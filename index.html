@@ -785,7 +785,7 @@
     <div class="kpi-grid" style="margin-top:12px">
       <div class="kpi blue" onclick="nav('cases')" style="cursor:pointer"><div class="label">Дел в работе</div><div class="value" id="kpi-cases">0</div></div>
       <div class="kpi purple" onclick="nav('calendar')" style="cursor:pointer"><div class="label">Заседаний 7 дней</div><div class="value" id="kpi-hearings">0</div></div>
-      <div class="kpi red" onclick="taskFilter='overdue';nav('tasks')" style="cursor:pointer"><div class="label">Просроч. задач</div><div class="value" id="kpi-tasks">0</div></div>
+      <div class="kpi red" onclick="taskFilter='open';nav('tasks')" style="cursor:pointer"><div class="label">Просроч. задач</div><div class="value" id="kpi-tasks">0</div></div>
       <div class="kpi orange" onclick="nav('finance')" style="cursor:pointer"><div class="label">Долг, ₽</div><div class="value" id="kpi-debt" style="font-size:22px">0</div></div>
     </div>
   </details>
@@ -856,8 +856,8 @@
   <!-- KPI дел -->
   <div class="sect-title"><svg class="ico-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><path d="M12 3v18M7 21h10M5 8l-2.5 6a3.5 3.5 0 005 0L5 8zm14 0l-2.5 6a3.5 3.5 0 005 0L19 8zM5 8l7-2 7 2"/></svg> Дела за период</div>
   <div class="kpi-grid">
-    <div class="kpi blue" onclick="casesFilter='В производстве';nav('cases')" style="cursor:pointer"><div class="label">В производстве</div><div class="value" id="rep-active">0</div></div>
-    <div class="kpi purple" onclick="casesFilter='Завершено';nav('cases')" style="cursor:pointer"><div class="label">Завершено</div><div class="value" id="rep-done">0</div></div>
+    <div class="kpi blue" onclick="casesFilter='__active';nav('cases')" style="cursor:pointer"><div class="label">В производстве</div><div class="value" id="rep-active">0</div></div>
+    <div class="kpi purple" onclick="casesFilter='__done';nav('cases')" style="cursor:pointer"><div class="label">Завершено</div><div class="value" id="rep-done">0</div></div>
   </div>
   <div class="kpi-grid">
     <div class="kpi green" onclick="casesFilter='__withno';nav('cases')" style="cursor:pointer"><div class="label">С № дела в суде</div><div class="value" id="rep-withno">0</div></div>
@@ -998,7 +998,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '100'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '102'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1870,7 +1870,7 @@ async function renderDashboard() {
 // ════════════════════════════════════════════════════════════
 // РЕНДЕР: ДЕЛА
 // ════════════════════════════════════════════════════════════
-let casesFilter = 'Все';
+let casesFilter = '__active'; // __active | __done | __archive | конкретный статус (переход из отчётов)
 async function renderCases() {
   const _cl = document.getElementById('cases-list');
   if (_cl && !_cl.children.length) _cl.innerHTML = skeletonCards(5);
@@ -1879,12 +1879,21 @@ async function renderCases() {
   const cases = all.filter(c => showArchived ? c.archived : !c.archived);
   const archivedCount = all.filter(c => c.archived).length;
   document.getElementById('cases-count').textContent = showArchived ? `${cases.length} в архиве` : `${cases.length} дел`;
-  // chips: статусы + «Архив» (если есть архивные)
-  const filters = ['Все',...REF.caseStatus];
-  let chipsHtml = filters.map(f=>
-    `<div class="chip ${casesFilter===f?'active':''}" onclick="casesFilter='${f}';renderCases()">${f}</div>`).join('');
+  // chips: Активные / Завершённые / Архив (+ временный чип при переходе из отчётов)
+  const nonArch = all.filter(c => !c.archived);
+  const cnt = {
+    '__active': nonArch.filter(c => c.status !== 'Завершено').length,
+    '__done':   nonArch.filter(c => c.status === 'Завершено').length
+  };
+  let chipsHtml = [['__active','Активные'],['__done','Завершённые']].map(([k,l])=>
+    `<div class="chip ${casesFilter===k?'active':''}" onclick="casesFilter='${k}';renderCases()">${l}${cnt[k]?` (${cnt[k]})`:''}</div>`).join('');
   if (archivedCount || showArchived) {
     chipsHtml += `<div class="chip ${showArchived?'active':''}" onclick="casesFilter='__archive';renderCases()" style="${showArchived?'':'opacity:.75'}">📦 Архив${archivedCount?' '+archivedCount:''}</div>`;
+  }
+  // Переход из отчётов (конкретный статус / наличие № в суде) — временный чип со сбросом
+  if (!['__active','__done','__archive'].includes(casesFilter)) {
+    const TRANSIENT = { '__withno':'С № в суде', '__nono':'Без № в суде' };
+    chipsHtml += `<div class="chip active" onclick="casesFilter='__active';renderCases()">${esc(TRANSIENT[casesFilter]||casesFilter)} ✕</div>`;
   }
   document.getElementById('cases-chips').innerHTML = chipsHtml;
   // Предупреждение о дублирующихся номерах (возможно после офлайн-синхронизации)
@@ -1922,11 +1931,19 @@ async function renderCases() {
     if (showArchived) ok = true;
     else if (casesFilter==='__withno') ok = !!(c.courtNo||'').trim();
     else if (casesFilter==='__nono') ok = !(c.courtNo||'').trim();
-    else ok = casesFilter==='Все' || c.status===casesFilter;
+    else if (casesFilter==='__active') ok = c.status !== 'Завершено';
+    else if (casesFilter==='__done') ok = c.status === 'Завершено';
+    else ok = c.status === casesFilter; // временный фильтр по статусу (переход из отчётов)
     return ok && ((c.number||'')+(c.courtNo||'')+(c.caseUid||'')+(c.client||'')+(c.court||'')+((c.labels||[]).join(' '))).toLowerCase().includes(q);
   });
   const cont = document.getElementById('cases-list');
-  if (!list.length) { cont.innerHTML = `<div class="empty"><div class="big">${ic('scale',48,'empty-ico')}</div><p>${showArchived?'В архиве пусто.':'Нет дел.<br>Нажмите + чтобы добавить.'}</p></div>`; return; }
+  if (!list.length) {
+    const msg = showArchived ? 'В архиве пусто.'
+      : casesFilter==='__done' ? 'Завершённых дел пока нет.'
+      : casesFilter==='__active' ? 'Активных дел нет.<br>Нажмите + чтобы добавить.'
+      : 'По этому фильтру ничего не найдено.';
+    cont.innerHTML = `<div class="empty"><div class="big">${ic('scale',48,'empty-ico')}</div><p>${msg}</p></div>`; return;
+  }
   // Ближайшее назначенное заседание и ближайший срок по каждому делу
   const hearAll = await getAll('hearings');
   const nextHearing = {};
@@ -2163,7 +2180,7 @@ async function renderFinance() {
     // Возраст долга: сколько дней счёт не оплачен полностью (без условных)
     let ageBadge = '';
     if (!f.pending && Number(f.amount||0) > Number(f.paid||0) && f.createdAt) {
-      const age = Math.floor((Date.now() - f.createdAt) / 86400000);
+      const age = Math.floor((Date.now() - tsOf(f.createdAt)) / 86400000);
       if (age >= 14) {
         const c = age >= 60 ? 'var(--red)' : age >= 30 ? 'var(--orange)' : 'var(--text-faint)';
         ageBadge = ` · <span style="color:${c}">долг ${age} дн.</span>`;
@@ -2544,7 +2561,7 @@ function renderProfitChart(finance, from, to) {
 // ════════════════════════════════════════════════════════════
 // РЕНДЕР: ЗАДАЧИ
 // ════════════════════════════════════════════════════════════
-let taskFilter = 'open'; // open | today | overdue | done | all
+let taskFilter = 'open'; // open | done
 
 // ═══════ ОБРАЩЕНИЯ (ВОРОНКА ДО ДЕЛА) ═══════
 const LEAD_STATUSES = ['Новое','Консультация','Думает','Взято в работу','Отказ'];
@@ -2664,6 +2681,7 @@ function ldDeadlineCalc() {
 async function saveLead(id) {
   const name = document.getElementById('ld-name').value.trim();
   if (!name) { toast('Укажите имя обратившегося!', true); return; }
+  if (!id && !(await demoAllow('leads'))) return;
   const prev = id ? (await getAll('leads')).find(x=>x.id===id) : null;
   const obj = {
     ...(prev||{}),
@@ -2774,10 +2792,7 @@ async function convertLeadToClient(id) {
     if (!confirm(`Участник «${l.name}» уже есть. Связать обращение с ним?`)) return;
   } else {
     if (!confirm(`Создать участника «${l.name}» из обращения?`)) return;
-    const clientCount = (await getAll('clients')).length;
-    if (typeof DEMO_CLIENT_LIMIT === 'number' && !LIC.ok && clientCount >= DEMO_CLIENT_LIMIT) {
-      toast('Достигнут лимит участников в деморежиме', true); return;
-    }
+    if (!(await demoAllow('clients'))) return;
     client = { id: uid('У'), name: l.name, type: 'Физлицо', role: 'Доверитель',
       phone: l.phone||'', email: l.email||'', createdAt: Date.now() };
     await put('clients', client);
@@ -2798,11 +2813,7 @@ async function convertLeadToCase(id) {
   // 1. Участник: ищем по имени, иначе создаём
   let client = (await getAll('clients')).find(c => (c.name||'').trim().toLowerCase() === l.name.trim().toLowerCase());
   if (!client) {
-    // проверка демо-лимита участников
-    const clientCount = (await getAll('clients')).length;
-    if (typeof DEMO_CLIENT_LIMIT === 'number' && !LIC.ok && clientCount >= DEMO_CLIENT_LIMIT) {
-      toast('Достигнут лимит участников в деморежиме', true); return;
-    }
+    if (!(await demoAllow('clients'))) return;
     client = { id: uid('У'), name: l.name, type: 'Физлицо', role: 'Доверитель',
       phone: l.phone||'', email: l.email||'', addr: l.addr||'', createdAt: Date.now() };
     await put('clients', client);
@@ -2812,10 +2823,7 @@ async function convertLeadToCase(id) {
   }
 
   // 2. Дело (оппонент из обращения → участник дела с ролью «Ответчик»)
-  const caseCount = (await getAll('cases')).length;
-  if (typeof DEMO_CASE_LIMIT === 'number' && !LIC.ok && caseCount >= DEMO_CASE_LIMIT) {
-    toast('Достигнут лимит дел в деморежиме', true); return;
-  }
+  if (!(await demoAllow('cases'))) return;
   const number = await nextCaseNo();
   const participants = [];
   if (l.opponent) participants.push({ name: l.opponent, role: 'Ответчик', inn: l.opponentInn||'', note: l.opponentInfo||'' });
@@ -2847,32 +2855,30 @@ async function renderTasks() {
   const all = await getAll('tasks');
   // чипы с количеством
   const today = todayISO();
+  if (taskFilter !== 'open' && taskFilter !== 'done') taskFilter = 'open'; // нормализация старых значений
   const counts = {
     open: all.filter(t=>!t.done).length,
-    today: all.filter(t=>!t.done && t.due===today).length,
-    overdue: all.filter(t=>!t.done && t.due && t.due<today).length,
-    done: all.filter(t=>t.done).length,
-    all: all.length
+    done: all.filter(t=>t.done).length
   };
-  const chips = [['open','Активные'],['today','Сегодня'],['overdue','Просрочено'],['done','Выполнено'],['all','Все']];
+  const chips = [['open','Активные'],['done','Выполненные']];
   document.getElementById('tasks-chips').innerHTML = chips.map(([k,l])=>
     `<div class="chip ${taskFilter===k?'active':''}" onclick="setTaskFilter('${k}')">${l} ${counts[k]?`(${counts[k]})`:''}</div>`).join('');
 
-  let list = all.slice();
-  if (taskFilter==='open') list = list.filter(t=>!t.done);
-  else if (taskFilter==='today') list = list.filter(t=>!t.done && t.due===today);
-  else if (taskFilter==='overdue') list = list.filter(t=>!t.done && t.due && t.due<today);
-  else if (taskFilter==='done') list = list.filter(t=>t.done);
+  let list = taskFilter==='done' ? all.filter(t=>t.done) : all.filter(t=>!t.done);
 
-  // сортировка: невыполненные по сроку (ближайшие сверху), без срока — в конце
+  // сортировка: активные — по сроку (просроченные и ближайшие сверху, без срока в конце);
+  // выполненные — свежевыполненные сверху
   list.sort((a,b)=>{
-    if (a.done!==b.done) return a.done?1:-1;
+    if (taskFilter==='done') return String(b.doneAt||'').localeCompare(String(a.doneAt||''));
     if (!a.due) return 1; if (!b.due) return -1;
     return a.due.localeCompare(b.due);
   });
 
   const cont = document.getElementById('tasks-list');
-  if (!list.length) { cont.innerHTML = `<div class="empty"><div class="big">${ic('check',48,'empty-ico')}</div><p>Задач нет.<br>Нажмите + чтобы добавить.</p></div>`; return; }
+  if (!list.length) {
+    const msg = taskFilter==='done' ? 'Выполненных задач пока нет.' : 'Все задачи выполнены ✓<br>Нажмите + чтобы добавить новую.';
+    cont.innerHTML = `<div class="empty"><div class="big">${ic('check',48,'empty-ico')}</div><p>${msg}</p></div>`; return;
+  }
 
   const prio = {'Высокий':'var(--sig-red-soft)','Средний':'var(--sig-amber)','Низкий':'#60a5fa'};
   cont.innerHTML = list.map(t=>{
@@ -2946,6 +2952,7 @@ async function openTaskForm(existing) {
 async function saveTask(id) {
   const title = document.getElementById('t-title').value.trim();
   if (!title) { toast('Введите название!', true); return; }
+  if (!id && !(await demoAllow('tasks'))) return;
   const all = id ? await getAll('tasks') : [];
   const prev = id ? all.find(x=>x.id===id) : null;
   const obj = {
@@ -2957,7 +2964,8 @@ async function saveTask(id) {
     caseNum: document.getElementById('t-case').value,
     note: document.getElementById('t-note').value,
     done: prev?.done || false,
-    doneAt: prev?.doneAt || ''
+    doneAt: prev?.doneAt || '',
+    createdAt: prev?.createdAt || Date.now()
   };
   await put('tasks', obj);
   if (typeof gcalTouch === 'function') gcalTouch();
@@ -4444,7 +4452,7 @@ function openRefsSheet() {
     <div class="card" onclick="openLicenseSheet()" style="cursor:pointer;margin-top:10px;border-color:${LIC.ok?'var(--brass)':'var(--orange)'}">
       <div class="row1"><div style="flex:1">
         <div class="title" style="color:var(--brass)">${ic("key",16)} Лицензия ${LIC.ok?'<span style="color:var(--green);font-size:12px">● '+esc(LIC.name)+'</span>':'<span style="color:var(--orange);font-size:12px">● деморежим</span>'}</div>
-        <div class="meta">${LIC.ok?'Полная версия'+(LIC.until&&LIC.until!=='бессрочно'?' до '+fmtDate(LIC.until):', бессрочная'):'До '+DEMO_CASE_LIMIT+' дел и '+DEMO_CLIENT_LIMIT+' участников.'}</div>
+        <div class="meta">${LIC.ok?'Полная версия'+(LIC.until&&LIC.until!=='бессрочно'?' до '+fmtDate(LIC.until):', бессрочная'):'Демо: до '+DEMO_MONTH_LIMIT+' новых записей в месяц в каждом разделе.'}</div>
       </div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
@@ -4583,12 +4591,11 @@ async function clientSelChanged(sel) {
   // Если такой участник уже есть — просто выбираем его
   let exist = all.find(c => (c.name||'').toLowerCase() === name.toLowerCase());
   if (!exist) {
-    if (!LIC.ok && all.length >= DEMO_CLIENT_LIMIT) {
-      toast(`Деморежим: до ${DEMO_CLIENT_LIMIT} участников. Активируйте лицензию.`, true);
+    if (!(await demoAllow('clients'))) {
       sel.value = _refPrev[sel.id] || '';
       return;
     }
-    const obj = { id: uid('К'), name };
+    const obj = { id: uid('К'), name, createdAt: Date.now() };
     await put('clients', obj);
     renderClients(); renderDashboard();
     toast('Участник добавлен: ' + name);
@@ -4641,21 +4648,20 @@ function openClientForm(existing) {
     ${existing?`<button class="btn-ghost" onclick="removeItem('clients','${c.id}','clients')">Удалить</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
   `);
-  if (!existing) demoWarn('demo-warn-client', 'clients', DEMO_CLIENT_LIMIT, 'участник');
+  if (!existing) demoWarn('demo-warn-client', 'clients');
 }
 async function saveClient(id) {
   const name = document.getElementById('f-name').value.trim();
   if (!name) { toast('Введите ФИО!', true); return; }
   const all = await getAll('clients');
   if (!id && all.some(c=>(c.name||'').toLowerCase()===name.toLowerCase())) { toast('Такой доверитель уже есть!', true); return; }
-  // Деморежим: ограничение количества участников (только для новых)
-  if (!LIC.ok && !id && all.length >= DEMO_CLIENT_LIMIT) {
-    toast(`Деморежим: до ${DEMO_CLIENT_LIMIT} участников. Активируйте лицензию в настройках.`, true);
-    openLicenseSheet();
-    return;
-  }
+  // Деморежим: помесячный лимит новых участников
+  if (!id && !(await demoAllow('clients'))) return;
+  const _prev = id ? all.find(c => c.id === id) : null;
   const obj = {
     id: id || uid('К'),
+    createdAt: _prev?.createdAt || Date.now(),
+    ...(_prev && _prev.contactLog ? { contactLog: _prev.contactLog } : {}),
     name, type: document.getElementById('f-type').value, role: document.getElementById('f-role').value,
     phone: document.getElementById('f-phone').value, email: document.getElementById('f-email').value,
     inn: document.getElementById('f-inn').value, addr: document.getElementById('f-addr').value,
@@ -4866,19 +4872,20 @@ async function openCaseForm(existing) {
     ${existing?`<button class="btn-ghost" onclick="removeItem('cases','${c.id}','cases')">Удалить</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
   `);
-  if (!existing) demoWarn('demo-warn-case', 'cases', DEMO_CASE_LIMIT, 'дело');
+  if (!existing) demoWarn('demo-warn-case', 'cases');
 }
-// Раннее предупреждение о приближении к лимиту демо-режима
-async function demoWarn(slotId, store, limit, noun) {
-  if (LIC.ok) return;
+// Раннее предупреждение о приближении к помесячному лимиту демо-режима
+async function demoWarn(slotId, store) {
+  if (LIC.ok || !(store in DEMO_STORES)) return;
   const el = document.getElementById(slotId);
   if (!el) return;
-  const count = (await getAll(store)).length;
-  const left = limit - count;
+  const used = await demoUsed(store);
+  const left = DEMO_MONTH_LIMIT - used;
   if (left > 2) return; // предупреждаем заранее, на подходе к лимиту
+  const label = DEMO_STORES[store];
   const msg = left <= 0
-    ? `Достигнут лимит демо-режима: ${limit} ${noun==='дело'?'дел':'участников'}. Активируйте лицензию, чтобы добавлять ещё.`
-    : `В демо-режиме осталось ${left} ${noun==='дело'?(left===1?'дело':'дела'):(left===1?'участник':'участника')} из ${limit}. Дальше понадобится лицензия.`;
+    ? `Лимит демо-режима на этот месяц исчерпан (${DEMO_MONTH_LIMIT} ${label}). Новые — с 1 числа следующего месяца или по лицензии.`
+    : `Демо: в этом месяце можно создать ещё ${left} из ${DEMO_MONTH_LIMIT} (${label}).`;
   el.innerHTML = `<div class="card" style="margin-bottom:12px;border-left:3px solid var(--orange);cursor:pointer" onclick="closeSheet();openLicenseSheet()">
     <div class="title" style="font-size:13.5px;color:var(--orange)">🔑 ${msg}</div>
   </div>`;
@@ -5035,15 +5042,8 @@ async function saveCase(id) {
     const had = obj.participants[oppIdx];
     if (!had.inn && !had.phone && !had.note) obj.participants.splice(oppIdx, 1);
   }
-  // Деморежим: ограничение количества дел (только для новых)
-  if (!LIC.ok && !id) {
-    const total = (await getAll('cases')).length;
-    if (total >= DEMO_CASE_LIMIT) {
-      toast(`Деморежим: до ${DEMO_CASE_LIMIT} дел. Активируйте лицензию в настройках.`, true);
-      openLicenseSheet();
-      return;
-    }
-  }
+  // Деморежим: помесячный лимит новых дел
+  if (!id && !(await demoAllow('cases'))) return;
   // Конфликт интересов: доверитель этого дела не должен фигурировать
   // участником (оппонентом и т.п.) в других делах. Быть доверителем
   // по нескольким делам — нормально, такие совпадения не показываем.
@@ -5052,7 +5052,9 @@ async function saveCase(id) {
     const matches = (await conflictScan(obj.client, obj.id)).filter(m => !String(m.role||'').startsWith('Доверитель'));
     if (matches.length) {
       CONFLICT_PENDING = async () => {
-        await put('cases', obj);
+          // createdAt: новому делу — сейчас; при редактировании — сохранить исходную дату создания
+  if (!obj.createdAt) obj.createdAt = id ? ((((await getAll('cases')).find(x=>x.id===id))||{}).createdAt || Date.now()) : Date.now();
+  await put('cases', obj);
         await maybeCreateOrderForCase(id, obj.number);
         closeSheet(); toast('Дело сохранено'); renderCases(); renderDashboard();
       };
@@ -5150,8 +5152,11 @@ function hearingCaseChanged(initial) {
 async function saveHearing(id) {
   const date = document.getElementById('f-date').value;
   if (!date) { toast('Укажите дату!', true); return; }
+  if (!id && !(await demoAllow('hearings'))) return;
+  const prev = id ? (await getAll('hearings')).find(x => x.id === id) : null;
   const obj = {
     id: id || uid('С'),
+    createdAt: prev?.createdAt || Date.now(),
     caseNum: document.getElementById('f-caseNum').value, date, time: document.getElementById('f-time').value,
     court: document.getElementById('f-court').value, judge: document.getElementById('f-judge').value,
     status: document.getElementById('f-status').value,
@@ -5272,6 +5277,7 @@ async function saveFinance(id) {
   const client = document.getElementById('f-client').value;
   const billType = document.getElementById('f-billType').value || 'fixed';
   if (!client) { toast('Выберите доверителя!', true); return; }
+  if (!id && !(await demoAllow('finance'))) return;
   // Итоговая сумма зависит от типа расчёта
   let amount = 0, extra = {};
   if (billType === 'hourly') {
@@ -7566,11 +7572,13 @@ async function mailFormForCase(caseNum) {
 async function saveMail(id) {
   const barcode = (document.getElementById('m-barcode').value||'').replace(/\s/g,'');
   if (!barcode) { toast('Введите трек-номер!', true); return; }
+  if (!id && !(await demoAllow('mail'))) return;
   const prev = id ? (await getAll('mail')).find(x=>x.id===id) : null;
   const leadId = (document.getElementById('m-leadid')?.value || (prev&&prev.leadId) || '');
   const caseSel = document.getElementById('m-case');
   await put('mail', {
     id: id || uid('П'), barcode,
+    createdAt: prev?.createdAt || Date.now(),
     title: document.getElementById('m-title').value.trim(),
     caseNum: caseSel ? caseSel.value : (prev?prev.caseNum:''),
     leadId: leadId || undefined,
@@ -8701,8 +8709,27 @@ function openDadataSheet() {
 // лицензию без закрытого ключа автора математически невозможно.
 // ════════════════════════════════════════════════════════════
 const LIC_PUB = {"key_ops":["verify"],"ext":true,"kty":"EC","x":"aDv-4ZFOw6bm4ZvA2qk0T3aqmzh31v31p3Rl4cicfqk","y":"nzqvX0ZuvtxYxqIHDjobiwKO_ROG2T9nokevY9pft5c","crv":"P-256"};
-const DEMO_CASE_LIMIT = 5;
-const DEMO_CLIENT_LIMIT = 5;
+// ── ДЕМОРЕЖИМ: помесячные лимиты создания ──
+// Без лицензии в каждом разделе можно создавать до DEMO_MONTH_LIMIT новых
+// записей в календарный месяц. Просмотр/редактирование — без ограничений.
+// Считаем по createdAt, включая удалённые (удаление не возвращает квоту).
+const DEMO_MONTH_LIMIT = 5;
+const DEMO_STORES = { cases:'дел', clients:'участников', hearings:'заседаний', tasks:'задач', finance:'счетов', leads:'обращений', mail:'писем' };
+// createdAt бывает числом (мс) или строкой ISO 'ГГГГ-ММ-ДД' — приводим к мс
+const tsOf = v => typeof v === 'number' ? v : (v ? (new Date(String(v).length === 10 ? v + 'T00:00:00' : v).getTime() || 0) : 0);
+function demoMonthStart() { const d = new Date(); d.setDate(1); d.setHours(0,0,0,0); return d.getTime(); }
+async function demoUsed(store) {
+  const from = demoMonthStart();
+  return (await getAllRaw(store)).filter(x => x && tsOf(x.createdAt) >= from).length;
+}
+async function demoAllow(store) {
+  if (LIC.ok || !(store in DEMO_STORES)) return true;
+  const used = await demoUsed(store);
+  if (used < DEMO_MONTH_LIMIT) return true;
+  toast(`Деморежим: до ${DEMO_MONTH_LIMIT} ${DEMO_STORES[store]} в месяц — лимит этого месяца исчерпан.`, true);
+  openLicenseSheet();
+  return false;
+}
 const DEVICE_LIMIT = 2; // ПК + смартфон
 let LIC = { ok:false, name:'', reg:'', until:'' };
 
@@ -8849,7 +8876,7 @@ function openLicenseSheet() {
   }
   showSheet(`
     <h3>${ic("key",18)} Активация лицензии</h3>
-    <div class="sheet-sub">Сейчас работает деморежим: до ${DEMO_CASE_LIMIT} дел и ${DEMO_CLIENT_LIMIT} участников, все остальные функции без ограничений. Ключ снимает лимиты и работает на ${DEVICE_LIMIT} устройствах (ПК + смартфон).</div>
+    <div class="sheet-sub">Сейчас работает деморежим: до ${DEMO_MONTH_LIMIT} новых записей в месяц в каждом разделе (дела, участники, заседания, задачи, счета, обращения, письма). Просмотр, редактирование и все функции — без ограничений; с 1 числа лимит обновляется. Ключ снимает лимиты и работает на ${DEVICE_LIMIT} устройствах (ПК + смартфон).</div>
     ${LIC.until?`<div class="card" style="margin-bottom:10px;border-color:var(--red)"><div class="meta" style="color:var(--red)">Срок лицензии «${esc(LIC.name)}» истёк ${fmtDate(LIC.until)}.</div></div>`:''}
     <div class="field"><label>Лицензионный ключ</label><textarea id="lic-key" rows="3" placeholder="Вставьте ключ из письма о покупке" style="font-family:monospace;font-size:12px"></textarea></div>
     <button class="btn-primary" onclick="licActivate()">Активировать</button>
