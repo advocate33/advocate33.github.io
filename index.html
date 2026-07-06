@@ -946,7 +946,7 @@
 </div>
 
 <!-- FAB -->
-<button class="fab" id="fab" onclick="fabClick()" onpointerdown="fabDown()" onpointerup="fabUp()" onpointerleave="fabUp()" onpointercancel="fabUp()" oncontextmenu="event.preventDefault()">
+<button class="fab" id="fab" onclick="fabAction()">
   <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
 </button>
 
@@ -998,7 +998,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '97'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '99'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1509,16 +1509,6 @@ function openCreateMenu() {
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
   `);
 }
-let _fabLongFired = false, _fabTimer = null;
-function fabClick() {
-  if (_fabLongFired) { _fabLongFired = false; return; }
-  fabAction();
-}
-function fabDown() {
-  clearTimeout(_fabTimer);
-  _fabTimer = setTimeout(() => { _fabLongFired = true; openCreateMenu(); }, 480);
-}
-function fabUp() { clearTimeout(_fabTimer); }
 
 // ═══════ СВАЙП-ДЕЙСТВИЯ (только на сенсорных экранах) ═══════
 // Свайп ВЛЕВО по карточке: заседание → «Проведено», задача → «Выполнено».
@@ -1595,7 +1585,7 @@ function fabAction() {
   else if (currentScreen==='calendar') openHearingForm();
   else if (currentScreen==='mail') openMailForm();
   else if (currentScreen==='leads') openLeadForm();
-  else if (currentScreen==='dashboard') openLeadForm();
+  else if (currentScreen==='dashboard') openCreateMenu();
   else if (currentScreen==='cases') openCaseForm();
   else openCaseForm();
 }
@@ -2984,11 +2974,12 @@ async function collectAll() {
 // СИНХРОНИЗИРУЕМ только безопасные настройки. НЕ включаем сюда секреты
 // (токены, пароль шифрования, PIN, биометрию, привязку файла, состояние
 // синхронизации) — они привязаны к устройству и не должны попадать в файл.
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest'];
+const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif'];
 
-// Секретные настройки подключений — синхронизируются ТОЛЬКО если пользователь
-// осознанно включил опцию (crm_sync_secrets). Сюда входят токены и учётные
-// данные мостов/облаков, пароль шифрования, лицензия и PIN-код.
+// Секретные настройки подключений — токены и учётные данные мостов/облаков,
+// пароль шифрования, лицензия и PIN-код. По умолчанию ВКЛЮЧЕНЫ в файл
+// синхронизации, чтобы при переезде/обновлении не настраивать всё заново
+// (можно отключить в настройках синхронизации).
 // НЕ входят (и не должны): состояние синхронизации, идентичность устройства,
 // биометрия (она аппаратно привязана к устройству и не переносится).
 const SYNC_SECRET_KEYS = [
@@ -2998,20 +2989,18 @@ const SYNC_SECRET_KEYS = [
   'crm_license','crm_lock_on','crm_lock_hash','crm_lock_salt'
 ];
 
-const secretSyncOn = () => localStorage.getItem('crm_sync_secrets') === '1';
+// Включено по умолчанию; '0' — осознанное отключение пользователем
+const secretSyncOn = () => localStorage.getItem('crm_sync_secrets') !== '0';
 function bumpSettings() { localStorage.setItem('crm_settings_upd', String(Date.now())); }
 
-// Включение/выключение синхронизации секретных настроек (осознанный выбор пользователя)
+// Включение/выключение синхронизации секретных настроек
 function toggleSecretSync(on) {
   if (on) {
-    if (!confirm('Включить синхронизацию настроек подключений?\n\nТокены, пароль шифрования, лицензия и PIN будут попадать в файл синхронизации в открытом виде. Включайте только если файл хранится в вашем личном облаке без чужого доступа.')) {
-      openSyncSheet(); return;
-    }
-    localStorage.setItem('crm_sync_secrets', '1');
+    localStorage.removeItem('crm_sync_secrets'); // возврат к умолчанию (включено)
     bumpSettings(); // чтобы текущие настройки этого устройства разошлись на другие
     toast('Настройки подключений будут синхронизироваться');
   } else {
-    localStorage.removeItem('crm_sync_secrets');
+    localStorage.setItem('crm_sync_secrets', '0');
     toast('Секретные настройки больше не синхронизируются');
   }
   openSyncSheet();
@@ -3032,7 +3021,8 @@ function applyIncomingSettings(incoming) {
   if (!incoming || typeof incoming !== 'object') return false;
   const theirs = Number(incoming._upd || 0);
   const mine = Number(localStorage.getItem('crm_settings_upd') || 0);
-  if (theirs <= mine) return false; // наши настройки не старее — не трогаем
+  // «Чистый» браузер (mine=0) принимает настройки всегда — включая старые файлы без метки.
+  if (theirs <= mine && mine > 0) return false; // наши настройки не старее — не трогаем
   let changed = false, secretsChanged = false;
   SYNC_SETTINGS_KEYS.forEach(k => {
     if (incoming[k] !== undefined && incoming[k] !== localStorage.getItem(k)) {
@@ -3171,11 +3161,11 @@ async function importData(file) {
   if (!parsed || parsed._fmt !== SYNC_FMT || !parsed.data) {
     toast('Это не файл данных CRM', true); return;
   }
-  const { added, updated, skipped } = await mergeIncoming(parsed);
+  const { added, updated, skipped, settingsChanged } = await mergeIncoming(parsed);
   await loadRefs();
   nav(document.querySelector('.navbar button.active')?.dataset.screen || 'dashboard');
   closeSheet();
-  toast(`Готово: +${added} нов., ${updated} обновл., ${skipped} без изм.`);
+  toast(`Готово: +${added} нов., ${updated} обновл., ${skipped} без изм.${settingsChanged?' · настройки подключений восстановлены':''}`);
 }
 
 // Быстрая синхронизация с главного экрана: если привязан файл синхронизации —
@@ -3787,11 +3777,11 @@ function openSyncSheet() {
       <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer">
         <input type="checkbox" ${secretSyncOn()?'checked':''} onchange="toggleSecretSync(this.checked)" style="width:18px;height:18px;margin-top:2px;flex-shrink:0">
         <div style="flex:1">
-          <div class="title" style="font-size:14.5px">Синхронизировать настройки подключений</div>
-          <div class="meta" style="line-height:1.5">Помимо оформления — переносить токены, пароль шифрования, лицензию и PIN-код, чтобы не настраивать их на каждом устройстве заново.</div>
+          <div class="title" style="font-size:14.5px">Переносить настройки подключений (включено)</div>
+          <div class="meta" style="line-height:1.5">Лицензия, ключ DaData, мосты Календаря и Почты России, Telegram, PIN и пароль шифрования попадают в файл — при восстановлении на новом браузере всё подтянется само, без повторной настройки.</div>
         </div>
       </label>
-      ${secretSyncOn()?`<div class="meta" style="margin-top:8px;color:var(--orange);line-height:1.5">⚠ Токены и пароли попадают в файл синхронизации в открытом виде. Включайте только если файл лежит в вашем личном облаке без чужого доступа. Биометрия не переносится — её настраивают на каждом устройстве отдельно.</div>`:''}
+      ${secretSyncOn()?`<div class="meta" style="margin-top:8px;color:var(--orange);line-height:1.5">⚠ Эти данные лежат в файле в открытом виде — храните файл в личном облаке без чужого доступа. Биометрия не переносится — включается на каждом устройстве отдельно.</div>`:`<div class="meta" style="margin-top:8px;line-height:1.5">Выключено: при переносе лицензию, API и мосты придётся вводить заново вручную.</div>`}
     </div>
 
     <div class="card" onclick="openExportSheet()" style="cursor:pointer;margin-top:10px">
@@ -3974,7 +3964,7 @@ const fmtRub = n => (Math.round(n*100)/100).toLocaleString('ru-RU',{minimumFract
 
 // ═══════ ПРАЙС УСЛУГ (расчёт гонорара) ═══════
 function getPrices() { try { return JSON.parse(localStorage.getItem('crm_prices')||'{}'); } catch(e) { return {}; } }
-function savePrices(p) { localStorage.setItem('crm_prices', JSON.stringify(p)); }
+function savePrices(p) { localStorage.setItem('crm_prices', JSON.stringify(p)); bumpSettings(); }
 
 function openPriceSheet() {
   const prices = getPrices();
@@ -7231,7 +7221,7 @@ async function gcalConnect() {
   const secret = (document.getElementById('gcal-secret')?.value || '').trim();
   if (!/^https:\/\/script\.google\.com\//.test(url)) { toast('Адрес должен начинаться с https://script.google.com/', true); return; }
   if (!secret) { toast('Введите секретный код (тот же, что в скрипте)', true); return; }
-  GCAL.url = url; GCAL.secret = secret;
+  GCAL.url = url; GCAL.secret = secret; bumpSettings();
   toast('Проверяю связь...');
   await gcalPush(false);
   openGcalSheet();
@@ -8541,7 +8531,7 @@ async function confirmConflictProceed() {
 // ════════════════════════════════════════════════════════════
 const DADATA = {
   get token()  { return localStorage.getItem('crm_dadata_token') || ''; },
-  set token(v) { v ? localStorage.setItem('crm_dadata_token', v) : localStorage.removeItem('crm_dadata_token'); }
+  set token(v) { v ? localStorage.setItem('crm_dadata_token', v) : localStorage.removeItem('crm_dadata_token'); bumpSettings(); }
 };
 // ── Живые адресные подсказки (DaData suggest/address) ──
 let ADDR_TIMER = null, ADDR_LAST = '';
@@ -9557,7 +9547,7 @@ async function enableNotif() {
   let perm = Notification.permission;
   if (perm === 'default') { try { perm = await Notification.requestPermission(); } catch(e) {} }
   if (perm === 'granted') {
-    localStorage.setItem('crm_notif', '1');
+    localStorage.setItem('crm_notif', '1'); bumpSettings();
     toast('Напоминания включены');
     notifCheck(true);
   } else if (perm === 'denied') {
@@ -9565,7 +9555,7 @@ async function enableNotif() {
   }
   if (typeof openNotifSheet === 'function') openNotifSheet();
 }
-function disableNotif() { localStorage.removeItem('crm_notif'); toast('Напоминания выключены'); if (typeof openNotifSheet==='function') openNotifSheet(); }
+function disableNotif() { localStorage.removeItem('crm_notif'); bumpSettings(); toast('Напоминания выключены'); if (typeof openNotifSheet==='function') openNotifSheet(); }
 
 // Не повторять одно и то же напоминание: ключ = id+дата
 function notifSent(key) {
