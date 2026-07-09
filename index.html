@@ -82,6 +82,7 @@
 
   body {
     font-family: var(--app-font, 'Golos Text'), system-ui, sans-serif;
+    font-variant-numeric: lining-nums; font-feature-settings: 'lnum' 1;
     background: var(--bg);
     color: var(--text);
     overscroll-behavior: none;
@@ -892,6 +893,9 @@
   <div id="rep-hearings-hint"></div>
 
   <!-- Финансы раздельно по делам -->
+  <div id="rep-methods"></div>
+  <button class="btn-ghost" onclick="printIncomeRegister()" style="margin-top:8px">🖨 Выписка поступлений за период</button>
+
   <div class="sect-title" style="margin-top:18px"><svg class="ico-svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5a2 2 0 012-1.5h1a2 2 0 010 4h-1a2 2 0 000 4h1a2 2 0 002-1.5"/></svg> Получено по делам</div>
   <div id="rep-fin-bars"></div>
 
@@ -998,7 +1002,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '102'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '105'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1749,7 +1753,8 @@ async function renderDashboard() {
   const mFromISO = `${mFrom.getFullYear()}-${String(mFrom.getMonth()+1).padStart(2,'0')}-01`;
   const monthFin = finance.filter(f=>f.createdAt && f.createdAt >= mFromISO);
   const mBilled = monthFin.filter(f=>!f.pending).reduce((a,f)=>a+Number(f.amount||0),0);
-  const mPaid = monthFin.reduce((a,f)=>a+Number(f.paid||0),0);
+  let mPaid = 0;
+  finance.forEach(f => finPayments(f).forEach(pp => { if (pp.at && String(pp.at) >= mFromISO) mPaid += Number(pp.sum||0); }));
   const mDebt = finance.reduce((a,f)=>a+(f.pending?0:(Number(f.amount||0)-Number(f.paid||0))),0);
   const mb = document.getElementById('money-billed'); if (mb) mb.textContent = fmtMoney(mBilled);
   const mp = document.getElementById('money-paid'); if (mp) mp.textContent = fmtMoney(mPaid);
@@ -1797,7 +1802,7 @@ async function renderDashboard() {
   // Абонентские платежи: срок очередного платежа подходит или прошёл
   finance.filter(f=>f.billType==='retainer' && f.nextDue && f.status!=='Оплачено').forEach(f=>{
     const d = daysUntil(f.nextDue);
-    if (d!==null && d<=5) attn.push({icon:'📅',color:d<0?'var(--red)':'var(--orange)',title:`Абонентский платёж: ${esc(f.client)}`,sub:d<0?`просрочен ${fmtDate(f.nextDue)}`:`до ${fmtDate(f.nextDue)}`,act:`viewFinance('${f.id}')`});
+    if (d!==null && d<=5) attn.push({icon:'📅',color:d<0?'var(--red)':'var(--orange)',title:`Абонентский платёж: ${esc(f.client||f.service||'без участника')}`,sub:d<0?`просрочен ${fmtDate(f.nextDue)}`:`до ${fmtDate(f.nextDue)}`,act:`viewFinance('${f.id}')`});
   });
   const confl = syncConflicts();
   if (confl.length) attn.unshift({icon:'⚡',color:'var(--orange)',title:`Коллизии синхронизации: ${confl.length}`,sub:'записи менялись на двух устройствах — проверьте',act:`showConflictsSheet()`});
@@ -1980,7 +1985,8 @@ async function renderClients() {
   const clients = await getAll('clients');
   document.getElementById('clients-count').textContent = `${clients.length} участников`;
   const q = (document.getElementById('clients-search').value||'').toLowerCase();
-  let list = clients.filter(c=>((c.name||'')+(c.phone||'')+(c.email||'')).toLowerCase().includes(q));
+  let list = clients.filter(c=>((c.name||'')+(c.phone||'')+(c.email||'')).toLowerCase().includes(q))
+    .sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru'));
   const cont = document.getElementById('clients-list');
   if (!list.length) { cont.innerHTML = `<div class="empty"><div class="big">${ic('user',48,'empty-ico')}</div><p>Нет участников.<br>Нажмите + чтобы добавить.</p></div>`; return; }
   cont.innerHTML = list.map(c=>{
@@ -2187,8 +2193,8 @@ async function renderFinance() {
       }
     }
     return `<div class="card" onclick="viewFinance('${f.id}')"><div class="row1">
-      <div style="flex:1"><div class="title">${esc(f.client||'—')}</div><div class="meta">${esc([caseLabel(f.caseNum), f.service].filter(Boolean).join(' · ')||'')}${btLabel?` · <span style="color:var(--accent)">${btLabel}</span>`:''}${pendBadge}${ageBadge}</div></div>
-      ${statusBadge(f.status)}</div>
+      <div style="flex:1"><div class="title">${esc(f.client || f.service || 'Платёж')}</div><div class="meta">${esc([caseLabel(f.caseNum), f.client ? f.service : ''].filter(Boolean).join(' · ')||'')}${f.client?'':`${f.caseNum?' · ':''}без участника`}${btLabel?` · <span style="color:var(--accent)">${btLabel}</span>`:''}${pendBadge}${ageBadge}</div></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">${statusBadge(f.status)}${(!f.pending&&Number(f.amount||0)>Number(f.paid||0))?`<button onclick="event.stopPropagation();openPayForm('${f.id}')" style="background:rgba(34,197,94,.13);color:var(--sig-green);border:1px solid var(--sig-green);border-radius:8px;padding:4px 10px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:inherit">+ Оплата</button>`:''}</div></div>
       <div style="margin-top:10px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span style="color:var(--text-dim)">${fmtMoney(f.paid)} из ${fmtMoney(f.amount)}</span><span style="color:var(--text-dim)">${pct}%</span></div>
       <div style="height:6px;background:var(--surface-2);border-radius:3px"><div style="width:${pct}%;height:100%;background:${pct===100?'var(--green)':pct>0?'var(--orange)':'var(--red)'};border-radius:3px"></div></div></div>
     </div>`;
@@ -2250,9 +2256,14 @@ async function renderReports() {
   document.getElementById('rep-nono').textContent = periodCases.length - withNo;
 
   // — ФИНАНСЫ (та же база 'finance', что и вкладка Финансы) —
-  // Прибыль = оплаты, прошедшие в периоде
-  const finPeriod = finance.filter(f=>inRange(f.paidAt, from, to));
-  const income = finPeriod.reduce((a,f)=>a+Number(f.paid||0),0);
+  // Прибыль = реальные платежи из журналов счетов, датированные периодом
+  const payPeriod = [];
+  finance.forEach(f => finPayments(f).forEach(pp => {
+    if (inRange(pp.at, from, to) && Number(pp.sum) > 0) payPeriod.push({ ...pp, f });
+  }));
+  const income = payPeriod.reduce((a,pp)=>a+Number(pp.sum||0),0);
+  const byMethod = { cash:0, bank:0, '':0 };
+  payPeriod.forEach(pp => { byMethod[pp.method in byMethod ? pp.method : ''] += Number(pp.sum||0); });
   // Выставлено счетов за период (по дате создания)
   const billedList = finance.filter(f=>inRange(f.createdAt, from, to));
   const billed = billedList.reduce((a,f)=>a+Number(f.amount||0),0);
@@ -2261,6 +2272,13 @@ async function renderReports() {
   document.getElementById('rep-income').textContent = fmtMoney(income);
   document.getElementById('rep-billed').textContent = fmtMoney(billed);
   document.getElementById('rep-debt').textContent = fmtMoney(debt);
+  const mEl = document.getElementById('rep-methods');
+  if (mEl) mEl.innerHTML = income ? `
+    <div class="money-strip" style="margin-top:8px">
+      <div class="money-cell"><div class="m-label">💵 Наличными</div><div class="m-val" style="color:var(--sig-green)">${fmtMoney(byMethod.cash)}</div></div>
+      <div class="money-cell"><div class="m-label">🏦 Безналом</div><div class="m-val" style="color:#60a5fa">${fmtMoney(byMethod.bank)}</div></div>
+      ${byMethod['']?`<div class="money-cell"><div class="m-label">Способ не указан</div><div class="m-val">${fmtMoney(byMethod[''])}</div></div>`:''}
+    </div>` : '';
 
   // — Дела по статусам (горизонтальные полосы) —
   const colors = {'Новое':'#3b82f6','В работе':'var(--sig-green)','Ожидание':'var(--sig-orange)','Завершено':'#9ca3af'};
@@ -2338,9 +2356,9 @@ async function renderReports() {
 
   // — Финансы раздельно по делам: получено за период —
   const finByCase = {};
-  finPeriod.forEach(f => {
-    const key = f.caseNum || '— без дела —';
-    finByCase[key] = (finByCase[key] || 0) + Number(f.paid || 0);
+  payPeriod.forEach(pp => {
+    const key = pp.f.caseNum || '— без дела —';
+    finByCase[key] = (finByCase[key] || 0) + Number(pp.sum || 0);
   });
   const finRows = Object.entries(finByCase).filter(r=>r[1]>0).sort((a,b)=>b[1]-a[1]);
   const maxF = Math.max(1, ...finRows.map(r=>r[1]));
@@ -2446,12 +2464,11 @@ async function renderReports() {
 
   // — Разбивка по типам дел: получено за период + число дел —
   const kindIncome = {}, kindCount = {};
-  // получено за период по типу дела (через № дела → дело → kind)
-  finPeriod.forEach(f => {
-    if (!Number(f.paid)) return;
-    const cs = CASES_BY_NUM[f.caseNum];
+  // получено за период по типу дела (через № дела → дело → kind) — из журнала платежей
+  payPeriod.forEach(pp => {
+    const cs = CASES_BY_NUM[pp.f.caseNum];
     const kind = (cs && cs.kind) || '— прочее —';
-    kindIncome[kind] = (kindIncome[kind]||0) + Number(f.paid||0);
+    kindIncome[kind] = (kindIncome[kind]||0) + Number(pp.sum||0);
   });
   periodCases.forEach(c => { const k = c.kind || '— прочее —'; kindCount[k] = (kindCount[k]||0) + 1; });
   const allKinds = Array.from(new Set([...Object.keys(kindIncome), ...Object.keys(kindCount)]));
@@ -2536,12 +2553,12 @@ function renderProfitChart(finance, from, to) {
   const cont = document.getElementById('rep-chart');
   // группируем оплаты по месяцам
   const buckets = {};
-  finance.forEach(f=>{
-    if (!inRange(f.paidAt, from, to) || !Number(f.paid)) return;
-    const d = new Date(f.paidAt);
+  finance.forEach(f=> finPayments(f).forEach(pp=>{
+    if (!inRange(pp.at, from, to) || !Number(pp.sum)) return;
+    const d = new Date(pp.at);
     const key = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
-    buckets[key] = (buckets[key]||0) + Number(f.paid||0);
-  });
+    buckets[key] = (buckets[key]||0) + Number(pp.sum||0);
+  }));
   const keys = Object.keys(buckets).sort();
   if (!keys.length) { cont.innerHTML = `<div class="empty"><div class="big">${ic('chartLine',48,'empty-ico')}</div><p>Нет оплат за выбранный период</p></div>`; return; }
   const max = Math.max(...keys.map(k=>buckets[k]));
@@ -5221,7 +5238,7 @@ async function openFinanceForm(existing) {
   const bt = f.billType || 'fixed';
   const clients = (await getAll('clients')).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru'));
   const cases = await getAll('cases');
-  const clientOpts = '<option value="">— выберите —</option>' + clients.map(c=>`<option ${c.name===f.client?'selected':''}>${esc(c.name)}</option>`).join('');
+  const clientOpts = '<option value="">— без участника —</option>' + clients.map(c=>`<option ${c.name===f.client?'selected':''}>${esc(c.name)}</option>`).join('');
   const caseOpts = '<option value="">— без привязки —</option>' + cases.map(c=>`<option value="${esc(c.number)}" data-client="${esc(c.client||'')}" ${c.number===f.caseNum?'selected':''}>${esc(c.number)}${c.client?' · '+esc(c.client):''}</option>`).join('');
   showSheet(`
     <h3>${existing?'Изменить счёт':'Новый счёт'}</h3>
@@ -5255,7 +5272,8 @@ async function openFinanceForm(existing) {
       <div class="meta" style="margin-bottom:8px">Счёт активируется при положительном исходе дела.</div>
     </div>
 
-    <div class="field"><label>Оплачено, ₽</label><input id="f-paid" type="number" inputmode="numeric" value="${f.paid||0}"></div>
+    <div class="field"><label>Оплачено, ₽</label><input id="f-paid" type="number" inputmode="numeric" value="${f.paid||0}" ${Array.isArray(f.payments)&&f.payments.length?'readonly style="opacity:.6"':''}>
+      ${Array.isArray(f.payments)&&f.payments.length?`<div class="meta" style="margin-top:4px">Считается по журналу платежей — правьте платежи в карточке счёта</div>`:''}</div>
     <div class="field"><label>Комментарий</label><textarea id="f-fcomment" rows="2" placeholder="Назначение платежа, № договора, условия...">${esc(f.comment||'')}</textarea></div>
     <button class="btn-primary" onclick="saveFinance('${f.id||''}')">Сохранить</button>
     ${existing?`<button class="btn-ghost" onclick="removeItem('finance','${f.id}','finance')">Удалить</button>`:''}
@@ -5276,7 +5294,7 @@ function finCaseChanged() {
 async function saveFinance(id) {
   const client = document.getElementById('f-client').value;
   const billType = document.getElementById('f-billType').value || 'fixed';
-  if (!client) { toast('Выберите доверителя!', true); return; }
+  // Участник необязателен: счёт можно создать «без привязки» (общие поступления и т.п.)
   if (!id && !(await demoAllow('finance'))) return;
   // Итоговая сумма зависит от типа расчёта
   let amount = 0, extra = {};
@@ -5296,10 +5314,10 @@ async function saveFinance(id) {
     amount = Number(document.getElementById('f-amount').value) || 0;
     if (!amount) { toast('Укажите сумму!', true); return; }
   }
-  const paid = Number(document.getElementById('f-paid').value)||0;
-  let status;
-  if (paid===0) status='Не оплачено'; else if (paid>=amount) status='Оплачено'; else status='Частично оплачено';
+  let paid = 0, status = 'Не оплачено'; // финальные значения — после prev/журнала ниже
   const prev = id ? (await getAll('finance')).find(x=>x.id===id) : null;
+  const _journal = prev && Array.isArray(prev.payments) && prev.payments.length ? prev.payments : null;
+  const realPaid = _journal ? _journal.reduce((a,pp)=>a+Number(pp.sum||0),0) : (Number(document.getElementById('f-paid').value)||0);
   const caseNum = document.getElementById('f-caseNum').value;
   // Почасовой счёт: помечаем учтённые записи времени как списанные
   if (billType === 'hourly' && caseNum) {
@@ -5310,12 +5328,17 @@ async function saveFinance(id) {
   // Гонорар успеха по умолчанию «условный» (не висит на клиенте, пока дело не выиграно).
   // Сохраняем уже выставленный флаг, если счёт редактируется.
   const isPending = billType === 'success' ? (prev ? (prev.pending !== false) : true) : false;
+  paid = realPaid;
+  if (paid===0) status='Не оплачено'; else if (paid>=amount && amount) status='Оплачено'; else status='Частично оплачено';
   const obj = { id: id||uid('Ф'), client, caseNum, service: document.getElementById('f-service').value,
     billType, amount, paid, status, ...extra, pending: isPending,
+    payments: _journal || undefined,
+    plan: prev?.plan || undefined,
     comment: document.getElementById('f-fcomment').value.trim(),
     createdAt: prev?.createdAt || todayISO(),
     nextDue: billType === 'retainer' ? (prev?.nextDue || nextMonthISO()) : '',
     paidAt: paid>0 ? (prev?.paidAt || todayISO()) : '' };
+  if (Array.isArray(obj.payments) && obj.payments.length) finRecalc(obj); // журнал — источник истины
   await put('finance', obj);
   closeSheet(); toast('Счёт сохранён'); renderFinance(); renderDashboard();
 }
@@ -5691,6 +5714,9 @@ async function viewCase(id, tab) {
     </div>
 
     <button class="btn-primary" onclick="openCaseForm(${JSON.stringify(c).replace(/"/g,'&quot;')})">Редактировать</button>
+    ${c.status!=='Завершено'
+      ? `<button class="btn-ghost" style="color:var(--sig-green);border-color:var(--sig-green)" onclick="completeCase('${c.id}')">✓ Завершить дело</button>`
+      : `<button class="btn-ghost" onclick="completeCase('${c.id}')">↩ Вернуть дело в работу</button>`}
     <button class="btn-ghost" onclick="toggleArchiveCase('${c.id}')">${ic(c.archived?'refresh':'folder',16)} ${c.archived?'Вернуть из архива':'В архив'}</button>
     <button class="btn-ghost" onclick="exportCase('${c.id}')">${ic('print',16)} Выгрузить дело (для печати)</button>
     <button class="btn-ghost" onclick="deleteCase('${c.id}')" style="color:var(--red)">${ic('alert',16)} Удалить в корзину</button>
@@ -5980,6 +6006,21 @@ async function archiveOldCases() {
   renderCases(); renderDashboard();
 }
 
+// Завершение дела одной кнопкой (и возврат в работу)
+async function completeCase(id) {
+  const c = (await getAll('cases')).find(x=>x.id===id); if (!c) return;
+  if (c.status !== 'Завершено') {
+    c.status = 'Завершено';
+    toast('Дело завершено');
+  } else {
+    c.status = 'В производстве';
+    toast('Дело возвращено в работу');
+  }
+  await put('cases', c);
+  renderCases(); renderDashboard(); navBadgeRefresh();
+  viewCase(id); // обновляем открытую карточку (появится напоминание про акт, если он не подписан)
+}
+
 async function toggleArchiveCase(id) {
   const c = (await getAll('cases')).find(x=>x.id===id);
   if (!c) return;
@@ -6194,7 +6235,7 @@ async function viewFinance(id) {
   await refreshCasesCache();
   const f = (await getAll('finance')).find(x=>x.id===id); if (!f) return;
   showSheet(`
-    <h3>${esc(f.client)}</h3><div class="sheet-sub">${esc(f.service||'')} · ${statusBadge(f.status)}</div>
+    <h3>${esc(f.client || f.service || 'Платёж')}</h3><div class="sheet-sub">${f.client ? esc(f.service||'') : 'без участника'} · ${statusBadge(f.status)}</div>
     <div class="detail-block">
       ${f.caseNum?`<div class="detail-row"><span class="k">Дело</span><span class="v">${esc(caseLabel(f.caseNum))}</span></div>`:''}
       ${f.billType&&f.billType!=='fixed'?`<div class="detail-row"><span class="k">Тип расчёта</span><span class="v">${BILLING_LABEL[f.billType]}</span></div>`:''}
@@ -6209,6 +6250,15 @@ async function viewFinance(id) {
     </div>
     ${f.pending?`<div class="card" style="margin-bottom:12px;border-left:3px solid var(--orange)"><div class="meta" style="color:var(--orange)">Условный гонорар успеха — не входит в долг, пока дело не выиграно. Активируйте счёт по факту положительного исхода.</div></div>`:''}
     ${f.comment?`<div class="detail-block"><div style="color:var(--text-dim);font-size:13px">${esc(f.comment)}</div></div>`:''}
+    ${(()=>{ const ps = finPayments(f); if (!ps.length) return ''; return `
+    <div class="sect-title">Платежи (${ps.length})</div>
+    ${ps.map(pp=>`<div class="card" style="margin-bottom:6px;padding:10px 13px${pp.legacy?'':';cursor:pointer'}" ${pp.legacy?'':`onclick="openPayForm('${f.id}','${pp.id}')"`}>
+      <div class="row1"><div style="flex:1;min-width:0">
+        <div class="title" style="font-size:14px">${fmtMoney(pp.sum)} <span style="font-weight:400;font-size:12px;color:${pp.method==='cash'?'var(--sig-green)':pp.method==='bank'?'#60a5fa':'var(--text-faint)'}">· ${PAY_METHODS[pp.method]||PAY_METHODS['']}</span></div>
+        <div class="meta">${fmtDate(pp.at)}${pp.note?' · '+esc(pp.note):''}</div>
+      </div>${pp.legacy?'':'<span style="color:var(--text-faint);font-size:13px">✎</span>'}</div>
+    </div>`).join('')}`; })()}
+    ${!f.pending?`<button class="btn-primary" style="background:var(--sig-green)" onclick="openPayForm('${f.id}')">💰 + Оплата</button>`:''}
     ${renderPlanSection(f)}
     ${f.pending?`<button class="btn-primary" onclick="activateSuccessFee('${f.id}')">✓ Дело выиграно — активировать счёт</button>`:''}
     ${f.billType==='hourly'&&f.caseNum?`<button class="btn-ghost" onclick="actFromInvoice('${f.caseNum.replace(/'/g,'')}')">${ic('receipt',16)} Сформировать акт по учёту времени</button>`:''}
@@ -6217,6 +6267,144 @@ async function viewFinance(id) {
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
   `);
 }
+// ═══════ ЖУРНАЛ ПЛАТЕЖЕЙ (нал/безнал, точные даты) ═══════
+const PAY_METHODS = { cash:'Наличные', bank:'Безнал', '':'Способ не указан' };
+// Платежи счёта: реальный журнал или «виртуальный» для старых записей (paid без журнала)
+function finPayments(f) {
+  if (Array.isArray(f.payments) && f.payments.length) return f.payments;
+  const paid = Number(f.paid||0);
+  if (paid > 0) return [{ id:'__legacy', at: f.paidAt || f.createdAt || todayISO(), sum: paid, method:'', note:'', legacy:true }];
+  return [];
+}
+// Однократный перенос старой суммы «оплачено» в журнал (перед первой записью)
+function finMaterialize(f) {
+  if (Array.isArray(f.payments)) return;
+  const paid = Number(f.paid||0);
+  f.payments = paid > 0
+    ? [{ id: uid('ПЛ'), at: f.paidAt || f.createdAt || todayISO(), sum: paid, method:'', note:'до журнала' }]
+    : [];
+}
+// Пересчёт счёта по журналу: оплачено, статус, дата первой оплаты
+function finRecalc(f) {
+  const sum = (f.payments||[]).reduce((a,p)=>a+Number(p.sum||0),0);
+  f.paid = Math.round(sum*100)/100;
+  const amount = Number(f.amount||0);
+  f.status = f.paid<=0 ? 'Не оплачено' : (amount && f.paid>=amount ? 'Оплачено' : 'Частично оплачено');
+  const dates = (f.payments||[]).map(p=>p.at).filter(Boolean).sort();
+  f.paidAt = dates[0] || '';
+}
+
+// Форма платежа: сумма (подставлен остаток), дата, способ, заметка
+async function openPayForm(finId, payId) {
+  const f = (await getAll('finance')).find(x=>x.id===finId); if (!f) return;
+  const pEdit = payId && Array.isArray(f.payments) ? f.payments.find(x=>x.id===payId) : null;
+  const paidNow = finPayments(f).reduce((a,x)=>a+Number(x.sum||0),0);
+  const rest = Math.max(0, Math.round((Number(f.amount||0) - paidNow + (pEdit?Number(pEdit.sum||0):0))*100)/100);
+  const method = pEdit ? (pEdit.method||'') : (localStorage.getItem('crm_pay_method') || 'cash');
+  showSheet(`
+    <h3>${pEdit?'Платёж':'Оплата по счёту'}</h3>
+    <div class="sheet-sub">${esc(f.client||f.service||'Платёж')}${Number(f.amount)?` · остаток долга ${fmtMoney(Math.max(0,Number(f.amount||0)-paidNow+(pEdit?Number(pEdit.sum||0):0)))}`:''}</div>
+    <div class="field-row">
+      <div class="field"><label>Сумма, ₽</label><input id="pay-sum" inputmode="decimal" value="${pEdit?pEdit.sum:(rest||'')}" placeholder="сумма платежа"></div>
+      <div class="field"><label>Дата</label><input id="pay-at" type="date" value="${pEdit?pEdit.at:todayISO()}"></div>
+    </div>
+    <div class="field"><label>Способ</label>
+      <div class="chips" id="pay-method">
+        <div class="chip ${method==='cash'?'active':''}" data-m="cash" onclick="payPick(this)">💵 Наличные</div>
+        <div class="chip ${method==='bank'?'active':''}" data-m="bank" onclick="payPick(this)">🏦 Безнал</div>
+      </div></div>
+    <div class="field"><label>Заметка (необязательно)</label><input id="pay-note" value="${esc(pEdit?.note||'')}" placeholder="аванс, перевод на карту, из кассы…"></div>
+    <button class="btn-primary" style="background:var(--sig-green)" onclick="savePayment('${finId}','${payId||''}')">Сохранить платёж</button>
+    ${pEdit?`<button class="btn-ghost" style="color:var(--red)" onclick="delPayment('${finId}','${payId}')">Удалить платёж</button>`:''}
+    <button class="btn-ghost" onclick="viewFinance('${finId}')">← Назад</button>
+  `);
+}
+function payPick(el) {
+  document.querySelectorAll('#pay-method .chip').forEach(c=>c.classList.toggle('active', c===el));
+}
+async function savePayment(finId, payId) {
+  const f = (await getAll('finance')).find(x=>x.id===finId); if (!f) return;
+  const sum = Number(String(document.getElementById('pay-sum').value).replace(',','.')) || 0;
+  if (sum <= 0) { toast('Укажите сумму платежа', true); return; }
+  const at = document.getElementById('pay-at').value || todayISO();
+  const method = document.querySelector('#pay-method .chip.active')?.dataset.m || '';
+  const note = document.getElementById('pay-note').value.trim();
+  finMaterialize(f);
+  if (payId) {
+    const p = f.payments.find(x=>x.id===payId); if (!p) { toast('Платёж не найден', true); return; }
+    Object.assign(p, { sum, at, method, note });
+  } else {
+    f.payments.push({ id: uid('ПЛ'), at, sum, method, note });
+  }
+  if (method) localStorage.setItem('crm_pay_method', method);
+  finRecalc(f);
+  await put('finance', f);
+  toast(`Платёж ${fmtMoney(sum)} записан · ${PAY_METHODS[method]||''}`);
+  viewFinance(finId); renderFinance(); renderDashboard();
+}
+async function delPayment(finId, payId) {
+  const f = (await getAll('finance')).find(x=>x.id===finId); if (!f || !Array.isArray(f.payments)) return;
+  if (!confirm('Удалить этот платёж из журнала?')) return;
+  const p = f.payments.find(x=>x.id===payId);
+  f.payments = f.payments.filter(x=>x.id!==payId);
+  // если платёж был привязан к пункту рассрочки — снимаем отметку
+  if (p && Array.isArray(f.plan)) { const pl = f.plan.find(x=>x.payId===payId); if (pl) { pl.paid=false; pl.paidAt=''; delete pl.payId; } }
+  finRecalc(f);
+  await put('finance', f);
+  toast('Платёж удалён');
+  viewFinance(finId); renderFinance(); renderDashboard();
+}
+
+// ═══════ ВЫПИСКА ПОСТУПЛЕНИЙ (печать, для кассовой книги и сверки) ═══════
+async function printIncomeRegister() {
+  const { from, to } = reportRange();
+  const lbl = reportPreset==='all' ? 'за всё время' : `${fmtDate(from)} — ${fmtDate(to)}`;
+  const finance = await getAll('finance');
+  await refreshCasesCache();
+  const rows = [];
+  finance.forEach(f => finPayments(f).forEach(pp => {
+    if (!inRange(pp.at, from, to) || !Number(pp.sum)) return;
+    rows.push({ at: pp.at, sum: Number(pp.sum), method: pp.method||'', note: pp.note||'',
+      client: f.client||'—', caseNum: f.caseNum||'', service: f.service||'' });
+  }));
+  if (!rows.length) { toast('Нет поступлений за выбранный период', true); return; }
+  rows.sort((a,b)=>String(a.at).localeCompare(String(b.at)));
+  const tCash = rows.filter(r=>r.method==='cash').reduce((a,r)=>a+r.sum,0);
+  const tBank = rows.filter(r=>r.method==='bank').reduce((a,r)=>a+r.sum,0);
+  const tNone = rows.filter(r=>!r.method).reduce((a,r)=>a+r.sum,0);
+  const total = tCash + tBank + tNone;
+  const esc2 = x => String(x==null?'':x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Выписка поступлений</title>
+    <style>
+      body{font-family:'Times New Roman',Georgia,serif;font-size:12pt;color:#000;max-width:1000px;margin:20px auto;padding:0 16px;}
+      h1{font-size:16pt;margin-bottom:2px} .sub{color:#444;font-size:10.5pt;margin-bottom:14px}
+      table{border-collapse:collapse;width:100%;} th,td{border:1px solid #000;padding:5px 7px;font-size:10.5pt;text-align:left;vertical-align:top}
+      th{background:#efefef} td.r,th.r{text-align:right;white-space:nowrap}
+      tfoot td{font-weight:bold;background:#f7f7f7}
+      @media print{@page{margin:1.2cm}}
+    </style></head><body>
+    <h1>Выписка поступлений</h1>
+    <div class="sub">Период: ${esc2(lbl)} · сформировано ${new Date().toLocaleDateString('ru-RU')} · CRM Адвоката</div>
+    <table>
+      <thead><tr><th style="width:80px">Дата</th><th>От кого</th><th style="width:110px">Дело</th><th>Услуга / заметка</th><th style="width:80px">Способ</th><th class="r" style="width:100px">Сумма, ₽</th></tr></thead>
+      <tbody>${rows.map(r=>`<tr>
+        <td>${fmtDate(r.at)}</td><td>${esc2(r.client)}</td><td>${esc2(r.caseNum)}</td>
+        <td>${esc2([r.service,r.note].filter(Boolean).join(' · '))}</td>
+        <td>${r.method==='cash'?'нал':r.method==='bank'?'безнал':'—'}</td>
+        <td class="r">${fmtMoney(r.sum)}</td></tr>`).join('')}</tbody>
+      <tfoot>
+        <tr><td colspan="5">💵 Наличными</td><td class="r">${fmtMoney(tCash)}</td></tr>
+        <tr><td colspan="5">🏦 Безналом</td><td class="r">${fmtMoney(tBank)}</td></tr>
+        ${tNone?`<tr><td colspan="5">Способ не указан</td><td class="r">${fmtMoney(tNone)}</td></tr>`:''}
+        <tr><td colspan="5">ИТОГО поступлений: ${rows.length}</td><td class="r">${fmtMoney(total)}</td></tr>
+      </tfoot>
+    </table>
+    ` + '<'+'scr'+'ipt>window.print();<'+'/scr'+'ipt>' + `</body></html>`;
+  const w = window.open('', '_blank');
+  if (w) { w.document.write(html); w.document.close(); }
+  else toast('Разрешите всплывающие окна для печати', true);
+}
+
 // ═══════ ПЛАНЫ ПЛАТЕЖЕЙ (РАССРОЧКА) ═══════
 function renderPlanSection(f) {
   const plan = f.plan || [];
@@ -6274,15 +6462,24 @@ async function createPaymentPlan(id) {
 async function togglePlanPaid(id, idx) {
   const f = (await getAll('finance')).find(x=>x.id===id); if (!f || !f.plan || !f.plan[idx]) return;
   const p = f.plan[idx];
-  p.paid = !p.paid;
-  p.paidAt = p.paid ? todayISO() : '';
-  // синхронизируем общую сумму «оплачено» по счёту с суммой оплаченных платежей графика
-  f.paid = f.plan.filter(x=>x.paid).reduce((a,x)=>a+Number(x.amount||0),0);
-  if (f.paid >= Number(f.amount||0) && f.amount) { f.status = 'Оплачено'; if (!f.paidAt) f.paidAt = todayISO(); }
-  else if (f.paid > 0) f.status = 'Частично оплачено';
-  else f.status = 'Не оплачено';
+  finMaterialize(f);
+  if (!p.paid) {
+    p.paid = true; p.paidAt = todayISO();
+    const method = localStorage.getItem('crm_pay_method') || 'cash';
+    const entry = { id: uid('ПЛ'), at: p.paidAt, sum: Number(p.amount||0), method, note: `Рассрочка, платёж ${idx+1}` };
+    f.payments.push(entry); p.payId = entry.id;
+    toast(`Платёж записан · ${PAY_METHODS[method]}`);
+  } else {
+    p.paid = false; p.paidAt = '';
+    if (p.payId) { f.payments = f.payments.filter(x=>x.id!==p.payId); delete p.payId; }
+    else { // платёж отмечен до появления журнала — уменьшаем перенесённую сумму
+      const legacy = f.payments.find(x=>x.note==='до журнала');
+      if (legacy) { legacy.sum = Math.max(0, Math.round((Number(legacy.sum||0)-Number(p.amount||0))*100)/100); if (!legacy.sum) f.payments = f.payments.filter(x=>x!==legacy); }
+    }
+    toast('Отметка снята');
+  }
+  finRecalc(f);
   await put('finance', f);
-  toast(p.paid ? 'Платёж отмечен оплаченным' : 'Отметка снята');
   viewFinance(id);
   renderFinance(); renderDashboard();
 }
@@ -9177,7 +9374,7 @@ const FONT_SIZES = [
 const FONT_FAMILIES = [
   ['golos',  "'Golos Text'",            'Голос (фирменный)', 'Современный, как сейчас'],
   ['system', "system-ui",               'Системный',         'Как в интерфейсе телефона'],
-  ['serif',  "Georgia, 'Times New Roman', serif", 'С засечками', 'Книжный, привычный для документов']
+  ['serif',  "'Times New Roman', 'PT Serif', Georgia, serif", 'С засечками', 'Книжный, привычный для документов']
 ];
 function applyFontSettings() {
   const sizeKey = localStorage.getItem('crm_fontsize') || 'm';
