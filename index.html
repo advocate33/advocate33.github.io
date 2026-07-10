@@ -1038,7 +1038,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '114'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '116'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -9445,6 +9445,23 @@ async function demoAllow(store) {
 const DEVICE_LIMIT = 2; // ПК + смартфон
 let LIC = { ok:false, name:'', reg:'', until:'' };
 
+// ── Монотонные часы: защита срочных лицензий от перевода даты назад ──
+// Запоминаем максимальную виденную отметку времени; срок ключа сверяется с ней,
+// поэтому перевод системных часов в прошлое не «воскрешает» истёкший ключ.
+function clockNowTs() {
+  const seen = Number(localStorage.getItem('crm_clock_max') || 0);
+  const now = Date.now();
+  if (now >= seen) { localStorage.setItem('crm_clock_max', String(now)); return now; }
+  return seen;
+}
+function clockTodayISO() {
+  const d = new Date(clockNowTs());
+  const p2 = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+}
+clockNowTs(); // отметка при каждом запуске
+setInterval(clockNowTs, 3600e3); // и раз в час для долгоживущей вкладки
+
 // Стабильный отпечаток устройства (хранится локально, генерируется один раз)
 function deviceId() {
   let id = localStorage.getItem('crm_device_id');
@@ -9487,7 +9504,7 @@ async function licVerify(keyStr) {
     const ok = await crypto.subtle.verify({ name:'ECDSA', hash:'SHA-256' }, pub, sig, payload);
     if (!ok) return null;
     const [name, reg, until] = new TextDecoder().decode(payload).split('|');
-    if (until && until !== 'бессрочно' && until < todayISO()) return { expired:true, name, reg, until };
+    if (until && until !== 'бессрочно' && until < clockTodayISO()) return { expired:true, name, reg, until };
     return { ok:true, name: name||'', reg: reg||'', until: until||'' };
   } catch(e) { return null; }
 }
@@ -9589,6 +9606,7 @@ function openLicenseSheet() {
   showSheet(`
     <h3>${ic("key",18)} Активация лицензии</h3>
     <div class="sheet-sub">Сейчас работает деморежим: до ${DEMO_MONTH_LIMIT} новых записей в месяц в каждом разделе (дела, участники, заседания, задачи, счета, обращения, письма). Просмотр, редактирование и все функции — без ограничений; с 1 числа лимит обновляется. Ключ снимает лимиты и работает на ${DEVICE_LIMIT} устройствах (ПК + смартфон).</div>
+    <a href="https://advocate33.github.io/kupit.html" target="_blank" rel="noopener" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;margin-bottom:12px;color:var(--brass);border-color:var(--brass)">🔑 Как получить ключ — тарифы и покупка</a>
     ${LIC.until?`<div class="card" style="margin-bottom:10px;border-color:var(--red)"><div class="meta" style="color:var(--red)">Срок лицензии «${esc(LIC.name)}» истёк ${fmtDate(LIC.until)}.</div></div>`:''}
     <div class="field"><label>Лицензионный ключ</label><textarea id="lic-key" rows="3" placeholder="Вставьте ключ из письма о покупке" style="font-family:monospace;font-size:12px"></textarea></div>
     <button class="btn-primary" onclick="licActivate()">Активировать</button>
