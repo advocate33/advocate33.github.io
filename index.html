@@ -1038,7 +1038,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '117'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '118'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -2846,15 +2846,15 @@ async function viewLead(id) {
     <h3>${esc(l.name)}</h3><div class="sheet-sub">Обращение от ${created}</div>
     <div class="detail-block">
       <div class="detail-row"><span class="k">Телефон</span><span class="v">${l.phone?phoneHtml(l.phone,'lead',l.id):'—'}</span></div>
-      <div class="detail-row"><span class="k">Email</span><span class="v"><a href="mailto:${esc(l.email)}">${esc(l.email||'—')}</a></span></div>
+      <div class="detail-row"><span class="k">Email</span><span class="v">${emailHtml(l.email,'lead',l.id)}</span></div>
       <div class="detail-row"><span class="k">Суть</span><span class="v">${esc(l.topic||'—')}</span></div>
-      ${l.addr?`<div class="detail-row"><span class="k">Адрес</span><span class="v">${esc(l.addr)}</span></div>`:''}
+      ${l.addr?`<div class="detail-row"><span class="k">Адрес</span><span class="v">${addrHtml(l.addr,'lead',l.id)}</span></div>`:''}
       ${l.opponent?`<div class="detail-row"><span class="k">Оппонент</span><span class="v">${esc(l.opponent)}${l.opponentInn?'<br><span style="font-size:12px;color:var(--text-faint)">ИНН '+esc(l.opponentInn)+'</span>':''}${l.opponentInfo?'<br><span style="font-size:12px;color:var(--text-faint)">'+esc(l.opponentInfo)+'</span>':''}</span></div>`:''}
       <div class="detail-row"><span class="k">Вид</span><span class="v">${esc(l.kind||'—')}</span></div>
       <div class="detail-row"><span class="k">Источник</span><span class="v">${esc(l.source||'—')}</span></div>
       <div class="detail-row"><span class="k">Статус</span><span class="v"><span class="badge ${LEAD_BADGE[l.status]||'b-new'}"><span class="dot"></span>${esc(l.status||'Новое')}</span></span></div>
     </div>
-    ${l.summary?`<div class="detail-block"><div style="color:var(--text-dim);font-size:13px;line-height:1.55;white-space:pre-wrap">${esc(l.summary)}</div></div>`:''}
+    ${l.summary?`<div class="detail-block"><div style="color:var(--text-dim);font-size:13px;line-height:1.55;white-space:pre-wrap">${linkify(esc(l.summary))}</div></div>`:''}
     ${(() => {
       const dl = leadDeadlineDate(l);
       if (!dl) return '';
@@ -3067,7 +3067,7 @@ async function openTaskForm(existing) {
     <div class="sheet-sub">Поручение или дедлайн по делу</div>
     <div class="field"><label>Название <span class="req">*</span></label><input id="t-title" value="${esc(t.title||'')}" placeholder="Подготовить отзыв на иск"></div>
     <div class="field-row">
-      <div class="field"><label>Срок</label><input id="t-due" type="date" value="${t.due||''}"></div>
+      <div class="field"><label>Срок</label><input id="t-due" type="date" value="${t.due||''}">${qdChips('t-due')}</div>
       <div class="field"><label>Время</label><input id="t-time" type="time" value="${t.time||''}"></div>
     </div>
     <div class="field"><label>Приоритет</label><select id="t-priority">${opts(['Низкий','Средний','Высокий'],t.priority||'Средний')}</select></div>
@@ -4792,6 +4792,15 @@ async function saveClient(id) {
   if (!name) { toast('Введите ФИО!', true); return; }
   const all = await getAll('clients');
   if (!id && all.some(c=>(c.name||'').toLowerCase()===name.toLowerCase())) { toast('Такой доверитель уже есть!', true); return; }
+  if (!id) { // мягкий контроль дублей по телефону и ИНН (паттерн зрелых CRM)
+    const pd = phoneDigits(document.getElementById('f-phone')?.value || '');
+    const innV = (document.getElementById('f-inn')?.value || '').trim();
+    const dup = all.find(x => (pd && pd.length >= 10 && phoneDigits(x.phone||'') === pd) || (innV && (x.inn||'').trim() === innV));
+    if (dup) {
+      const why = (pd && phoneDigits(dup.phone||'') === pd) ? 'телефон' : 'ИНН';
+      if (!confirm(`Похоже, такой участник уже есть: ${dup.name}\n(совпадает ${why}).\n\nВсё равно создать нового?`)) return;
+    }
+  }
   // Деморежим: помесячный лимит новых участников
   if (!id && !(await demoAllow('clients'))) return;
   const _prev = id ? all.find(c => c.id === id) : null;
@@ -5298,6 +5307,7 @@ function phoneActions(raw, backType, backId) {
     <a class="btn-primary" style="display:block;text-align:center;text-decoration:none" href="tel:${esc(d)}">📞 Позвонить</a>
     <a class="btn-ghost" style="display:block;text-align:center;text-decoration:none" href="sms:${esc(d)}">💬 Написать SMS</a>
     <a class="btn-ghost" style="display:block;text-align:center;text-decoration:none" href="https://t.me/${esc(d)}" target="_blank" rel="noopener">✈️ Открыть в Telegram</a>
+    <a class="btn-ghost" style="display:block;text-align:center;text-decoration:none" href="https://wa.me/${esc(d.replace('+',''))}" target="_blank" rel="noopener">💬 Открыть в WhatsApp</a>
     <button class="btn-ghost" onclick="phoneCopy('${esc(d)}')">📋 Скопировать номер</button>
     <button class="btn-ghost" onclick="${back}">← Назад</button>
   `);
@@ -5305,6 +5315,75 @@ function phoneActions(raw, backType, backId) {
 async function phoneCopy(d) {
   try { await navigator.clipboard.writeText(d); toast('Номер скопирован'); }
   catch (e) { window.prompt('Скопируйте номер:', d); }
+}
+
+// ═══════ РЕКВИЗИТЫ КАК ДЕЙСТВИЯ: e-mail · адрес · копирование · автоссылки ═══════
+async function copyText(v, label) {
+  try { await navigator.clipboard.writeText(String(v)); toast(label || 'Скопировано'); }
+  catch (e) { window.prompt('Скопируйте:', String(v)); }
+}
+// Значение, копируемое одним нажатием (ИНН, УИД, № ИП, трек и т.п.)
+function copyHtml(v, label) {
+  if (!v) return '—';
+  const safe = String(v).replace(/['"<>]/g, '');
+  return `<span onclick="event.stopPropagation();copyText('${safe}','${label||'Скопировано'}')" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px" title="Нажмите — скопируется">${esc(v)}</span>`;
+}
+function emailHtml(raw, backType, backId) {
+  if (!raw) return '—';
+  const safe = String(raw).replace(/['"<>]/g, '');
+  return `<a href="javascript:void(0)" onclick="event.stopPropagation();emailActions('${safe}','${backType||''}','${backId||''}')" style="color:inherit;text-decoration:underline dotted;text-underline-offset:3px">${esc(raw)}</a>`;
+}
+function emailActions(raw, backType, backId) {
+  const back = backType === 'client' ? `viewClient('${backId}')`
+    : backType === 'lead' ? `viewLead('${backId}')`
+    : backType === 'case' ? `viewCase('${backId}')` : 'closeSheet()';
+  showSheet(`
+    <h3>✉️ ${esc(raw)}</h3>
+    <a class="btn-primary" style="display:block;text-align:center;text-decoration:none" href="mailto:${esc(raw)}">✉️ Написать письмо</a>
+    <button class="btn-ghost" onclick="copyText('${esc(raw)}','E-mail скопирован')">📋 Скопировать адрес</button>
+    <button class="btn-ghost" onclick="${back}">← Назад</button>`);
+}
+function addrHtml(raw, backType, backId) {
+  if (!raw) return '—';
+  const safe = String(raw).replace(/['"<>]/g, '');
+  return `<a href="javascript:void(0)" onclick="event.stopPropagation();addrActions('${safe}','${backType||''}','${backId||''}')" style="color:inherit;text-decoration:underline dotted;text-underline-offset:3px">${esc(raw)}</a>`;
+}
+function addrActions(raw, backType, backId) {
+  const back = backType === 'client' ? `viewClient('${backId}')`
+    : backType === 'lead' ? `viewLead('${backId}')` : 'closeSheet()';
+  showSheet(`
+    <h3>📍 Адрес</h3>
+    <div class="sheet-sub">${esc(raw)}</div>
+    <a class="btn-primary" style="display:block;text-align:center;text-decoration:none" href="https://yandex.ru/maps/?text=${encodeURIComponent(raw)}" target="_blank" rel="noopener">🗺 Открыть в Яндекс.Картах</a>
+    <button class="btn-ghost" onclick="copyText('${esc(raw)}','Адрес скопирован')">📋 Скопировать адрес</button>
+    <button class="btn-ghost" onclick="${back}">← Назад</button>`);
+}
+// Автоссылки: URL в заметках кликабельны (вход — уже экранированный текст)
+function linkify(escaped) {
+  return String(escaped || '').replace(/(https?:\/\/[^\s<]+[^\s<.,)!?;:»])/g,
+    '<a href="$1" target="_blank" rel="noopener" style="color:#60a5fa;word-break:break-all">$1</a>');
+}
+// Быстрые даты у полей срока: Сегодня · Завтра · +3 · +7 · +30
+function qdSet(id, n) { const el = document.getElementById(id); if (el) el.value = addDaysISO(todayISO(), n); }
+function qdChips(id) {
+  return `<div class="chips" style="margin-top:6px">${[[0,'Сегодня'],[1,'Завтра'],[3,'+3 дн'],[7,'+7 дн'],[30,'+30 дн']].map(([n,l]) => `<div class="chip" onclick="qdSet('${id}',${n})">${l}</div>`).join('')}</div>`;
+}
+// Быстрое создание из карточки участника (паттерн «из контакта — сделку/счёт»)
+async function quickCaseFor(clientId) {
+  const c = (await getAll('clients')).find(x => x.id === clientId);
+  closeSheet();
+  await openCaseForm();
+  const sel = document.getElementById('f-client');
+  if (sel && c) for (const o of sel.options) { if (o.text === c.name || o.value === c.name) { sel.value = o.value; break; } }
+}
+async function quickFinFor(clientId) {
+  const c = (await getAll('clients')).find(x => x.id === clientId);
+  closeSheet();
+  await openFinanceForm();
+  if (c) {
+    const hid = document.getElementById('f-client'), inp = document.getElementById('f-client-q');
+    if (hid) hid.value = c.name; if (inp) inp.value = c.name;
+  }
 }
 
 // Универсальный компонент выбора дела: заседание, задача, счёт, письмо, ордер.
@@ -5825,7 +5904,7 @@ async function viewCase(id, tab) {
   const hasCiv = (c.kind==='Гражданское'||c.kind==='Арбитраж'||c.kind==='КАС') && (c.prResult||c.prDate||c.i1Result||c.i1FilingDate||c.apResult||c.apFilingDate);
 
   showSheet(`
-    <h3>${esc(c.number)}</h3><div class="sheet-sub">${esc(c.kind)} · ${statusBadge(c.status)}</div>
+    <h3>${copyHtml(c.number,'Номер дела скопирован')}</h3><div class="sheet-sub">${esc(c.kind)} · ${statusBadge(c.status)}</div>
     <div class="ftabs">
       <button class="${tab===0?'active':''}" onclick="vcTab(0,this)">Основное</button>
       <button class="${tab===1?'active':''}" onclick="vcTab(1,this)">Движение</button>
@@ -5847,8 +5926,8 @@ async function viewCase(id, tab) {
     })()}
     <div class="detail-block">
       ${c.courtNo?`<div class="detail-row"><span class="k">№ в суде / у органа</span><span class="v">${esc(c.courtNo)}</span></div>`:''}
-      ${c.fsspNo?`<div class="detail-row"><span class="k">№ ИП (ФССП)</span><span class="v">${esc(c.fsspNo)}</span></div>`:''}
-      ${c.caseUid?`<div class="detail-row"><span class="k">УИД</span><span class="v" style="font-size:12px">${esc(c.caseUid)}</span></div>`:''}
+      ${c.fsspNo?`<div class="detail-row"><span class="k">№ ИП (ФССП)</span><span class="v">${copyHtml(c.fsspNo,'№ ИП скопирован')}</span></div>`:''}
+      ${c.caseUid?`<div class="detail-row"><span class="k">УИД</span><span class="v" style="font-size:12px">${copyHtml(c.caseUid,'УИД скопирован')}</span></div>`:''}
       ${c.category?`<div class="detail-row"><span class="k">${c.kind==='Уголовное'?'Статья УК РФ':c.kind==='КоАП'?'Статья КоАП РФ':'Категория'}</span><span class="v">${esc(c.category)}</span></div>`:''}
       ${c.agreementNo?`<div class="detail-row"><span class="k">Соглашение №</span><span class="v">${esc(c.agreementNo)}${c.agreementDate?' от '+fmtDate(c.agreementDate):''}${c.agreementSigned==='Да'?' <span style="color:var(--sig-green)">✓ подписано</span>':c.agreementSigned==='Нет — ждёт подписи'?' <span style="color:var(--red)">⚠ не подписано</span>':''}</span></div>`:''}
       ${c.actSigned&&c.actSigned!=='Не требуется'?`<div class="detail-row"><span class="k">Акт услуг</span><span class="v">${c.actSigned==='Подписан'?'<span style="color:var(--sig-green)">✓ подписан</span>':'<span style="color:var(--sig-amber)">не подписан</span>'}</span></div>`:''}
@@ -5866,10 +5945,10 @@ async function viewCase(id, tab) {
     <div class="detail-block">
       <div class="detail-row"><span class="k">Участник</span><span class="v">${esc(c.client||'—')}</span></div>
       ${cl?`<div class="detail-row"><span class="k">Телефон</span><span class="v">${cl.phone?phoneHtml(cl.phone,'case',c.id):'—'}</span></div>
-      <div class="detail-row"><span class="k">Email</span><span class="v"><a href="mailto:${esc(cl.email)}">${esc(cl.email||'—')}</a></span></div>
+      <div class="detail-row"><span class="k">Email</span><span class="v">${emailHtml(cl.email,'case',c.id)}</span></div>
       <div class="detail-row"><span class="k">Адрес</span><span class="v">${esc(cl.addr||'—')}</span></div>`:''}
     </div>
-    ${c.comment?`<div class="detail-block"><div style="color:var(--text-dim);font-size:13px">${esc(c.comment)}</div></div>`:''}
+    ${c.comment?`<div class="detail-block"><div style="color:var(--text-dim);font-size:13px;white-space:pre-wrap">${linkify(esc(c.comment))}</div></div>`:''}
     ${caseMail.length?`
     <div class="sect-title">Письма по делу (${caseMail.length})</div>
     ${caseMail.map(m=>{const mk=mailStatusKind(m),mm=MAIL_KIND_META[mk];return `
@@ -6479,11 +6558,11 @@ async function viewClient(id) {
     <h3>${esc(c.name)}</h3><div class="sheet-sub">${esc(c.type)}${c.role?' · '+esc(c.role):''}</div>
     <div class="detail-block">
       <div class="detail-row"><span class="k">Телефон</span><span class="v">${c.phone?phoneHtml(c.phone,'client',c.id):'—'}</span></div>
-      <div class="detail-row"><span class="k">Email</span><span class="v"><a href="mailto:${esc(c.email)}">${esc(c.email||'—')}</a></span></div>
-      <div class="detail-row"><span class="k">ИНН</span><span class="v">${esc(c.inn||'—')}</span></div>
-      <div class="detail-row"><span class="k">Адрес</span><span class="v">${c.zip?esc(c.zip)+', ':''}${esc(c.addr||'—')}</span></div>
+      <div class="detail-row"><span class="k">Email</span><span class="v">${emailHtml(c.email,'client',c.id)}</span></div>
+      <div class="detail-row"><span class="k">ИНН</span><span class="v">${copyHtml(c.inn,'ИНН скопирован')}</span></div>
+      <div class="detail-row"><span class="k">Адрес</span><span class="v">${(c.zip||c.addr)?addrHtml([c.zip,c.addr].filter(Boolean).join(', '),'client',c.id):'—'}</span></div>
       ${c.birthDate||c.birthPlace?`<div class="detail-row"><span class="k">Рождение</span><span class="v">${c.birthDate?fmtDate(c.birthDate):''}${c.birthPlace?(c.birthDate?', ':'')+esc(c.birthPlace):''}</span></div>`:''}
-      ${c.passport?`<div class="detail-row"><span class="k">Паспорт</span><span class="v">${esc(c.passport)}${c.passportInfo?'<br><span style="font-size:12px;color:var(--text-faint)">'+esc(c.passportInfo)+'</span>':''}</span></div>`:''}
+      ${c.passport?`<div class="detail-row"><span class="k">Паспорт</span><span class="v">${copyHtml(c.passport,'Паспорт скопирован')}${c.passportInfo?'<br><span style="font-size:12px;color:var(--text-faint)">'+esc(c.passportInfo)+'</span>':''}</span></div>`:''}
     </div>
 
     ${fin.length?`<div class="kpi-grid" style="margin-bottom:14px">
@@ -6504,6 +6583,10 @@ async function viewClient(id) {
         <button onclick="delContactLog('${c.id}',${e.at})" style="background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;flex-shrink:0;padding:0 4px">×</button></div>
       </div>`).join(''):'<div class="meta" style="margin-bottom:8px">Записей пока нет. Фиксируйте звонки, встречи и письма — вся история по участнику будет в одном месте.</div>'}
 
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <button class="btn-ghost" style="flex:1" onclick="quickCaseFor('${c.id}')">＋ Дело</button>
+      <button class="btn-ghost" style="flex:1" onclick="quickFinFor('${c.id}')">＋ Счёт</button>
+    </div>
     <button class="btn-primary" onclick="openClientDocs('${c.id}')">${ic('doc',16)} Документы (соглашение и др.)</button>
     <button class="btn-primary" onclick="openClientForm(${JSON.stringify(c).replace(/"/g,'&quot;')})">Редактировать</button>
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
@@ -8119,7 +8202,7 @@ async function viewMail(id) {
   const kind = mailStatusKind(m), meta = MAIL_KIND_META[kind];
   showSheet(`
     <h3>${esc(m.title||m.barcode)}</h3>
-    <div class="sheet-sub">${esc(m.barcode)} · <span style="color:${meta.color};font-weight:600">${esc(m.status||meta.label)}</span></div>
+    <div class="sheet-sub">${copyHtml(m.barcode,'Трек-номер скопирован')} · <span style="color:${meta.color};font-weight:600">${esc(m.status||meta.label)}</span></div>
     ${boundCase?`
     <div class="card" style="margin-bottom:10px;cursor:pointer" onclick="closeSheet();viewCase('${boundCase.id}')">
       <div class="row1"><div style="flex:1">
@@ -8462,7 +8545,7 @@ async function openDeadlineForm(caseId, idx) {
     <div class="field"><label>Пресет</label><select id="dl-preset" onchange="dlAddPreset()"><option value="">— выбрать —</option>${DEADLINE_PRESETS.map((p,i)=>`<option value="${i}">${p.t}</option>`).join('')}</select></div>
     <div class="field"><label>Отсчёт от даты (решение / событие)</label><input id="dl-from" type="date" value="${todayISO()}" onchange="dlAddPreset()"></div>
     <div class="field"><label>Название срока <span class="req">*</span></label><input id="dl-title" value="${esc(dl.title||'')}" placeholder="Апелляционная жалоба..."></div>
-    <div class="field"><label>Срок до <span class="req">*</span></label><input id="dl-date" type="date" value="${dl.date||''}"></div>
+    <div class="field"><label>Срок до <span class="req">*</span></label><input id="dl-date" type="date" value="${dl.date||''}">${qdChips('dl-date')}</div>
     <div class="field"><label>Заметка</label><input id="dl-note" value="${esc(dl.note||'')}"></div>
     <button class="btn-primary" onclick="saveDeadline('${caseId}',${idx!==undefined?idx:-1})">Сохранить</button>
     <button class="btn-ghost" onclick="viewCase('${caseId}',1)">← Назад</button>
