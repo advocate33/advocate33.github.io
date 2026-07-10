@@ -717,6 +717,17 @@
     }
   }
 
+
+/* ── Канбан дел по стадиям (широкие экраны) ── */
+.kb-wrap{display:flex;gap:10px;overflow-x:auto;align-items:flex-start;padding:2px 0 12px}
+.kb-col{flex:0 0 238px;min-width:238px;background:rgba(127,127,127,.06);border:1px solid var(--border);border-radius:14px;padding:8px}
+.kb-head{font-size:11.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--text-faint);padding:2px 6px 8px;display:flex;justify-content:space-between;align-items:center}
+.kb-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:9px 11px;margin-bottom:8px;cursor:pointer}
+.kb-card .t{font-size:13.5px;font-weight:700;line-height:1.25}
+.kb-card .m{font-size:11.5px;color:var(--text-faint);margin-top:3px;line-height:1.35}
+.kb-next{background:none;border:1px solid var(--border);border-radius:8px;color:var(--text-faint);font-size:12px;cursor:pointer;padding:3px 8px;margin-top:7px;font-family:inherit}
+.kb-next:hover{color:var(--accent);border-color:var(--accent)}
+@media(max-width:759px){.cases-view-toggle{display:none}}
 </style>
 </head>
 <body>
@@ -825,6 +836,7 @@
     <button id="cal-tab-month" class="active" onclick="setCalView('month')">📅 Месяц</button>
     <button id="cal-tab-list" onclick="setCalView('list')">☰ Список</button>
   </div>
+  <button class="btn-ghost" style="margin:4px 0 10px" onclick="icsExport()">📤 Экспорт заседаний в календарь (.ics) — Яндекс / Google / Mail.ru / телефон</button>
   <div id="calendar-month"></div>
   <div id="calendar-list"></div>
 </div>
@@ -863,6 +875,8 @@
   <div class="kpi-grid">
     <div class="kpi green" onclick="casesFilter='__withno';nav('cases')" style="cursor:pointer"><div class="label">С № дела в суде</div><div class="value" id="rep-withno">0</div></div>
     <div class="kpi orange" onclick="casesFilter='__nono';nav('cases')" style="cursor:pointer"><div class="label">Без № дела в суде</div><div class="value" id="rep-nono">0</div></div>
+    <div class="kpi"><div class="label">Предъявлено (заверш.)</div><div class="value" id="rep-claimed" style="font-size:17px">0</div></div>
+    <div class="kpi green"><div class="label">Взыскано (заверш.)</div><div class="value" id="rep-recovered" style="font-size:17px">0</div></div>
   </div>
 
   <!-- KPI финансы (синхр. с Финансами) -->
@@ -1002,7 +1016,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '105'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '109'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1482,7 +1496,7 @@ async function navBadgeRefresh() {
     const [hearings, cases, tasks, leads] = await Promise.all(['hearings','cases','tasks','leads'].map(s=>getAll(s)));
     let overdue = 0;
     hearings.forEach(h => { if (isPlanned(h)) { const d = daysUntil(h.date); if (d !== null && d < 0) overdue++; } });
-    cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!dl.done) { const d = daysUntil(dl.date); if (d !== null && d < 0) overdue++; } }));
+    cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!c.archived && !dl.done) { const d = daysUntil(dl.date); if (d !== null && d < 0) overdue++; } }));
     tasks.forEach(t => { if (!t.done && t.due) { const d = daysUntil(t.due); if (d !== null && d < 0) overdue++; } });
     leads.forEach(l => { if (l.status !== 'Взято в работу' && l.status !== 'Отказ') { const dl = leadDeadlineDate(l); if (dl) { const d = daysUntil(dl); if (d !== null && d < 0) overdue++; } } });
     if (overdue > 0) { el.textContent = overdue > 9 ? '9+' : overdue; el.style.display = 'block'; }
@@ -1599,6 +1613,7 @@ function fabAction() {
 // ════════════════════════════════════════════════════════════
 // ═══════ СРОКИ — ЧТО ГОРИТ (всё приближающееся в одном списке) ═══════
 async function openDeadlinesSheet() {
+  await refreshCasesCache();
   const cases = await getAll('cases');
   const hearings = await getAll('hearings');
   const tasks = await getAll('tasks');
@@ -1613,11 +1628,11 @@ async function openDeadlinesSheet() {
     if (d === null) return;
     const hid = h.id;
     items.push({ date: h.date, time: h.time||'', d, type: 'Заседание', icon: '🏛',
-      title: h.court || 'Заседание', sub: h.caseNum || '', act: `closeSheet();viewHearing('${hid}')` });
+      title: h.court || 'Заседание', sub: [h.caseNum, hearingPerson(h)].filter(Boolean).join(' · '), act: `closeSheet();viewHearing('${hid}')` });
   });
   // Процессуальные сроки (на делах)
   cases.forEach(c => (c.deadlines||[]).forEach(dl => {
-    if (dl.done || !dl.date) return;
+    if (c.archived || dl.done || !dl.date) return;
     const d = daysUntil(dl.date);
     if (d === null) return;
     const cid = c.id;
@@ -1705,7 +1720,7 @@ async function renderDashboard() {
   if (dlEl) {
     let urgent = 0, overdueCnt = 0;
     hearings.forEach(h => { if (isPlanned(h)) { const d=daysUntil(h.date); if (d!==null && d<0) overdueCnt++; else if (d!==null && d<=3) urgent++; } });
-    cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!dl.done) { const d=daysUntil(dl.date); if (d!==null && d<0) overdueCnt++; else if (d!==null && d<=3) urgent++; } }));
+    cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!c.archived && !dl.done) { const d=daysUntil(dl.date); if (d!==null && d<0) overdueCnt++; else if (d!==null && d<=3) urgent++; } }));
     tasks.forEach(t => { if (!t.done && t.due) { const d=daysUntil(t.due); if (d!==null && d<0) overdueCnt++; else if (d!==null && d<=3) urgent++; } });
     try { (await getAll('leads')).forEach(l => { if (l.status!=='Взято в работу' && l.status!=='Отказ') { const dl=leadDeadlineDate(l); if(dl){ const d=daysUntil(dl); if (d!==null && d<0) overdueCnt++; else if (d!==null && d<=3) urgent++; } } }); } catch(e){}
     const accent = overdueCnt ? 'var(--red)' : urgent ? 'var(--sig-amber)' : 'var(--green)';
@@ -1755,7 +1770,7 @@ async function renderDashboard() {
   const mBilled = monthFin.filter(f=>!f.pending).reduce((a,f)=>a+Number(f.amount||0),0);
   let mPaid = 0;
   finance.forEach(f => finPayments(f).forEach(pp => { if (pp.at && String(pp.at) >= mFromISO) mPaid += Number(pp.sum||0); }));
-  const mDebt = finance.reduce((a,f)=>a+(f.pending?0:(Number(f.amount||0)-Number(f.paid||0))),0);
+  const mDebt = finance.reduce((a,f)=>a+(f.pending?0:Math.max(0, Number(f.amount||0)-Number(f.paid||0))),0);
   const mb = document.getElementById('money-billed'); if (mb) mb.textContent = fmtMoney(mBilled);
   const mp = document.getElementById('money-paid'); if (mp) mp.textContent = fmtMoney(mPaid);
   const md = document.getElementById('money-debt'); if (md) md.textContent = fmtMoney(mDebt);
@@ -1780,7 +1795,7 @@ async function renderDashboard() {
         <div class="today-head">📌 Сегодня${todayHearings.length?` · ${todayHearings.length} ${plural(todayHearings.length,'заседание','заседания','заседаний')}`:''}${todayTasks.length?` · ${todayTasks.length} ${plural(todayTasks.length,'задача','задачи','задач')}`:''}</div>
         ${todayHearings.map(h=>`<div class="today-row" onclick="viewHearing('${h.id}')">
           <span class="t-time">${h.time||'—:—'}</span>
-          <span class="t-body"><b>🏛 ${esc(caseLabel(h.caseNum)||'Заседание')}</b>${h.court?`<br><span class="t-sub">${esc(h.court)}</span>`:''}</span>
+          <span class="t-body"><b>🏛 ${esc(caseLabel(h.caseNum)||'Заседание')}</b>${(h.court||hearingPerson(h))?`<br><span class="t-sub">${esc([h.court,hearingPerson(h)].filter(Boolean).join(' · '))}</span>`:''}</span>
         </div>`).join('')}
         ${todayDeadlines.map(({c,dl})=>`<div class="today-row" onclick="viewCase('${c.id}',1)">
           <span class="t-time" style="color:var(--red)">срок</span>
@@ -1846,7 +1861,7 @@ async function renderDashboard() {
   document.getElementById('kpi-hearings').textContent = upcoming.length;
   document.getElementById('kpi-tasks').textContent = tasks.filter(t=>!t.done && t.due && t.due<today).length;
   // Условный гонорар успеха (pending) не входит в долг — он ещё не висит на клиенте
-  const debt = finance.reduce((a,f)=>a+(f.pending?0:(Number(f.amount||0)-Number(f.paid||0))),0);
+  const debt = finance.reduce((a,f)=>a+(f.pending?0:Math.max(0, Number(f.amount||0)-Number(f.paid||0))),0);
   document.getElementById('kpi-debt').textContent = fmtMoney(debt);
 
   // Сегодняшние заседания уже показаны в блоке «Сегодня» выше — здесь начинаем с завтра
@@ -1876,6 +1891,8 @@ async function renderDashboard() {
 // РЕНДЕР: ДЕЛА
 // ════════════════════════════════════════════════════════════
 let casesFilter = '__active'; // __active | __done | __archive | конкретный статус (переход из отчётов)
+let casesView = localStorage.getItem('crm_cases_view') || 'list'; // list | board (доска по стадиям, ПК)
+function setCasesView(v) { casesView = v; localStorage.setItem('crm_cases_view', v); renderCases(); }
 async function renderCases() {
   const _cl = document.getElementById('cases-list');
   if (_cl && !_cl.children.length) _cl.innerHTML = skeletonCards(5);
@@ -1900,7 +1917,11 @@ async function renderCases() {
     const TRANSIENT = { '__withno':'С № в суде', '__nono':'Без № в суде' };
     chipsHtml += `<div class="chip active" onclick="casesFilter='__active';renderCases()">${esc(TRANSIENT[casesFilter]||casesFilter)} ✕</div>`;
   }
+  const boardMode = casesView === 'board' && window.innerWidth >= 760 && !showArchived;
+  if (boardMode) chipsHtml = ''; // на доске все дела сгруппированы по стадиям — фильтры не нужны
+  chipsHtml += `<div class="chip cases-view-toggle ${boardMode?'active':''}" onclick="setCasesView(casesView==='board'?'list':'board')" title="Вид: список / доска по стадиям">${boardMode?'☰ Список':'⊞ Доска'}</div>`;
   document.getElementById('cases-chips').innerHTML = chipsHtml;
+  if (boardMode) { renderCasesBoard(nonArch); return; }
   // Предупреждение о дублирующихся номерах (возможно после офлайн-синхронизации)
   const dupWarn = document.getElementById('cases-dup-warn');
   if (dupWarn) {
@@ -1972,7 +1993,7 @@ async function renderCases() {
         ${nh?`<span style="display:inline-flex;align-items:center;gap:5px">${ic('building',13)} ${fmtDate(nh.date)}${nh.time?' '+nh.time:''} — заседание${daysUntil(nh.date)===0?' <b style="color:var(--sig-amber)">СЕГОДНЯ</b>':daysUntil(nh.date)<=3?` <b style="color:var(--sig-amber)">через ${daysUntil(nh.date)} дн.</b>`:''}</span>`:''}
         ${nextDl?`<span style="color:${deadlineColor(nextDl.date)};display:inline-flex;align-items:center;gap:5px">${ic('clock',13)} ${fmtDate(nextDl.date)} — ${esc(nextDl.title)} (${deadlineLabel(nextDl.date)})</span>`:''}
       </div>`:''}
-      <div class="meta-row"><span class="tag ${kindTagClass(c.kind)}">${c.kind||'—'}</span>${c.stage?`<span class="tag" style="background:rgba(79,70,229,.15);color:#8b8ff5">${esc(c.stage.replace('Первая инстанция','1-я инстанция'))}</span>`:''}${(c.labels||[]).map(l=>`<span class="tag" style="background:rgba(200,162,76,.15);color:#d8b766">${esc(l)}</span>`).join('')}${c.category?`<span class="tag">${c.category}</span>`:''}${c.court?`<span class="tag">${c.court}</span>`:''}${c.amount?`<span class="tag tag-amount">${fmtMoney(c.amount)}</span>`:''}</div>
+      <div class="meta-row"><span class="tag ${kindTagClass(c.kind)}">${c.kind||'—'}</span>${c.stage?`<span class="tag" style="background:rgba(79,70,229,.15);color:#8b8ff5">${esc(c.stage.replace('Первая инстанция','1-я инстанция'))}</span>`:''}${(c.labels||[]).map(l=>`<span class="tag" style="background:rgba(200,162,76,.15);color:#d8b766">${esc(l)}</span>`).join('')}${c.category?`<span class="tag">${c.category}</span>`:''}${c.court?`<span class="tag">${c.court}</span>`:''}${c.amount?`<span class="tag tag-amount">${fmtMoney(c.amount)}</span>`:''}${c.recovered?`<span class="tag" style="background:rgba(34,197,94,.15);color:var(--sig-green)">✓ ${fmtMoney(c.recovered)}</span>`:''}</div>
     </div>`;}).join('');
 }
 
@@ -2029,7 +2050,15 @@ async function calEventsByDate() {
   const push = (date, ev) => { if (!date) return; const k = String(date).slice(0,10); (map[k] = map[k] || []).push(ev); };
   const hearings = await getAll('hearings');
   hearings.forEach(h => push(h.date, { type:'hearing', color: h.status==='Проведено' ? 'var(--text-faint)' : '#4F46E5',
-    time: h.time||'', title: caseLabel(h.caseNum)||'Заседание', sub: h.court||'', status: h.status||'', id: h.id, act:`viewHearing('${h.id}')` }));
+    time: h.time||'', title: caseLabel(h.caseNum)||'Заседание', sub: [h.court, hearingPerson(h)].filter(Boolean).join(' · '), status: h.status||'', id: h.id, act:`viewHearing('${h.id}')` }));
+  const leads = await getAll('leads');
+  leads.forEach(l => {
+    if (l.status === 'Взято в работу' || l.status === 'Отказ') return;
+    const dl = leadDeadlineDate(l);
+    if (!dl) return;
+    push(dl, { type:'lead', color: (()=>{const d=daysUntil(dl);return d===null?'var(--text-faint)':d<0?'var(--red)':'var(--sig-amber)';})(),
+      time:'', title:'📨 Ответ на претензию', sub: l.name||'', act:`viewLead('${l.id}')` });
+  });
   const cases = await getAll('cases');
   cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!dl.done) push(dl.date, { type:'deadline',
     color: (()=>{const d=daysUntil(dl.date);return d===null?'var(--text-faint)':d<0?'var(--red)':d<=10?'var(--sig-amber)':'var(--green)';})(),
@@ -2155,7 +2184,7 @@ async function renderFinance() {
   const all = await getAll('finance');
   const paid = all.reduce((a,f)=>a+Number(f.paid||0),0);
   // Условный гонорар успеха не входит в долг
-  const debt = all.reduce((a,f)=>a+(f.pending?0:(Number(f.amount||0)-Number(f.paid||0))),0);
+  const debt = all.reduce((a,f)=>a+(f.pending?0:Math.max(0, Number(f.amount||0)-Number(f.paid||0))),0);
   document.getElementById('fin-paid').textContent = fmtMoney(paid);
   document.getElementById('fin-debt').textContent = fmtMoney(debt);
 
@@ -2254,6 +2283,12 @@ async function renderReports() {
   const withNo = periodCases.filter(c=>(c.courtNo||'').trim()).length;
   document.getElementById('rep-withno').textContent = withNo;
   document.getElementById('rep-nono').textContent = periodCases.length - withNo;
+  // Предъявлено/взыскано по завершённым делам периода (эффективность практики)
+  const recClaimed = doneInPeriod.reduce((a,c)=>a+Number(c.amount||0),0);
+  const recGot = doneInPeriod.reduce((a,c)=>a+Number(c.recovered||0),0);
+  const rcEl = document.getElementById('rep-claimed'), rgEl = document.getElementById('rep-recovered');
+  if (rcEl) rcEl.textContent = fmtMoney(recClaimed);
+  if (rgEl) rgEl.textContent = fmtMoney(recGot) + (recClaimed>0?` (${Math.round(recGot/recClaimed*100)}%)`:'');
 
   // — ФИНАНСЫ (та же база 'finance', что и вкладка Финансы) —
   // Прибыль = реальные платежи из журналов счетов, датированные периодом
@@ -2268,7 +2303,7 @@ async function renderReports() {
   const billedList = finance.filter(f=>inRange(f.createdAt, from, to));
   const billed = billedList.reduce((a,f)=>a+Number(f.amount||0),0);
   // Долг по этим счетам (условный гонорар успеха не считаем — он ещё не висит на клиенте)
-  const debt = billedList.reduce((a,f)=>a+(f.pending?0:(Number(f.amount||0)-Number(f.paid||0))),0);
+  const debt = billedList.reduce((a,f)=>a+(f.pending?0:Math.max(0, Number(f.amount||0)-Number(f.paid||0))),0);
   document.getElementById('rep-income').textContent = fmtMoney(income);
   document.getElementById('rep-billed').textContent = fmtMoney(billed);
   document.getElementById('rep-debt').textContent = fmtMoney(debt);
@@ -2293,7 +2328,7 @@ async function renderReports() {
         <span style="color:var(--text-dim)">${s}</span><span style="font-weight:700">${n}</span>
       </div>
       <div style="height:8px;background:var(--surface-2);border-radius:4px">
-        <div style="width:${Math.round(n/maxC*100)}%;height:100%;background:${colors[s]};border-radius:4px;transition:width .3s"></div>
+        <div style="width:${Math.round(n/maxC*100)}%;height:100%;background:${colors[s]||'#60a5fa'};border-radius:4px;transition:width .3s"></div>
       </div>
     </div>`).join('');
 
@@ -2714,6 +2749,7 @@ async function saveLead(id) {
     summary: document.getElementById('ld-summary').value.trim(),
     claimDate: document.getElementById('ld-claimDate').value || '',
     claimDays: document.getElementById('ld-claimDays').value ? parseInt(document.getElementById('ld-claimDays').value) : '',
+    convertedCaseId: prev?.convertedCaseId || '', // связь с созданным делом — не терять при правке
     kind: document.getElementById('ld-kind').value,
     status: document.getElementById('ld-status').value,
     source: document.getElementById('ld-source').value,
@@ -3008,7 +3044,7 @@ async function collectAll() {
 // СИНХРОНИЗИРУЕМ только безопасные настройки. НЕ включаем сюда секреты
 // (токены, пароль шифрования, PIN, биометрию, привязку файла, состояние
 // синхронизации) — они привязаны к устройству и не должны попадать в файл.
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif'];
+const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists'];
 
 // Секретные настройки подключений — токены и учётные данные мостов/облаков,
 // пароль шифрования, лицензия и PIN-код. По умолчанию ВКЛЮЧЕНЫ в файл
@@ -4063,6 +4099,12 @@ function openCalcSheet() {
     <div class="sheet-sub">Точные расчёты — на проверенных юридических сервисах</div>
 
     <div class="sect-title" style="margin:6px 0 8px">Расчёт дат (работают офлайн)</div>
+    <div class="card" onclick="openChecklistEditor()" style="cursor:pointer;margin-bottom:8px">
+      <div class="row1"><div style="flex:1">
+        <div class="title" style="font-size:14px">☑ Чек-листы задач по видам дел</div>
+        <div class="meta">Типовые задачи для гражданских, уголовных, арбитражных дел — добавляются в дело одной кнопкой</div>
+      </div></div>
+    </div>
     <div class="card" onclick="calcSrok()" style="cursor:pointer;margin-bottom:8px">
       <div class="row1"><div style="flex:1"><div class="title">📅 Расчёт срока</div>
       <div class="meta">Дата + число дней / месяцев / лет</div></div>
@@ -4817,6 +4859,10 @@ async function openCaseForm(existing) {
     <div class="field"><label>Комментарий</label><textarea id="f-comment" rows="2">${esc(c.comment||'')}</textarea></div>
     <div class="field"><label>Метки (через запятую)</label><input id="f-labels" value="${esc((c.labels||[]).join(', '))}" placeholder="срочное, ждём оплату, апелляция">
       <div class="meta" style="margin-top:4px">Свои ярлыки для группировки — видны в списке дел и ищутся поиском</div></div>
+    <div class="field-row">
+      <div class="field"><label>Взыскано / результат, ₽</label><input id="f-recovered" type="number" inputmode="numeric" value="${c.recovered||''}" placeholder="по итогам дела"></div>
+      <div class="field"></div>
+    </div>
     </div><!-- /ftab-main -->
 
     <div class="ftab-pane" id="ftab-1">
@@ -5023,6 +5069,7 @@ async function saveCase(id) {
     lawyer: document.getElementById('f-lawyer').value, status,
     regdate: document.getElementById('f-regdate').value,
     amount: Number(document.getElementById('f-amount').value)||0,
+    recovered: Number(document.getElementById('f-recovered')?.value)||0,
     comment: document.getElementById('f-comment').value,
     labels: (document.getElementById('f-labels')?.value||'').split(',').map(s=>s.trim()).filter(Boolean),
     link: document.getElementById('f-link').value.trim(),
@@ -5461,6 +5508,48 @@ function buildCaseTimeline(c, hearings, fin, mail, tasks, orders) {
 
 // Визуальный «степпер» стадий процесса (инстанции)
 const CASE_STAGES = ['Досудебная','Первая инстанция','Апелляция','Кассация','Надзор','Исполнение','Завершено'];
+
+// ═══════ ДОСКА ДЕЛ ПО СТАДИЯМ (канбан, ПК) ═══════
+function renderCasesBoard(src) {
+  const q = (document.getElementById('cases-search')?.value || '').trim().toLowerCase();
+  const match = c => !q || ((c.number||'')+' '+(c.client||'')+' '+(c.court||'')+' '+((c.labels||[]).join(' '))).toLowerCase().includes(q);
+  const items = src.filter(match);
+  // Завершённые (по статусу) всегда в колонке «Завершено»; неизвестная стадия → «Без стадии»
+  const colOf = c => c.status === 'Завершено' ? 'Завершено' : (CASE_STAGES.includes(c.stage) ? c.stage : '__none');
+  const cols = [['__none','Без стадии'], ...CASE_STAGES.map(st => [st, st])];
+  const byCol = {}; cols.forEach(([k]) => byCol[k] = []);
+  items.forEach(c => byCol[colOf(c)].push(c));
+  Object.values(byCol).forEach(a => a.sort((x, y) => tsOf(y.createdAt) - tsOf(x.createdAt)));
+  const cont = document.getElementById('cases-list');
+  cont.innerHTML = `<div class="kb-wrap">` + cols
+    .filter(([k]) => k !== '__none' || byCol.__none.length) // пустую «Без стадии» не показываем
+    .map(([k, label]) => `
+    <div class="kb-col">
+      <div class="kb-head"><span>${label}</span><span>${byCol[k].length}</span></div>
+      ${byCol[k].map(c => kbCard(c, k)).join('') || `<div style="font-size:11.5px;color:var(--text-faint);padding:4px 6px">пусто</div>`}
+    </div>`).join('') + `</div>`;
+}
+function kbCard(c, colKey) {
+  const canNext = c.status !== 'Завершено' && colKey !== 'Завершено';
+  return `<div class="kb-card" onclick="viewCase('${c.id}')">
+    <div class="t">${esc(c.number||'')}</div>
+    <div class="m">${esc([c.client, c.kind].filter(Boolean).join(' · '))||'&nbsp;'}</div>
+    ${c.amount ? `<div class="m">${fmtMoney(c.amount)}${c.recovered ? ` · <span style="color:var(--sig-green)">✓ ${fmtMoney(c.recovered)}</span>` : ''}</div>` : ''}
+    ${canNext ? `<button class="kb-next" onclick="event.stopPropagation();kbNextStage('${c.id}')">→ следующая стадия</button>` : ''}
+  </div>`;
+}
+async function kbNextStage(id) {
+  const c = (await getAll('cases')).find(x => x.id === id); if (!c) return;
+  const cur = CASE_STAGES.includes(c.stage) ? CASE_STAGES.indexOf(c.stage) : -1;
+  const next = CASE_STAGES[Math.min(cur + 1, CASE_STAGES.length - 1)];
+  c.stage = next;
+  if (next === 'Завершено' && c.status !== 'Завершено') {
+    c.status = 'Завершено';
+    toast('Стадия «Завершено» — дело завершено');
+  } else toast(`Стадия: ${next}`);
+  await put('cases', c);
+  renderCases(); renderDashboard(); navBadgeRefresh();
+}
 function stageStepperHtml(c) {
   const cur = c.stage || '';
   if (!cur) return ''; // если стадия не задана — не показываем
@@ -5637,6 +5726,8 @@ async function viewCase(id, tab) {
       </div>
     </div>`).join(''):''}
     <button class="btn-ghost" onclick="openDeadlineForm('${c.id}')">+ Добавить срок</button>
+    <button class="btn-ghost" onclick="openPresetDeadline('${c.id}')">⚖ Типовой срок обжалования</button>
+    <button class="btn-ghost" onclick="applyChecklist('${c.id}')">☑ Типовые задачи по виду дела</button>
     ${hasCrim ? `
     <div class="sect-title">Уголовное дело (УПК РФ)</div>
     <div class="detail-block">
@@ -6434,9 +6525,11 @@ function renderPlanSection(f) {
 
 async function createPaymentPlan(id) {
   const f = (await getAll('finance')).find(x=>x.id===id); if (!f) return;
-  const total = Number(f.amount||0);
-  if (!total) { toast('Сначала укажите сумму счёта', true); return; }
-  const nStr = window.prompt('На сколько платежей разбить сумму ' + fmtMoney(total) + '?', '3');
+  const already = Number(f.paid||0);
+  const total = Math.round((Number(f.amount||0) - already)*100)/100;
+  if (!Number(f.amount||0)) { toast('Сначала укажите сумму счёта', true); return; }
+  if (total <= 0) { toast('Счёт уже оплачен полностью — разбивать нечего', true); return; }
+  const nStr = window.prompt('На сколько платежей разбить ' + (already>0 ? 'остаток ' + fmtMoney(total) + ' (из ' + fmtMoney(f.amount) + ')' : 'сумму ' + fmtMoney(total)) + '?', '3');
   if (nStr === null) return;
   const n = Math.max(2, Math.min(36, parseInt(nStr) || 0));
   if (n < 2) { toast('Нужно минимум 2 платежа', true); return; }
@@ -6510,6 +6603,7 @@ async function actFromInvoice(caseNum) {
 // Абонентка: создать новый счёт за следующий месяц на основе текущего
 async function retainerNextMonth(id) {
   const f = (await getAll('finance')).find(x=>x.id===id); if (!f) return;
+  if (!(await demoAllow('finance'))) return;
   const obj = { ...f, id: uid('Ф'), paid: 0, status: 'Не оплачено',
     createdAt: f.nextDue || nextMonthISO(), paidAt: '', nextDue: '' };
   // следующий платёж через месяц от даты этого (с учётом длины месяца)
@@ -7776,6 +7870,7 @@ async function saveMail(id) {
   await put('mail', {
     id: id || uid('П'), barcode,
     createdAt: prev?.createdAt || Date.now(),
+    inventory: prev?.inventory, // опись вложения (ф.107) — не терять при правке
     title: document.getElementById('m-title').value.trim(),
     caseNum: caseSel ? caseSel.value : (prev?prev.caseNum:''),
     leadId: leadId || undefined,
@@ -7903,6 +7998,233 @@ function dlAddPreset() {
   else if (p.d) base.setDate(base.getDate() + p.d);
   document.getElementById('dl-date').value = base.toISOString().slice(0,10);
 }
+// ═══════ ЧЕК-ЛИСТЫ ЗАДАЧ ПО ВИДАМ ДЕЛ ═══════
+// Дата + N дней → ISO-дата
+function addDaysISO(iso, n) {
+  const d = new Date((iso || todayISO()) + 'T00:00:00');
+  d.setDate(d.getDate() + (Number(n) || 0));
+  const p2 = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+}
+
+const CHECKLIST_DEFAULTS = {
+  'Гражданское': [
+    { t: 'Направить претензию', days: 0 },
+    { t: 'Подготовить и подать исковое заявление', days: 30 },
+    { t: 'Подготовить уточнения / доказательства к заседанию', days: 45 },
+    { t: 'Заявление о взыскании судебных расходов', days: 120 }
+  ],
+  'Арбитраж': [
+    { t: 'Направить претензию (обязательный порядок)', days: 0 },
+    { t: 'Подать иск в арбитражный суд', days: 35 },
+    { t: 'Отзыв / возражения на позицию оппонента', days: 55 },
+    { t: 'Заявление о взыскании судебных расходов', days: 150 }
+  ],
+  'Уголовное': [
+    { t: 'Свидание с подзащитным', days: 1 },
+    { t: 'Ознакомиться с материалами дела', days: 3 },
+    { t: 'Подготовить ходатайства', days: 7 },
+    { t: 'Проверить законность меры пресечения / обжаловать', days: 5 },
+    { t: 'Сформировать позицию защиты', days: 14 }
+  ],
+  'КАС': [
+    { t: 'Подготовить административный иск', days: 10 },
+    { t: 'Собрать доказательства', days: 20 },
+    { t: 'Заявление о судебных расходах', days: 90 }
+  ],
+  'КоАП': [
+    { t: 'Ознакомиться с протоколом и материалами', days: 1 },
+    { t: 'Подготовить позицию / ходатайства', days: 5 },
+    { t: 'Жалоба на постановление (при необходимости)', days: 10 }
+  ]
+};
+function getChecklists() {
+  try {
+    const raw = localStorage.getItem('crm_checklists');
+    if (raw) { const o = JSON.parse(raw); if (o && typeof o === 'object') return o; }
+  } catch (e) {}
+  return JSON.parse(JSON.stringify(CHECKLIST_DEFAULTS));
+}
+function saveChecklists(obj) {
+  localStorage.setItem('crm_checklists', JSON.stringify(obj));
+  bumpSettings();
+}
+
+// Применение чек-листа к делу: подтверждение с перечнем и датами
+async function applyChecklist(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  const items = getChecklists()[c.kind] || [];
+  if (!items.length) { toast(`Для вида «${c.kind || '—'}» нет шаблона задач. Настройте: Ещё → Инструменты → Чек-листы`, true); return; }
+  const base = c.regdate || todayISO();
+  const existing = (await getAll('tasks')).filter(t => t.caseNum === c.number && !t.done).length;
+  const wordForm = items.length === 1 ? 'задачу' : (items.length < 5 ? 'задачи' : 'задач');
+  showSheet(`
+    <h3>☑ Типовые задачи</h3>
+    <div class="sheet-sub">${esc(c.number)} · ${esc(c.kind || '')} · отсчёт от ${fmtDate(base)}</div>
+    ${existing ? `<div class="card" style="border-left:3px solid var(--sig-amber);margin-bottom:10px"><div class="meta">По делу уже есть открытых задач: ${existing}. Проверьте, чтобы не создать дубликаты.</div></div>` : ''}
+    ${items.map(it => `<div class="card" style="margin-bottom:6px;padding:10px 13px">
+      <div class="title" style="font-size:14px">${esc(it.t)}</div>
+      <div class="meta">через ${it.days} дн. → ${fmtDate(addDaysISO(base, it.days))}</div>
+    </div>`).join('')}
+    ${!LIC.ok ? `<div class="meta" style="margin:6px 0 10px">Демо-режим: задачи создаются в пределах месячного лимита (${DEMO_MONTH_LIMIT}/мес).</div>` : ''}
+    <button class="btn-primary" onclick="chkCreate('${caseId}')">Создать ${items.length} ${wordForm}</button>
+    <button class="btn-ghost" onclick="viewCase('${caseId}')">← Назад</button>
+  `);
+}
+async function chkCreate(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  const items = getChecklists()[c.kind] || [];
+  const base = c.regdate || todayISO();
+  let created = 0;
+  for (const it of items) {
+    if (!(await demoAllow('tasks'))) break;
+    await put('tasks', { id: uid('З'), title: it.t, caseNum: c.number, due: addDaysISO(base, it.days), done: false, createdAt: Date.now() });
+    created++;
+  }
+  if (created === items.length) toast(`Создано задач: ${created}`);
+  else toast(`Создано ${created} из ${items.length} — лимит демо-режима`, true);
+  renderTasks(); renderDashboard(); navBadgeRefresh();
+  viewCase(caseId);
+}
+
+// Редактор чек-листов (Инструменты)
+let _chkKind = null;
+function openChecklistEditor() {
+  const kinds = (REF.caseKind || []).slice();
+  if (!kinds.length) { toast('Сначала заполните виды дел в справочниках', true); return; }
+  _chkKind = _chkKind && kinds.includes(_chkKind) ? _chkKind : kinds[0];
+  const lists = getChecklists();
+  showSheet(`
+    <h3>☑ Чек-листы задач</h3>
+    <div class="sheet-sub">Типовые задачи для каждого вида дела. Срок — в днях от даты регистрации дела. Переносятся при синхронизации.</div>
+    <div class="field"><label>Вид дела</label>
+      <select id="chk-kind" onchange="_chkKind=this.value;openChecklistEditor()">
+        ${kinds.map(k => `<option ${k === _chkKind ? 'selected' : ''}>${esc(k)}</option>`).join('')}
+      </select></div>
+    <div id="chk-rows">
+      ${(lists[_chkKind] || []).map(it => chkRowHtml(it.t, it.days)).join('')}
+    </div>
+    <button class="btn-ghost" onclick="chkAddRow()">+ Добавить задачу</button>
+    <button class="btn-primary" onclick="chkSave()">Сохранить чек-лист</button>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
+  `);
+}
+function chkRowHtml(t, days) {
+  const st = 'padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-family:inherit;font-size:14px';
+  return `<div class="chk-row" style="display:flex;gap:8px;margin-bottom:8px;align-items:center">
+    <input class="chk-t" value="${esc(t || '')}" placeholder="задача" style="flex:1;${st}">
+    <input class="chk-d" value="${days ?? ''}" inputmode="numeric" placeholder="дней" style="width:74px;text-align:center;${st}">
+    <button onclick="this.parentElement.remove()" style="background:none;border:none;color:var(--red);font-size:18px;cursor:pointer;padding:4px">✕</button>
+  </div>`;
+}
+function chkAddRow() {
+  document.getElementById('chk-rows').insertAdjacentHTML('beforeend', chkRowHtml('', ''));
+}
+function chkSave() {
+  const rows = [...document.querySelectorAll('#chk-rows .chk-row')].map(r => ({
+    t: r.querySelector('.chk-t').value.trim(),
+    days: Math.max(0, parseInt(r.querySelector('.chk-d').value) || 0)
+  })).filter(x => x.t);
+  const lists = getChecklists();
+  lists[_chkKind] = rows;
+  saveChecklists(lists);
+  toast(`Чек-лист «${_chkKind}» сохранён (${rows.length})`);
+}
+
+// ═══════ ТИПОВЫЕ ПРОЦЕССУАЛЬНЫЕ СРОКИ (обжалование) ═══════
+const APPEAL_PRESETS = {
+  'Гражданское': [['Апелляционная жалоба', 30], ['Кассационная жалоба', 90]],
+  'Арбитраж':    [['Апелляционная жалоба', 30], ['Кассационная жалоба', 60]],
+  'КАС':         [['Апелляционная жалоба', 30]],
+  'КоАП':        [['Жалоба на постановление', 10]],
+  'Уголовное':   [['Апелляционная жалоба', 15]]
+};
+async function openPresetDeadline(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  const own = APPEAL_PRESETS[c.kind];
+  const groups = own ? [[c.kind, own]] : Object.entries(APPEAL_PRESETS);
+  showSheet(`
+    <h3>⚖ Типовой срок обжалования</h3>
+    <div class="sheet-sub">${esc(c.number)} — срок отсчитывается от даты события</div>
+    <div class="field"><label>Дата события (вынесено решение / получено постановление)</label>
+      <input id="pd-date" type="date" value="${todayISO()}"></div>
+    ${groups.map(([kind, list]) => `
+      ${groups.length > 1 ? `<div class="sect-title" style="font-size:13px">${esc(kind)}</div>` : ''}
+      ${list.map(([t, d]) => `<button class="btn-ghost" style="margin-bottom:6px" onclick="presetDl('${caseId}','${t}',${d})">${t} — ${d} дн.</button>`).join('')}
+    `).join('')}
+    <div class="sect-title" style="font-size:13px">Свой срок</div>
+    <div class="field-row">
+      <div class="field"><label>Название</label><input id="pd-title" placeholder="напр. Частная жалоба"></div>
+      <div class="field" style="max-width:110px"><label>Дней</label><input id="pd-days" inputmode="numeric" placeholder="15"></div>
+    </div>
+    <button class="btn-primary" onclick="presetDlCustom('${caseId}')">Добавить свой срок</button>
+    <div class="meta" style="margin-top:8px">⚠ Типовые сроки — ориентир. Сверьте с кодексом для вашей категории и инстанции.</div>
+    <button class="btn-ghost" onclick="viewCase('${caseId}',1)">← Назад</button>
+  `);
+}
+async function presetDl(caseId, title, days) {
+  const base = document.getElementById('pd-date')?.value || todayISO();
+  const date = addDaysISO(base, Number(days) || 0);
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  c.deadlines = c.deadlines || [];
+  c.deadlines.push({ title, date, note: 'типовой срок — сверьте с кодексом', done: false });
+  c.deadlines.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  await put('cases', c);
+  toast(`Срок «${title}» → ${fmtDate(date)}`);
+  navBadgeRefresh(); renderDashboard();
+  viewCase(caseId, 1);
+}
+async function presetDlCustom(caseId) {
+  const t = document.getElementById('pd-title').value.trim();
+  const d = parseInt(document.getElementById('pd-days').value);
+  if (!t || !(d >= 0)) { toast('Укажите название и число дней', true); return; }
+  presetDl(caseId, t, d);
+}
+
+// ═══════ ЭКСПОРТ ЗАСЕДАНИЙ В КАЛЕНДАРЬ (.ics) ═══════
+// Один файл импортируется в Яндекс.Календарь, Google, Mail.ru и календарь телефона
+async function icsExport() {
+  await refreshCasesCache();
+  const hearings = (await getAll('hearings'))
+    .filter(h => h.date && isPlanned(h) && (daysUntil(h.date) ?? -1) >= 0)
+    .sort((a, b) => ((a.date + (a.time || '')) > (b.date + (b.time || ''))) ? 1 : -1);
+  if (!hearings.length) { toast('Нет предстоящих заседаний для экспорта', true); return; }
+  const escT = v => String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+  const p2 = n => String(n).padStart(2, '0');
+  const dstamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CRM Advokata//RU', 'CALSCALE:GREGORIAN'];
+  hearings.forEach(h => {
+    const cs = h.caseNum ? CASES_BY_NUM[h.caseNum] : null;
+    const d8 = h.date.replace(/-/g, '');
+    lines.push('BEGIN:VEVENT');
+    lines.push('UID:' + h.id + '@crm-advocate');
+    lines.push('DTSTAMP:' + dstamp);
+    if (h.time && /^\d{2}:\d{2}/.test(h.time)) {
+      lines.push('DTSTART:' + d8 + 'T' + h.time.replace(':', '').slice(0, 4) + '00');
+      const end = new Date(h.date + 'T' + h.time.slice(0, 5) + ':00');
+      end.setHours(end.getHours() + 1);
+      lines.push('DTEND:' + end.getFullYear() + p2(end.getMonth() + 1) + p2(end.getDate()) + 'T' + p2(end.getHours()) + p2(end.getMinutes()) + '00');
+    } else {
+      lines.push('DTSTART;VALUE=DATE:' + d8);
+      const nd = new Date(h.date + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
+      lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
+    }
+    lines.push('SUMMARY:' + escT('⚖ ' + (caseLabel(h.caseNum) || 'Заседание') + (cs && cs.client ? ' · ' + cs.client : '')));
+    if (h.court) lines.push('LOCATION:' + escT(h.court));
+    const desc = [hearingPerson(h), h.status ? 'Статус: ' + h.status : ''].filter(Boolean).join('; ');
+    if (desc) lines.push('DESCRIPTION:' + escT(desc));
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'CRM-заседания.ics';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast(`Экспортировано заседаний: ${hearings.length}. Откройте файл — календарь предложит импорт`);
+}
+
 async function openDeadlineForm(caseId, idx) {
   const c = (await getAll('cases')).find(x=>x.id===caseId); if (!c) return;
   const dl = (idx!==undefined && c.deadlines) ? c.deadlines[idx] : {};
