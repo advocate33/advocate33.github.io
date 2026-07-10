@@ -728,6 +728,17 @@
 .kb-next{background:none;border:1px solid var(--border);border-radius:8px;color:var(--text-faint);font-size:12px;cursor:pointer;padding:3px 8px;margin-top:7px;font-family:inherit}
 .kb-next:hover{color:var(--accent);border-color:var(--accent)}
 @media(max-width:759px){.cases-view-toggle{display:none}}
+
+/* ── Недельная лента календаря ── */
+.wk-day{margin-bottom:14px}
+.wk-head{font-size:12px;font-weight:700;color:var(--text-faint);text-transform:uppercase;letter-spacing:.4px;margin:0 2px 6px}
+.wk-today .wk-head{color:var(--accent)}
+.wk-ev{display:flex;gap:10px;align-items:flex-start;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:9px 11px;margin-bottom:6px;cursor:pointer}
+.wk-time{font-size:12px;font-weight:700;color:var(--text-faint);min-width:44px;padding-top:1px}
+.wk-t{font-size:14px;font-weight:600;line-height:1.3}
+.wk-s{font-size:12px;color:var(--text-faint);margin-top:2px;line-height:1.35}
+.wk-empty{font-size:12px;color:var(--text-faint);opacity:.6;padding:0 4px}
+.wk-now{background:none;border:1px solid var(--border);border-radius:8px;color:var(--text-faint);font-size:11px;padding:2px 8px;cursor:pointer;font-family:inherit;margin-left:8px}
 </style>
 </head>
 <body>
@@ -834,10 +845,12 @@
   <div class="screen-sub" id="cal-count">0 событий</div>
   <div class="cal-switch">
     <button id="cal-tab-month" class="active" onclick="setCalView('month')">📅 Месяц</button>
+    <button id="cal-tab-week" onclick="setCalView('week')">📆 Неделя</button>
     <button id="cal-tab-list" onclick="setCalView('list')">☰ Список</button>
   </div>
   <button class="btn-ghost" style="margin:4px 0 10px" onclick="icsExport()">📤 Экспорт заседаний в календарь (.ics) — Яндекс / Google / Mail.ru / телефон</button>
   <div id="calendar-month"></div>
+  <div id="calendar-week" style="display:none"></div>
   <div id="calendar-list"></div>
 </div>
 
@@ -1016,7 +1029,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '109'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '110'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1776,8 +1789,9 @@ async function renderDashboard() {
   const md = document.getElementById('money-debt'); if (md) md.textContent = fmtMoney(mDebt);
   const todayHearings = hearings.filter(h=>daysUntil(h.date)===0 && isPlanned(h)).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
   const todayTasks = tasks.filter(t=>!t.done && t.due===today);
+  const overdueTasks = tasks.filter(t=>!t.done && t.due && t.due < today).sort((a,b)=>a.due.localeCompare(b.due));
   const todayDeadlines = [];
-  cases.forEach(c=>(c.deadlines||[]).forEach(dl=>{ if(!dl.done && daysUntil(dl.date)===0) todayDeadlines.push({c,dl}); }));
+  cases.forEach(c=>(c.deadlines||[]).forEach(dl=>{ if(!c.archived && !dl.done && daysUntil(dl.date)===0) todayDeadlines.push({c,dl}); }));
 
   const h = new Date().getHours();
   const greetBase = h < 5 ? 'Поздний вечер' : h < 12 ? 'Доброе утро' : h < 18 ? 'Добрый день' : 'Добрый вечер';
@@ -1785,14 +1799,22 @@ async function renderDashboard() {
   if (gEl) gEl.textContent = greetBase;
 
   const todayEl = document.getElementById('dash-today');
-  const todayCount = todayHearings.length + todayTasks.length + todayDeadlines.length;
+  const todayCount = todayHearings.length + todayTasks.length + todayDeadlines.length + overdueTasks.length;
   if (todayEl) {
     if (todayCount === 0) {
       todayEl.innerHTML = `<div class="today-card empty-today"><div style="font-size:30px;margin-bottom:6px">☕</div><div style="color:var(--text-dim);font-size:14px">На сегодня заседаний и задач нет</div></div>`;
     } else {
       todayEl.innerHTML = `
       <div class="today-card">
-        <div class="today-head">📌 Сегодня${todayHearings.length?` · ${todayHearings.length} ${plural(todayHearings.length,'заседание','заседания','заседаний')}`:''}${todayTasks.length?` · ${todayTasks.length} ${plural(todayTasks.length,'задача','задачи','задач')}`:''}</div>
+        <div class="today-head">📌 Сегодня${todayHearings.length?` · ${todayHearings.length} ${plural(todayHearings.length,'заседание','заседания','заседаний')}`:''}${todayTasks.length?` · ${todayTasks.length} ${plural(todayTasks.length,'задача','задачи','задач')}`:''}${overdueTasks.length?` · <span style="color:var(--red)">${overdueTasks.length} просроч.</span>`:''}</div>
+        ${overdueTasks.slice(0,5).map(t=>{const n=Math.abs(daysUntil(t.due));return `<div class="today-row" onclick="openTaskById('${t.id}')">
+          <span class="t-time" style="color:var(--red)">!${n}д</span>
+          <span class="t-body"><b style="color:var(--red)">${esc(t.title)}</b><br><span class="t-sub">просрочено ${n} ${plural(n,'день','дня','дней')}${t.caseNum?' · '+esc(t.caseNum):''}</span></span>
+        </div>`;}).join('')}
+        ${overdueTasks.length>5?`<div class="today-row" onclick="taskFilter='open';nav('tasks')">
+          <span class="t-time"></span>
+          <span class="t-body"><span class="t-sub" style="color:var(--red)">ещё ${overdueTasks.length-5} просроченных →</span></span>
+        </div>`:''}
         ${todayHearings.map(h=>`<div class="today-row" onclick="viewHearing('${h.id}')">
           <span class="t-time">${h.time||'—:—'}</span>
           <span class="t-body"><b>🏛 ${esc(caseLabel(h.caseNum)||'Заседание')}</b>${(h.court||hearingPerson(h))?`<br><span class="t-sub">${esc([h.court,hearingPerson(h)].filter(Boolean).join(' · '))}</span>`:''}</span>
@@ -2033,10 +2055,52 @@ function setCalView(v) {
   calView = v; localStorage.setItem('crm_calview', v); bumpSettings();
   document.getElementById('cal-tab-month').classList.toggle('active', v==='month');
   document.getElementById('cal-tab-list').classList.toggle('active', v==='list');
+  document.getElementById('cal-tab-week').classList.toggle('active', v==='week');
   document.getElementById('calendar-month').style.display = v==='month' ? 'block' : 'none';
   document.getElementById('calendar-list').style.display = v==='list' ? 'block' : 'none';
+  document.getElementById('calendar-week').style.display = v==='week' ? 'block' : 'none';
   renderCalendar();
 }
+// ═══════ НЕДЕЛЬНАЯ ЛЕНТА ═══════
+let calWeekOffset = 0; // 0 = текущая неделя
+function calWeekShift(d) { calWeekOffset += d; renderCalendarWeek(); }
+function calWeekToday() { calWeekOffset = 0; renderCalendarWeek(); }
+async function renderCalendarWeek() {
+  const cont = document.getElementById('calendar-week'); if (!cont) return;
+  CAL_EVENTS = await calEventsByDate();
+  const now = new Date(); now.setHours(0,0,0,0);
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7) + calWeekOffset * 7); // неделя с понедельника
+  const p2 = n => String(n).padStart(2, '0');
+  const iso = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+  const todayKey = iso(now);
+  const dows = ['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота','Воскресенье'];
+  const end = new Date(monday); end.setDate(monday.getDate() + 6);
+  const fmtShort = d => d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  let days = '', total = 0;
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(monday); d.setDate(monday.getDate() + i);
+    const key = iso(d);
+    const evs = (CAL_EVENTS[key] || []).slice().sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
+    total += evs.length;
+    const isToday = key === todayKey;
+    days += `<div class="wk-day${isToday ? ' wk-today' : ''}">
+      <div class="wk-head">${dows[i]}, ${d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}${isToday ? ' · сегодня' : ''}</div>
+      ${evs.length ? evs.map(e => `<div class="wk-ev" onclick="${e.act || ''}" style="border-left:3px solid ${e.color || 'var(--accent)'}">
+          <span class="wk-time">${e.time || ''}</span>
+          <div style="flex:1;min-width:0"><div class="wk-t">${e.title}</div>${e.sub ? `<div class="wk-s">${e.sub}</div>` : ''}</div>
+        </div>`).join('') : `<div class="wk-empty">нет событий</div>`}
+    </div>`;
+  }
+  document.getElementById('cal-count').textContent = `${total} ${plural(total, 'событие', 'события', 'событий')} на неделе`;
+  cont.innerHTML = `
+    <div class="cal-head">
+      <button onclick="calWeekShift(-1)">‹</button>
+      <span class="mname">${fmtShort(monday)} — ${fmtShort(end)}${calWeekOffset !== 0 ? `<button class="wk-now" onclick="calWeekToday()">сегодня</button>` : ''}</span>
+      <button onclick="calWeekShift(1)">›</button>
+    </div>${days}`;
+}
+
 function calShift(delta) {
   calMonth += delta;
   if (calMonth < 0) { calMonth = 11; calYear--; }
@@ -2129,8 +2193,10 @@ async function renderCalendar() {
   // Применяем сохранённый вид к контейнерам
   document.getElementById('cal-tab-month').classList.toggle('active', calView==='month');
   document.getElementById('cal-tab-list').classList.toggle('active', calView==='list');
+  document.getElementById('cal-tab-week').classList.toggle('active', calView==='week');
   document.getElementById('calendar-month').style.display = calView==='month' ? 'block' : 'none';
   document.getElementById('calendar-list').style.display = calView==='list' ? 'block' : 'none';
+  document.getElementById('calendar-week').style.display = calView==='week' ? 'block' : 'none';
 
   await refreshCasesCache();
   const all = (await getAll('hearings')).sort((a,b)=>new Date(a.date)-new Date(b.date));
@@ -2138,6 +2204,7 @@ async function renderCalendar() {
   document.getElementById('cal-count').textContent = `${upcoming.length} предстоящих`;
 
   if (calView === 'month') { renderCalendarMonth(); return; }
+  if (calView === 'week') { renderCalendarWeek(); return; }
 
   const past = all.filter(h => { const d = daysUntil(h.date); return d!==null && d<0; })
     .sort((a,b)=>new Date(b.date)-new Date(a.date));
