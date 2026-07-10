@@ -1038,7 +1038,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '116'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '117'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1780,7 +1780,7 @@ async function renderDashboard() {
       <div class="card" style="cursor:pointer;margin-bottom:10px;border-left:3px solid var(--brass)" onclick="viewClient('${c.id}')">
         <div class="row1"><div style="flex:1">
           <div class="title" style="font-size:13.5px">🎂 ${when==='сегодня'?'Сегодня':'Завтра'} день рождения</div>
-          <div class="meta">${esc(c.name)}${c.phone?' · '+esc(c.phone):''} — хороший повод позвонить</div>
+          <div class="meta">${esc(c.name)}${c.phone?' · '+phoneHtml(c.phone):''} — хороший повод позвонить</div>
         </div></div>
       </div>`).join('') : '';
   }
@@ -2049,7 +2049,7 @@ async function renderClients() {
       <div class="row1"><div style="display:flex;gap:12px;align-items:center;flex:1;min-width:0">
         ${avatarHTML(c.name, 44)}
         <div style="min-width:0"><div class="title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.name||'—'}</div>
-        <div class="meta">${c.role||''}${c.phone?' · '+c.phone:''}</div></div>
+        <div class="meta">${c.role||''}${c.phone?' · '+phoneHtml(c.phone):''}</div></div>
       </div><span class="badge ${isJur?'b-new':'b-work'}"><span class="dot"></span>${isJur?'ЮЛ':isIP?'ИП':'ФЛ'}</span></div>
     </div>`;
   }).join('');
@@ -2724,7 +2724,7 @@ async function renderLeads() {
     return `<div class="card" onclick="viewLead('${l.id}')">
       <div class="row1"><div style="flex:1;min-width:0">
         <div class="title" style="font-size:15px">${esc(l.name||'Без имени')}</div>
-        <div class="meta">${esc(l.phone||'')}${l.phone&&l.topic?' · ':''}${esc(l.topic||'')}</div>
+        <div class="meta">${l.phone?phoneHtml(l.phone):''}${l.phone&&l.topic?' · ':''}${esc(l.topic||'')}</div>
       </div><span class="badge ${LEAD_BADGE[l.status]||'b-new'}"><span class="dot"></span>${esc(l.status||'Новое')}</span></div>
       ${l.summary?`<div class="meta" style="margin-top:7px">${esc(l.summary.length>90?l.summary.slice(0,90)+'…':l.summary)}</div>`:''}
       <div class="meta-row"><span class="tag">${esc(when)}</span>${l.kind?`<span class="tag ${kindTagClass(l.kind)}">${esc(l.kind)}</span>`:''}${l.source?`<span class="tag">${esc(l.source)}</span>`:''}</div>
@@ -2845,7 +2845,7 @@ async function viewLead(id) {
   showSheet(`
     <h3>${esc(l.name)}</h3><div class="sheet-sub">Обращение от ${created}</div>
     <div class="detail-block">
-      <div class="detail-row"><span class="k">Телефон</span><span class="v"><a href="tel:${esc(l.phone)}">${esc(l.phone||'—')}</a></span></div>
+      <div class="detail-row"><span class="k">Телефон</span><span class="v">${l.phone?phoneHtml(l.phone,'lead',l.id):'—'}</span></div>
       <div class="detail-row"><span class="k">Email</span><span class="v"><a href="mailto:${esc(l.email)}">${esc(l.email||'—')}</a></span></div>
       <div class="detail-row"><span class="k">Суть</span><span class="v">${esc(l.topic||'—')}</span></div>
       ${l.addr?`<div class="detail-row"><span class="k">Адрес</span><span class="v">${esc(l.addr)}</span></div>`:''}
@@ -5272,6 +5272,41 @@ const sortCasesByClient = arr => arr.slice().sort((a, b) =>
   String(a.client || '\uFFFF').localeCompare(String(b.client || '\uFFFF'), 'ru') ||
   String(a.number || '').localeCompare(String(b.number || ''), 'ru'));
 
+// ═══════ ДЕЙСТВИЯ С ТЕЛЕФОНОМ: позвонить · SMS · Telegram · копировать ═══════
+// Нормализация: 8XXXXXXXXXX → +7XXXXXXXXXX, чистка от пробелов/скобок/дефисов
+function phoneDigits(raw) {
+  let d = String(raw || '').replace(/[^\d+]/g, '');
+  if (/^8\d{10}$/.test(d)) d = '+7' + d.slice(1);
+  else if (/^7\d{10}$/.test(d)) d = '+' + d;
+  return d;
+}
+// Кликабельный номер (для карточек и списков); backType/backId — куда вернуться
+function phoneHtml(raw, backType, backId) {
+  if (!raw) return '';
+  const safe = String(raw).replace(/['"<>]/g, '');
+  return `<a href="javascript:void(0)" onclick="event.stopPropagation();phoneActions('${safe}','${backType||''}','${backId||''}')" style="color:inherit;text-decoration:underline dotted;text-underline-offset:3px">${esc(raw)}</a>`;
+}
+function phoneActions(raw, backType, backId) {
+  const d = phoneDigits(raw) || raw;
+  const back = backType === 'client' ? `viewClient('${backId}')`
+    : backType === 'lead' ? `viewLead('${backId}')`
+    : backType === 'case' ? `viewCase('${backId}')`
+    : 'closeSheet()';
+  showSheet(`
+    <h3>📞 ${esc(raw)}</h3>
+    <div class="sheet-sub">${d !== raw ? 'Для набора: ' + esc(d) : 'Выберите действие'}</div>
+    <a class="btn-primary" style="display:block;text-align:center;text-decoration:none" href="tel:${esc(d)}">📞 Позвонить</a>
+    <a class="btn-ghost" style="display:block;text-align:center;text-decoration:none" href="sms:${esc(d)}">💬 Написать SMS</a>
+    <a class="btn-ghost" style="display:block;text-align:center;text-decoration:none" href="https://t.me/${esc(d)}" target="_blank" rel="noopener">✈️ Открыть в Telegram</a>
+    <button class="btn-ghost" onclick="phoneCopy('${esc(d)}')">📋 Скопировать номер</button>
+    <button class="btn-ghost" onclick="${back}">← Назад</button>
+  `);
+}
+async function phoneCopy(d) {
+  try { await navigator.clipboard.writeText(d); toast('Номер скопирован'); }
+  catch (e) { window.prompt('Скопируйте номер:', d); }
+}
+
 // Универсальный компонент выбора дела: заседание, задача, счёт, письмо, ордер.
 const CPX = {}; // fieldId → { items, shown, onPick }
 function cpxRegister(fieldId, items, onPick) { CPX[fieldId] = { items, shown: [], onPick: onPick || null }; }
@@ -5830,7 +5865,7 @@ async function viewCase(id, tab) {
     <div class="sect-title">Участник</div>
     <div class="detail-block">
       <div class="detail-row"><span class="k">Участник</span><span class="v">${esc(c.client||'—')}</span></div>
-      ${cl?`<div class="detail-row"><span class="k">Телефон</span><span class="v"><a href="tel:${esc(cl.phone)}">${esc(cl.phone||'—')}</a></span></div>
+      ${cl?`<div class="detail-row"><span class="k">Телефон</span><span class="v">${cl.phone?phoneHtml(cl.phone,'case',c.id):'—'}</span></div>
       <div class="detail-row"><span class="k">Email</span><span class="v"><a href="mailto:${esc(cl.email)}">${esc(cl.email||'—')}</a></span></div>
       <div class="detail-row"><span class="k">Адрес</span><span class="v">${esc(cl.addr||'—')}</span></div>`:''}
     </div>
@@ -5973,7 +6008,7 @@ async function viewCase(id, tab) {
           ${avatarHTML(p.name, 36)}
           <div style="flex:1;min-width:0">
             <div class="title" style="font-size:14px">${esc(p.name||'')}</div>
-            <div class="meta">${esc(p.role||'')}${p.phone?` · <a href="tel:${esc(p.phone)}" style="color:#60a5fa">${esc(p.phone)}</a>`:''}</div>
+            <div class="meta">${esc(p.role||'')}${p.phone?` · <span style="color:#60a5fa">${phoneHtml(p.phone,'case',c.id)}</span>`:''}</div>
             ${p.note?`<div class="meta" style="margin-top:3px">${esc(p.note)}</div>`:''}
           </div>
           </div>
@@ -6443,7 +6478,7 @@ async function viewClient(id) {
   showSheet(`
     <h3>${esc(c.name)}</h3><div class="sheet-sub">${esc(c.type)}${c.role?' · '+esc(c.role):''}</div>
     <div class="detail-block">
-      <div class="detail-row"><span class="k">Телефон</span><span class="v"><a href="tel:${esc(c.phone)}">${esc(c.phone||'—')}</a></span></div>
+      <div class="detail-row"><span class="k">Телефон</span><span class="v">${c.phone?phoneHtml(c.phone,'client',c.id):'—'}</span></div>
       <div class="detail-row"><span class="k">Email</span><span class="v"><a href="mailto:${esc(c.email)}">${esc(c.email||'—')}</a></span></div>
       <div class="detail-row"><span class="k">ИНН</span><span class="v">${esc(c.inn||'—')}</span></div>
       <div class="detail-row"><span class="k">Адрес</span><span class="v">${c.zip?esc(c.zip)+', ':''}${esc(c.addr||'—')}</span></div>
