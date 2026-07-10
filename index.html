@@ -1038,7 +1038,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '111'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '113'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -3059,7 +3059,8 @@ async function openTaskById(id) {
 async function openTaskForm(existing) {
   const t = existing || {};
   const cases = await getAll('cases');
-  const caseOpts = '<option value="">— без привязки —</option>' + sortCasesByClient(cases).map(c=>`<option value="${esc(c.number)}" ${c.number===t.caseNum?'selected':''}>${esc(c.number)}${c.client?' · '+esc(c.client):''}</option>`).join('');
+  cpxRegister('t-case', cpxCaseItems(cases));
+  const curCaseLabel = cpxLabelFor(cases, t.caseNum);
   showSheet(`
     <h3>${existing?'Изменить задачу':'Новая задача'}</h3>
     <div class="sheet-sub">Поручение или дедлайн по делу</div>
@@ -3069,7 +3070,7 @@ async function openTaskForm(existing) {
       <div class="field"><label>Время</label><input id="t-time" type="time" value="${t.time||''}"></div>
     </div>
     <div class="field"><label>Приоритет</label><select id="t-priority">${opts(['Низкий','Средний','Высокий'],t.priority||'Средний')}</select></div>
-    <div class="field"><label>Дело</label><select id="t-case">${caseOpts}</select></div>
+    <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('t-case', t.caseNum, curCaseLabel)}</div>
     <div class="field"><label>Заметка</label><textarea id="t-note" rows="2">${esc(t.note||'')}</textarea></div>
     <button class="btn-primary" onclick="saveTask('${t.id||''}')">Сохранить</button>
     ${existing?`<button class="btn-ghost" onclick="taskToICS('${t.id}')">📅 В календарь</button>`:''}
@@ -5241,18 +5242,12 @@ async function maybeCreateOrderForCase(editingId, caseNumber) {
 async function openHearingForm(existing) {
   const h = existing || {};
   const cases = await getAll('cases');
-  CP_CASES = sortCasesByClient(cases.filter(c => !c.archived))
-    .map(c => ({ n: c.number, client: c.client || '', court: c.court || '', judge: c.judge || '' }));
-  const curCase = cases.find(c => c.number === h.caseNum);
-  const curLabel = curCase ? curCase.number + (curCase.client ? ' · ' + curCase.client : '') : (h.caseNum || '');
+  cpxRegister('f-caseNum', cpxCaseItems(cases), () => hearingCaseChanged(false));
+  const curLabel = cpxLabelFor(cases, h.caseNum);
   showSheet(`
     <h3>${existing?'Изменить заседание':'Новое заседание'}</h3>
     <div class="sheet-sub">Заседание появится в календаре</div>
-    <div class="field" style="position:relative"><label>Дело</label>
-      <input id="f-caseNum-q" placeholder="Поиск: фамилия, № дела, суд…" autocomplete="off" value="${esc(curLabel)}" oninput="cpFilter(this)" onfocus="cpFilter(this)" onblur="cpHideSoon()">
-      <input type="hidden" id="f-caseNum" value="${esc(h.caseNum||'')}">
-      <div class="cp-list" id="f-caseNum-list" style="display:none"></div>
-    </div>
+    <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('f-caseNum', h.caseNum, curLabel)}</div>
     <div class="field-row">
       <div class="field"><label>Дата <span class="req">*</span></label><input id="f-date" type="date" value="${h.date||todayISO()}"></div>
       <div class="field"><label>Время</label><input id="f-time" type="time" value="${h.time||'10:00'}"></div>
@@ -5276,34 +5271,52 @@ const sortCasesByClient = arr => arr.slice().sort((a, b) =>
   String(a.client || '\uFFFF').localeCompare(String(b.client || '\uFFFF'), 'ru') ||
   String(a.number || '').localeCompare(String(b.number || ''), 'ru'));
 
-let CP_CASES = []; // список для живого поиска в форме заседания
-function cpFilter(inp) {
-  const list = document.getElementById('f-caseNum-list'); if (!list) return;
+// Универсальный компонент выбора дела: заседание, задача, счёт, письмо, ордер.
+const CPX = {}; // fieldId → { items, shown, onPick }
+function cpxRegister(fieldId, items, onPick) { CPX[fieldId] = { items, shown: [], onPick: onPick || null }; }
+function cpxCaseItems(cases) {
+  return sortCasesByClient(cases.filter(c => !c.archived))
+    .map(c => ({ n: c.number, client: c.client || '', court: c.court || '', judge: c.judge || '' }));
+}
+function cpxLabelFor(cases, num) {
+  const c = num ? cases.find(x => x.number === num) : null;
+  return c ? c.number + (c.client ? ' · ' + c.client : '') : (num || '');
+}
+function cpxHtml(fieldId, num, label) {
+  return `<input id="${fieldId}-q" placeholder="Поиск: фамилия, № дела, суд…" autocomplete="off" value="${esc(label||'')}" oninput="cpxFilter('${fieldId}')" onfocus="cpxFilter('${fieldId}')" onblur="cpxHide('${fieldId}')">
+      <input type="hidden" id="${fieldId}" value="${esc(num||'')}">
+      <div class="cp-list" id="${fieldId}-list" style="display:none"></div>`;
+}
+function cpxFilter(fieldId) {
+  const st = CPX[fieldId];
+  const inp = document.getElementById(fieldId + '-q');
+  const list = document.getElementById(fieldId + '-list');
+  if (!st || !inp || !list) return;
   const q = (inp.value || '').trim().toLowerCase();
-  const matched = CP_CASES.filter(x => !q ||
-    (x.n + ' ' + x.client + ' ' + x.court).toLowerCase().includes(q)).slice(0, 30);
+  st.shown = st.items.filter(x => !q || (x.n + ' ' + x.client + ' ' + x.court).toLowerCase().includes(q)).slice(0, 30);
   list.innerHTML =
-    `<div class="cp-item" onmousedown="cpPick('')"><div class="cp-t" style="color:var(--text-faint)">✕ без дела</div></div>` +
-    (matched.length
-      ? matched.map(x => `<div class="cp-item" onmousedown="cpPick('${esc(x.n)}')">
+    `<div class="cp-item" onmousedown="cpxPick('${fieldId}',-1)"><div class="cp-t" style="color:var(--text-faint)">✕ без дела</div></div>` +
+    (st.shown.length
+      ? st.shown.map((x, i) => `<div class="cp-item" onmousedown="cpxPick('${fieldId}',${i})">
           <div class="cp-t">${esc(x.n)}${x.client ? ' · ' + esc(x.client) : ''}</div>
           ${x.court ? `<div class="cp-s">${esc(x.court)}</div>` : ''}
         </div>`).join('')
       : `<div class="cp-none">Ничего не найдено — уточните фамилию или номер</div>`);
   list.style.display = 'block';
 }
-function cpPick(num) {
-  const hid = document.getElementById('f-caseNum');
-  const inp = document.getElementById('f-caseNum-q');
-  const info = CP_CASES.find(x => x.n === num);
-  if (hid) hid.value = num || '';
-  if (inp) inp.value = info ? (info.n + (info.client ? ' · ' + info.client : '')) : '';
-  const list = document.getElementById('f-caseNum-list');
-  if (list) list.style.display = 'none';
-  hearingCaseChanged(false); // подтянуть суд и судью выбранного дела
+function cpxPick(fieldId, i) {
+  const st = CPX[fieldId]; if (!st) return;
+  const x = i >= 0 ? st.shown[i] : null;
+  const hid = document.getElementById(fieldId);
+  const inp = document.getElementById(fieldId + '-q');
+  if (hid) hid.value = x ? x.n : '';
+  if (inp) inp.value = x ? (x.n + (x.client ? ' · ' + x.client : '')) : '';
+  const l = document.getElementById(fieldId + '-list');
+  if (l) l.style.display = 'none';
+  if (st.onPick) st.onPick(x);
 }
-function cpHideSoon() {
-  setTimeout(() => { const l = document.getElementById('f-caseNum-list'); if (l) l.style.display = 'none'; }, 180);
+function cpxHide(fieldId) {
+  setTimeout(() => { const l = document.getElementById(fieldId + '-list'); if (l) l.style.display = 'none'; }, 180);
 }
 
 // Подставить суд и судью из выбранного дела.
@@ -5312,7 +5325,8 @@ function cpHideSoon() {
 function hearingCaseChanged(initial) {
   const hid = document.getElementById('f-caseNum');
   if (!hid) return;
-  const info = CP_CASES.find(x => x.n === hid.value);
+  const st = CPX['f-caseNum'];
+  const info = st ? st.items.find(x => x.n === hid.value) : null;
   const court = (info && info.court) || '';
   const judge = (info && info.judge) || '';
   const courtEl = document.getElementById('f-court');
@@ -5403,16 +5417,26 @@ async function openFinanceForm(existing) {
   const bt = f.billType || 'fixed';
   const clients = (await getAll('clients')).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru'));
   const cases = await getAll('cases');
-  const clientOpts = '<option value="">— без участника —</option>' + clients.map(c=>`<option ${c.name===f.client?'selected':''}>${esc(c.name)}</option>`).join('');
-  const caseOpts = '<option value="">— без привязки —</option>' + sortCasesByClient(cases).map(c=>`<option value="${esc(c.number)}" data-client="${esc(c.client||'')}" ${c.number===f.caseNum?'selected':''}>${esc(c.number)}${c.client?' · '+esc(c.client):''}</option>`).join('');
+  CL_LIST = clients.map(c => ({ name: c.name || '', phone: c.phone || '' }));
+  cpxRegister('f-caseNum', cpxCaseItems(cases), x => {
+    if (!x || !x.client) return; // дело выбрано — подставляем его участника
+    const hid = document.getElementById('f-client'), inp = document.getElementById('f-client-q');
+    if (hid) hid.value = x.client;
+    if (inp) inp.value = x.client;
+  });
+  const curCaseLabel = cpxLabelFor(cases, f.caseNum);
   showSheet(`
     <h3>${existing?'Изменить счёт':'Новый счёт'}</h3>
     <input type="hidden" id="f-billType" value="${bt}">
     <div class="seg" id="fin-billseg">
       ${BILLING_TYPES.map(([k,l])=>`<button data-bt="${k}" class="${k===bt?'active':''}" onclick="finBillingTab('${k}')">${l}</button>`).join('')}
     </div>
-    <div class="field"><label>Дело</label><select id="f-caseNum" onchange="finCaseChanged()">${caseOpts}</select></div>
-    <div class="field"><label>Участник <span class="req">*</span></label><select id="f-client" onchange="clientSelChanged(this)">${clientOpts}<option value="__addclient__" data-add="1">➕ Новый участник…</option></select></div>
+    <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('f-caseNum', f.caseNum, curCaseLabel)}</div>
+    <div class="field" style="position:relative"><label>Участник</label>
+      <input id="f-client-q" placeholder="Поиск по фамилии…" autocomplete="off" value="${esc(f.client||'')}" oninput="clFilter(this)" onfocus="clFilter(this)" onblur="clHideSoon()">
+      <input type="hidden" id="f-client" value="${esc(f.client||'')}">
+      <div class="cp-list" id="f-client-list" style="display:none"></div>
+    </div>
     <div class="field"><label>Услуга</label>${refSelect('f-service','services',f.service,null)}</div>
 
     <div id="fin-fld-amount" style="display:${bt==='fixed'||bt==='retainer'?'':'none'}">
@@ -5437,8 +5461,15 @@ async function openFinanceForm(existing) {
       <div class="meta" style="margin-bottom:8px">Счёт активируется при положительном исходе дела.</div>
     </div>
 
-    <div class="field"><label>Оплачено, ₽</label><input id="f-paid" type="number" inputmode="numeric" value="${f.paid||0}" ${Array.isArray(f.payments)&&f.payments.length?'readonly style="opacity:.6"':''}>
-      ${Array.isArray(f.payments)&&f.payments.length?`<div class="meta" style="margin-top:4px">Считается по журналу платежей — правьте платежи в карточке счёта</div>`:''}</div>
+    <div class="field-row">
+      <div class="field"><label>Дата счёта (выставлен)</label><input id="f-createdAt" type="date" value="${String(f.createdAt||todayISO()).slice(0,10)}"></div>
+      <div class="field"></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Оплачено, ₽</label><input id="f-paid" type="number" inputmode="numeric" value="${f.paid||0}" ${Array.isArray(f.payments)&&f.payments.length?'readonly style="opacity:.6"':''}></div>
+      <div class="field"><label>Дата оплаты</label><input id="f-paidAt" type="date" value="${String(f.paidAt||todayISO()).slice(0,10)}" ${Array.isArray(f.payments)&&f.payments.length?'readonly style="opacity:.6"':''}></div>
+    </div>
+    ${Array.isArray(f.payments)&&f.payments.length?`<div class="meta" style="margin-top:-6px;margin-bottom:12px">Оплата и её дата считаются по журналу платежей — правьте платежи в карточке счёта</div>`:''}
     <div class="field"><label>Комментарий</label><textarea id="f-fcomment" rows="2" placeholder="Назначение платежа, № договора, условия...">${esc(f.comment||'')}</textarea></div>
     <button class="btn-primary" onclick="saveFinance('${f.id||''}')">Сохранить</button>
     ${existing?`<button class="btn-ghost" onclick="removeItem('finance','${f.id}','finance')">Удалить</button>`:''}
@@ -5447,15 +5478,57 @@ async function openFinanceForm(existing) {
   finBillingTab(bt);
 }
 // При выборе дела автоматически подставляем доверителя из этого дела
-function finCaseChanged() {
-  const sel = document.getElementById('f-caseNum');
-  const opt = sel.options[sel.selectedIndex];
-  const cl = opt ? opt.getAttribute('data-client') : '';
-  if (cl) {
-    const clientSel = document.getElementById('f-client');
-    for (const o of clientSel.options) { if (o.value === cl || o.text === cl) { clientSel.value = o.value; break; } }
-  }
+// ═══════ ПОИСКОВЫЙ ВЫБОР УЧАСТНИКА (форма счёта) ═══════
+let CL_LIST = [], CL_SHOWN = [];
+function clFilter(inp) {
+  const list = document.getElementById('f-client-list'); if (!list) return;
+  const q = (inp.value || '').trim().toLowerCase();
+  CL_SHOWN = CL_LIST.filter(x => !q || (x.name + ' ' + x.phone).toLowerCase().includes(q)).slice(0, 30);
+  list.innerHTML =
+    `<div class="cp-item" onmousedown="clPick(-1)"><div class="cp-t" style="color:var(--text-faint)">✕ без участника</div></div>` +
+    `<div class="cp-item" onmousedown="clAddNew()"><div class="cp-t" style="color:var(--accent)">➕ Новый участник…</div></div>` +
+    (CL_SHOWN.length
+      ? CL_SHOWN.map((x, i) => `<div class="cp-item" onmousedown="clPick(${i})">
+          <div class="cp-t">${esc(x.name)}</div>${x.phone ? `<div class="cp-s">${esc(x.phone)}</div>` : ''}
+        </div>`).join('')
+      : `<div class="cp-none">Не найдено — проверьте фамилию или добавьте нового</div>`);
+  list.style.display = 'block';
 }
+function clPick(i) {
+  const name = i >= 0 && CL_SHOWN[i] ? CL_SHOWN[i].name : '';
+  const hid = document.getElementById('f-client');
+  const inp = document.getElementById('f-client-q');
+  if (hid) hid.value = name;
+  if (inp) inp.value = name;
+  const l = document.getElementById('f-client-list');
+  if (l) l.style.display = 'none';
+}
+function clHideSoon() {
+  setTimeout(() => { const l = document.getElementById('f-client-list'); if (l) l.style.display = 'none'; }, 180);
+}
+async function clAddNew() {
+  const name = (window.prompt('Фамилия И.О. нового участника:') || '').trim();
+  const inp = document.getElementById('f-client-q');
+  const hid = document.getElementById('f-client');
+  const list = document.getElementById('f-client-list');
+  if (list) list.style.display = 'none';
+  if (!name) { if (inp) inp.focus(); return; }
+  const all = await getAll('clients');
+  const exists = all.find(c => (c.name || '').toLowerCase() === name.toLowerCase());
+  if (exists) {
+    toast('Такой участник уже есть — выбран он');
+  } else {
+    if (!(await demoAllow('clients'))) return;
+    await put('clients', { id: uid('К'), name, createdAt: Date.now() });
+    CL_LIST.push({ name, phone: '' });
+    CL_LIST.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    toast('Участник добавлен');
+    if (typeof renderClients === 'function') renderClients();
+  }
+  if (hid) hid.value = name;
+  if (inp) inp.value = name;
+}
+
 async function saveFinance(id) {
   const client = document.getElementById('f-client').value;
   const billType = document.getElementById('f-billType').value || 'fixed';
@@ -5500,9 +5573,9 @@ async function saveFinance(id) {
     payments: _journal || undefined,
     plan: prev?.plan || undefined,
     comment: document.getElementById('f-fcomment').value.trim(),
-    createdAt: prev?.createdAt || todayISO(),
+    createdAt: (document.getElementById('f-createdAt')?.value) || prev?.createdAt || todayISO(),
     nextDue: billType === 'retainer' ? (prev?.nextDue || nextMonthISO()) : '',
-    paidAt: paid>0 ? (prev?.paidAt || todayISO()) : '' };
+    paidAt: paid>0 ? ((document.getElementById('f-paidAt')?.value) || prev?.paidAt || todayISO()) : '' };
   if (Array.isArray(obj.payments) && obj.payments.length) finRecalc(obj); // журнал — источник истины
   await put('finance', obj);
   closeSheet(); toast('Счёт сохранён'); renderFinance(); renderDashboard();
@@ -7946,8 +8019,8 @@ async function openMailForm(id, presetLeadId) {
   let leadName = '';
   if (leadId) { const ld = (await getAll('leads')).find(x=>x.id===leadId); leadName = ld ? ld.name : ''; }
   const cases = (await getAll('cases')).filter(c=>c.status!=='Завершено' || (m && m.caseNum===c.number));
-  const caseOpts = '<option value="">— без привязки —</option>' + sortCasesByClient(cases).map(c=>
-    `<option value="${esc(c.number)}" ${m&&m.caseNum===c.number?'selected':''}>${esc(c.number)}${c.client?' · '+esc(c.client):''}</option>`).join('');
+  cpxRegister('m-case', cpxCaseItems(cases));
+  const curCaseLabel = cpxLabelFor(cases, m && m.caseNum);
   showSheet(`
     <h3>${m?'Изменить отправление':'Новое отправление'}</h3>
     <div class="sheet-sub">Статусы подтянутся из Почты России при обновлении</div>
@@ -7955,7 +8028,7 @@ async function openMailForm(id, presetLeadId) {
     <input type="hidden" id="m-leadid" value="${esc(leadId)}">
     <div class="field"><label>Трек-номер (РПО) <span class="req">*</span></label><input id="m-barcode" value="${m?esc(m.barcode):''}" placeholder="80107204381310" autocomplete="off" inputmode="numeric"></div>
     <div class="field"><label>Описание</label><input id="m-title" value="${m?esc(m.title||''):''}" placeholder="Претензия в ООО «...»"></div>
-    ${leadId?'':`<div class="field"><label>Дело</label><select id="m-case">${caseOpts}</select></div>`}
+    ${leadId?'':`<div class="field" style="position:relative"><label>Дело</label>${cpxHtml('m-case', (m&&m.caseNum)||'', curCaseLabel)}</div>`}
     <button class="btn-primary" onclick="saveMail('${m?m.id:''}')">Сохранить</button>
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
   `);
@@ -9572,8 +9645,8 @@ async function openOrderForm(id, backCase) {
   const o = id ? (await getAll('orders')).find(x=>x.id===id) : {};
   const cases = await getAll('cases');
   const nextNo = id ? '' : await nextOrderNo();
-  const caseOpts = '<option value="">— без дела —</option>' + sortCasesByClient(cases).map(c=>
-    `<option value="${esc(c.number)}" ${(o.caseNum||backCase)===c.number?'selected':''}>${esc(c.number)}${c.client?' · '+esc(c.client):''}</option>`).join('');
+  cpxRegister('o-case', cpxCaseItems(cases));
+  const curCaseLabel = cpxLabelFor(cases, o.caseNum || backCase);
   showSheet(`
     <h3>${id?'Изменить ордер':'Новый ордер'}</h3>
     <div class="sheet-sub">Номер — с бланка ордера из вашей книжки</div>
@@ -9581,7 +9654,7 @@ async function openOrderForm(id, backCase) {
       <div class="field"><label>Номер ордера <span class="req">*</span></label><input id="o-num" value="${esc(o.num||nextNo)}" inputmode="numeric"></div>
       <div class="field"><label>Дата <span class="req">*</span></label><input id="o-date" type="date" value="${o.date||todayISO()}"></div>
     </div>
-    <div class="field"><label>Дело</label><select id="o-case">${caseOpts}</select></div>
+    <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('o-case', o.caseNum || backCase, curCaseLabel)}</div>
     <div class="field"><label>Основание</label><select id="o-basis">${ORDER_BASIS.map(b=>`<option ${b===(o.basis||'Соглашение')?'selected':''}>${b}</option>`).join('')}</select></div>
     <div class="field"><label>Поручение / стадия</label><input id="o-stage" value="${esc(o.stage||'')}" placeholder="защита в суде первой инстанции"></div>
     <div class="field"><label>Заметка</label><input id="o-note" value="${esc(o.note||'')}"></div>
