@@ -748,6 +748,17 @@
 .cp-t{font-size:13.5px;font-weight:600;line-height:1.3}
 .cp-s{font-size:11.5px;color:var(--text-faint);margin-top:1px}
 .cp-none{padding:10px 12px;font-size:12.5px;color:var(--text-faint)}
+
+/* ── Лента ближайших 7 дней (Обзор) ── */
+.ag-day{font-size:11.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--text-faint);margin:12px 2px 6px}
+.today-card .ag-day:first-child{margin-top:0}
+.ag-row{display:flex;gap:9px;align-items:flex-start;padding:7px 2px;border-bottom:1px solid rgba(127,127,127,.14);cursor:pointer}
+.ag-row:last-child{border-bottom:none}
+.ag-mark{width:9px;height:9px;border-radius:3px;flex:0 0 9px;margin-top:5px}
+.ag-time{font-size:12px;font-weight:700;color:var(--text-faint);min-width:44px;flex:0 0 44px;padding-top:1px}
+.ag-body{flex:1;min-width:0;font-size:14px;line-height:1.32}
+.ag-sub{font-size:11.5px;color:var(--text-faint);font-weight:400}
+.ag-empty{font-size:12.5px;color:var(--text-faint);opacity:.7;padding:4px 2px 2px}
 </style>
 </head>
 <body>
@@ -801,9 +812,6 @@
   <div id="dash-today"></div>
   <div id="dash-attention"></div>
   <div id="dash-leads"></div>
-
-  <div class="sect-title">Ближайшие заседания</div>
-  <div id="dash-hearings"></div>
 
   <div class="sect-title">Финансы за месяц</div>
   <div class="money-strip" id="dash-money">
@@ -1038,7 +1046,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '118'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '119'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -1796,53 +1804,44 @@ async function renderDashboard() {
   const mb = document.getElementById('money-billed'); if (mb) mb.textContent = fmtMoney(mBilled);
   const mp = document.getElementById('money-paid'); if (mp) mp.textContent = fmtMoney(mPaid);
   const md = document.getElementById('money-debt'); if (md) md.textContent = fmtMoney(mDebt);
-  const todayHearings = hearings.filter(h=>daysUntil(h.date)===0 && isPlanned(h)).sort((a,b)=>(a.time||'').localeCompare(b.time||''));
-  const todayTasks = tasks.filter(t=>!t.done && t.due===today);
+  // ═══ ЛЕНТА БЛИЖАЙШИХ 7 ДНЕЙ: просрочка + заседания · сроки · задачи · претензии · ДР ═══
   const overdueTasks = tasks.filter(t=>!t.done && t.due && t.due < today).sort((a,b)=>a.due.localeCompare(b.due));
-  const todayDeadlines = [];
-  cases.forEach(c=>(c.deadlines||[]).forEach(dl=>{ if(!c.archived && !dl.done && daysUntil(dl.date)===0) todayDeadlines.push({c,dl}); }));
-
-  const h = new Date().getHours();
-  const greetBase = h < 5 ? 'Поздний вечер' : h < 12 ? 'Доброе утро' : h < 18 ? 'Добрый день' : 'Добрый вечер';
-  const gEl = document.getElementById('dash-greet');
-  if (gEl) gEl.textContent = greetBase;
-
+  CAL_EVENTS = await calEventsByDate();
   const todayEl = document.getElementById('dash-today');
-  const todayCount = todayHearings.length + todayTasks.length + todayDeadlines.length + overdueTasks.length;
   if (todayEl) {
-    if (todayCount === 0) {
-      todayEl.innerHTML = `<div class="today-card empty-today"><div style="font-size:30px;margin-bottom:6px">☕</div><div style="color:var(--text-dim);font-size:14px">На сегодня заседаний и задач нет</div></div>`;
-    } else {
-      todayEl.innerHTML = `
-      <div class="today-card">
-        <div class="today-head">📌 Сегодня${todayHearings.length?` · ${todayHearings.length} ${plural(todayHearings.length,'заседание','заседания','заседаний')}`:''}${todayTasks.length?` · ${todayTasks.length} ${plural(todayTasks.length,'задача','задачи','задач')}`:''}${overdueTasks.length?` · <span style="color:var(--red)">${overdueTasks.length} просроч.</span>`:''}</div>
-        ${overdueTasks.slice(0,5).map(t=>{const n=Math.abs(daysUntil(t.due));return `<div class="today-row" onclick="openTaskById('${t.id}')">
-          <span class="t-time" style="color:var(--red)">!${n}д</span>
-          <span class="t-body"><b style="color:var(--red)">${esc(t.title)}</b><br><span class="t-sub">просрочено ${n} ${plural(n,'день','дня','дней')}${t.caseNum?' · '+esc(t.caseNum):''}</span></span>
-        </div>`;}).join('')}
-        ${overdueTasks.length>5?`<div class="today-row" onclick="taskFilter='open';nav('tasks')">
-          <span class="t-time"></span>
-          <span class="t-body"><span class="t-sub" style="color:var(--red)">ещё ${overdueTasks.length-5} просроченных →</span></span>
-        </div>`:''}
-        ${todayHearings.map(h=>`<div class="today-row" onclick="viewHearing('${h.id}')">
-          <span class="t-time">${h.time||'—:—'}</span>
-          <span class="t-body"><b>🏛 ${esc(caseLabel(h.caseNum)||'Заседание')}</b>${(h.court||hearingPerson(h))?`<br><span class="t-sub">${esc([h.court,hearingPerson(h)].filter(Boolean).join(' · '))}</span>`:''}</span>
-        </div>`).join('')}
-        ${todayDeadlines.map(({c,dl})=>`<div class="today-row" onclick="viewCase('${c.id}',1)">
-          <span class="t-time" style="color:var(--red)">срок</span>
-          <span class="t-body"><b>⏰ ${esc(dl.title)}</b><br><span class="t-sub">${esc(c.number)}${c.client?' · '+esc(c.client):''}</span></span>
-        </div>`).join('')}
-        ${todayTasks.map(t=>`<div class="today-row" onclick="openTaskById('${t.id}')">
-          <span class="t-time">☐</span>
-          <span class="t-body"><b>${esc(t.title)}</b>${t.caseNum?`<br><span class="t-sub">${esc(t.caseNum)}</span>`:''}</span>
-        </div>`).join('')}
-      </div>`;
+    const p2 = n => String(n).padStart(2,'0');
+    const isoOf = d => d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate());
+    const base = new Date(); base.setHours(0,0,0,0);
+    let daysHtml = '', total = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(base); d.setDate(base.getDate() + i);
+      const evs = (CAL_EVENTS[isoOf(d)] || []).slice().sort((a,b)=>(a.time||'99').localeCompare(b.time||'99'));
+      if (!evs.length && i > 0) continue; // пустые дни (кроме сегодня) не показываем
+      total += evs.length;
+      const label = i === 0 ? `Сегодня · ${d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})}`
+        : i === 1 ? `Завтра · ${d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})}`
+        : `${d.toLocaleDateString('ru-RU',{day:'numeric',month:'short'})} · ${d.toLocaleDateString('ru-RU',{weekday:'long'})}`;
+      daysHtml += `<div class="ag-day">${label}</div>` + (evs.length
+        ? evs.map(e=>`<div class="ag-row" onclick="${e.act||''}">
+            <span class="ag-mark" style="background:${e.color||'var(--accent)'}"></span>
+            <span class="ag-time">${e.time||'—'}</span>
+            <span class="ag-body"><b>${e.title}</b>${e.sub?`<br><span class="ag-sub">${e.sub}</span>`:''}</span>
+          </div>`).join('')
+        : `<div class="ag-empty">☕ свободно</div>`);
     }
+    const odHtml = overdueTasks.length ? `
+      <div class="ag-day" style="color:var(--red)">Просрочено · ${overdueTasks.length}</div>
+      ${overdueTasks.slice(0,5).map(t=>{const n=Math.abs(daysUntil(t.due));return `<div class="ag-row" onclick="openTaskById('${t.id}')">
+          <span class="ag-mark" style="background:var(--red)"></span>
+          <span class="ag-time" style="color:var(--red)">!${n}д</span>
+          <span class="ag-body"><b style="color:var(--red)">${esc(t.title)}</b><br><span class="ag-sub">просрочено ${n} ${plural(n,'день','дня','дней')}${t.caseNum?' · '+esc(t.caseNum):''}</span></span>
+        </div>`;}).join('')}
+      ${overdueTasks.length>5?`<div class="ag-row" onclick="taskFilter='open';nav('tasks')"><span class="ag-mark" style="background:var(--red)"></span><span class="ag-time"></span><span class="ag-body ag-sub" style="color:var(--red)">ещё ${overdueTasks.length-5} просроченных →</span></div>`:''}` : '';
+    todayEl.innerHTML = (total || overdueTasks.length)
+      ? `<div class="today-card">${odHtml}${daysHtml}</div>`
+      : `<div class="today-card empty-today"><div style="font-size:30px;margin-bottom:6px">☕</div><div style="color:var(--text-dim);font-size:14px">На ближайшую неделю заседаний, сроков и задач нет</div></div>`;
   }
 
-  // — Блок «Требует внимания» — только то, чего НЕТ в «Сроки — что горит»:
-  // проблемы доставки почты, абонентские платежи, коллизии синхронизации, пробелы в данных.
-  // Просроченные задачи и процессуальные сроки сюда не дублируем — они в «что горит».
   const attn = [];
   mail.filter(m=>/Неудачн|Возврат|Истек/i.test((m.status||'')+((m.history||[]).map(x=>x.oper).join(' ')))).forEach(m=>attn.push({icon:'📮',color:'var(--red)',title:m.title||m.barcode,sub:m.status||'проблема с доставкой',act:`viewMail('${m.id}')`}));
   // Абонентские платежи: срок очередного платежа подходит или прошёл
@@ -1896,26 +1895,6 @@ async function renderDashboard() {
   document.getElementById('kpi-debt').textContent = fmtMoney(debt);
 
   // Сегодняшние заседания уже показаны в блоке «Сегодня» выше — здесь начинаем с завтра
-  const next = hearings.filter(h=>{const d=daysUntil(h.date);return d!==null&&d>=1;}).sort((a,b)=>new Date(a.date)-new Date(b.date)).slice(0,6);
-  const past = hearings.filter(h=>{const d=daysUntil(h.date);return d!==null&&d<0;}).sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,6);
-  const cont = document.getElementById('dash-hearings');
-
-  const renderGroups = (list, dim) => groupHearingsByDate(list).map(group => {
-    const cards = group.items.map(h => {
-      const isToday = daysUntil(h.date)===0;
-      return `<div class="card" onclick="viewHearing('${h.id}')" style="${isToday?'border:2px solid var(--sig-green);background:rgba(34,197,94,0.08)':''}${dim?'opacity:.6':''}"><div class="row1"><div style="flex:1;min-width:0"><div class="title">${esc(caseLabel(h.caseNum)||'Заседание')}</div><div class="meta">${esc(h.court||'')}</div><div class="meta" style="font-size:11px">${esc(hearingPerson(h))}</div></div><div style="text-align:right"><div style="color:var(--text-faint);font-weight:700;font-size:13px">${h.time||''}</div></div></div></div>`;
-    }).join('');
-    return dayHeader(group.date, group.items.length) + cards;
-  }).join('');
-
-  let html = next.length ? renderGroups(next, false) : `<div class="empty"><div class="big">${ic('calendar',48,'empty-ico')}</div><p>Нет запланированных заседаний</p></div>`;
-  if (past.length) {
-    html += `<button class="btn-ghost" onclick="togglePastDashboard()" style="margin-top:12px">${showPastDashboard ? 'Скрыть прошедшие' : `Показать прошедшие (${past.length})`}</button>`;
-    if (showPastDashboard) {
-      html += `<div style="margin-top:6px;color:var(--text-faint);font-size:12px;text-align:center">Прошедшие заседания</div>` + renderGroups(past, true);
-    }
-  }
-  cont.innerHTML = html;
 }
 
 // ════════════════════════════════════════════════════════════
@@ -2134,9 +2113,33 @@ async function calEventsByDate() {
       time:'', title:'📨 Ответ на претензию', sub: l.name||'', act:`viewLead('${l.id}')` });
   });
   const cases = await getAll('cases');
-  cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!dl.done) push(dl.date, { type:'deadline',
+  cases.forEach(c => (c.deadlines||[]).forEach(dl => { if (!c.archived && !dl.done) push(dl.date, { type:'deadline',
     color: (()=>{const d=daysUntil(dl.date);return d===null?'var(--text-faint)':d<0?'var(--red)':d<=10?'var(--sig-amber)':'var(--green)';})(),
     time:'', title:'⏰ '+dl.title, sub: c.number+(c.client?' · '+c.client:''), act:`viewCase('${c.id}',1)` }); }));
+  // Задачи (незавершённые, со сроком) — зелёные; просроченные — красные
+  const tasksAll = await getAll('tasks');
+  tasksAll.forEach(t => {
+    if (t.done || !t.due) return;
+    const dd = daysUntil(t.due);
+    push(t.due, { type:'task', color: dd !== null && dd < 0 ? 'var(--red)' : 'var(--sig-green)',
+      time:'', title: '✓ ' + esc(t.title||'Задача'), sub: t.caseNum ? esc(caseLabel(t.caseNum)) : '', act:`openTaskById('${t.id}')` });
+  });
+  // Дни рождения участников — из карточки (birthDate), с возрастом; годы: прошлый/текущий/следующий
+  const clientsAll = await getAll('clients');
+  const Ynow = new Date().getFullYear();
+  clientsAll.forEach(cl => {
+    if (!cl.birthDate || !/^\d{4}-\d{2}-\d{2}$/.test(cl.birthDate)) return;
+    const [by, bm, bd] = cl.birthDate.split('-');
+    for (let y = Ynow - 1; y <= Ynow + 1; y++) {
+      let mmdd = bm + '-' + bd;
+      if (mmdd === '02-29' && !((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0)) mmdd = '02-28';
+      const age = y - Number(by);
+      if (age <= 0) continue;
+      push(y + '-' + mmdd, { type:'bday', color:'#d4a94e', time:'',
+        title:`🎂 ${esc(cl.name)} — ${age}`, sub:'день рождения', act:`viewClient('${cl.id}')` });
+    }
+  });
+
   return map;
 }
 let CAL_EVENTS = {};
