@@ -1047,7 +1047,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '122'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '123'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -3136,6 +3136,7 @@ const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_cal
 const SYNC_SECRET_KEYS = [
   'crm_ya_token','crm_ya_client','crm_dbx_token','crm_dbx_client',
   'crm_gcal_url','crm_gcal_secret','crm_mail_url','crm_mail_secret',
+  'crm_srv_url','crm_srv_secret',
   'crm_dadata_token','crm_tg_token','crm_tg_chat','crm_sync_pass',
   'crm_license','crm_lock_on','crm_lock_hash','crm_lock_salt'
 ];
@@ -3870,6 +3871,12 @@ function openSyncSheet() {
     </div>
     </div>
 
+    <div class="card" onclick="openSrvSheet()" style="cursor:pointer;margin-bottom:10px">
+      <div class="row1"><div style="flex:1">
+        <div class="title">☁️ Личный сервер ${SRV.url?'<span style="color:var(--green);font-size:12px">● подключён</span>':''}</div>
+        <div class="meta">Яндекс Облако: письма без Google-скрипта + подписка календаря (.ics)</div>
+      </div></div>
+    </div>
     <div class="card" onclick="openGcalSheet()" style="cursor:pointer;margin-bottom:10px">
       <div class="row1"><div style="flex:1">
         <div class="title">${ic("calendar",16)} Google Календарь ${GCAL.url?'<span style="color:var(--green);font-size:12px">● подключён</span>':''}</div>
@@ -7762,6 +7769,78 @@ function openTgSheet() {
 // скрипту список событий, скрипт создаёт/обновляет/удаляет их
 // в календаре. Токены не истекают, сервер не нужен.
 // ════════════════════════════════════════════════════════════
+// ═══════ ЛИЧНЫЙ СЕРВЕР (Яндекс Облако): статусы писем + живая .ics-лента ═══════
+const SRV = {
+  get url() { return localStorage.getItem('crm_srv_url') || ''; },
+  set url(v) { if (v) localStorage.setItem('crm_srv_url', v); else localStorage.removeItem('crm_srv_url'); },
+  get secret() { return localStorage.getItem('crm_srv_secret') || ''; },
+  set secret(v) { if (v) localStorage.setItem('crm_srv_secret', v); else localStorage.removeItem('crm_srv_secret'); }
+};
+async function srvCall(action, payload) {
+  if (!SRV.url) return null;
+  try {
+    const r = await fetch(SRV.url, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(Object.assign({ secret: SRV.secret, action }, payload || {}))
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: 'network' }; }
+}
+let srvIcsTimer = null;
+function srvIcsTouch() {
+  if (!SRV.url) return;
+  clearTimeout(srvIcsTimer);
+  srvIcsTimer = setTimeout(() => srvIcsPush(true).catch(() => {}), 8000);
+}
+async function srvIcsPush(silent) {
+  if (!SRV.url) { if (!silent) toast('Личный сервер не подключён', true); return; }
+  const b = await icsBuild();
+  const j = await srvCall('ics', { ics: b.ics });
+  if (j && j.ok) { if (!silent) toast(`Календарная лента опубликована: ${b.n} засед.`); }
+  else if (!silent) toast('Публикация не удалась: ' + (j && j.error === 'auth' ? 'неверный секрет' : (j && j.error) || 'нет связи'), true);
+}
+function srvSubUrl() {
+  if (!SRV.url || !SRV.secret) return '';
+  return SRV.url.replace(/\/bridge\/?$/, '') + '/cal/' + encodeURIComponent(SRV.secret);
+}
+function openSrvSheet() {
+  const sub = srvSubUrl();
+  showSheet(`
+    <h3>☁️ Личный сервер</h3>
+    <div class="sheet-sub">Яндекс Облако: статусы Почты России и живая календарная лента для подписки. База данных на сервер не попадает.</div>
+    <div class="field"><label>URL моста (…/bridge)</label>
+      <input id="srv-url" value="${esc(SRV.url)}" placeholder="https://…apigw.yandexcloud.net/bridge" autocomplete="off"></div>
+    <div class="field"><label>Секретный код</label>
+      <input id="srv-secret" value="${esc(SRV.secret)}" placeholder="тот же, что в переменной SECRET функции" autocomplete="off"></div>
+    <button class="btn-primary" onclick="srvSave()">Сохранить</button>
+    <button class="btn-ghost" onclick="srvPing()">📡 Проверить связь</button>
+    <button class="btn-ghost" onclick="srvIcsPush(false)">📤 Опубликовать календарь сейчас</button>
+    ${sub ? `<div class="card" style="margin-top:10px">
+      <div class="title" style="font-size:13.5px;margin-bottom:4px">Адрес подписки календаря</div>
+      <div class="meta" style="word-break:break-all">${esc(sub)}</div>
+      <button class="btn-ghost" style="margin-top:8px" onclick="copyText('${esc(sub)}','Адрес подписки скопирован')">📋 Копировать адрес</button>
+      <div class="meta" style="margin-top:6px">Добавьте его в Google/Яндекс Календарь («по URL») или на телефоне — заседания будут обновляться сами.</div>
+    </div>` : ''}
+    <div class="meta" style="margin-top:8px">Мост «Почта России» подключается тем же URL и секретом в своей карточке. Инструкция по развёртыванию — в файле «УСТАНОВКА-Яндекс-Облако».</div>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
+  `);
+}
+function srvSave() {
+  SRV.url = (document.getElementById('srv-url').value || '').trim();
+  SRV.secret = (document.getElementById('srv-secret').value || '').trim();
+  if (typeof bumpSettings === 'function') bumpSettings();
+  toast(SRV.url ? 'Личный сервер сохранён' : 'Личный сервер отключён');
+  openSrvSheet();
+}
+async function srvPing() {
+  if (!SRV.url) { toast('Укажите URL и сохраните', true); return; }
+  const j = await srvCall('ping');
+  if (j && j.ok) {
+    const rdy = j.ready || {};
+    toast(`Связь есть ✓ Почта: ${rdy.pochta ? 'настроена' : 'нет'} · Хранилище: ${rdy.storage ? 'настроено' : 'нет'}`);
+  } else toast(j && j.error === 'auth' ? 'Неверный секретный код' : 'Нет связи: ' + ((j && j.error) || 'проверьте URL'), true);
+}
+
 const GCAL = {
   get url()    { return localStorage.getItem('crm_gcal_url') || ''; },
   set url(v)   { v ? localStorage.setItem('crm_gcal_url', v) : localStorage.removeItem('crm_gcal_url'); },
@@ -7781,6 +7860,7 @@ let gcalTimer = null;
 
 // Вызывается после изменения заседаний/задач — отправка с задержкой 5 сек
 function gcalTouch() {
+  srvIcsTouch(); // личный сервер: обновить календарную ленту
   if (!GCAL.url) return;
   clearTimeout(gcalTimer);
   gcalTimer = setTimeout(() => gcalPush(true).catch(()=>{}), 5000);
@@ -8521,12 +8601,12 @@ async function presetDlCustom(caseId) {
 
 // ═══════ ЭКСПОРТ ЗАСЕДАНИЙ В КАЛЕНДАРЬ (.ics) ═══════
 // Один файл импортируется в Яндекс.Календарь, Google, Mail.ru и календарь телефона
-async function icsExport() {
+// Сборка календарной ленты — общая для файла-экспорта и личного сервера
+async function icsBuild() {
   await refreshCasesCache();
   const hearings = (await getAll('hearings'))
     .filter(h => h.date && isPlanned(h) && (daysUntil(h.date) ?? -1) >= 0)
     .sort((a, b) => ((a.date + (a.time || '')) > (b.date + (b.time || ''))) ? 1 : -1);
-  if (!hearings.length) { toast('Нет предстоящих заседаний для экспорта', true); return; }
   const escT = v => String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
   const p2 = n => String(n).padStart(2, '0');
   const dstamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
@@ -8554,14 +8634,20 @@ async function icsExport() {
     lines.push('END:VEVENT');
   });
   lines.push('END:VCALENDAR');
-  const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+  return { ics: lines.join('\r\n'), n: hearings.length };
+}
+async function icsExport() {
+  const b = await icsBuild();
+  if (!b.n) { toast('Нет предстоящих заседаний для экспорта', true); return; }
+  const blob = new Blob([b.ics], { type: 'text/calendar;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'CRM-заседания.ics';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  toast(`Экспортировано заседаний: ${hearings.length}. Откройте файл — календарь предложит импорт`);
+  toast(`Экспортировано заседаний: ${b.n}. Откройте файл — календарь предложит импорт`);
 }
+
 
 async function openDeadlineForm(caseId, idx) {
   const c = (await getAll('cases')).find(x=>x.id===caseId); if (!c) return;
