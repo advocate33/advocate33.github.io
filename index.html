@@ -1046,7 +1046,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '119'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '120'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -5367,10 +5367,34 @@ function linkify(escaped) {
     '<a href="$1" target="_blank" rel="noopener" style="color:#60a5fa;word-break:break-all">$1</a>');
 }
 // Быстрые даты у полей срока: Сегодня · Завтра · +3 · +7 · +30
-function qdSet(id, n) { const el = document.getElementById(id); if (el) el.value = addDaysISO(todayISO(), n); }
-function qdChips(id) {
-  return `<div class="chips" style="margin-top:6px">${[[0,'Сегодня'],[1,'Завтра'],[3,'+3 дн'],[7,'+7 дн'],[30,'+30 дн']].map(([n,l]) => `<div class="chip" onclick="qdSet('${id}',${n})">${l}</div>`).join('')}</div>`;
+function qdSet(id, n) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.value = addDaysISO(todayISO(), n);
+  el.dispatchEvent(new Event('change'));
+  toast('Срок: ' + fmtDate(el.value)); // видимый отклик нажатия
 }
+function qdChips(id) {
+  // Без inline-onclick: срабатывание через делегат на pointerdown (capture) —
+  // неуязвимо к перехвату кликов; flex-wrap — чтобы «+30 дн» не обрезался на телефоне
+  return `<div class="chips" style="margin-top:6px;flex-wrap:wrap;overflow:visible">${[[0,'Сегодня'],[1,'Завтра'],[3,'+3 дн'],[7,'+7 дн'],[30,'+30 дн']].map(([n,l]) => `<div class="chip" data-qdfor="${id}" data-qdn="${n}">${l}</div>`).join('')}</div>`;
+}
+// Делегат быстрых дат: ловим на самой ранней фазе касания + страховка обычным кликом
+let _qdLast = 0;
+function _qdFire(ch) {
+  const now = Date.now();
+  if (now - _qdLast < 400) return; // защита от двойного срабатывания pointer+click
+  _qdLast = now;
+  qdSet(ch.getAttribute('data-qdfor'), Number(ch.getAttribute('data-qdn')));
+}
+document.addEventListener('pointerdown', e => {
+  const ch = e.target && e.target.closest ? e.target.closest('.chip[data-qdn]') : null;
+  if (ch) _qdFire(ch);
+}, true);
+document.addEventListener('click', e => {
+  const ch = e.target && e.target.closest ? e.target.closest('.chip[data-qdn]') : null;
+  if (ch) _qdFire(ch);
+}, true);
 // Быстрое создание из карточки участника (паттерн «из контакта — сделку/счёт»)
 async function quickCaseFor(clientId) {
   const c = (await getAll('clients')).find(x => x.id === clientId);
