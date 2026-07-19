@@ -1051,7 +1051,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '128'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '129'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -5431,8 +5431,8 @@ function cpxLabelFor(cases, num) {
   const c = num ? cases.find(x => x.number === num) : null;
   return c ? c.number + (c.client ? ' · ' + c.client : '') : (num || '');
 }
-function cpxHtml(fieldId, num, label) {
-  return `<input id="${fieldId}-q" placeholder="Поиск: фамилия, № дела, суд…" autocomplete="off" value="${esc(label||'')}" oninput="cpxFilter('${fieldId}')" onfocus="cpxFilter('${fieldId}')" onblur="cpxHide('${fieldId}')">
+function cpxHtml(fieldId, num, label, ph) {
+  return `<input id="${fieldId}-q" placeholder="${ph || 'Поиск: фамилия, № дела, суд…'}" autocomplete="off" value="${esc(label||'')}" oninput="cpxFilter('${fieldId}')" onfocus="cpxFilter('${fieldId}')" onblur="cpxHide('${fieldId}')">
       <input type="hidden" id="${fieldId}" value="${esc(num||'')}">
       <div class="cp-list" id="${fieldId}-list" style="display:none"></div>`;
 }
@@ -8240,48 +8240,32 @@ async function renderMail() {
   }).join('');
 }
 
-// ═══════ ПОИСКОВЫЙ ВЫБОР ОБРАЩЕНИЯ (форма письма) ═══════
-let LD_LIST = [], LD_SHOWN = [];
-function ldFilter(inp) {
-  const list = document.getElementById('m-lead-list'); if (!list) return;
-  const q = (inp.value || '').trim().toLowerCase();
-  LD_SHOWN = LD_LIST.filter(x => !q || (x.name + ' ' + x.topic).toLowerCase().includes(q)).slice(0, 30);
-  list.innerHTML =
-    `<div class="cp-item" onmousedown="ldPick(-1)"><div class="cp-t" style="color:var(--text-faint)">✕ без обращения</div></div>` +
-    (LD_SHOWN.length
-      ? LD_SHOWN.map((x, i) => `<div class="cp-item" onmousedown="ldPick(${i})">
-          <div class="cp-t">${esc(x.name)}</div>
-          ${x.topic || x.status ? `<div class="cp-s">${esc([x.topic, x.status].filter(Boolean).join(' · '))}</div>` : ''}
-        </div>`).join('')
-      : `<div class="cp-none">Не найдено — проверьте фамилию или тему</div>`);
-  list.style.display = 'block';
-}
-function ldPick(i) {
-  const x = i >= 0 ? LD_SHOWN[i] : null;
-  const hid = document.getElementById('m-leadid');
-  const inp = document.getElementById('m-lead-q');
-  if (hid) hid.value = x ? x.id : '';
-  if (inp) inp.value = x ? (x.name + (x.topic ? ' · ' + x.topic : '')) : '';
-  const t = document.getElementById('m-title');
-  if (x && t && !t.value.trim()) t.value = x.name; // адресат — в описание, если оно пустое
-  const l = document.getElementById('m-lead-list');
-  if (l) l.style.display = 'none';
-}
-function ldHideSoon() {
-  setTimeout(() => { const l = document.getElementById('m-lead-list'); if (l) l.style.display = 'none'; }, 180);
-}
-
 async function openMailForm(id, presetLeadId) {
   const m = id ? (await getAll('mail')).find(x=>x.id===id) : null;
   const leadId = m ? (m.leadId||'') : (presetLeadId||'');
   let leadName = '';
   if (leadId) { const ld = (await getAll('leads')).find(x=>x.id===leadId); leadName = ld ? ld.name : ''; }
   const cases = (await getAll('cases')).filter(c=>c.status!=='Завершено' || (m && m.caseNum===c.number));
-  cpxRegister('m-case', cpxCaseItems(cases));
+  const leadItems = (await getAll('leads')).map(l => ({
+    n: '📨', client: l.name || '',
+    court: [l.topic, l.status].filter(Boolean).join(' · '), judge: '',
+    __lead: l.id, __label: (l.name || 'Обращение') + (l.topic ? ' · ' + l.topic : '')
+  }));
+  const mixed = cpxCaseItems(cases).concat(leadItems)
+    .sort((a, b) => String(a.client || '\uFFFF').localeCompare(String(b.client || '\uFFFF'), 'ru'));
+  cpxRegister('m-case', mixed, x => {
+    const hidL = document.getElementById('m-leadid');
+    const hidC = document.getElementById('m-case');
+    const inp  = document.getElementById('m-case-q');
+    if (x && x.__lead) { // выбрано обращение — письмо привязывается к нему
+      if (hidL) hidL.value = x.__lead;
+      if (hidC) hidC.value = '';
+      if (inp)  inp.value  = x.__label;
+      const t = document.getElementById('m-title');
+      if (t && !t.value.trim()) t.value = x.client;
+    } else if (hidL) hidL.value = ''; // выбрано дело или «без дела»
+  });
   const curCaseLabel = cpxLabelFor(cases, m && m.caseNum);
-  LD_LIST = (await getAll('leads')).slice()
-    .sort((a, b) => String(a.name || '\uFFFF').localeCompare(String(b.name || '\uFFFF'), 'ru'))
-    .map(l => ({ id: l.id, name: l.name || '', topic: l.topic || '', status: l.status || '' }));
   showSheet(`
     <h3>${m?'Изменить отправление':'Новое отправление'}</h3>
     <div class="sheet-sub">Статусы подтянутся из Почты России при обновлении</div>
@@ -8289,10 +8273,8 @@ async function openMailForm(id, presetLeadId) {
     <input type="hidden" id="m-leadid" value="${esc(leadId)}">
     <div class="field"><label>Трек-номер (РПО) <span class="req">*</span></label><input id="m-barcode" value="${m?esc(m.barcode):''}" placeholder="80107204381310" autocomplete="off" inputmode="numeric"></div>
     <div class="field"><label>Описание</label><input id="m-title" value="${m?esc(m.title||''):''}" placeholder="Претензия в ООО «...»"></div>
-    ${leadId?'':`<div class="field" style="position:relative"><label>Дело</label>${cpxHtml('m-case', (m&&m.caseNum)||'', curCaseLabel)}</div>`}
-    ${leadId?'':`<div class="field" style="position:relative"><label>Обращение (отправление по претензии)</label>
-      <input id="m-lead-q" placeholder="Поиск: фамилия, тема…" autocomplete="off" oninput="ldFilter(this)" onfocus="ldFilter(this)" onblur="ldHideSoon()">
-      <div class="cp-list" id="m-lead-list" style="display:none"></div>
+    ${leadId?'':`<div class="field" style="position:relative"><label>Дело или обращение</label>${cpxHtml('m-case', (m&&m.caseNum)||'', curCaseLabel, 'Поиск: фамилия, № дела, тема…')}
+      <div class="meta" style="margin-top:4px">Обращения в списке помечены 📨 — выбор привяжет письмо к обращению</div>
     </div>`}
     <button class="btn-primary" onclick="saveMail('${m?m.id:''}')">Сохранить</button>
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
