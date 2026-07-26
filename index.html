@@ -1051,7 +1051,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '130'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '131'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -8356,6 +8356,7 @@ async function viewMail(id) {
     <div class="chips" style="margin-bottom:10px">
       ${['Принято в отделении','В пути','Прибыло в место вручения','Вручено адресату','Возврат отправителю'].map(s=>`<div class="chip ${m.status===s?'active':''}" onclick="setMailStatus('${m.id}','${s}')">${s}</div>`).join('')}
     </div>
+    <button class="btn-ghost" onclick="mailRefreshOne('${m.id}')">↻ Обновить статус этого отправления</button>
     <a href="https://www.pochta.ru/tracking#${encodeURIComponent(m.barcode)}" target="_blank" rel="noopener" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">Открыть на pochta.ru</a>
     <button class="btn-ghost" onclick="openInventoryForm('${m.id}')">${ic('doc',15)} Опись вложения (ф.107)</button>
     <button class="btn-ghost" onclick="openMailForm('${m.id}')">✏️ Изменить</button>
@@ -8380,8 +8381,34 @@ async function mailRefreshAll() {
     m.history = res; m.status = last.oper; m.statusAt = last.date;
     await put('mail', m); updated++;
   }
-  toast(updated ? `Обновлено отправлений: ${updated}` : 'Новых данных нет — проверьте трек-номера');
+  const errKeys = Object.keys(j.errors || {});
+  const errCnt = errKeys.length;
+  if (updated && !errCnt) toast(`Обновлено отправлений: ${updated}`);
+  else if (updated || errCnt) toast(`Обновлено: ${updated}${errCnt ? ` · ошибок: ${errCnt} (${(j.errors[errKeys[0]]||'').slice(0,60)})` : ''}`, errCnt > 0);
+  else toast('Новых данных нет — проверьте трек-номера');
   renderMail();
+}
+
+// Обновление статуса одного отправления (из его карточки)
+async function mailRefreshOne(id) {
+  const m = (await getAll('mail')).find(x => x.id === id);
+  if (!m || !m.barcode) { toast('У отправления нет трек-номера', true); return; }
+  toast('Запрашиваю Почту России…');
+  const j = await mailBridgeCall('track', { barcodes: [m.barcode] });
+  if (!j) return;
+  if (!j.ok) { toast(j.error === 'auth' ? 'Неверный секретный код' : 'Сервер: ' + (j.error || 'ошибка'), true); return; }
+  const res = (j.results || {})[m.barcode];
+  const err = (j.errors || {})[m.barcode];
+  if (res && res.length) {
+    const last = res[res.length - 1];
+    m.history = res; m.status = last.oper; m.statusAt = last.date;
+    await put('mail', m);
+    toast('Статус обновлён: ' + last.oper);
+    renderMail();
+  } else {
+    toast(err ? 'Почта: ' + err : 'Данных по треку пока нет', true);
+  }
+  viewMail(id);
 }
 
 
