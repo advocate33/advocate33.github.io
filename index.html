@@ -1051,7 +1051,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '131'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '132'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -7815,6 +7815,7 @@ function openSrvSheet() {
     <button class="btn-primary" onclick="srvSave()">Сохранить</button>
     <button class="btn-ghost" onclick="srvPing()">📡 Проверить связь</button>
     <button class="btn-ghost" onclick="srvIcsPush(false)">📤 Опубликовать календарь сейчас</button>
+    <button class="btn-ghost" onclick="srvCalDiag()">🩺 Диагностика календарной ленты</button>
     ${sub ? `<div class="card" style="margin-top:10px">
       <div class="title" style="font-size:13.5px;margin-bottom:4px">Адрес подписки календаря</div>
       <div class="meta" style="word-break:break-all">${esc(sub)}</div>
@@ -7831,6 +7832,33 @@ function srvSave() {
   if (typeof bumpSettings === 'function') bumpSettings();
   toast(SRV.url ? 'Личный сервер сохранён' : 'Личный сервер отключён');
   openSrvSheet();
+}
+// Диагностика ленты: публикация → серверная проверка объекта → вердикт
+async function srvCalDiag() {
+  if (!SRV.url) { toast('Сначала сохраните URL и секрет', true); return; }
+  toast('Диагностика: публикую и проверяю…');
+  const b = await icsBuild();
+  const pub = await srvCall('ics', { ics: b.ics });
+  if (!pub || !pub.ok) {
+    toast('Публикация не удалась: ' + (pub ? (pub.error === 'auth' ? 'неверный секрет' : pub.error) : 'нет связи'), true);
+    return;
+  }
+  const chk = await srvCall('calcheck');
+  if (!chk) { toast('Нет связи с сервером', true); return; }
+  if (!chk.ok) { toast('Хранилище: ' + chk.error, true); return; }
+  if (!chk.exists) { toast('Файл не найден после записи — проверьте BUCKET и создайте версию функции', true); return; }
+  showSheet(`
+    <h3>🩺 Диагностика ленты</h3>
+    <div class="card" style="border-left:3px solid var(--sig-green);margin-bottom:10px">
+      <div class="title" style="font-size:14px">✓ Лента опубликована и читается сервером</div>
+      <div class="meta" style="margin-top:4px">Заседаний в ленте: ${chk.events} · размер: ${Math.round((chk.bytes||0)/102.4)/10} КБ</div>
+    </div>
+    <div class="meta" style="margin-bottom:8px">Сервер и хранилище в порядке. Если календарь всё ещё пуст — проверьте два оставшихся звена:</div>
+    <div class="card" style="margin-bottom:8px"><div class="meta"><b>1. Ссылка.</b> Откройте адрес подписки в обычном браузере — должен показаться текст, начинающийся с BEGIN:VCALENDAR. Если там 404 — в спецификации шлюза опечатка в строке object: 'cal-{secret}.ics' или в имени бакета; поправьте и сохраните шлюз.</div></div>
+    <div class="card"><div class="meta"><b>2. Подписка.</b> Ссылку нужно один раз добавить в календарь («по URL»). Google подтягивает подписки редко — до суток; для быстрой проверки добавьте её в Яндекс.Календарь или в календарь телефона.</div></div>
+    <button class="btn-ghost" style="margin-top:10px" onclick="copyText('${esc(srvSubUrl())}','Адрес подписки скопирован')">📋 Копировать адрес подписки</button>
+    <button class="btn-ghost" onclick="openSrvSheet()">← Назад</button>
+  `);
 }
 async function srvPing() {
   if (!SRV.url) { toast('Укажите URL и сохраните', true); return; }
@@ -8216,11 +8244,10 @@ async function renderMail() {
   const actions = `
     <div style="margin-bottom:14px">
       <button class="btn-primary" style="margin-top:0" onclick="mailRefreshAll()">📦 Обновить статусы отправлений</button>
-      <button class="btn-ghost" style="margin-top:8px" onclick="openMailBridgeSheet()">${MAILBR.url?'⚙️ Мост «Почта России» подключён':'⚙️ Подключить мост «Почта России»'}</button>
     </div>`;
 
   if (!rows.length) {
-    listEl.innerHTML = actions + `<div class="empty">${all.length?`<div class="big">${ic('search',48,'empty-ico')}</div><p>Ничего не найдено по фильтру</p>`:`<div class="big">${ic('mail',48,'empty-ico')}</div><p>Добавьте отправление кнопкой «+»<br>— статусы подтянутся из Почты России<br>через мост «Почта России»</p></div>`}</div>`;
+    listEl.innerHTML = actions + `<div class="empty">${all.length?`<div class="big">${ic('search',48,'empty-ico')}</div><p>Ничего не найдено по фильтру</p>`:`<div class="big">${ic('mail',48,'empty-ico')}</div><p>Добавьте отправление кнопкой «+»<br>— статусы подтянутся из Почты России<br>через личный сервер</p></div>`}</div>`;
     return;
   }
 
