@@ -1051,7 +1051,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '132'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '133'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
 let db;
 
@@ -8392,16 +8392,31 @@ async function viewMail(id) {
 }
 
 // Обновление статусов всех отправлений через мост → API Почты России
+// Финальный статус: вручено адресату или отправителю (возврат). Такие треки
+// больше не запрашиваем — бережём дневной лимит API Почты (~100 запросов).
+// «Неудачная попытка вручения» финалом не считается.
+function mailIsDelivered(m) {
+  // [а-яё] вместо \w: \w в JS не матчит кириллицу — урок из автотеста
+  return /вручен[а-яё]*\s+(адресату|отправителю)/i.test(String((m && m.status) || ''));
+}
+
 async function mailRefreshAll() {
   const mail = await getAll('mail');
   if (!mail.length) { toast('Сначала добавьте трек-номера', true); return; }
   if (!MAILBR.url && !SRV.url) { toast('Подключите «Личный сервер» или мост «Почта России»: Настройки → Синхронизация', true); return; }
+  const withCode = mail.filter(m => m.barcode);
+  const toTrack = withCode.filter(m => !mailIsDelivered(m));
+  const skipped = withCode.length - toTrack.length;
+  if (!toTrack.length) {
+    toast(skipped ? `Все отправления уже вручены (${skipped}) — запросы к Почте не расходуем` : 'Нет трек-номеров для проверки', skipped === 0);
+    return;
+  }
   toast('Запрашиваю Почту России...');
-  const j = await mailBridgeCall('track', { barcodes: mail.map(m=>m.barcode) });
+  const j = await mailBridgeCall('track', { barcodes: toTrack.map(m=>m.barcode) });
   if (!j) return;
   if (!j.ok) { toast(j.error==='auth'?'Неверный секретный код':'Мост: '+(j.error||'ошибка')+'. Проверьте логин/пароль API в скрипте', true); return; }
   let updated = 0;
-  for (const m of mail) {
+  for (const m of toTrack) {
     const res = (j.results||{})[m.barcode];
     if (!res || !res.length) continue;
     const last = res[res.length-1];
@@ -8410,9 +8425,10 @@ async function mailRefreshAll() {
   }
   const errKeys = Object.keys(j.errors || {});
   const errCnt = errKeys.length;
-  if (updated && !errCnt) toast(`Обновлено отправлений: ${updated}`);
-  else if (updated || errCnt) toast(`Обновлено: ${updated}${errCnt ? ` · ошибок: ${errCnt} (${(j.errors[errKeys[0]]||'').slice(0,60)})` : ''}`, errCnt > 0);
-  else toast('Новых данных нет — проверьте трек-номера');
+  const skipNote = skipped ? ` · вручённых пропущено: ${skipped}` : '';
+  if (updated && !errCnt) toast(`Обновлено отправлений: ${updated}${skipNote}`);
+  else if (updated || errCnt) toast(`Обновлено: ${updated}${errCnt ? ` · ошибок: ${errCnt} (${(j.errors[errKeys[0]]||'').slice(0,60)})` : ''}${skipNote}`, errCnt > 0);
+  else toast(`Новых данных нет${skipNote} — проверьте трек-номера`);
   renderMail();
 }
 
