@@ -922,6 +922,9 @@
     <div class="kpi orange" onclick="nav('finance')" style="cursor:pointer"><div class="label">К получению, ₽</div><div class="value" id="rep-debt" style="font-size:20px">0</div></div>
   </div>
   <div class="kpi-grid" style="grid-template-columns:1fr">
+    <div class="kpi green"><div class="label" id="rep-year-label">Доход за год</div><div class="value" id="rep-year" style="font-size:20px">0</div></div>
+  </div>
+  <div class="kpi-grid" style="grid-template-columns:1fr">
     <div class="kpi purple" onclick="nav('finance')" style="cursor:pointer"><div class="label">Выставлено счетов, ₽</div><div class="value" id="rep-billed" style="font-size:22px">0</div></div>
   </div>
 
@@ -1054,9 +1057,9 @@
 // БАЗА ДАННЫХ — IndexedDB (данные хранятся на устройстве, офлайн)
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
-const DB_VER = 11; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '134'; // номер версии приложения (растёт с каждым выпуском)
-const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads'];
+const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
+const APP_VER = '137'; // номер версии приложения (растёт с каждым выпуском)
+const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
 function openDB() {
@@ -1519,6 +1522,10 @@ function openMoreSheet() {
           <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="${currentScreen===s?'var(--blue)':'currentColor'}" stroke-width="1.8">${svg}</svg>
           <div style="font-size:13px;font-weight:600;${currentScreen===s?'color:var(--blue)':''}">${label}</div>
         </div>`).join('')}
+      <div class="card" style="cursor:pointer;margin:0;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 10px" onclick="openPoaRegistry()">
+        ${ic('doc',26)}
+        <div style="font-size:13px;font-weight:600">Доверенности</div>
+      </div>
       <div class="card" style="cursor:pointer;margin:0;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 10px" onclick="openCalcSheet()">
         ${ic('tools',26)}
         <div style="font-size:13px;font-weight:600">Калькуляторы</div>
@@ -1860,6 +1867,15 @@ async function renderDashboard() {
   finance.filter(f=>f.billType==='retainer' && f.nextDue && f.status!=='Оплачено').forEach(f=>{
     const d = daysUntil(f.nextDue);
     if (d!==null && d<=5) attn.push({icon:'📅',color:d<0?'var(--red)':'var(--orange)',title:`Абонентский платёж: ${esc(f.client||f.service||'без участника')}`,sub:d<0?`просрочен ${fmtDate(f.nextDue)}`:`до ${fmtDate(f.nextDue)}`,act:`viewFinance('${f.id}')`});
+  });
+  // Доверенности: истекают в ближайшие 30 дней или уже истекли (кроме отозванных)
+  (await getAll('poa')).filter(p => !p.revoked).forEach(p => {
+    const u = poaEffUntil(p); if (!u) return;
+    const d = daysUntil(u); if (d === null || d > 30) return;
+    attn.push({ icon:'📜', color: d < 0 ? 'var(--red)' : 'var(--orange)',
+      title: `Доверенность ${d < 0 ? 'истекла' : 'истекает'}: ${esc(p.clientName || '')}`,
+      sub: d < 0 ? `${fmtDate(u)} · ${Math.abs(d)} ${plural(Math.abs(d),'день','дня','дней')} назад` : `до ${fmtDate(u)} · через ${d} ${plural(d,'день','дня','дней')}`,
+      act: `openPoaRegistry()` });
   });
   const confl = syncConflicts();
   if (confl.length) attn.unshift({icon:'⚡',color:'var(--orange)',title:`Коллизии синхронизации: ${confl.length}`,sub:'записи менялись на двух устройствах — проверьте',act:`showConflictsSheet()`});
@@ -2399,6 +2415,22 @@ async function renderReports() {
   document.getElementById('rep-income').textContent = fmtMoney(income);
   document.getElementById('rep-billed').textContent = fmtMoney(billed);
   document.getElementById('rep-debt').textContent = fmtMoney(debt);
+  // Доход за календарный год (реальные платежи) и сравнение с прошлым годом
+  {
+    const Y = new Date().getFullYear();
+    let yNow = 0, yPrev = 0;
+    finance.forEach(f => finPayments(f).forEach(pp => {
+      const yy = Number(String(pp.at || '').slice(0, 4));
+      if (yy === Y) yNow += Number(pp.sum || 0);
+      else if (yy === Y - 1) yPrev += Number(pp.sum || 0);
+    }));
+    const vEl = document.getElementById('rep-year'), lEl = document.getElementById('rep-year-label');
+    if (vEl) vEl.textContent = fmtMoney(yNow);
+    if (lEl) {
+      const pct = yPrev > 0 ? Math.round((yNow - yPrev) / yPrev * 100) : null;
+      lEl.textContent = `Доход за ${Y}` + (pct !== null ? ` · к ${Y-1}: ${pct >= 0 ? '+' : ''}${pct}%` : (yNow > 0 ? ` · в ${Y-1}: 0 ₽` : ''));
+    }
+  }
   const mEl = document.getElementById('rep-methods');
   if (mEl) mEl.innerHTML = income ? `
     <div class="money-strip" style="margin-top:8px">
@@ -3137,7 +3169,7 @@ async function collectAll() {
 // СИНХРОНИЗИРУЕМ только безопасные настройки. НЕ включаем сюда секреты
 // (токены, пароль шифрования, PIN, биометрию, привязку файла, состояние
 // синхронизации) — они привязаны к устройству и не должны попадать в файл.
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists'];
+const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min'];
 
 // Секретные настройки подключений — токены и учётные данные мостов/облаков,
 // пароль шифрования, лицензия и PIN-код. По умолчанию ВКЛЮЧЕНЫ в файл
@@ -5220,6 +5252,7 @@ async function saveCase(id) {
           // createdAt: новому делу — сейчас; при редактировании — сохранить исходную дату создания
   if (!obj.createdAt) obj.createdAt = id ? ((((await getAll('cases')).find(x=>x.id===id))||{}).createdAt || Date.now()) : Date.now();
   await put('cases', obj);
+  await stageSuggestDeadline(obj, prev?.stage);
         await maybeCreateOrderForCase(id, obj.number);
         closeSheet(); toast('Дело сохранено'); renderCases(); renderDashboard();
       };
@@ -5279,16 +5312,46 @@ async function openHearingForm(existing) {
     <div class="field"><label>Суд</label>${refSelect('f-court','courts',h.court,'—')}</div>
     <div class="field"><label>Судья</label>${refSelect('f-judge','judges',h.judge,'—')}</div>
     <div class="field"><label>Статус</label>${refSelect('f-status','hearingStatus',h.status,null)}</div>
+    <div class="field"><label>Результат</label><textarea id="f-result" rows="2" placeholder="решение, определение, отложено — на что и почему">${esc(h.result||'')}</textarea></div>
     <label style="display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:14px;cursor:pointer">
       <input type="checkbox" id="f-attended" ${(h.attended===true)?'checked':''} style="width:18px;height:18px"> Участвовал(а) лично в заседании
     </label>
     <button class="btn-primary" onclick="saveHearing('${h.id||''}')">Сохранить</button>
+    ${existing?`<button class="btn-ghost" onclick="hearingNext('${h.id}')">✅ Проведено + создать следующее</button>`:''}
+    ${existing?`<button class="btn-ghost" onclick="hearingNext('${h.id}')">✅ Проведено + следующее заседание</button>`:''}
     ${existing?`<button class="btn-ghost" onclick="removeItem('hearings','${h.id}','calendar')">Удалить</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
   `);
   // Для нового заседания с уже выбранным делом — сразу подтянуть суд и судью
   if (!existing) hearingCaseChanged(true);
 }
+// Проведено + следующее заседание: текущее закрывается, новое наследует дело/суд/судью
+async function hearingNext(id) {
+  const prev = (await getAll('hearings')).find(x => x.id === id);
+  if (!prev) return;
+  const cur = Object.assign({}, prev, {
+    caseNum: document.getElementById('f-caseNum')?.value ?? prev.caseNum,
+    date: document.getElementById('f-date')?.value || prev.date,
+    time: document.getElementById('f-time')?.value ?? prev.time,
+    court: document.getElementById('f-court')?.value ?? prev.court,
+    judge: document.getElementById('f-judge')?.value ?? prev.judge,
+    status: 'Проведено',
+    attended: document.getElementById('f-attended')?.checked ?? prev.attended,
+    result: (document.getElementById('f-result')?.value || '').trim()
+  });
+  await put('hearings', cur);
+  if (typeof gcalTouch === 'function') gcalTouch();
+  await openHearingForm();
+  const hid = document.getElementById('f-caseNum'), inp = document.getElementById('f-caseNum-q');
+  if (hid) hid.value = cur.caseNum || '';
+  if (inp) inp.value = cur.caseNum ? (caseLabel(cur.caseNum) || cur.caseNum) : '';
+  const setSel = (sid, v) => { const el = document.getElementById(sid); if (el && v) el.value = v; };
+  setSel('f-court', cur.court); setSel('f-judge', cur.judge);
+  toast('Прошлое — «Проведено». Дату и время возьмите из новой повестки');
+  if (typeof renderCalendar === 'function') renderCalendar();
+  renderDashboard(); navBadgeRefresh();
+}
+
 // ═══════ ПОИСКОВЫЙ ВЫБОР ДЕЛА ═══════
 // Сортировка дел по фамилии участника (без участника — в конец), затем по номеру
 const sortCasesByClient = arr => arr.slice().sort((a, b) =>
@@ -5503,14 +5566,15 @@ async function saveHearing(id) {
   if (!date) { toast('Укажите дату!', true); return; }
   if (!id && !(await demoAllow('hearings'))) return;
   const prev = id ? (await getAll('hearings')).find(x => x.id === id) : null;
-  const obj = {
+  const obj = Object.assign({}, prev || {}, {
     id: id || uid('С'),
     createdAt: prev?.createdAt || Date.now(),
     caseNum: document.getElementById('f-caseNum').value, date, time: document.getElementById('f-time').value,
     court: document.getElementById('f-court').value, judge: document.getElementById('f-judge').value,
     status: document.getElementById('f-status').value,
-    attended: document.getElementById('f-attended').checked
-  };
+    attended: document.getElementById('f-attended').checked,
+    result: (document.getElementById('f-result')?.value || '').trim()
+  });
   await put('hearings', obj);
   // Уведомление в Telegram и обновление Google Календаря (если подключены)
   if (typeof tgHearingNotify === 'function') tgHearingNotify(obj, !!id);
@@ -5768,8 +5832,8 @@ async function globalSearchExec() {
   if (!el) return;
   if (q.length < 2) { el.innerHTML = `<div class="empty" style="padding:20px"><p>Введите хотя бы 2 символа</p></div>`; return; }
 
-  const [cases, clients, hearings, mail, tasks, templates, leads] = await Promise.all(
-    ['cases','clients','hearings','mail','tasks','templates','leads'].map(s=>getAll(s)));
+  const [cases, clients, hearings, mail, tasks, templates, leads, poas, orders] = await Promise.all(
+    ['cases','clients','hearings','mail','tasks','templates','leads','poa','orders'].map(s=>getAll(s)));
   const hit = (...vals) => vals.filter(Boolean).join(' ').toLowerCase().includes(q);
   const groups = [];
 
@@ -5788,6 +5852,12 @@ async function globalSearchExec() {
 
   const mm = mail.filter(m=>hit(m.barcode,m.title,m.caseNum,m.status));
   if (mm.length) groups.push(['Письма', mm.map(m=>({icon:'📮',title:m.title||m.barcode,sub:[m.caseNum,m.status].filter(Boolean).join(' · '),act:`viewMail('${m.id}')`}))]);
+
+  const mpoa = poas.filter(pp=>hit(pp.clientName,pp.notary,pp.regno,pp.note,pp.caseNum));
+  if (mpoa.length) groups.push(['Доверенности', mpoa.slice(0,8).map(pp=>({icon:'📜',title:pp.clientName||'Без доверителя',sub:[pp.regno,pp.notary].filter(Boolean).join(' · ')||'доверенность',act:`openPoaForm('${pp.id}')`}))]);
+
+  const mord = orders.filter(o=>hit(o.number,o.client,o.caseNum,o.basis,o.note));
+  if (mord.length) groups.push(['Ордера', mord.slice(0,8).map(o=>({icon:'🎫',title:'Ордер' + (o.number?' № '+o.number:'') + (o.date?' от '+fmtDate(o.date):''),sub:[o.client,o.caseNum].filter(Boolean).join(' · '),act:`openOrderForm('${o.id}')`}))]);
 
   const mt = tasks.filter(t=>hit(t.title,t.caseNum,t.note));
   if (mt.length) groups.push(['Задачи', mt.slice(0,8).map(t=>({icon:t.done?'✅':'📌',title:t.title,sub:t.caseNum||'',act:`openTaskById('${t.id}')`}))]);
@@ -5883,8 +5953,21 @@ function kbCard(c, colKey) {
     ${canNext ? `<button class="kb-next" onclick="event.stopPropagation();kbNextStage('${c.id}')">→ следующая стадия</button>` : ''}
   </div>`;
 }
+// Смена стадии на обжалование → предложить типовой срок (пресеты из модуля сроков)
+async function stageSuggestDeadline(c, prevStage) {
+  if (!c || c.stage === prevStage) return;
+  const idx = { 'Апелляция': 0, 'Кассация': 1 }[c.stage];
+  if (idx === undefined) return;
+  const arr = APPEAL_PRESETS[c.kind];
+  if (!arr || !arr[idx]) return;
+  const [title, days] = arr[idx];
+  if (confirm(`Стадия «${c.stage}». Создать типовой срок: ${title} — ${days} дн от сегодняшней даты?\n\nТочку отсчёта сверьте с датой изготовления решения.`)) {
+    await presetDl(c.id, title, days);
+  }
+}
 async function kbNextStage(id) {
   const c = (await getAll('cases')).find(x => x.id === id); if (!c) return;
+  const prevStage = c.stage;
   const cur = CASE_STAGES.includes(c.stage) ? CASE_STAGES.indexOf(c.stage) : -1;
   const next = CASE_STAGES[Math.min(cur + 1, CASE_STAGES.length - 1)];
   c.stage = next;
@@ -5894,6 +5977,7 @@ async function kbNextStage(id) {
   } else toast(`Стадия: ${next}`);
   await put('cases', c);
   renderCases(); renderDashboard(); navBadgeRefresh();
+  await stageSuggestDeadline(c, prevStage);
 }
 function stageStepperHtml(c) {
   const cur = c.stage || '';
@@ -6592,6 +6676,8 @@ async function viewClient(id) {
   const owed = billed - paid;
   const log = (c.contactLog||[]).slice().sort((a,b)=>(b.at||0)-(a.at||0));
   const LOG_ICON = { 'Звонок':'📞','Встреча':'🤝','Письмо':'✉️','Сообщение':'💬','Заметка':'📝' };
+  const poas = (await getAll('poa')).filter(p => p.clientId === id)
+    .sort((a, b) => (poaEffUntil(a) || '9999').localeCompare(poaEffUntil(b) || '9999'));
   showSheet(`
     <h3>${esc(c.name)}</h3><div class="sheet-sub">${esc(c.type)}${c.role?' · '+esc(c.role):''}</div>
     <div class="detail-block">
@@ -6625,6 +6711,11 @@ async function viewClient(id) {
       <button class="btn-ghost" style="flex:1" onclick="quickCaseFor('${c.id}')">＋ Дело</button>
       <button class="btn-ghost" style="flex:1" onclick="quickFinFor('${c.id}')">＋ Счёт</button>
     </div>
+    <div class="sect-title" style="margin-top:12px">📜 Доверенности${poas.length?` · ${poas.length}`:''}</div>
+    ${poas.map(p=>`<div class="card" style="margin-bottom:6px;cursor:pointer" onclick="openPoaForm('${p.id}',null,'client')">
+      <div class="meta">${poaBadge(p)}${p.notary?` · ${esc(p.notary)}`:''}</div>
+    </div>`).join('')}
+    <button class="btn-ghost" style="margin-bottom:10px" onclick="openPoaForm(null,'${c.id}','client')">＋ Доверенность</button>
     <button class="btn-primary" onclick="openClientDocs('${c.id}')">${ic('doc',16)} Документы (соглашение и др.)</button>
     <button class="btn-primary" onclick="openClientForm(${JSON.stringify(c).replace(/"/g,'&quot;')})">Редактировать</button>
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
@@ -10555,6 +10646,199 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ── Настройки безопасности ──
+// ═══════ ДОВЕРЕННОСТИ: реестр с контролем сроков (ст. 186 ГК) ═══════
+let poaFilter = 'act';
+function addYearsISO(iso, n) {
+  const d = new Date(iso + 'T00:00:00'); if (isNaN(d)) return '';
+  d.setFullYear(d.getFullYear() + n);
+  const p2 = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+}
+// Срок не указан → по ст. 186 ГК доверенность действует год с даты выдачи
+function poaEffUntil(p) {
+  if (p.until) return p.until;
+  if (p.issued) return addYearsISO(p.issued, 1);
+  return '';
+}
+function poaState(p) {
+  if (p.revoked) return 'rev';
+  const u = poaEffUntil(p);
+  if (!u) return 'nodate';
+  const d = daysUntil(u);
+  if (d === null) return 'nodate';
+  if (d < 0) return 'exp';
+  if (d <= 30) return 'soon';
+  return 'act';
+}
+function poaBadge(p) {
+  const st = poaState(p), u = poaEffUntil(p);
+  const d = u ? daysUntil(u) : null;
+  const lawNote = !p.until && p.issued ? ' (ст. 186 ГК)' : '';
+  if (st === 'rev') return `<span style="color:var(--text-faint)">отозвана</span>`;
+  if (st === 'nodate') return `<span style="color:var(--text-faint)">без дат</span>`;
+  if (st === 'exp') return `<span style="color:var(--red);font-weight:700">истекла ${fmtDate(u)}${lawNote}</span>`;
+  if (st === 'soon') return `<span style="color:var(--orange);font-weight:700">до ${fmtDate(u)} · ${d} ${plural(d,'день','дня','дней')}${lawNote}</span>`;
+  return `<span style="color:var(--sig-green)">до ${fmtDate(u)}${lawNote}</span>`;
+}
+async function openPoaRegistry() {
+  const poas = await getAll('poa');
+  const counts = { act: 0, soon: 0, exp: 0, rev: 0 };
+  poas.forEach(p => { const st = poaState(p); if (st === 'soon') { counts.soon++; counts.act++; } else if (counts[st] !== undefined) counts[st]++; else counts.act++; });
+  const flt = p => {
+    const st = poaState(p);
+    if (poaFilter === 'act') return st === 'act' || st === 'soon' || st === 'nodate';
+    if (poaFilter === 'soon') return st === 'soon';
+    if (poaFilter === 'exp') return st === 'exp';
+    if (poaFilter === 'rev') return st === 'rev';
+    return true;
+  };
+  const shown = poas.filter(flt).sort((a, b) => (poaEffUntil(a) || '9999') .localeCompare(poaEffUntil(b) || '9999'));
+  const chip = (k, l, n) => `<div class="chip ${poaFilter===k?'active':''}" onclick="poaFilter='${k}';openPoaRegistry()">${l}${n?` · ${n}`:''}</div>`;
+  showSheet(`
+    <h3>📜 Доверенности</h3>
+    <div class="sheet-sub">Реестр с контролем сроков. Если срок не указан — действует год с даты выдачи (ст. 186 ГК).</div>
+    <div class="chips" style="flex-wrap:wrap;overflow:visible">
+      ${chip('act','Действующие',counts.act)}${chip('soon','Истекают ≤30 дн',counts.soon)}${chip('exp','Истёкшие',counts.exp)}${chip('rev','Отозванные',counts.rev)}${chip('all','Все',poas.length)}
+    </div>
+    ${shown.length ? shown.map(p => `
+      <div class="card" style="margin-bottom:8px;cursor:pointer" onclick="openPoaForm('${p.id}')">
+        <div class="title" style="font-size:14.5px">${esc(p.clientName || 'Без доверителя')}</div>
+        <div class="meta" style="margin-top:3px">${poaBadge(p)}${p.notary?` · ${esc(p.notary)}`:''}</div>
+        ${p.regno?`<div class="meta">реестр. № ${copyHtml(p.regno,'Реестровый номер скопирован')}</div>`:''}
+      </div>`).join('') : `<div class="empty" style="padding:24px 0"><p>Пока пусто — добавьте первую доверенность</p></div>`}
+    <button class="btn-primary" onclick="openPoaForm()">＋ Доверенность</button>
+    ${poas.length?`<button class="btn-ghost" onclick="printPoaRegistry()">🖨 Печать реестра</button>`:''}
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
+  `);
+}
+let POA_CL = [], POA_CL_SHOWN = [];
+function poaClFilter(inp) {
+  const list = document.getElementById('p-client-list'); if (!list) return;
+  const q = (inp.value || '').trim().toLowerCase();
+  POA_CL_SHOWN = POA_CL.filter(c => !q || (c.name || '').toLowerCase().includes(q)).slice(0, 30);
+  list.innerHTML = POA_CL_SHOWN.length
+    ? POA_CL_SHOWN.map((c, i) => `<div class="cp-item" onmousedown="poaClPick(${i})"><div class="cp-t">${esc(c.name)}</div>${c.role?`<div class="cp-s">${esc(c.role)}</div>`:''}</div>`).join('')
+    : `<div class="cp-none">Не найдено — участник создаётся в разделе «Участники»</div>`;
+  list.style.display = 'block';
+}
+function poaClPick(i) {
+  const c = POA_CL_SHOWN[i]; if (!c) return;
+  document.getElementById('p-client-id').value = c.id;
+  document.getElementById('p-client-q').value = c.name;
+  document.getElementById('p-client-list').style.display = 'none';
+}
+function poaClHide() { setTimeout(() => { const l = document.getElementById('p-client-list'); if (l) l.style.display = 'none'; }, 180); }
+function poaYears(inputId, n) {
+  const base = document.getElementById('p-issued')?.value || todayISO();
+  const el = document.getElementById(inputId);
+  if (el) { el.value = addYearsISO(base, n); toast('Срок: ' + fmtDate(el.value)); }
+}
+async function openPoaForm(id, presetClientId, backType) {
+  const p = id ? (await getAll('poa')).find(x => x.id === id) || {} : {};
+  const clientsAll = await getAll('clients');
+  POA_CL = clientsAll.slice().sort((a, b) => String(a.name||'\uFFFF').localeCompare(String(b.name||'\uFFFF'), 'ru')).map(c => ({ id: c.id, name: c.name || '', role: c.role || '' }));
+  const curId = p.clientId || presetClientId || '';
+  const curName = (clientsAll.find(c => c.id === curId) || {}).name || p.clientName || '';
+  const cases = await getAll('cases');
+  cpxRegister('p-case', cpxCaseItems(cases));
+  const curCase = cpxLabelFor(cases, p.caseNum);
+  window._poaBack = backType === 'client' ? `viewClient('${curId || presetClientId}')` : 'openPoaRegistry()';
+  showSheet(`
+    <h3>${id ? 'Изменить доверенность' : 'Новая доверенность'}</h3>
+    <div class="field" style="position:relative"><label>Доверитель <span class="req">*</span></label>
+      <input id="p-client-q" value="${esc(curName)}" placeholder="Поиск по фамилии…" autocomplete="off" oninput="poaClFilter(this)" onfocus="poaClFilter(this)" onblur="poaClHide()">
+      <input type="hidden" id="p-client-id" value="${esc(curId)}">
+      <div class="cp-list" id="p-client-list" style="display:none"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>Дата выдачи</label><input id="p-issued" type="date" value="${p.issued||''}"></div>
+      <div class="field"><label>Действует до</label><input id="p-until" type="date" value="${p.until||''}"></div>
+    </div>
+    <div class="chips" style="flex-wrap:wrap;overflow:visible;margin-top:-6px">
+      ${[[1,'1 год'],[3,'3 года'],[5,'5 лет'],[10,'10 лет']].map(([n,l])=>`<div class="chip" onclick="poaYears('p-until',${n})">${l}</div>`).join('')}
+    </div>
+    <div class="meta" style="margin:-6px 0 10px">Оставьте «до» пустым — применится ст. 186 ГК: год с даты выдачи</div>
+    <div class="field"><label>Кем удостоверена</label><input id="p-notary" value="${esc(p.notary||'')}" placeholder="нотариус Иванова И.И., г. Ковров / ст. 53 ГПК"></div>
+    <div class="field"><label>Реестровый №</label><input id="p-regno" value="${esc(p.regno||'')}" placeholder="33/45-н/33-2026-1-234"></div>
+    <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('p-case', p.caseNum||'', curCase)}</div>
+    <div class="field"><label>Полномочия / заметка</label><textarea id="p-note" rows="2" placeholder="объём полномочий, особые условия">${esc(p.note||'')}</textarea></div>
+    <label style="display:flex;align-items:center;gap:10px;font-size:14px;margin-bottom:12px;cursor:pointer">
+      <input type="checkbox" id="p-revoked" ${p.revoked?'checked':''} style="width:18px;height:18px"> Доверенность отозвана
+    </label>
+    <button class="btn-primary" onclick="savePoa('${id||''}')">Сохранить</button>
+    ${id?`<button class="btn-ghost" style="color:var(--red)" onclick="deletePoa('${id}')">Удалить</button>`:''}
+    <button class="btn-ghost" onclick="${window._poaBack}">Отмена</button>
+  `);
+}
+async function savePoa(id) {
+  const clientId = document.getElementById('p-client-id').value;
+  const clientsAll = await getAll('clients');
+  const cl = clientsAll.find(c => c.id === clientId);
+  if (!cl) { toast('Выберите доверителя из списка', true); return; }
+  if (!id && !(await demoAllow('poa'))) return;
+  const prev = id ? (await getAll('poa')).find(x => x.id === id) || {} : {};
+  const obj = Object.assign({}, prev, {
+    id: id || uid('ДВ'),
+    clientId, clientName: cl.name || '',
+    issued: document.getElementById('p-issued').value || '',
+    until: document.getElementById('p-until').value || '',
+    notary: (document.getElementById('p-notary').value || '').trim(),
+    regno: (document.getElementById('p-regno').value || '').trim(),
+    caseNum: document.getElementById('p-case').value || '',
+    note: (document.getElementById('p-note').value || '').trim(),
+    revoked: document.getElementById('p-revoked').checked,
+    createdAt: prev.createdAt || Date.now()
+  });
+  await put('poa', obj);
+  toast(id ? 'Доверенность обновлена' : 'Доверенность добавлена');
+  eval(window._poaBack);
+}
+async function deletePoa(id) {
+  if (!confirm('Удалить доверенность из реестра?')) return;
+  await del('poa', id);
+  toast('Доверенность удалена');
+  eval(window._poaBack);
+}
+async function printPoaRegistry() {
+  const poas = (await getAll('poa')).sort((a,b)=>(poaEffUntil(a)||'9999').localeCompare(poaEffUntil(b)||'9999'));
+  const rows = poas.map((p,i)=>`<tr><td>${i+1}</td><td>${esc(p.clientName||'')}</td><td>${p.issued?fmtDate(p.issued):'—'}</td><td>${poaEffUntil(p)?fmtDate(poaEffUntil(p)):'—'}${!p.until&&p.issued?'<br><small>ст. 186 ГК</small>':''}</td><td>${esc(p.notary||'—')}</td><td>${esc(p.regno||'—')}</td><td>${esc(p.caseNum||'—')}</td><td>${p.revoked?'отозвана':poaState(p)==='exp'?'истекла':'действует'}</td></tr>`).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Реестр доверенностей</title>
+    <style>body{font-family:'Times New Roman',serif;padding:24px;color:#111}h1{font-size:18px;text-align:center}table{width:100%;border-collapse:collapse;font-size:12.5px}th,td{border:1px solid #444;padding:5px 7px;vertical-align:top}th{background:#eee}small{color:#555}</style>
+    </head><body><h1>Реестр доверенностей</h1>
+    <p style="font-size:12px">Сформировано: ${fmtDate(todayISO())}. Доверенности без указанного срока действуют один год с даты совершения (п. 1 ст. 186 ГК РФ).</p>
+    <table><tr><th>№</th><th>Доверитель</th><th>Выдана</th><th>Действует до</th><th>Удостоверена</th><th>Реестровый №</th><th>Дело</th><th>Статус</th></tr>${rows}</table>
+    ` + '<'+'scr'+'ipt>window.print();<'+'/scr'+'ipt>' + `</body></html>`;
+  const w = window.open('', '_blank');
+  w.document.write(html); w.document.close();
+}
+
+// ── АВТОБЛОКИРОВКА ПРИ НЕАКТИВНОСТИ: отошли от устройства — экран под замком ──
+let _alTimer = null;
+function autolockFire() {
+  const el = document.getElementById('lockScreen');
+  if (!el || el.classList.contains('show')) return; // уже заблокировано
+  _lockBuffer = '';
+  if (typeof lockRenderDots === 'function') lockRenderDots();
+  el.classList.add('show');
+}
+function autolockArm() {
+  clearTimeout(_alTimer);
+  const min = Number(localStorage.getItem('crm_autolock_min') || 0);
+  if (!min || !LOCK.enabled) return;
+  _alTimer = setTimeout(autolockFire, min * 60000);
+}
+function autolockSave(v) {
+  v = String(Number(v) || 0);
+  if (v === '0') localStorage.removeItem('crm_autolock_min');
+  else localStorage.setItem('crm_autolock_min', v);
+  if (typeof bumpSettings === 'function') bumpSettings();
+  autolockArm();
+  toast(v === '0' ? 'Автоблокировка выключена' : `Автоблокировка: через ${v} мин неактивности`);
+}
+['pointerdown', 'keydown', 'touchstart'].forEach(ev =>
+  document.addEventListener(ev, () => autolockArm(), { capture: true, passive: true }));
+autolockArm(); // взвод при запуске
+
 async function openSecuritySheet() {
   const bioAvail = await bioAvailable();
   showSheet(`
@@ -10568,6 +10852,12 @@ async function openSecuritySheet() {
         <label style="display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px;cursor:pointer">
           <input type="checkbox" ${LOCK.bio?'checked':''} onchange="toggleBio(this)" style="width:18px;height:18px"> Вход по биометрии (отпечаток / Face ID)
         </label>` : `<div class="meta" style="margin-top:10px">Биометрия на этом устройстве недоступна.</div>`}
+      </div>
+      <div class="field" style="margin-top:4px"><label>Автоблокировка при неактивности</label>
+        <select onchange="autolockSave(this.value)">
+          ${[[0,'Выключена'],[1,'Через 1 минуту'],[3,'Через 3 минуты'],[5,'Через 5 минут'],[10,'Через 10 минут']].map(([v,l])=>`<option value="${v}" ${Number(localStorage.getItem('crm_autolock_min')||0)===v?'selected':''}>${l}</option>`).join('')}
+        </select>
+        <div class="meta" style="margin-top:4px">Экран заблокируется сам, если отойти от устройства — открытый ноутбук в суде больше не риск</div>
       </div>
       <button class="btn-ghost" onclick="openPinSetup()">Изменить PIN-код</button>
       <button class="btn-ghost" onclick="confirmLockOff()" style="color:var(--red)">Отключить защиту</button>
