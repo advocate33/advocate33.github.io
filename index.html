@@ -1058,7 +1058,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '137'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '139'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
@@ -3169,7 +3169,7 @@ async function collectAll() {
 // СИНХРОНИЗИРУЕМ только безопасные настройки. НЕ включаем сюда секреты
 // (токены, пароль шифрования, PIN, биометрию, привязку файла, состояние
 // синхронизации) — они привязаны к устройству и не должны попадать в файл.
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min'];
+const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on'];
 
 // Секретные настройки подключений — токены и учётные данные мостов/облаков,
 // пароль шифрования, лицензия и PIN-код. По умолчанию ВКЛЮЧЕНЫ в файл
@@ -6063,6 +6063,27 @@ async function viewCase(id, tab) {
       ${hearingsDone?`<div class="detail-row"><span class="k">Участвовал лично</span><span class="v">✅ ${hearingsAttended} из ${hearingsDone}</span></div>`:''}
       <div class="detail-row"><span class="k">Сумма</span><span class="v">${fmtMoney(c.amount)}</span></div>
     </div>
+    ${caseHearings.length?`
+    <div class="sect-title">⚖️ Заседания</div>
+    <div class="detail-block">
+      ${(()=>{
+        const key = h => (h.date||'') + 'T' + (h.time||'');
+        const up = caseHearings.filter(h => isPlanned(h) && (daysUntil(h.date) ?? -1) >= 0)
+          .sort((a,b)=>key(a).localeCompare(key(b)));
+        const upIds = new Set(up.map(h=>h.id));
+        const past = caseHearings.filter(h => !upIds.has(h.id))
+          .sort((a,b)=>key(b).localeCompare(key(a)));
+        const near = d => { const n = daysUntil(d); return n===0?' · сегодня':n===1?' · завтра':n>1?` · через ${n} дн`:''; };
+        const line = (h, isUp) => `<div class="detail-row" style="cursor:pointer" onclick="viewHearing('${h.id}')">
+            <span class="k">${isUp?'Назначено':esc(h.status||'Проведено')}</span>
+            <span class="v" style="text-align:right">${isUp
+              ? `<span style="color:var(--blue);font-weight:600">${fmtDate(h.date)}${h.time?' · '+esc(String(h.time).slice(0,5)):''}${near(h.date)}</span>`
+              : `${fmtDate(h.date)}${h.time?' · '+esc(String(h.time).slice(0,5)):''}${h.attended?' ✅':''}`}${!isUp&&h.result?`<br><span style="font-size:12px;color:var(--text-faint)">${esc(String(h.result).slice(0,60))}${String(h.result).length>60?'…':''}</span>`:''}</span>
+          </div>`;
+        return up.map(h=>line(h,true)).join('') + past.map(h=>line(h,false)).join('');
+      })()}
+    </div>`:''}
+    <button class="btn-ghost" style="margin-bottom:12px" onclick="hearingFormForCase('${(c.number||'').replace(/'/g,'')}')">＋ Заседание по делу</button>
     <div class="sect-title">Участник</div>
     <div class="detail-block">
       <div class="detail-row"><span class="k">Участник</span><span class="v">${esc(c.client||'—')}</span></div>
@@ -7191,6 +7212,7 @@ let cloudPushTimer = null, cloudLoopTimer = null, cloudBusy = false;
 // Вызывается из put()/del() при любом изменении данных
 function cloudTouch() {
   if (typeof fsyncTouch === 'function') fsyncTouch(); // запись в привязанный файл синхронизации (если включён)
+  if (typeof srvdbTouch === 'function') srvdbTouch(); // и на личный сервер (если включён)
 }
 
 async function pushCloud() {
@@ -7911,6 +7933,13 @@ function openSrvSheet() {
     <button class="btn-ghost" onclick="srvPing()">📡 Проверить связь</button>
     <button class="btn-ghost" onclick="srvIcsPush(false)">📤 Опубликовать календарь сейчас</button>
     <button class="btn-ghost" onclick="srvCalDiag()">🩺 Диагностика календарной ленты</button>
+    <div class="card" style="margin-top:12px">
+      <div class="title" style="font-size:14px">⚡ Синхронизация базы через сервер ${SRVDB.on?'<span style="color:var(--sig-green);font-size:12px">● включена</span>':''}</div>
+      <div class="meta" style="margin:4px 0 8px">Зашифрованный дамп хранится в вашем Object Storage; устройства видят изменения за 5–20 секунд. Пароль шифрования — общий с Яндекс.Диском; сервер видит только шифротекст.</div>
+      <button class="${SRVDB.on?'btn-ghost':'btn-primary'}" onclick="srvdbToggle(${SRVDB.on?'false':'true'})">${SRVDB.on?'Выключить':'⚡ Включить'}</button>
+      ${SRVDB.on?`<div class="meta" style="margin-top:8px">${(()=>{const t=SRVDB.lastAt?new Date(SRVDB.lastAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'}):'ещё не было';return 'Последний обмен: '+t+(SRVDB.dirty?' · есть неотправленные изменения':'');})()}</div>
+      <button class="btn-ghost" style="margin-top:6px" onclick="srvdbPull(true)">↕️ Синхронизировать сейчас</button>`:''}
+    </div>
     ${sub ? `<div class="card" style="margin-top:10px">
       <div class="title" style="font-size:13.5px;margin-bottom:4px">Адрес подписки календаря</div>
       <div class="meta" style="word-break:break-all">${esc(sub)}</div>
@@ -7962,6 +7991,92 @@ async function srvPing() {
     const rdy = j.ready || {};
     toast(`Связь есть ✓ Почта: ${rdy.pochta ? 'настроена' : 'нет'} · Хранилище: ${rdy.storage ? 'настроено' : 'нет'}`);
   } else toast(j && j.error === 'auth' ? 'Неверный секретный код' : 'Нет связи: ' + ((j && j.error) || 'проверьте URL'), true);
+}
+
+// ═══════ СИНХРОНИЗАЦИЯ БАЗЫ ЧЕРЕЗ ЛИЧНЫЙ СЕРВЕР (третий транспорт) ═══════
+// Тот же шифроконтейнер и пароль, что у Яндекс.Диска; сервер хранит только шифротекст.
+const SRVDB = {
+  get on()     { return localStorage.getItem('crm_srvdb_on') === '1'; },
+  set on(v)    { v ? localStorage.setItem('crm_srvdb_on','1') : localStorage.removeItem('crm_srvdb_on'); },
+  get pass()   { return localStorage.getItem('crm_sync_pass') || ''; },
+  get ver()    { return Number(localStorage.getItem('crm_srvdb_ver') || 0); },
+  set ver(v)   { localStorage.setItem('crm_srvdb_ver', String(v)); },
+  get dirty()  { return localStorage.getItem('crm_srvdb_dirty') === '1'; },
+  set dirty(v) { v ? localStorage.setItem('crm_srvdb_dirty','1') : localStorage.removeItem('crm_srvdb_dirty'); },
+  get lastAt() { return Number(localStorage.getItem('crm_srvdb_lastat') || 0); },
+  set lastAt(v){ localStorage.setItem('crm_srvdb_lastat', String(v)); }
+};
+let srvdbPushTimer = null, srvdbLoopTimer = null, srvdbBusy = false;
+function srvdbEnabled() { return SRVDB.on && SRV.url && SRV.secret && SRVDB.pass; }
+function srvdbTouch() {
+  if (!srvdbEnabled()) return;
+  SRVDB.dirty = true;
+  clearTimeout(srvdbPushTimer);
+  srvdbPushTimer = setTimeout(() => srvdbPush().catch(()=>{}), 4000);
+}
+async function srvdbPush() {
+  if (!srvdbEnabled() || srvdbBusy) return;
+  srvdbBusy = true;
+  try {
+    const dump = await collectAll();
+    const enc  = await encryptDump(dump, SRVDB.pass);
+    const j = await srvCall('dbput', { data: enc });
+    if (j && j.ok) { SRVDB.ver = j.ver; SRVDB.dirty = false; SRVDB.lastAt = Date.now(); }
+  } finally { srvdbBusy = false; }
+}
+async function srvdbPull(force) {
+  if (!srvdbEnabled() || srvdbBusy) return;
+  srvdbBusy = true;
+  try {
+    const v = await srvCall('dbver');
+    if (!v || !v.ok) { srvdbBusy = false; return; }
+    if (!v.ver) { srvdbBusy = false; if (SRVDB.dirty || force) await srvdbPush(); return; }
+    if (!force && v.ver === SRVDB.ver) { srvdbBusy = false; if (SRVDB.dirty) await srvdbPush(); return; }
+    const g = await srvCall('dbget');
+    if (!g || !g.ok || !g.data) { srvdbBusy = false; return; }
+    let dump;
+    try { dump = await decryptDump(g.data, SRVDB.pass); }
+    catch(e) { toast('Сервер-синк: не расшифровать — проверьте пароль шифрования', true); srvdbBusy = false; return; }
+    if (!dump || dump._fmt !== SYNC_FMT || !dump.data) { srvdbBusy = false; return; }
+    const { added, updated } = await mergeIncoming(dump);
+    SRVDB.ver = v.ver; SRVDB.lastAt = Date.now();
+    if (added || updated) {
+      await loadRefs();
+      const cur = document.querySelector('.navbar button.active')?.dataset.screen || 'dashboard';
+      nav(cur);
+      toast(`⚡ Сервер: +${added} нов., ${updated} обновл.`);
+    }
+    srvdbBusy = false;
+    if (SRVDB.dirty) await srvdbPush();
+  } catch(e) { srvdbBusy = false; }
+}
+function srvdbLoopStart() {
+  srvdbLoopStop();
+  if (srvdbEnabled()) srvdbLoopTimer = setInterval(() => srvdbPull().catch(()=>{}), 15000);
+}
+function srvdbLoopStop() { if (srvdbLoopTimer) { clearInterval(srvdbLoopTimer); srvdbLoopTimer = null; } }
+srvdbLoopStart();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') srvdbPull().catch(()=>{}); });
+window.addEventListener('online', () => srvdbPull(true).catch(()=>{}));
+async function srvdbToggle(on) {
+  if (on) {
+    if (!SRV.url || !SRV.secret) { toast('Сначала сохраните URL и секрет сервера', true); openSrvSheet(); return; }
+    if (!SRVDB.pass) {
+      const pw = prompt('Пароль шифрования базы (тот же, что для Яндекс.Диска, либо задайте новый):');
+      if (!pw) { openSrvSheet(); return; }
+      localStorage.setItem('crm_sync_pass', pw);
+    }
+    SRVDB.on = true;
+    srvdbLoopStart();
+    toast('Синхронизация через сервер включена');
+    srvdbPull(true).catch(()=>{});
+  } else {
+    SRVDB.on = false;
+    srvdbLoopStop();
+    toast('Синхронизация через сервер выключена');
+  }
+  if (typeof bumpSettings === 'function') bumpSettings();
+  openSrvSheet();
 }
 
 const GCAL = {
@@ -8412,6 +8527,17 @@ async function mailFormForLead(leadId) {
 }
 
 // Новое отправление с предвыбранным делом (из карточки дела)
+// Новое заседание из карточки дела: дело, суд и судья подставляются сами
+async function hearingFormForCase(caseNum) {
+  await openHearingForm();
+  if (!caseNum) return;
+  const hid = document.getElementById('f-caseNum');
+  const inp = document.getElementById('f-caseNum-q');
+  if (hid) hid.value = caseNum;
+  if (inp) inp.value = caseLabel(caseNum) || caseNum;
+  hearingCaseChanged(true);
+}
+
 async function mailFormForCase(caseNum) {
   await openMailForm();
   if (!caseNum) return;
