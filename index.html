@@ -1058,7 +1058,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '139'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '140'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
@@ -1834,7 +1834,20 @@ async function renderDashboard() {
     let daysHtml = '', total = 0;
     for (let i = 0; i < 7; i++) {
       const d = new Date(base); d.setDate(base.getDate() + i);
-      const evs = (CAL_EVENTS[isoOf(d)] || []).slice().sort((a,b)=>(a.time||'99').localeCompare(b.time||'99'));
+      let evs = (CAL_EVENTS[isoOf(d)] || []).slice().sort((a,b)=>(a.time||'99').localeCompare(b.time||'99'));
+      let hiddenPast = 0;
+      if (i === 0) { // сегодня: прошедшие по времени события скрываем
+        const now = new Date();
+        const nowMin = now.getHours() * 60 + now.getMinutes();
+        const before = evs.length;
+        evs = evs.filter(e => {
+          if (e.status === 'Проведено' || e.status === 'Отмена') return false; // закрытые — сразу
+          const m = /^(\d{2}):(\d{2})/.exec(e.time || '');
+          if (!m) return true; // без времени (задачи, сроки, ДР) — актуально весь день
+          return Number(m[1]) * 60 + Number(m[2]) + 60 > nowMin; // час люфта: идущее заседание не прячем
+        });
+        hiddenPast = before - evs.length;
+      }
       if (!evs.length && i > 0) continue; // пустые дни (кроме сегодня) не показываем
       total += evs.length;
       const label = i === 0 ? `Сегодня · ${d.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'})}`
@@ -1846,7 +1859,7 @@ async function renderDashboard() {
             <span class="ag-time">${e.time||'—'}</span>
             <span class="ag-body"><b>${e.title}</b>${e.sub?`<br><span class="ag-sub">${e.sub}</span>`:''}</span>
           </div>`).join('')
-        : `<div class="ag-empty">☕ свободно</div>`);
+        : `<div class="ag-empty">${i===0&&hiddenPast?'✔ Все события дня прошли':'☕ свободно'}</div>`);
     }
     const odHtml = overdueTasks.length ? `
       <div class="ag-day" style="color:var(--red)">Просрочено · ${overdueTasks.length}</div>
