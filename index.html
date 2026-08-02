@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '141'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '144'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
@@ -1843,7 +1843,7 @@ async function renderDashboard() {
         const nowMin = now.getHours() * 60 + now.getMinutes();
         const before = evs.length;
         evs = evs.filter(e => {
-          if (e.status === 'Проведено' || e.status === 'Отмена') return false; // закрытые — сразу
+          if (e.status === 'Проведено' || e.status === 'Отменено') return false; // закрытые — сразу
           const m = /^(\d{2}):(\d{2})/.exec(e.time || '');
           if (!m) return true; // без времени (задачи, сроки, ДР) — актуально весь день
           return Number(m[1]) * 60 + Number(m[2]) + 60 > nowMin; // час люфта: идущее заседание не прячем
@@ -3101,6 +3101,16 @@ async function renderTasks() {
 }
 function setTaskFilter(k){ taskFilter=k; renderTasks(); }
 
+// «Исполнена» прямо из формы: сохраняет правки и переключает статус штатным путём
+async function taskDoneFromForm(id) {
+  const title = (document.getElementById('t-title')?.value || '').trim();
+  if (!title) { toast('Введите название!', true); return; }
+  await saveTask(id);
+  await toggleTask(id);
+  const t = (await getAll('tasks')).find(x => x.id === id);
+  toast(t && t.done ? '✅ Задача исполнена' : '↩ Задача возвращена в работу');
+}
+
 async function toggleTask(id) {
   const all = await getAll('tasks');
   const t = all.find(x=>x.id===id);
@@ -3136,6 +3146,7 @@ async function openTaskForm(existing) {
     <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('t-case', t.caseNum, curCaseLabel)}</div>
     <div class="field"><label>Заметка</label><textarea id="t-note" rows="2">${esc(t.note||'')}</textarea></div>
     <button class="btn-primary" onclick="saveTask('${t.id||''}')">Сохранить</button>
+    ${existing?`<button class="btn-ghost" style="color:${t.done?'var(--orange)':'var(--sig-green)'};border-color:currentColor" onclick="taskDoneFromForm('${t.id}')">${t.done?'↩ Вернуть в работу':'✅ Исполнена'}</button>`:''}
     ${existing?`<button class="btn-ghost" onclick="taskToICS('${t.id}')">📅 В календарь</button>`:''}
     ${existing?`<button class="btn-ghost" onclick="removeItem('tasks','${t.id}','tasks')">Удалить</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
@@ -8431,7 +8442,7 @@ const MAIL_KIND_META = {
   transit:   { label:'В пути',     color:'var(--blue)' },
   new:       { label:'Без статуса', color:'var(--text-faint)' }
 };
-let mailChip = 'all';
+let mailChip = 'active'; // по умолчанию — только «живые» отправления
 function setMailChip(c) { mailChip = c; renderMail(); }
 
 async function renderMail() {
@@ -8444,12 +8455,12 @@ async function renderMail() {
   // Чипы-фильтры со счётчиками
   const counts = { all: all.length, delivered:0, problem:0, transit:0, new:0 };
   all.forEach(m => counts[mailStatusKind(m)]++);
+  counts.active = counts.transit + counts.problem + counts.new; // всё невручённое
   chipsEl.innerHTML = [
-    ['all', `Все ${counts.all}`],
-    ['transit', `В пути ${counts.transit}`],
-    ['delivered', `Вручено ${counts.delivered}`],
+    ['active', `Текущие ${counts.active}`],
     ['problem', `Проблемные ${counts.problem}`],
-    ['new', `Без статуса ${counts.new}`]
+    ['delivered', `Вручено ${counts.delivered}`],
+    ['all', `Все ${counts.all}`]
   ].map(([k,l])=>`<div class="chip ${mailChip===k?'active':''}" onclick="setMailChip('${k}')">${l}</div>`).join('');
 
   const q = (document.getElementById('mail-search')?.value||'').toLowerCase();
@@ -8461,7 +8472,8 @@ async function renderMail() {
     return '';
   };
   const rows = all.filter(m => {
-    if (mailChip !== 'all' && mailStatusKind(m) !== mailChip) return false;
+    if (mailChip === 'active') { if (mailStatusKind(m) === 'delivered') return false; }
+    else if (mailChip !== 'all' && mailStatusKind(m) !== mailChip) return false;
     if (!q) return true;
     return [m.barcode, m.title, m.caseNum, m.status, mailOwner(m)].join(' ').toLowerCase().includes(q);
   });
@@ -8472,7 +8484,7 @@ async function renderMail() {
     </div>`;
 
   if (!rows.length) {
-    listEl.innerHTML = actions + `<div class="empty">${all.length?`<div class="big">${ic('search',48,'empty-ico')}</div><p>Ничего не найдено по фильтру</p>`:`<div class="big">${ic('mail',48,'empty-ico')}</div><p>Добавьте отправление кнопкой «+»<br>— статусы подтянутся из Почты России<br>через личный сервер</p></div>`}</div>`;
+    listEl.innerHTML = actions + `<div class="empty">${all.length?(mailChip==='active'&&!counts.active&&counts.delivered?`<div class="big" style="font-size:44px">✔</div><p>Все отправления вручены<br>— ${counts.delivered} во вкладке «Вручено»</p>`:`<div class="big">${ic('search',48,'empty-ico')}</div><p>Ничего не найдено по фильтру</p>`):`<div class="big">${ic('mail',48,'empty-ico')}</div><p>Добавьте отправление кнопкой «+»<br>— статусы подтянутся из Почты России<br>через личный сервер</p></div>`}</div>`;
     return;
   }
 
@@ -10170,7 +10182,7 @@ function openLicenseSheet() {
   showSheet(`
     <h3>${ic("key",18)} Активация лицензии</h3>
     <div class="sheet-sub">Сейчас работает деморежим: до ${DEMO_MONTH_LIMIT} новых записей в месяц в каждом разделе (дела, участники, заседания, задачи, счета, обращения, письма). Просмотр, редактирование и все функции — без ограничений; с 1 числа лимит обновляется. Ключ снимает лимиты и работает на ${DEVICE_LIMIT} устройствах (ПК + смартфон).</div>
-    <a href="https://advocate33.github.io/kupit.html" target="_blank" rel="noopener" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;margin-bottom:12px;color:var(--brass);border-color:var(--brass)">🔑 Как получить ключ — тарифы и покупка</a>
+    <a href="kupit.html" target="_blank" rel="noopener" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;margin-bottom:12px;color:var(--brass);border-color:var(--brass)">🔑 Как получить ключ — тарифы и покупка</a>
     ${LIC.until?`<div class="card" style="margin-bottom:10px;border-color:var(--red)"><div class="meta" style="color:var(--red)">Срок лицензии «${esc(LIC.name)}» истёк ${fmtDate(LIC.until)}.</div></div>`:''}
     <div class="field"><label>Лицензионный ключ</label><textarea id="lic-key" rows="3" placeholder="Вставьте ключ из письма о покупке" style="font-family:monospace;font-size:12px"></textarea></div>
     <button class="btn-primary" onclick="licActivate()">Активировать</button>
