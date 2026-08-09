@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '144'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '145'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
@@ -4905,6 +4905,7 @@ async function openCaseForm(existing) {
   // Оппонент (другая сторона) хранится как участник дела с ролью «Ответчик» или «Истец»
   const oppPart = (c.participants||[]).find(p=>p.role==='Ответчик') || (c.participants||[]).find(p=>p.role==='Истец');
   const oppName = oppPart ? (oppPart.name||'') : '';
+  const oppInnPrefill = oppPart && oppPart.inn ? oppPart.inn : '';
   showSheet(`
     <h3>${existing?'Изменить дело':'Новое дело'}</h3>
     <div class="sheet-sub">Реквизиты участника подтянутся автоматически</div>
@@ -4990,6 +4991,12 @@ async function openCaseForm(existing) {
     <div class="field"><label>Оппонент (другая сторона)</label>
       <input id="f-opponent" value="${esc(oppName)}" placeholder="ответчик / истец — ФИО или наименование">
       <div class="meta" style="margin-top:4px">Другая сторона по делу. Сохранится как участник с ролью «Ответчик» — попадёт в документы ({{Оппонент}}) и в проверку конфликта интересов. Подробные реквизиты можно добавить на вкладке «Участники».</div>
+      <div class="field"><label>ИНН оппонента (для юрлиц и ИП)</label>
+        <div style="display:flex;gap:8px">
+          <input id="f-opp-inn" value="${esc(oppInnPrefill)}" placeholder="10 или 12 цифр — заполнит наименование" inputmode="numeric" style="flex:1">
+          <button type="button" class="btn-ghost" style="width:auto;margin-top:0;padding:0 14px;white-space:nowrap" onclick="innLookupCaseOpp()">Найти</button>
+        </div>
+      </div>
     </div>
     <div class="field-row">
       <div class="field"><label>Юрист</label>${refSelect('f-lawyer','lawyers',c.lawyer,'—')}</div>
@@ -5255,11 +5262,12 @@ async function saveCase(id) {
   };
   // Оппонент из основного поля → участник дела с ролью «Ответчик»
   const oppVal = fval('f-opponent').trim();
+  const oppInnVal = (document.getElementById('f-opp-inn')?.value || '').replace(/\D/g,'');
   obj.participants = Array.isArray(obj.participants) ? obj.participants.slice() : [];
   const oppIdx = obj.participants.findIndex(p => p.role==='Ответчик' || p.role==='Истец');
   if (oppVal) {
-    if (oppIdx >= 0) obj.participants[oppIdx] = { ...obj.participants[oppIdx], name: oppVal, role: obj.participants[oppIdx].role || 'Ответчик' };
-    else obj.participants.push({ name: oppVal, role: 'Ответчик' });
+    if (oppIdx >= 0) obj.participants[oppIdx] = { ...obj.participants[oppIdx], name: oppVal, inn: oppInnVal || obj.participants[oppIdx].inn || '', role: obj.participants[oppIdx].role || 'Ответчик' };
+    else obj.participants.push({ name: oppVal, role: 'Ответчик', inn: oppInnVal || '' });
   } else if (oppIdx >= 0) {
     // Поле очищено — убираем оппонента (но сохраняем реквизиты, если они были заполнены вручную)
     const had = obj.participants[oppIdx];
@@ -5403,6 +5411,7 @@ function phoneActions(raw, backType, backId) {
   const back = backType === 'client' ? `viewClient('${backId}')`
     : backType === 'lead' ? `viewLead('${backId}')`
     : backType === 'case' ? `viewCase('${backId}')`
+    : backType === 'hearing' ? `viewHearing('${backId}')`
     : 'closeSheet()';
   showSheet(`
     <h3>📞 ${esc(raw)}</h3>
@@ -6794,10 +6803,12 @@ async function viewHearing(id) {
   await refreshCasesCache();
   const h = (await getAll('hearings')).find(x=>x.id===id); if (!h) return;
   const c = h.caseNum ? CASES_BY_NUM[h.caseNum] : null;
+  const clientsAll = await getAll('clients');
   showSheet(`
     <h3>${esc(h.caseNum||'Заседание')}</h3><div class="sheet-sub">${fmtDate(h.date)} · ${h.time||''}</div>
     <div class="detail-block">
       ${clientByCase(h.caseNum)?`<div class="detail-row"><span class="k">Доверитель</span><span class="v">${esc(clientByCase(h.caseNum))}</span></div>`:''}
+      ${(()=>{const nm=clientByCase(h.caseNum); if(!nm) return ''; const cl=clientsAll.find(x=>x.name===nm); return cl&&cl.phone?`<div class="detail-row"><span class="k">Телефон</span><span class="v">${phoneHtml(cl.phone,'hearing',h.id)}</span></div>`:'';})()}
       <div class="detail-row"><span class="k">Суд</span><span class="v">${esc(h.court||'—')}</span></div>
       <div class="detail-row"><span class="k">Судья</span><span class="v">${esc(h.judge||'—')}</span></div>
       ${c&&c.official?`<div class="detail-row"><span class="k">Долж. лицо</span><span class="v">${esc(c.official)}</span></div>`:''}
@@ -9944,6 +9955,28 @@ async function innLookupParticipant() {
     toast(e.message==='auth' ? 'Ключ DaData не подошёл' : 'Нет связи с DaData', true);
   }
 }
+// Поиск по ИНН для оппонента в форме дела
+async function innLookupCaseOpp() {
+  const inn = (document.getElementById('f-opp-inn')?.value || '').replace(/\D/g,'');
+  if (inn.length !== 10 && inn.length !== 12) { toast('ИНН — 10 цифр (юрлицо) или 12 (ИП)', true); return; }
+  if (!DADATA.token) { toast('Сначала укажите ключ DaData: Настройки → Синхронизация → Реквизиты по ИНН', true); return; }
+  toast('Ищу в ЕГРЮЛ/ЕГРИП...');
+  try {
+    const s = await dadataParty(inn);
+    if (!s) { toast('Не найдено — проверьте ИНН', true); return; }
+    const d = s.data || {};
+    const nameEl = document.getElementById('f-opponent');
+    if (nameEl) nameEl.value = s.value || nameEl.value;
+    const status = d.state && d.state.status;
+    if (status === 'LIQUIDATED') toast('⚠️ Оппонент ЛИКВИДИРОВАН — проверьте правопреемника', true);
+    else if (status === 'LIQUIDATING') toast('⚠️ Оппонент в стадии ликвидации', true);
+    else if (status === 'BANKRUPT') toast('⚠️ Оппонент — БАНКРОТ (учтите при взыскании)', true);
+    else toast('Оппонент заполнен' + (d.ogrn ? ' · ОГРН ' + d.ogrn : ''));
+  } catch(e) {
+    toast(e.message==='auth' ? 'Ключ DaData не подошёл — проверьте его в настройках' : 'Нет связи с DaData', true);
+  }
+}
+
 // Поиск по ИНН для оппонента в обращении
 async function innLookupLeadOpp() {
   const inn = (document.getElementById('ld-opp-inn')?.value || '').replace(/\D/g,'');
