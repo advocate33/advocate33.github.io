@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '146'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '147'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
@@ -4943,6 +4943,29 @@ async function saveClient(id) {
 }
 
 // — Форма дела —
+// Перепривязка связанных записей после смены номера дела.
+// БЕЗОПАСНОЕ правило: если старый номер всё ещё принадлежит другому делу
+// (офлайн-дубль), записи НЕ трогаем — иначе заберём чужие заседания и письма.
+async function caseRelinkAfterRename(myId, oldNum, newNum) {
+  if (!oldNum || !newNum || oldNum === newNum) return;
+  const stillUsed = (await getAll('cases')).some(x => x.id !== myId && x.number === oldNum);
+  if (stillUsed) {
+    toast(`Записи со старым номером ${oldNum} остались у дела-двойника. Свои заседания/письма перепривяжите вручную через поле «Дело» в их формах`, true);
+    return;
+  }
+  let moved = 0;
+  const links = [['hearings','caseNum'],['finance','caseNum'],['mail','caseNum'],['tasks','caseNum'],
+    ['orders','caseNum'],['expenses','caseNum'],['time','caseNum'],['deposits','caseNum'],
+    ['poa','caseNum'],['files','caseNum']];
+  for (const [st, f] of links) {
+    const rows = await getAll(st);
+    for (const r of rows) {
+      if (r && r[f] === oldNum) { r[f] = newNum; await put(st, r); moved++; }
+    }
+  }
+  if (moved) toast(`Номер изменён · перепривязано записей: ${moved}`);
+}
+
 async function openCaseForm(existing) {
   const c = existing || {};
   const clients = (await getAll('clients')).sort((a,b)=>String(a.name||'').localeCompare(String(b.name||''),'ru'));
@@ -5270,6 +5293,15 @@ async function saveCase(id) {
   if (!client) { toast('Выберите участника!', true); return; }
   const status = document.getElementById('f-status').value;
   const prev = id ? (await getAll('cases')).find(x=>x.id===id) : null;
+  // Уникальность номера: офлайн-дубли лечим до сохранения, а не после
+  {
+    const _clash = (await getAll('cases')).find(x => x.id !== (id || '__') && x.number === obj.number);
+    if (_clash) {
+      const free = await nextCaseNo();
+      if (confirm(`Номер ${obj.number} уже занят делом «${_clash.client || 'без участника'}».\n\nПрисвоить свободный ${free}?`)) obj.number = free;
+      else { toast('Сохранение отменено — номера дел должны быть уникальны', true); return; }
+    }
+  }
   const obj = {
     ...(prev || {}), // сохраняем сроки, участников и прочие поля, которых нет в форме
     id: id || uid('Д'),
@@ -5337,6 +5369,7 @@ async function saveCase(id) {
   if (!obj.createdAt) obj.createdAt = id ? ((((await getAll('cases')).find(x=>x.id===id))||{}).createdAt || Date.now()) : Date.now();
   await put('cases', obj);
   await stageSuggestDeadline(obj, prev?.stage);
+  await caseRelinkAfterRename(obj.id, prev && prev.number, obj.number);
         await maybeCreateOrderForCase(id, obj.number);
         closeSheet(); toast('Дело сохранено'); renderCases(); renderDashboard();
       };
