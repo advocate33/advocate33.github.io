@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '145'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '146'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
 let db;
 
@@ -4704,11 +4704,61 @@ function openRefEditor(key) {
       ${items.length ? items.map((v,i)=>`
         <div class="card" style="margin-bottom:8px"><div class="row1">
           <div class="title" style="flex:1;font-size:14px;font-weight:600">${esc(v)}</div>
+          <button onclick="renameRefItem('${key}',${i})" style="background:var(--card2);color:var(--text-dim);border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:14px;cursor:pointer;flex-shrink:0;margin-right:6px" title="Редактировать">✎</button>
           <button onclick="removeRefItem('${key}',${i})" style="background:var(--red-l);color:var(--red);border:none;border-radius:8px;width:32px;height:32px;font-size:18px;cursor:pointer;flex-shrink:0">×</button>
         </div></div>`).join('') : `<div class="empty" style="padding:20px"><p>Список пуст</p></div>`}
     </div>
     <button class="btn-ghost" onclick="openRefsSheet()">← Назад</button>
   `);
+}
+
+// Куда дотягивается переименование значения справочника (только достоверные поля)
+const REF_PROPAGATE = {
+  judges:    [['hearings','judge'], ['cases','judge']],
+  courts:    [['hearings','court'], ['cases','court']],
+  officials: [['cases','official']],
+  services:  [['finance','service']],
+  clientRole:[['clients','role']],
+  caseKind:  [['cases','kind']],
+  caseCategory: [['cases','category']]
+};
+async function refPropagate(key, oldVal, newVal) {
+  const map = REF_PROPAGATE[key];
+  if (!map || oldVal === newVal) return 0;
+  let n = 0;
+  for (const [store, field] of map) {
+    const rows = await getAll(store);
+    for (const r of rows) {
+      if (r && r[field] === oldVal) { r[field] = newVal; await put(store, r); n++; }
+    }
+  }
+  return n;
+}
+async function renameRefItem(key, i) {
+  const items = (REF[key] || []).slice();
+  const oldVal = items[i];
+  if (oldVal === undefined) return;
+  const raw = prompt('Новое написание:', oldVal);
+  if (raw === null) return;
+  const val = raw.trim();
+  if (!val) { toast('Пустое значение — для удаления используйте ×', true); return; }
+  if (val === oldVal) return;
+  const dupIdx = items.findIndex((x, j) => j !== i && x.toLowerCase() === val.toLowerCase());
+  if (dupIdx >= 0) {
+    const keep = items[dupIdx];
+    if (!confirm(`«${keep}» уже есть в справочнике.\n\nОбъединить? Все записи со старым написанием «${oldVal}» будут переведены на «${keep}», дубль исчезнет.`)) return;
+    items.splice(i, 1);
+    await saveRef(key, items);
+    const n = await refPropagate(key, oldVal, keep);
+    toast(`Объединено с «${keep}»${n ? ` · обновлено записей: ${n}` : ''}`);
+    openRefEditor(key);
+    return;
+  }
+  items[i] = val;
+  await saveRef(key, items);
+  const n = await refPropagate(key, oldVal, val);
+  toast(`Переименовано${n ? ` · обновлено записей: ${n}` : ''}`);
+  openRefEditor(key);
 }
 
 async function addRefItem(key) {
