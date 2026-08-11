@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 13; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '154'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '155'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa','meetings'];
 let db;
 
@@ -4988,6 +4988,9 @@ async function openCaseForm(existing) {
   const oppPart = (c.participants||[]).find(p=>p.role==='Ответчик') || (c.participants||[]).find(p=>p.role==='Истец');
   const oppName = oppPart ? (oppPart.name||'') : '';
   const oppInnPrefill = oppPart && oppPart.inn ? oppPart.inn : '';
+  const oppAddrPrefill = oppPart && oppPart.addr ? oppPart.addr : '';
+  const oppOgrnPrefill = oppPart && oppPart.ogrn ? oppPart.ogrn : '';
+  const oppKppPrefill  = oppPart && oppPart.kpp  ? oppPart.kpp  : '';
   showSheet(`
     <h3>${existing?'Изменить дело':'Новое дело'}</h3>
     <div class="sheet-sub">Реквизиты участника подтянутся автоматически</div>
@@ -5078,7 +5081,11 @@ async function openCaseForm(existing) {
           <input id="f-opp-inn" value="${esc(oppInnPrefill)}" placeholder="10 или 12 цифр — заполнит наименование" inputmode="numeric" style="flex:1">
           <button type="button" class="btn-ghost" style="width:auto;margin-top:0;padding:0 14px;white-space:nowrap" onclick="innLookupCaseOpp()">Найти</button>
         </div>
+        <div class="meta" style="margin-top:5px">Наименование и адрес заполнятся из ЕГРЮЛ/ЕГРИП</div>
       </div>
+      <div class="field"><label>Адрес оппонента</label><input id="f-opp-addr" value="${esc(oppAddrPrefill)}" placeholder="заполнится по ИНН — попадёт в претензию и иск"></div>
+      <input type="hidden" id="f-opp-ogrn" value="${esc(oppOgrnPrefill)}">
+      <input type="hidden" id="f-opp-kpp" value="${esc(oppKppPrefill)}">
     </div>
     <div class="field-row">
       <div class="field"><label>Юрист</label>${refSelect('f-lawyer','lawyers',c.lawyer,'—')}</div>
@@ -5354,15 +5361,18 @@ async function saveCase(id) {
   // Оппонент из основного поля → участник дела с ролью «Ответчик»
   const oppVal = fval('f-opponent').trim();
   const oppInnVal = (document.getElementById('f-opp-inn')?.value || '').replace(/\D/g,'');
+  const oppAddrVal = (document.getElementById('f-opp-addr')?.value || '').trim();
+  const oppOgrnVal = (document.getElementById('f-opp-ogrn')?.value || '').trim();
+  const oppKppVal  = (document.getElementById('f-opp-kpp')?.value || '').trim();
   obj.participants = Array.isArray(obj.participants) ? obj.participants.slice() : [];
   const oppIdx = obj.participants.findIndex(p => p.role==='Ответчик' || p.role==='Истец');
   if (oppVal) {
-    if (oppIdx >= 0) obj.participants[oppIdx] = { ...obj.participants[oppIdx], name: oppVal, inn: oppInnVal || obj.participants[oppIdx].inn || '', role: obj.participants[oppIdx].role || 'Ответчик' };
-    else obj.participants.push({ name: oppVal, role: 'Ответчик', inn: oppInnVal || '' });
+    if (oppIdx >= 0) obj.participants[oppIdx] = { ...obj.participants[oppIdx], name: oppVal, inn: oppInnVal || obj.participants[oppIdx].inn || '', addr: oppAddrVal || obj.participants[oppIdx].addr || '', ogrn: oppOgrnVal || obj.participants[oppIdx].ogrn || '', kpp: oppKppVal || obj.participants[oppIdx].kpp || '', role: obj.participants[oppIdx].role || 'Ответчик' };
+    else obj.participants.push({ name: oppVal, role: 'Ответчик', inn: oppInnVal || '', addr: oppAddrVal || '', ogrn: oppOgrnVal || '', kpp: oppKppVal || '' });
   } else if (oppIdx >= 0) {
     // Поле очищено — убираем оппонента (но сохраняем реквизиты, если они были заполнены вручную)
     const had = obj.participants[oppIdx];
-    if (!had.inn && !had.phone && !had.note) obj.participants.splice(oppIdx, 1);
+    if (!had.inn && !had.addr && !had.phone && !had.note) obj.participants.splice(oppIdx, 1);
   }
   // Деморежим: помесячный лимит новых дел
   if (!id && !(await demoAllow('cases'))) return;
@@ -9483,7 +9493,7 @@ async function buildDocument(tpl, c) {
   }
 
   if (tpl==='pretension') return `
-    <p style="text-align:right">Кому: ${opp?esc(opp.name):'____________'}<br>От: ${esc(c.client||'____________')}${cl&&cl.addr?'<br>адрес: '+esc(cl.addr):''}</p>
+    <p style="text-align:right">Кому: ${opp?esc(opp.name):'____________'}${opp&&opp.addr?',<br>адрес: '+esc(opp.addr):''}${opp&&opp.inn?`,<br>ИНН ${esc(opp.inn)}${opp.ogrn?', ОГРН '+esc(opp.ogrn):''}`:''}<br>От: ${esc(c.client||'____________')}${cl&&cl.addr?',<br>адрес: '+esc(cl.addr):''}${cl&&cl.inn?',<br>ИНН: '+esc(cl.inn):''}</p>
     <h2 style="text-align:center">ПРЕТЕНЗИЯ</h2>
     <p>${D} г.</p>
     <p>Между ${esc(c.client||'____________')} и ${opp?esc(opp.name):'____________'} сложились правоотношения, в рамках которых ${opp?esc(opp.name):'контрагентом'} допущено нарушение обязательств, а именно: <i>[опишите нарушение]</i>.</p>
@@ -10178,11 +10188,16 @@ async function innLookupCaseOpp() {
     const d = s.data || {};
     const nameEl = document.getElementById('f-opponent');
     if (nameEl) nameEl.value = s.value || nameEl.value;
+    const addrEl = document.getElementById('f-opp-addr');
+    const addrVal = (d.address && (d.address.unrestricted_value || d.address.value)) || '';
+    if (addrEl && addrVal) addrEl.value = addrVal;
+    const ogrnEl = document.getElementById('f-opp-ogrn'); if (ogrnEl) ogrnEl.value = d.ogrn || ogrnEl.value;
+    const kppEl = document.getElementById('f-opp-kpp'); if (kppEl) kppEl.value = d.kpp || kppEl.value;
     const status = d.state && d.state.status;
     if (status === 'LIQUIDATED') toast('⚠️ Оппонент ЛИКВИДИРОВАН — проверьте правопреемника', true);
     else if (status === 'LIQUIDATING') toast('⚠️ Оппонент в стадии ликвидации', true);
     else if (status === 'BANKRUPT') toast('⚠️ Оппонент — БАНКРОТ (учтите при взыскании)', true);
-    else toast('Оппонент заполнен' + (d.ogrn ? ' · ОГРН ' + d.ogrn : ''));
+    else toast('Оппонент заполнен' + (addrVal ? ' · адрес из ЕГРЮЛ' : '') + (d.ogrn ? ' · ОГРН ' + d.ogrn : ''));
   } catch(e) {
     toast(e.message==='auth' ? 'Ключ DaData не подошёл — проверьте его в настройках' : 'Нет связи с DaData', true);
   }
