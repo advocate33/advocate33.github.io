@@ -1059,9 +1059,9 @@
 // БАЗА ДАННЫХ — IndexedDB (данные хранятся на устройстве, офлайн)
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
-const DB_VER = 12; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '148'; // номер версии приложения (растёт с каждым выпуском)
-const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa'];
+const DB_VER = 13; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
+const APP_VER = '150'; // номер версии приложения (растёт с каждым выпуском)
+const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa','meetings'];
 let db;
 
 function openDB() {
@@ -1563,6 +1563,7 @@ function openCreateMenu() {
     ['Дело','<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a2 2 0 012-2h4a2 2 0 012 2v2"/>','openCaseForm()'],
     ['Обращение','<path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="3"/><path d="M19 8v6M22 11h-6"/>','openLeadForm()'],
     ['Заседание','<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>','openHearingForm()'],
+    ['🤝 Встреча','<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/>','openMeetingForm()'],
     ['Задачу','<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>','openTaskForm()'],
     ['Участника','<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0112 0M16 3.5a3 3 0 010 5.8M21 20a6 6 0 00-4-5.6"/>','openClientForm()'],
     ['Счёт','<circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5a2 2 0 012-1.5h1a2 2 0 010 4h-1a2 2 0 000 4h1a2 2 0 002-1.5"/>','openFinanceForm()'],
@@ -2166,6 +2167,14 @@ async function calEventsByDate() {
     const dd = daysUntil(t.due);
     push(t.due, { type:'task', color: dd !== null && dd < 0 ? 'var(--red)' : 'var(--sig-green)',
       time:'', title: '✓ ' + esc(t.title||'Задача'), sub: t.caseNum ? esc(caseLabel(t.caseNum)) : '', act:`openTaskById('${t.id}')` });
+  });
+  // Встречи — голубые, кликабельные
+  (await getAll('meetings')).forEach(mt => {
+    if (!mt.date) return;
+    push(mt.date, { type:'meeting', color:'var(--blue)', time: mt.time || '',
+      title: '🤝 ' + esc(mt.with || 'Встреча'),
+      sub: [mt.place, mt.caseNum ? caseLabel(mt.caseNum) : ''].filter(Boolean).join(' · '),
+      act: `openMeetingForm('${mt.id}')` });
   });
   // Дни рождения участников — из карточки (birthDate), с возрастом; годы: прошлый/текущий/следующий
   const clientsAll = await getAll('clients');
@@ -5413,6 +5422,58 @@ async function maybeCreateOrderForCase(editingId, caseNumber) {
 }
 
 // — Форма заседания —
+// ═══════ ВСТРЕЧИ: консультации и переговоры — с выходом в календарь ═══════
+async function openMeetingForm(id) {
+  const m = id ? (await getAll('meetings')).find(x => x.id === id) || {} : {};
+  const cases = await getAll('cases');
+  cpxRegister('mt-case', cpxCaseItems(cases));
+  const curCase = cpxLabelFor(cases, m.caseNum);
+  showSheet(`
+    <h3>${id ? 'Изменить встречу' : '🤝 Новая встреча'}</h3>
+    <div class="row2">
+      <div class="field"><label>Дата <span class="req">*</span></label><input id="mt-date" type="date" value="${m.date || todayISO()}"></div>
+      <div class="field"><label>Время</label><input id="mt-time" type="time" value="${m.time || ''}"></div>
+    </div>
+    <div class="field"><label>С кем <span class="req">*</span></label><input id="mt-with" value="${esc(m.with || '')}" placeholder="доверитель, оппонент, следователь…"></div>
+    <div class="field"><label>Место</label><input id="mt-place" value="${esc(m.place || '')}" placeholder="офис, суд, СИЗО, кафе «…»"></div>
+    <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('mt-case', m.caseNum || '', curCase, 'Поиск: фамилия, № дела…')}</div>
+    <div class="field"><label>Заметка</label><textarea id="mt-note" rows="2" placeholder="повестка встречи, что взять с собой">${esc(m.note || '')}</textarea></div>
+    <button class="btn-primary" onclick="saveMeeting('${id || ''}')">Сохранить</button>
+    ${id ? `<button class="btn-ghost" style="color:var(--red)" onclick="deleteMeeting('${id}')">Удалить</button>` : ''}
+    <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
+  `);
+}
+async function saveMeeting(id) {
+  const date = document.getElementById('mt-date').value;
+  const withWho = (document.getElementById('mt-with').value || '').trim();
+  if (!date) { toast('Укажите дату встречи', true); return; }
+  if (!withWho) { toast('Укажите, с кем встреча', true); return; }
+  if (!id && !(await demoAllow('meetings'))) return;
+  const prev = id ? (await getAll('meetings')).find(x => x.id === id) || {} : {};
+  const obj = Object.assign({}, prev, {
+    id: id || uid('В'),
+    date, time: document.getElementById('mt-time').value || '',
+    with: withWho,
+    place: (document.getElementById('mt-place').value || '').trim(),
+    caseNum: document.getElementById('mt-case').value || '',
+    note: (document.getElementById('mt-note').value || '').trim(),
+    createdAt: prev.createdAt || Date.now()
+  });
+  await put('meetings', obj);
+  if (typeof gcalTouch === 'function') gcalTouch();
+  toast(id ? 'Встреча обновлена' : '🤝 Встреча создана — попадёт в календарь');
+  closeSheet();
+  renderDashboard();
+}
+async function deleteMeeting(id) {
+  if (!confirm('Удалить встречу?')) return;
+  await del('meetings', id);
+  if (typeof gcalTouch === 'function') gcalTouch();
+  toast('Встреча удалена');
+  closeSheet();
+  renderDashboard();
+}
+
 async function openHearingForm(existing) {
   const h = existing || {};
   const cases = await getAll('cases');
@@ -5950,8 +6011,8 @@ async function globalSearchExec() {
   if (!el) return;
   if (q.length < 2) { el.innerHTML = `<div class="empty" style="padding:20px"><p>Введите хотя бы 2 символа</p></div>`; return; }
 
-  const [cases, clients, hearings, mail, tasks, templates, leads, poas, orders] = await Promise.all(
-    ['cases','clients','hearings','mail','tasks','templates','leads','poa','orders'].map(s=>getAll(s)));
+  const [cases, clients, hearings, mail, tasks, templates, leads, poas, orders, meets2] = await Promise.all(
+    ['cases','clients','hearings','mail','tasks','templates','leads','poa','orders','meetings'].map(s=>getAll(s)));
   const hit = (...vals) => vals.filter(Boolean).join(' ').toLowerCase().includes(q);
   const groups = [];
 
@@ -5982,6 +6043,9 @@ async function globalSearchExec() {
 
   const mtpl = templates.filter(t=>hit(t.title,t.body));
   if (mtpl.length) groups.push(['Шаблоны документов', mtpl.map(t=>({icon:'📝',title:t.title,sub:'свой шаблон',act:`closeSheet()`}))]);
+
+  const mtHits = meets2.filter(mt=>hit(mt.with,mt.place,mt.note,mt.caseNum));
+  if (mtHits.length) groups.push(['Встречи', mtHits.slice(0,8).map(mt=>({icon:'🤝',title:esc(mt.with||'Встреча'),sub:[fmtDate(mt.date)+(mt.time?' · '+mt.time:''),mt.place].filter(Boolean).join(' · '),act:`openMeetingForm('${mt.id}')`}))]);
 
   const total = groups.reduce((a,g)=>a+g[1].length,0);
   if (!total) { el.innerHTML = `<div class="empty" style="padding:20px"><p>Ничего не найдено по запросу «${esc(q)}»</p></div>`; return; }
@@ -7196,7 +7260,7 @@ async function removeItem(store, id, screen) {
   if (!confirm('Удалить запись безвозвратно?')) return;
   await del(store, id); closeSheet(); toast('Удалено');
   // Удалённое заседание/задача должны исчезнуть и из Google Календаря
-  if ((store === 'hearings' || store === 'tasks') && typeof gcalTouch === 'function') gcalTouch();
+  if ((store === 'hearings' || store === 'tasks' || store === 'meetings') && typeof gcalTouch === 'function') gcalTouch();
   nav(screen);
 }
 
@@ -8176,6 +8240,7 @@ function srvdbLoopStart() {
 }
 function srvdbLoopStop() { if (srvdbLoopTimer) { clearInterval(srvdbLoopTimer); srvdbLoopTimer = null; } }
 srvdbLoopStart();
+srvIcsTouch(); // при старте: лента пересобирается по актуальной логике (если сервер подключён)
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') srvdbPull().catch(()=>{}); });
 window.addEventListener('online', () => srvdbPull(true).catch(()=>{}));
 async function srvdbToggle(on) {
@@ -9045,6 +9110,9 @@ async function icsBuild() {
   const p2 = n => String(n).padStart(2, '0');
   const dstamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
   const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CRM Advokata//RU', 'CALSCALE:GREGORIAN'];
+  const tasksIcs = (await getAll('tasks')).filter(t => !t.done && t.due && (daysUntil(t.due) ?? -1) >= 0);
+  const meets = (await getAll('meetings')).filter(mt => mt.date && (daysUntil(mt.date) ?? -1) >= 0)
+    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
   hearings.forEach(h => {
     const cs = h.caseNum ? CASES_BY_NUM[h.caseNum] : null;
     const d8 = h.date.replace(/-/g, '');
@@ -9061,25 +9129,66 @@ async function icsBuild() {
       const nd = new Date(h.date + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
       lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
     }
-    lines.push('SUMMARY:' + escT('⚖ ' + (caseLabel(h.caseNum) || 'Заседание') + (cs && cs.client ? ' · ' + cs.client : '')));
+    lines.push('SUMMARY:' + escT('⚖ ' + (cs && cs.client ? cs.client : (caseLabel(h.caseNum) || 'Заседание'))));
     if (h.court) lines.push('LOCATION:' + escT(h.court));
-    const desc = [hearingPerson(h), h.status ? 'Статус: ' + h.status : ''].filter(Boolean).join('; ');
+    const desc = [h.caseNum ? 'Дело: ' + (caseLabel(h.caseNum) || h.caseNum) : '', hearingPerson(h), h.status ? 'Статус: ' + h.status : ''].filter(Boolean).join('; ');
     if (desc) lines.push('DESCRIPTION:' + escT(desc));
     lines.push('END:VEVENT');
   });
+  tasksIcs.forEach(t => {
+    const d8 = t.due.replace(/-/g, '');
+    lines.push('BEGIN:VEVENT');
+    lines.push('UID:' + t.id + '@crm-advocate');
+    lines.push('DTSTAMP:' + dstamp);
+    if (t.time && /^\d{2}:\d{2}/.test(t.time)) {
+      lines.push('DTSTART:' + d8 + 'T' + t.time.replace(':', '').slice(0, 4) + '00');
+      const end = new Date(t.due + 'T' + t.time.slice(0, 5) + ':00');
+      end.setMinutes(end.getMinutes() + 30);
+      lines.push('DTEND:' + end.getFullYear() + p2(end.getMonth() + 1) + p2(end.getDate()) + 'T' + p2(end.getHours()) + p2(end.getMinutes()) + '00');
+    } else {
+      lines.push('DTSTART;VALUE=DATE:' + d8);
+      const nd = new Date(t.due + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
+      lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
+    }
+    lines.push('SUMMARY:' + escT('📋 ' + (t.title || 'Задача')));
+    const td = [t.caseNum ? 'Дело: ' + (caseLabel(t.caseNum) || t.caseNum) : '', t.note || ''].filter(Boolean).join('; ');
+    if (td) lines.push('DESCRIPTION:' + escT(td));
+    lines.push('END:VEVENT');
+  });
+  meets.forEach(mt => {
+    const d8 = mt.date.replace(/-/g, '');
+    lines.push('BEGIN:VEVENT');
+    lines.push('UID:' + mt.id + '@crm-advocate');
+    lines.push('DTSTAMP:' + dstamp);
+    if (mt.time && /^\d{2}:\d{2}/.test(mt.time)) {
+      lines.push('DTSTART:' + d8 + 'T' + mt.time.replace(':', '').slice(0, 4) + '00');
+      const end = new Date(mt.date + 'T' + mt.time.slice(0, 5) + ':00');
+      end.setHours(end.getHours() + 1);
+      lines.push('DTEND:' + end.getFullYear() + p2(end.getMonth() + 1) + p2(end.getDate()) + 'T' + p2(end.getHours()) + p2(end.getMinutes()) + '00');
+    } else {
+      lines.push('DTSTART;VALUE=DATE:' + d8);
+      const nd = new Date(mt.date + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
+      lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
+    }
+    lines.push('SUMMARY:' + escT('🤝 ' + (mt.with || 'Встреча')));
+    if (mt.place) lines.push('LOCATION:' + escT(mt.place));
+    const md = [mt.caseNum ? 'Дело: ' + (caseLabel(mt.caseNum) || mt.caseNum) : '', mt.note || ''].filter(Boolean).join('; ');
+    if (md) lines.push('DESCRIPTION:' + escT(md));
+    lines.push('END:VEVENT');
+  });
   lines.push('END:VCALENDAR');
-  return { ics: lines.join('\r\n'), n: hearings.length };
+  return { ics: lines.join('\r\n'), n: hearings.length + tasksIcs.length + meets.length };
 }
 async function icsExport() {
   const b = await icsBuild();
-  if (!b.n) { toast('Нет предстоящих заседаний для экспорта', true); return; }
+  if (!b.n) { toast('Нет предстоящих событий для экспорта', true); return; }
   const blob = new Blob([b.ics], { type: 'text/calendar;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'CRM-заседания.ics';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  toast(`Экспортировано заседаний: ${b.n}. Откройте файл — календарь предложит импорт`);
+  toast(`Экспортировано событий: ${b.n} (заседания, задачи, встречи). Откройте файл — календарь предложит импорт`);
 }
 
 
