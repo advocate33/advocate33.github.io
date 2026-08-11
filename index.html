@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 13; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '150'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '151'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa','meetings'];
 let db;
 
@@ -8602,6 +8602,8 @@ const MAIL_KIND_META = {
   new:       { label:'Без статуса', color:'var(--text-faint)' }
 };
 let mailChip = 'active'; // по умолчанию — только «живые» отправления
+let mailDir = 'all';
+function setMailDir(v) { mailDir = v; renderMail(); }
 function setMailChip(c) { mailChip = c; renderMail(); }
 
 async function renderMail() {
@@ -8631,6 +8633,7 @@ async function renderMail() {
     return '';
   };
   const rows = all.filter(m => {
+    if (mailDir !== 'all' && (m.dir || 'out') !== mailDir) return false;
     if (mailChip === 'active') { if (mailStatusKind(m) === 'delivered') return false; }
     else if (mailChip !== 'all' && mailStatusKind(m) !== mailChip) return false;
     if (!q) return true;
@@ -8639,6 +8642,9 @@ async function renderMail() {
 
   const actions = `
     <div style="margin-bottom:14px">
+      <div class="chips" style="margin-bottom:8px;overflow:visible">
+        ${[['all','Все направления'],['in','⬇ Входящие'],['out','⬆ Исходящие']].map(([k,l])=>`<div class="chip ${mailDir===k?'active':''}" onclick="setMailDir('${k}')">${l}</div>`).join('')}
+      </div>
       <button class="btn-primary" style="margin-top:0" onclick="mailRefreshAll()">📦 Обновить статусы отправлений</button>
     </div>`;
 
@@ -8657,7 +8663,7 @@ async function renderMail() {
       <div class="row1">
         <div style="flex:1;min-width:0">
           ${owner?`<div style="font-size:12px;color:var(--accent);font-weight:600;margin-bottom:2px">${ic('user',12)} ${esc(owner)}${ownerFromLead?' · обращение':''}</div>`:''}
-          <div class="title" style="font-size:14.5px">${esc(m.title||m.barcode)}</div>
+          <div class="title" style="font-size:14.5px">${m.dir==='in'?'⬇️ ':''}${esc(m.title||m.barcode)}</div>
           <div class="meta">${esc(m.barcode)}${m.caseNum?` · ${esc(m.caseNum)}`:''}</div>
           <div class="meta" style="margin-top:5px;color:${meta.color};font-weight:600">${esc(m.status||meta.label)}${m.statusAt?` <span style="color:var(--text-faint);font-weight:400">· ${esc(m.statusAt)}</span>`:''}</div>
         </div>
@@ -8666,6 +8672,11 @@ async function renderMail() {
   }).join('');
 }
 
+function mailDirPick(v, el) {
+  const hid = document.getElementById('m-dir');
+  if (hid) hid.value = v;
+  if (el && el.parentElement) el.parentElement.querySelectorAll('.chip').forEach(c => c.classList.toggle('active', c === el));
+}
 async function openMailForm(id, presetLeadId) {
   const m = id ? (await getAll('mail')).find(x=>x.id===id) : null;
   const leadId = m ? (m.leadId||'') : (presetLeadId||'');
@@ -8698,6 +8709,13 @@ async function openMailForm(id, presetLeadId) {
     ${leadId?`<div class="card" style="border-left:3px solid var(--accent);margin-bottom:10px"><div class="meta">Привязано к обращению: <b>${esc(leadName)}</b>. При создании дела письмо перейдёт на него.</div></div>`:''}
     <input type="hidden" id="m-leadid" value="${esc(leadId)}">
     <div class="field"><label>Трек-номер (РПО) <span class="req">*</span></label><input id="m-barcode" value="${m?esc(m.barcode):''}" placeholder="80107204381310" autocomplete="off" inputmode="numeric"></div>
+    <div class="field"><label>Направление</label>
+      <div class="chips" style="overflow:visible">
+        <div class="chip ${(!m||!m.dir||m.dir==='out')?'active':''}" onclick="mailDirPick('out',this)">⬆ Исходящее</div>
+        <div class="chip ${m&&m.dir==='in'?'active':''}" onclick="mailDirPick('in',this)">⬇ Входящее (адресовано вам)</div>
+      </div>
+      <input type="hidden" id="m-dir" value="${(m&&m.dir)||'out'}">
+    </div>
     <div class="field"><label>Описание</label><input id="m-title" value="${m?esc(m.title||''):''}" placeholder="Претензия в ООО «...»"></div>
     ${leadId?'':`<div class="field" style="position:relative"><label>Дело или обращение</label>${cpxHtml('m-case', (m&&m.caseNum)||'', curCaseLabel, 'Поиск: фамилия, № дела, тема…')}
       <div class="meta" style="margin-top:4px">Обращения в списке помечены 📨 — выбор привяжет письмо к обращению</div>
@@ -8748,6 +8766,7 @@ async function saveMail(id) {
     title: document.getElementById('m-title').value.trim(),
     caseNum: caseSel ? caseSel.value : (prev?prev.caseNum:''),
     leadId: leadId || undefined,
+    dir: (document.getElementById('m-dir')?.value === 'in') ? 'in' : 'out',
     status: prev && prev.barcode===barcode ? prev.status : '',
     statusAt: prev && prev.barcode===barcode ? prev.statusAt : '',
     history: prev && prev.barcode===barcode ? (prev.history||[]) : []
