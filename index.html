@@ -1060,7 +1060,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 13; // v11: добавлено хранилище 'leads' (обращения/воронка до дела)
-const APP_VER = '156'; // номер версии приложения (растёт с каждым выпуском)
+const APP_VER = '157'; // номер версии приложения (растёт с каждым выпуском)
 const STORES = ['clients','cases','hearings','finance','refs','tasks','mail','files','expenses','templates','orders','time','deposits','leads','poa','meetings'];
 let db;
 
@@ -1864,6 +1864,16 @@ async function renderDashboard() {
           </div>`).join('')
         : `<div class="ag-empty">${i===0&&hiddenPast?'✔ Все события дня прошли':'☕ свободно'}</div>`);
     }
+    // Задачи за горизонтом недели (7–30 дней): приближение срока видно заранее
+    const soonTasks = tasks.filter(t => !t.done && t.due && (daysUntil(t.due) ?? -1) >= 7 && daysUntil(t.due) <= 30)
+      .sort((a, b) => a.due.localeCompare(b.due)).slice(0, 5);
+    const soonHtml = soonTasks.length ? `
+      <div class="ag-day" style="opacity:.8">Скоро · задачи до 30 дней</div>
+      ${soonTasks.map(t => { const n = daysUntil(t.due); return `<div class="ag-row" onclick="openTaskById('${t.id}')">
+        <span class="ag-mark" style="background:var(--sig-green);opacity:.6"></span>
+        <span class="ag-time">${fmtDate(t.due).slice(0,5)}</span>
+        <span class="ag-body"><b>📋 ${esc(t.title||'Задача')}</b><br><span class="ag-sub">через ${n} ${plural(n,'день','дня','дней')}${t.caseNum?' · '+esc(caseLabel(t.caseNum)):''}</span></span>
+      </div>`; }).join('')}` : '';
     const odHtml = overdueTasks.length ? `
       <div class="ag-day" style="color:var(--red-hot)">Просрочено · ${overdueTasks.length}</div>
       ${overdueTasks.slice(0,5).map(t=>{const n=Math.abs(daysUntil(t.due));return `<div class="ag-row" onclick="openTaskById('${t.id}')">
@@ -1872,8 +1882,8 @@ async function renderDashboard() {
           <span class="ag-body"><b style="color:var(--red-hot)">${esc(t.title)}</b><br><span class="ag-sub">просрочено ${n} ${plural(n,'день','дня','дней')}${t.caseNum?' · '+esc(t.caseNum):''}</span></span>
         </div>`;}).join('')}
       ${overdueTasks.length>5?`<div class="ag-row" onclick="taskFilter='open';nav('tasks')"><span class="ag-mark" style="background:var(--red-hot)"></span><span class="ag-time"></span><span class="ag-body ag-sub" style="color:var(--red-hot)">ещё ${overdueTasks.length-5} просроченных →</span></div>`:''}` : '';
-    todayEl.innerHTML = (total || overdueTasks.length)
-      ? `<div class="today-card">${odHtml}${daysHtml}</div>`
+    todayEl.innerHTML = (total || overdueTasks.length || soonTasks.length)
+      ? `<div class="today-card">${odHtml}${daysHtml}${soonHtml}</div>`
       : `<div class="today-card empty-today"><div style="font-size:30px;margin-bottom:6px">☕</div><div style="color:var(--text-dim);font-size:14px">На ближайшую неделю заседаний, сроков и задач нет</div></div>`;
   }
 
@@ -1896,7 +1906,7 @@ async function renderDashboard() {
   const confl = syncConflicts();
   if (confl.length) attn.unshift({icon:'⚡',color:'var(--orange)',title:`Коллизии синхронизации: ${confl.length}`,sub:'записи менялись на двух устройствах — проверьте',act:`showConflictsSheet()`});
   const noCourt = cases.filter(c=>c.status!=='Завершено' && !(c.courtNo||'').trim() && (c.kind==='Гражданское'||c.kind==='Арбитраж'));
-  if (noCourt.length) attn.push({icon:'📋',color:'var(--text-faint)',title:`${noCourt.length} ${plural(noCourt.length,'дело','дела','дел')} без № в суде`,sub:'добавьте судебный номер',act:`nav('cases')`});
+  if (noCourt.length) attn.push({icon:'📋',color:'var(--text-faint)',title:`${noCourt.length} ${plural(noCourt.length,'дело','дела','дел')} без № в суде`,sub:'добавьте судебный номер',act:`casesFocus='noCourtNo';nav('cases')`});
 
   const attnEl = document.getElementById('dash-attention');
   if (attnEl) {
@@ -1947,10 +1957,12 @@ async function renderDashboard() {
 let casesFilter = '__active'; // __active | __done | __archive | конкретный статус (переход из отчётов)
 let casesView = localStorage.getItem('crm_cases_view') || 'list'; // list | board (доска по стадиям, ПК)
 function setCasesView(v) { casesView = v; localStorage.setItem('crm_cases_view', v); renderCases(); }
+let casesFocus = null; // фокус-фильтр при переходе из «Требует внимания»
 async function renderCases() {
   const _cl = document.getElementById('cases-list');
   if (_cl && !_cl.children.length) _cl.innerHTML = skeletonCards(5);
-  const all = await getAll('cases');
+  let all = await getAll('cases');
+  if (casesFocus === 'noCourtNo') all = all.filter(c => c.status !== 'Завершено' && !(c.courtNo||'').trim() && (c.kind==='Гражданское' || c.kind==='Арбитраж'));
   const showArchived = casesFilter === '__archive';
   const cases = all.filter(c => showArchived ? c.archived : !c.archived);
   const archivedCount = all.filter(c => c.archived).length;
@@ -1974,6 +1986,7 @@ async function renderCases() {
   const boardMode = casesView === 'board' && window.innerWidth >= 760 && !showArchived;
   if (boardMode) chipsHtml = ''; // на доске все дела сгруппированы по стадиям — фильтры не нужны
   chipsHtml += `<div class="chip cases-view-toggle ${boardMode?'active':''}" onclick="setCasesView(casesView==='board'?'list':'board')" title="Вид: список / доска по стадиям">${boardMode?'☰ Список':'⊞ Доска'}</div>`;
+  if (casesFocus === 'noCourtNo') chipsHtml = `<div class="chip active" onclick="casesFocus=null;renderCases()" title="Сбросить фильтр">📋 Без № в суде ✕</div>` + chipsHtml;
   document.getElementById('cases-chips').innerHTML = chipsHtml;
   if (boardMode) { renderCasesBoard(nonArch); return; }
   document.getElementById('cases-list').style.display = ''; // список — обратно в сеточную раскладку ПК
