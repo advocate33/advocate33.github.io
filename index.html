@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v165</title>
+<title>CRM Адвоката v172</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -768,7 +768,7 @@
 .topbar{padding-top:8px;padding-bottom:8px}
 .topbar h1{white-space:nowrap;font-size:clamp(15px,4.6vw,19px)}
 
-/* ===== VERSIONED UPGRADES v165 ===== */
+/* ===== VERSIONED UPGRADES v170 ===== */
 /* CRM Адвоката v161 — рабочая поверхность и адаптивный master-detail */
 .v-upgrade-strip{
   display:flex;align-items:center;gap:10px;margin:0 0 14px;padding:10px 12px;
@@ -857,6 +857,17 @@
 .v-adapter-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.v-adapter{padding:11px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
 .v-adapter b{display:block;font-size:12px;margin-bottom:4px}.v-adapter .meta{font-size:10.5px}
 @media(max-width:560px){.v-adapter-grid{grid-template-columns:1fr}}
+
+
+/* CRM Адвоката v170 — контролируемый ИИ */
+.v-ai-guard{border:1px solid color-mix(in srgb,var(--blue) 28%,var(--border));border-left:4px solid var(--blue);border-radius:13px;padding:11px 12px;background:color-mix(in srgb,var(--blue) 6%,var(--surface));font-size:11.5px;line-height:1.45;margin:9px 0}
+.v-ai-preview{white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto;background:#0f172a;color:#dbeafe;border-radius:13px;padding:13px;font:11.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;margin:9px 0}
+.v-ai-result{white-space:pre-wrap;word-break:break-word;max-height:480px;overflow:auto;background:var(--surface-2);border:1px solid var(--border);border-radius:13px;padding:13px;font-size:12.5px;line-height:1.55;margin:10px 0}
+.v-ai-scope{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:8px 0}.v-ai-scope label{display:flex;align-items:center;gap:7px;padding:8px;border:1px solid var(--border);border-radius:10px;font-size:11.5px;background:var(--surface)}
+.v-ai-consent{display:flex;align-items:flex-start;gap:8px;padding:10px;border-radius:11px;background:color-mix(in srgb,var(--sig-amber) 10%,var(--surface));font-size:11.5px}
+.v-ai-session{padding:10px 0;border-bottom:1px solid var(--border)}.v-ai-session:last-child{border-bottom:0}.v-ai-session-head{display:flex;gap:8px;align-items:center}.v-ai-session-head b{flex:1;font-size:12px}
+.v-ai-loader{display:inline-flex;align-items:center;gap:8px}.v-ai-loader:before{content:'';width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:vspin .8s linear infinite}@keyframes vspin{to{transform:rotate(360deg)}}
+@media(max-width:560px){.v-ai-scope{grid-template-columns:1fr}}
 
 
 </style>
@@ -1150,9 +1161,9 @@
 // БАЗА ДАННЫХ — IndexedDB (данные хранятся на устройстве, офлайн)
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
-const DB_VER = 20; // схема данных выпуска v165
-const APP_VER = '165'; // номер версии приложения
-const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents"];
+const DB_VER = 21; // схема данных выпуска v170
+const APP_VER = '172'; // v171: исправлено обезличивание ПД (crmAiEscapeRegex); v172: убран баннер с главного экрана
+const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
 function openDB() {
@@ -1180,6 +1191,7 @@ function openDB() {
         documents:["caseId","caseNum","category","updatedAt","_upd"],
         docVersions:["documentId","createdAt","hash","_upd"],
         monitorEvents:["caseId","caseNum","status","hash","receivedAt","_upd"],
+        aiSessions:["caseId","caseNum","operation","createdAt","status","_upd"],
         leads:['status','createdAt','_upd']
       };
       STORES.forEach(s => {
@@ -3542,14 +3554,14 @@ async function collectAll() {
 }
 
 // ── Синхронизация пользовательских настроек ──
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url'];
+const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr'];
 
 // Секреты переносятся только внутри зашифрованного контейнера .crm. PIN
 // хранится и переносится как PBKDF2-хэш с солью, а не как исходные цифры.
 // Биометрическая привязка и идентификатор устройства намеренно не переносятся:
 // WebAuthn-ключ аппаратно связан с конкретным телефоном/компьютером.
 const SYNC_SECRET_KEYS = [
-  'crm_ya_token','crm_ya_client','crm_dbx_token','crm_dbx_client','crm_gcal_url','crm_gcal_secret','crm_mail_url','crm_mail_secret','crm_srv_url','crm_srv_secret','crm_dadata_token','crm_tg_token','crm_tg_chat','crm_sync_pass','crm_fsync_pass','crm_license','crm_lock_on','crm_lock_hash','crm_lock_salt','crm_lock_len','crm_lock_iter','crm_monitor_token'
+  'crm_ya_token','crm_ya_client','crm_dbx_token','crm_dbx_client','crm_gcal_url','crm_gcal_secret','crm_mail_url','crm_mail_secret','crm_srv_url','crm_srv_secret','crm_dadata_token','crm_tg_token','crm_tg_chat','crm_sync_pass','crm_fsync_pass','crm_license','crm_lock_on','crm_lock_hash','crm_lock_salt','crm_lock_len','crm_lock_iter','crm_monitor_token','crm_ai_key'
 ];
 
 function nextLocalStamp(key) {
@@ -12343,7 +12355,7 @@ document.addEventListener('keydown', e => {
 });
 
 
-// ===== VERSIONED UPGRADES v165 =====
+// ===== VERSIONED UPGRADES v170 =====
 // CRM Адвоката v161 — next action, избранное, сохранённые виды, черновики, desktop preview.
 window.CRM_UPGRADE = window.CRM_UPGRADE || { modules: [], selectedCaseId: '', startedAt: Date.now() };
 CRM_UPGRADE.modules.push('v161');
@@ -12353,12 +12365,8 @@ function crmV161HtmlButton(label, action, kind) {
 }
 
 function crmV161InstallShell() {
-  const dash = document.getElementById('screen-dashboard');
-  if (dash && !document.getElementById('v-upgrade-strip')) {
-    dash.insertAdjacentHTML('afterbegin', `<div class="v-upgrade-strip" id="v-upgrade-strip">
-      <div class="v-mark">${esc(APP_VER)}</div><div class="v-copy"><b>Рабочий центр адвоката</b><span>Следующие действия, документы, процессы и контроль — в одном месте</span></div>
-      <button class="v-mini-btn" onclick="openWorkCenter()">Открыть</button></div>`);
-  }
+  // v172: баннер «Рабочий центр адвоката» с главного экрана убран по решению
+  // владельца — вход остаётся в «Ещё → Рабочий центр» (плитка v161-more-work).
   const today = document.getElementById('dash-today');
   if (today && !document.getElementById('v161-next-actions')) {
     today.insertAdjacentHTML('afterend', '<div id="v161-next-actions"></div>');
@@ -12805,6 +12813,58 @@ async function openMonitorCenter(){
 }
 async function crmMonRenderDashboard(){let h=document.getElementById('v165-monitor-alerts');if(!h){h=document.createElement('div');h.id='v165-monitor-alerts';document.getElementById('v163-cor-alerts')?.insertAdjacentElement('afterend',h);}if(!h)return;const n=(await getAll('monitorEvents')).filter(x=>x.status==='new').length;h.innerHTML=n?`<div class="card" onclick="openMonitorCenter()" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin-top:10px"><div class="row1"><div><div class="title">◎ Новые события мониторинга</div><div class="meta">${n} ${plural(n,'событие','события','событий')} нужно проверить и подтвердить</div></div><span class="badge b-wait"><span class="dot"></span>${n}</span></div></div>`:'';}
 CRM_UPGRADE.v164RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v164RenderDashboard();await crmMonRenderDashboard();return r;};
+
+
+// CRM Адвоката v170 — BYOK ИИ с предпросмотром, редактированием и явным согласием.
+CRM_UPGRADE.modules.push('v170');
+CRM_UPGRADE.aiDraft=null;CRM_UPGRADE.aiAbort=null;
+const CRM_AI_OPERATIONS={
+  summary:{label:'Сводка по делу',system:'Составь нейтральную рабочую сводку: факты, позиция, доказательства, риски, ближайшие шаги. Не выдумывай сведения. Отдельно перечисли, что требуется проверить.'},
+  extract:{label:'Извлечь факты и даты',system:'Извлеки только явно содержащиеся сведения. Верни JSON с ключами facts (массив строк), dates (массив объектов date,title,type), participants (массив), nextActions (массив). Не достраивай отсутствующие факты.'},
+  client:{label:'Черновик сообщения доверителю',system:'Подготовь понятный и спокойный черновик сообщения доверителю. Отделяй факты от предположений, не обещай результат, укажи необходимые действия и сроки проверки.'},
+  outline:{label:'Структура процессуального документа',system:'Предложи структуру документа и перечень подтверждающих материалов. Не придумывай нормы и судебные акты; для правовых ссылок ставь пометку [ПРОВЕРИТЬ ИСТОЧНИК].'},
+  ocr:{label:'Распознать изображение / PDF',system:'Распознай текст максимально дословно, сохрани абзацы, номера, даты и реквизиты. Неразборчивые места помечай [неразборчиво]. Не дополняй текст.'}
+};
+function crmAiSettings(){return{endpoint:localStorage.getItem('crm_ai_endpoint')||'https://openrouter.ai/api/v1/chat/completions',model:localStorage.getItem('crm_ai_model')||'openrouter/auto',key:localStorage.getItem('crm_ai_key')||'',zdr:localStorage.getItem('crm_ai_zdr')!=='0'};}
+function crmAiSafeEndpoint(raw){try{const u=new URL(String(raw||''));if(u.protocol!=='https:')return'';return u.href;}catch(e){return'';}}
+function saveAiSettings(){const endpoint=crmAiSafeEndpoint(fval('v-ai-endpoint')),model=fval('v-ai-model').trim(),key=fval('v-ai-key').trim();if(!endpoint||!model){toast('Проверьте HTTPS endpoint и модель',true);return;}localStorage.setItem('crm_ai_endpoint',endpoint);localStorage.setItem('crm_ai_model',model);localStorage.setItem('crm_ai_zdr',document.getElementById('v-ai-zdr')?.checked?'1':'0');if(key)localStorage.setItem('crm_ai_key',key);bumpSettings?.();toast('Настройки ИИ сохранены локально');openAiCenter();}
+function crmAiEscapeRegex(s){return String(s).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
+function crmAiRedact(text,names){let out=String(text||''),map=[],n=0;const vals=[...new Set((names||[]).map(x=>String(x||'').trim()).filter(x=>x.length>2))].sort((a,b)=>b.length-a.length);for(const value of vals){const token=`[ЛИЦО_${++n}]`;const parts=[crmAiEscapeRegex(value)];for(const w of value.split(/\s+/)){const cw=w.replace(/[«»"'().,;:+№-]+/g,'');if(cw.length>=4&&/^[А-ЯЁ][а-яё]+$/.test(cw))parts.push('(?<![А-Яа-яЁё])'+crmAiEscapeRegex(cw)+'[а-яё]{0,3}(?![а-яё])');}const re=new RegExp(parts.join('|'),'gi');if(re.test(out)){out=out.replace(re,token);map.push({token,value});}} // v171: ловим и склонённые формы фамилий
+  const replace=(re,label)=>{let i=0;out=out.replace(re,()=>`[${label}_${++i}]`);if(i)map.push({token:`[${label}]`,value:`скрыто: ${i}`});};replace(/[\w.+-]+@[\w.-]+\.[A-Za-zА-Яа-я]{2,}/g,'EMAIL');replace(/(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}/g,'ТЕЛЕФОН');replace(/\b\d{4}\s?\d{6}\b/g,'ПАСПОРТ');replace(/\b\d{10,12}\b/g,'ИНН');replace(/\b\d{3}-?\d{3}-?\d{3}\s?\d{2}\b/g,'СНИЛС');return{text:out,map};}
+async function crmAiFileData(file){if(!file)return null;if(file.size>10*1024*1024)throw new Error('Файл больше 10 МБ');return{name:file.name,type:file.type||'application/octet-stream',size:file.size,dataUrl:await crmDocDataUrl(file)};}
+async function crmAiContext(caseId,docId){
+  const c=(await getAll('cases')).find(x=>x.id===caseId);if(!c)return{caseRec:null,text:''};const parts=(c.participants||[]),names=[c.client,...parts.map(p=>p.name)].filter(Boolean),base={number:c.number,kind:c.kind,status:c.status,stage:c.stage,court:c.court,courtNo:c.courtNo,category:c.category,comment:c.comment,nextAction:c.nextAction,nextActionDue:c.nextActionDue,waitingFor:c.waitingFor};const sections=[`ДЕЛО:\n${JSON.stringify(base,null,2)}`];
+  if(document.getElementById('v-ai-scope-participants')?.checked)sections.push(`УЧАСТНИКИ:\n${JSON.stringify(parts.map(p=>({name:p.name,role:p.role,note:p.note||''})),null,2)}`);
+  if(document.getElementById('v-ai-scope-dates')?.checked){const [h,t]=await Promise.all([getCaseLinks('hearings',c),getCaseLinks('tasks',c)]);sections.push(`ДАТЫ И ЗАДАЧИ:\n${JSON.stringify({hearings:h.map(x=>({date:x.date,time:x.time,status:x.status,note:x.note})),deadlines:c.deadlines||[],tasks:t.filter(x=>!x.done).map(x=>({title:x.title,due:x.due}))},null,2)}`);}
+  if(document.getElementById('v-ai-scope-cor')?.checked){const corr=(await getAll('correspondence')).filter(x=>x.caseId===c.id).slice(-20);sections.push(`КОРРЕСПОНДЕНЦИЯ:\n${JSON.stringify(corr.map(x=>({date:x.date,direction:x.direction,subject:x.subject,body:String(x.body||'').slice(0,5000)})),null,2)}`);}
+  if(docId){const [docs,vs]=await Promise.all([getAll('documents'),getAll('docVersions')]),d=docs.find(x=>x.id===docId),v=vs.find(x=>x.id===d?.currentVersionId);if(d)sections.push(`ДОКУМЕНТ «${d.title}»:\n${String(d.manualText||v?.extractedText||'Текст не извлечён').slice(0,120000)}`);}
+  return{caseRec:c,names,text:sections.join('\n\n')};
+}
+async function prepareAiRequest(){
+  const operation=fval('v-ai-operation'),caseId=fval('v-ai-case'),docId=fval('v-ai-document'),extra=fval('v-ai-extra').trim(),redact=!!document.getElementById('v-ai-redact')?.checked,file=document.getElementById('v-ai-file')?.files?.[0];if(!CRM_AI_OPERATIONS[operation])return;if(!caseId&&!extra&&!file){toast('Выберите дело, добавьте текст или файл',true);return;}
+  try{const ctx=caseId?await crmAiContext(caseId,docId):{caseRec:null,names:[],text:''},joined=[ctx.text,extra&&`ДОПОЛНИТЕЛЬНЫЙ ТЕКСТ:\n${extra}`].filter(Boolean).join('\n\n'),processed=redact?crmAiRedact(joined,ctx.names):{text:joined,map:[]},attachment=await crmAiFileData(file);CRM_UPGRADE.aiDraft={operation,caseId,caseNum:ctx.caseRec?.number||'',prompt:`${CRM_AI_OPERATIONS[operation].system}\n\nМАТЕРИАЛЫ ПОЛЬЗОВАТЕЛЯ:\n${processed.text||'[только вложенный файл]'}`,redacted:redact,redactionMap:processed.map,attachment,preparedAt:Date.now()};showAiConsentPreview();}catch(e){toast(e.message||'Не удалось подготовить запрос',true);}
+}
+function showAiConsentPreview(){const d=CRM_UPGRADE.aiDraft;if(!d)return;const s=crmAiSettings(),endpoint=crmAiSafeEndpoint(s.endpoint);if(!endpoint){toast('Сохраните корректный HTTPS endpoint',true);openAiCenter();return;}const host=new URL(endpoint).hostname,isOpenRouter=host.includes('openrouter.ai');showSheet(`<h3>Предпросмотр запроса</h3><div class="sheet-sub">Ничего ещё не отправлено.</div><div class="detail-block"><div class="detail-row"><span class="k">Операция</span><span class="v">${esc(CRM_AI_OPERATIONS[d.operation].label)}</span></div><div class="detail-row"><span class="k">Провайдер</span><span class="v">${esc(host)}</span></div><div class="detail-row"><span class="k">Модель</span><span class="v">${esc(s.model)}</span></div><div class="detail-row"><span class="k">Редактирование ПД</span><span class="v">${d.redacted?'включено':'выключено'}</span></div><div class="detail-row"><span class="k">ZDR</span><span class="v">${isOpenRouter&&s.zdr?'запрошен':'не применяется'}</span></div>${d.attachment?`<div class="detail-row"><span class="k">Вложение</span><span class="v">${esc(d.attachment.name)} · ${Math.round(d.attachment.size/1024)} КБ</span></div>`:''}</div><div class="v-ai-preview">${esc(d.prompt)}</div><div class="v-ai-consent"><input id="v-ai-consent" type="checkbox"><label for="v-ai-consent">Я просмотрел(а) содержимое и разрешаю однократную отправку этого запроса выбранному провайдеру.</label></div><div class="v-ai-guard">Ответ ИИ — черновик. Он не изменит дело, сроки или документы без отдельного ручного подтверждения. Правовые ссылки и факты нужно проверить по первичным источникам.</div><button class="btn-primary" onclick="sendAiRequest()">Разрешить и отправить</button><button class="btn-ghost" onclick="openAiCenter()">Изменить запрос</button>`);}
+function crmAiResponseText(data){const c=data?.choices?.[0]?.message?.content;if(typeof c==='string')return c;if(Array.isArray(c))return c.map(x=>x?.text||x?.content||'').join('\n');return data?.output_text||'';}
+function crmAiCopyResult(){const value=document.getElementById('v-ai-result-copy')?.value||'';return copyText(value,'Ответ скопирован');}
+async function sendAiRequest(){
+  const d=CRM_UPGRADE.aiDraft,s=crmAiSettings();if(!d)return;if(!document.getElementById('v-ai-consent')?.checked){toast('Подтвердите просмотр запроса',true);return;}if(!s.key){toast('Сначала сохраните API-ключ',true);openAiCenter();return;}const endpoint=crmAiSafeEndpoint(s.endpoint);if(!endpoint)return toast('Некорректный endpoint',true);const isOpenRouter=new URL(endpoint).hostname.includes('openrouter.ai');if(d.attachment?.type==='application/pdf'&&!isOpenRouter)return toast('PDF-вложение в этой сборке поддержано только через OpenRouter',true);
+  const content=[{type:'text',text:d.prompt}];if(d.attachment){if(d.attachment.type.startsWith('image/'))content.push({type:'image_url',image_url:{url:d.attachment.dataUrl}});else if(d.attachment.type==='application/pdf')content.push({type:'file',file:{filename:d.attachment.name,file_data:d.attachment.dataUrl}});else return toast('В ИИ можно приложить изображение или PDF',true);}
+  const body={model:s.model,messages:[{role:'user',content}],temperature:.15,max_tokens:4000};if(isOpenRouter&&s.zdr)body.provider={zdr:true};const btn=document.querySelector('#sheetContent .btn-primary');if(btn){btn.disabled=true;btn.innerHTML='<span class="v-ai-loader">Анализирую…</span>';}
+  const ctrl=new AbortController();CRM_UPGRADE.aiAbort=ctrl;const timer=setTimeout(()=>ctrl.abort(),90000);try{const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${s.key}`,...(isOpenRouter?{'X-Title':'CRM Адвоката'}:{})},body:JSON.stringify(body),signal:ctrl.signal,cache:'no-store'});clearTimeout(timer);const data=await res.json().catch(()=>({}));if(!res.ok)throw new Error(data?.error?.message||`HTTP ${res.status}`);const result=crmAiResponseText(data).slice(0,300000);if(!result)throw new Error('Пустой ответ модели');const session={id:uid('ИИ'),operation:d.operation,caseId:d.caseId,caseNum:d.caseNum,model:s.model,provider:new URL(endpoint).hostname,redacted:d.redacted,zdr:isOpenRouter&&s.zdr,hadAttachment:!!d.attachment,result,createdAt:Date.now(),consentAt:Date.now(),status:'draft'};await put('aiSessions',session);CRM_UPGRADE.aiDraft=null;showAiResult(session.id);}catch(e){clearTimeout(timer);toast(e.name==='AbortError'?'Запрос остановлен по тайм-ауту':`Ошибка ИИ: ${e.message||'неизвестно'}`,true);if(btn){btn.disabled=false;btn.textContent='Повторить отправку';}}
+}
+async function showAiResult(id){const s=(await getAll('aiSessions')).find(x=>x.id===id);if(!s)return;showSheet(`<h3>${esc(CRM_AI_OPERATIONS[s.operation]?.label||'Ответ ИИ')}</h3><div class="sheet-sub">${esc(s.caseNum||'Без дела')} · ${esc(s.model)} · ${new Date(s.createdAt).toLocaleString('ru-RU')}</div><div class="v-ai-result">${esc(s.result)}</div><div class="v-ai-guard">Это редактируемый черновик. Сохранение в дело выполняется отдельным действием ниже.</div><div class="field-row"><button class="btn-primary" onclick="crmAiCopyResult()">Копировать</button><button class="btn-ghost" onclick="prepareAiApply('${jsq(s.id)}','note')">Сохранить заметкой</button></div><button class="btn-ghost" onclick="prepareAiApply('${jsq(s.id)}','nextAction')">Предложить как следующее действие</button><button class="btn-ghost" onclick="openAiCenter()">← ИИ-помощник</button><textarea id="v-ai-result-copy" style="position:fixed;left:-9999px">${esc(s.result)}</textarea>`);}
+async function prepareAiApply(id,kind){const s=(await getAll('aiSessions')).find(x=>x.id===id);if(!s)return;if(!s.caseId){toast('Сессия не привязана к делу',true);return;}showSheet(`<h3>${kind==='note'?'Заметка в деле':'Следующее действие'}</h3><div class="sheet-sub">Проверьте и отредактируйте текст перед сохранением.</div><div class="field"><textarea id="v-ai-apply-text" rows="12">${esc(kind==='note'?s.result:String(s.result).split(/\n/).map(x=>x.replace(/^[-*#\d.\s]+/,'').trim()).find(x=>x.length>8)?.slice(0,300)||'')}</textarea></div>${kind==='nextAction'?`<div class="field"><label>Выполнить до</label><input id="v-ai-apply-due" type="date"></div>`:''}<button class="btn-primary" onclick="applyAiResult('${jsq(s.id)}','${kind}')">Подтвердить сохранение</button><button class="btn-ghost" onclick="showAiResult('${jsq(s.id)}')">Отмена</button>`);}
+async function applyAiResult(id,kind){const s=(await getAll('aiSessions')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===s?.caseId),text=fval('v-ai-apply-text').trim();if(!s||!c||!text)return toast('Нет данных для сохранения',true);if(kind==='note'){c.aiNotes=Array.isArray(c.aiNotes)?c.aiNotes:[];c.aiNotes.push({id:uid('ИИЗ'),text,sessionId:s.id,createdAt:Date.now()});addCaseHistoryEvent(c,'aiNote','',`Черновик ИИ сохранён (${text.length} знаков)`,'ai-manual');}else{const prev=c.nextAction||'';c.nextAction=text.slice(0,500);c.nextActionDue=fval('v-ai-apply-due');addCaseHistoryEvent(c,'nextAction',prev,c.nextAction,'ai-manual');}await put('cases',c);s.status='applied';s.appliedKind=kind;s.appliedAt=Date.now();await put('aiSessions',s);toast('Сохранено после ручного подтверждения');renderDashboard();renderCases();showAiResult(s.id);}
+async function deleteAiSession(id){if(!confirm('Удалить локально сохранённый ответ ИИ?'))return;await del('aiSessions',id);openAiCenter();}
+async function openAiCenter(){
+  const cfg=crmAiSettings(),[cases,docs,sessions]=await Promise.all([getAll('cases'),getAll('documents'),getAll('aiSessions')]);const active=cases.filter(c=>!c.archived),selected=CRM_UPGRADE.selectedCaseId&&active.some(c=>c.id===CRM_UPGRADE.selectedCaseId)?CRM_UPGRADE.selectedCaseId:'';
+  showSheet(`<h3>ИИ-помощник</h3><div class="sheet-sub">Одноразовые запросы по кнопке. Автоматических отправок и автоматического изменения дела нет.</div><div class="v-ai-guard"><b>Контроль конфиденциальности</b><br>По умолчанию включено обезличивание. Перед каждой отправкой CRM покажет точный текст, провайдера, модель, вложение и режим ZDR.</div>
+    <div class="field"><label>Операция</label><select id="v-ai-operation">${Object.entries(CRM_AI_OPERATIONS).map(([k,v])=>`<option value="${k}">${esc(v.label)}</option>`).join('')}</select></div><div class="field"><label>Дело</label><select id="v-ai-case"><option value="">— без дела —</option>${active.map(c=>`<option value="${esc(c.id)}" ${c.id===selected?'selected':''}>${esc(c.number)} · ${esc(c.client||'')}</option>`).join('')}</select></div><div class="v-ai-scope"><label><input id="v-ai-scope-participants" type="checkbox"> Участники</label><label><input id="v-ai-scope-dates" type="checkbox" checked> Даты и задачи</label><label><input id="v-ai-scope-cor" type="checkbox"> Корреспонденция</label><label><input id="v-ai-redact" type="checkbox" checked> Обезличить ПД</label></div>
+    <div class="field"><label>Текст документа из CRM (необязательно)</label><select id="v-ai-document"><option value="">— не добавлять —</option>${docs.map(d=>`<option value="${esc(d.id)}">${esc(d.title)}${d.caseNum?' · '+esc(d.caseNum):''}</option>`).join('')}</select></div><div class="field"><label>Изображение или PDF до 10 МБ (необязательно)</label><input id="v-ai-file" type="file" accept="image/*,.pdf,application/pdf"></div><div class="field"><label>Дополнительная инструкция / текст</label><textarea id="v-ai-extra" rows="4" placeholder="Что особенно важно проверить или включить в результат"></textarea></div><button class="btn-primary" onclick="prepareAiRequest()">Подготовить предпросмотр</button>
+    <details><summary>Подключение провайдера</summary><div class="v-ai-consent">API-ключ хранится только в локальных настройках и переносится лишь внутри зашифрованной резервной копии CRM. Для OpenRouter режим ZDR запрашивается в каждом запросе, но фактическая политика зависит от выбранной модели и провайдера.</div><div class="field"><label>OpenAI-compatible endpoint</label><input id="v-ai-endpoint" value="${esc(cfg.endpoint)}"></div><div class="field"><label>Модель</label><input id="v-ai-model" value="${esc(cfg.model)}" placeholder="openrouter/auto"></div><div class="field"><label>API-ключ</label><input id="v-ai-key" type="password" value="${esc(cfg.key)}" autocomplete="off"></div><label style="display:flex;align-items:center;gap:8px"><input id="v-ai-zdr" type="checkbox" ${cfg.zdr?'checked':''}> Запрашивать Zero Data Retention у OpenRouter</label><button class="btn-primary" onclick="saveAiSettings()">Сохранить подключение</button></details>
+    <details ${sessions.length?'open':''}><summary>История ответов (${sessions.length})</summary>${sessions.sort((a,b)=>b.createdAt-a.createdAt).slice(0,30).map(s=>`<div class="v-ai-session"><div class="v-ai-session-head"><b>${esc(CRM_AI_OPERATIONS[s.operation]?.label||s.operation)}${s.caseNum?' · '+esc(s.caseNum):''}</b><span class="badge ${s.status==='applied'?'b-work':'b-new'}"><span class="dot"></span>${s.status==='applied'?'применён':'черновик'}</span></div><div class="meta">${new Date(s.createdAt).toLocaleString('ru-RU')} · ${esc(s.model)}${s.redacted?' · обезличено':''}</div><div style="display:flex;gap:6px;margin-top:6px"><button class="v-mini-btn" onclick="showAiResult('${jsq(s.id)}')">Открыть</button><button class="v-mini-btn v-danger-text" onclick="deleteAiSession('${jsq(s.id)}')">Удалить</button></div></div>`).join('')||'<div class="meta">Ответов пока нет.</div>'}</details><button class="btn-ghost" onclick="openWorkCenter()">← Рабочий центр</button>`);
+}
 
 
 (async function init() {
