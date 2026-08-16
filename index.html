@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v178</title>
+<title>CRM Адвоката v179</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1188,7 +1188,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 21; // схема данных выпуска v170
-const APP_VER = '178'; // v177: хаб распущен; v178: доска дел на всю ширину, панель предпросмотра только в «Списке»
+const APP_VER = '179'; // v178: доска на всю ширину; v179: вышестоящие инстанции — суд, № и ссылка для апелляции и кассации
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
@@ -2373,7 +2373,7 @@ async function renderCases() {
     else if (casesFilter==='__active') ok = c.status !== 'Завершено';
     else if (casesFilter==='__done') ok = c.status === 'Завершено';
     else ok = c.status === casesFilter; // временный фильтр по статусу (переход из отчётов)
-    return ok && ((c.number||'')+(c.courtNo||'')+(c.caseUid||'')+(c.client||'')+(c.court||'')+((c.labels||[]).join(' '))).toLowerCase().includes(q);
+    return ok && ((c.number||'')+(c.courtNo||'')+(c.caseUid||'')+(c.client||'')+(c.court||'')+(c.courtApp||'')+(c.courtNoApp||'')+(c.courtCass||'')+(c.courtNoCass||'')+((c.labels||[]).join(' '))).toLowerCase().includes(q);
   });
   const cont = document.getElementById('cases-list');
   if (!list.length) {
@@ -5665,6 +5665,20 @@ async function openCaseForm(existing) {
     </div>
     <div class="field"><label>№ дела в суде / № уголовного дела</label><input id="f-courtNo" value="${esc(c.courtNo||'')}" placeholder="А40-.../2025, 2-.../2026 или № у органа"></div>
     <div class="field"><label>УИД дела (ГАС «Правосудие»)</label><input id="f-caseUid" value="${esc(c.caseUid||'')}" placeholder="59RS0005-01-2025-..."></div>
+    <details ${(c.courtApp||c.courtNoApp||c.linkApp||c.courtCass||c.courtNoCass||c.linkCass)?'open':''} style="margin:2px 0 14px;border:1px solid var(--border);border-radius:12px;padding:10px 12px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Вышестоящие инстанции (апелляция, кассация)</summary>
+      <div class="meta" style="margin:8px 0 10px">Заполняется, когда дело ушло в апелляцию или кассацию: там у дела другой суд, другой номер и другая страница на сайте суда.</div>
+      <div class="field"><label>Суд апелляционной инстанции</label>${refSelect('f-courtApp','courts',c.courtApp,'—')}</div>
+      <div class="field-row">
+        <div class="field"><label>№ дела в апелляции</label><input id="f-courtNoApp" value="${esc(c.courtNoApp||'')}" placeholder="33-.../2026"></div>
+        <div class="field"><label>Ссылка на дело (апелляция)</label><input id="f-linkApp" type="url" value="${esc(c.linkApp||'')}" placeholder="https://..."></div>
+      </div>
+      <div class="field"><label>Суд кассационной инстанции</label>${refSelect('f-courtCass','courts',c.courtCass,'—')}</div>
+      <div class="field-row">
+        <div class="field"><label>№ дела в кассации</label><input id="f-courtNoCass" value="${esc(c.courtNoCass||'')}" placeholder="8Г-.../2026"></div>
+        <div class="field"><label>Ссылка на дело (кассация)</label><input id="f-linkCass" type="url" value="${esc(c.linkCass||'')}" placeholder="https://..."></div>
+      </div>
+    </details>
     <div class="field"><label>№ исполнительного производства (ФССП)</label><input id="f-fsspNo" value="${esc(c.fsspNo||'')}" placeholder="12345/25/77001-ИП — если дело у приставов">
       <div class="meta" style="margin-top:4px">Заполняется после получения исполнительного листа. Появится кнопка проверки в банке данных ФССП.</div></div>
     <div class="field"><label id="category-label">${c.kind==='Уголовное'?'Статья УК РФ':c.kind==='КоАП'?'Статья КоАП РФ':'Категория'}</label>
@@ -5981,8 +5995,12 @@ async function saveCase(id) {
   if (!clientRec) { toast('Выберите участника!', true); return; }
   const rawLink = document.getElementById('f-link').value.trim();
   const rawDocsUrl = fval('f-docsUrl').trim();
+  const rawLinkApp = fval('f-linkApp').trim();
+  const rawLinkCass = fval('f-linkCass').trim();
   if (rawLink && !safeExternalUrl(rawLink)) { toast('Ссылка на сайт суда должна начинаться с http:// или https://', true); return; }
   if (rawDocsUrl && !safeExternalUrl(rawDocsUrl)) { toast('Ссылка на папку должна начинаться с http:// или https://', true); return; }
+  if (rawLinkApp && !safeExternalUrl(rawLinkApp)) { toast('Ссылка на дело в апелляции должна начинаться с http:// или https://', true); return; }
+  if (rawLinkCass && !safeExternalUrl(rawLinkCass)) { toast('Ссылка на дело в кассации должна начинаться с http:// или https://', true); return; }
   const docLinks = collectDocLinks();
   if (docLinks === null) return;
   const status = document.getElementById('f-status').value;
@@ -6011,6 +6029,8 @@ async function saveCase(id) {
     docLinks,
     courtNo: fval('f-courtNo'),
     caseUid: fval('f-caseUid'),
+    courtApp: fval('f-courtApp'), courtNoApp: fval('f-courtNoApp'), linkApp: safeExternalUrl(rawLinkApp),
+    courtCass: fval('f-courtCass'), courtNoCass: fval('f-courtNoCass'), linkCass: safeExternalUrl(rawLinkCass),
     fsspNo: fval('f-fsspNo'),
     stage: fval('f-stage'),
     // Уголовное дело — стадии УПК (поля пустые для других видов дел)
@@ -6882,6 +6902,8 @@ async function viewCase(id, tab) {
   const today = todayISO();
   const caseWebUrl = safeExternalUrl(c.link);
   const docsFolderUrl = safeExternalUrl(c.docsUrl);
+  const appealWebUrl = safeExternalUrl(c.linkApp);
+  const cassWebUrl = safeExternalUrl(c.linkCass);
   const safeDocLinks = (Array.isArray(c.docLinks) ? c.docLinks : [])
     .map(d => ({ name:d?.name || '', url:safeExternalUrl(d?.url) })).filter(d=>d.url);
 
@@ -6919,6 +6941,8 @@ async function viewCase(id, tab) {
       <div class="detail-row"><span class="k">Суд</span><span class="v">${esc(c.court||'—')}</span></div>
       ${c.agency?`<div class="detail-row"><span class="k">Правоохр. орган</span><span class="v">${esc(c.agency)}</span></div>`:''}
       ${c.judge?`<div class="detail-row"><span class="k">Судья</span><span class="v">${esc(c.judge)}</span></div>`:''}
+      ${(c.courtApp||c.courtNoApp)?`<div class="detail-row"><span class="k">Апелляция</span><span class="v">${esc(c.courtApp||'')}${c.courtNoApp?(c.courtApp?' · ':'')+'№ '+esc(c.courtNoApp):''}</span></div>`:''}
+      ${(c.courtCass||c.courtNoCass)?`<div class="detail-row"><span class="k">Кассация</span><span class="v">${esc(c.courtCass||'')}${c.courtNoCass?(c.courtCass?' · ':'')+'№ '+esc(c.courtNoCass):''}</span></div>`:''}
       ${c.official?`<div class="detail-row"><span class="k">Должностное лицо</span><span class="v">${esc(c.official)}</span></div>`:''}
       <div class="detail-row"><span class="k">Юрист</span><span class="v">${esc(c.lawyer||'—')}</span></div>
       <div class="detail-row"><span class="k">Дата рег.</span><span class="v">${fmtDate(c.regdate)}</span></div>
@@ -7011,6 +7035,8 @@ async function viewCase(id, tab) {
     <button class="btn-ghost" onclick="openOrdersSheet('${jsq(c.number||'')}')">${ic("scroll",16)} Ордера по делу</button>
     <button class="btn-ghost" onclick="openCourtCheck('${c.id}')">${ic("scale",16)} Проверить дело в суде (КАД / ГАС)</button>
     ${caseWebUrl?`<a href="${esc(caseWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-primary" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Открыть на сайте суда</a>`:''}
+    ${appealWebUrl?`<a href="${esc(appealWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Апелляция — дело на сайте суда</a>`:''}
+    ${cassWebUrl?`<a href="${esc(cassWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Кассация — дело на сайте суда</a>`:''}
     ${docsFolderUrl?`<a href="${esc(docsFolderUrl)}" target="_blank" rel="noopener noreferrer" class="btn-primary" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box;background:var(--accent)">📁 Документы в облаке</a>`:''}
     ${safeDocLinks.length?`
       <div style="margin-top:10px">
@@ -7357,6 +7383,8 @@ async function exportCase(id) {
   const info = row('Внутренний №', c.number) + row('№ в суде / органе', c.courtNo) +
     row('Вид дела', c.kind) + row('Категория', c.category) + row('Статус', c.status) +
     row('Суд', c.court) + row('Правоохранительный орган', c.agency) + row('Судья', c.judge) +
+    row('Апелляция', ((c.courtApp||'') + (c.courtNoApp?((c.courtApp?' · ':'')+'№ '+c.courtNoApp):'')).trim()) +
+    row('Кассация', ((c.courtCass||'') + (c.courtNoCass?((c.courtCass?' · ':'')+'№ '+c.courtNoCass):'')).trim()) +
     row('Должностное лицо', c.official) + row('Доверитель', c.client) +
     row('Юрист', c.lawyer) + row('Соглашение №', c.agreementNo) +
     row('Дата соглашения', c.agreementDate ? fmtDate(c.agreementDate) : '') +
@@ -12491,7 +12519,7 @@ async function crmV161RenderCasePreview(id) {
   host.innerHTML = `<div class="v-case-preview-head"><div><div class="v-case-preview-title">${c.favorite ? '★ ' : ''}${esc(c.number)}</div><div class="meta">${esc(c.kind || '')} · ${esc(c.client || '')}</div></div>${statusBadge(c.status)}</div>
     ${c.nextAction || c.waitingFor ? `<div class="card v-action-card ${nextDue !== null && nextDue < 0 ? 'v-overdue' : ''}" onclick="crmV161OpenNextAction('${jsq(c.id)}')" style="cursor:pointer"><div class="title">${esc(c.nextAction || 'Ожидание')}</div><div class="meta">${c.waitingFor ? `Ждём: ${esc(c.waitingFor)}` : ''}${c.nextActionDue ? `${c.waitingFor?' · ':''}${fmtDate(c.nextActionDue)}` : ''}</div></div>` : `<button class="btn-primary" onclick="crmV161OpenNextAction('${jsq(c.id)}')">+ Задать следующее действие</button>`}
     <div class="v-preview-kpis"><div class="v-preview-kpi"><b>${openTasks}</b><span>открытых задач</span></div><div class="v-preview-kpi"><b>${nextH ? fmtDate(nextH.date).slice(0,5) : '—'}</b><span>ближайшее заседание</span></div><div class="v-preview-kpi"><b>${debt ? fmtMoney(debt) : '0 ₽'}</b><span>задолженность</span></div></div>
-    <div class="detail-block"><div class="detail-row"><span class="k">Суд / орган</span><span class="v">${esc(c.court || c.agency || '—')}</span></div><div class="detail-row"><span class="k">№ в суде</span><span class="v">${esc(c.courtNo || '—')}</span></div><div class="detail-row"><span class="k">Стадия</span><span class="v">${esc(c.stage || '—')}</span></div>${c.comment ? `<div class="detail-row"><span class="k">Комментарий</span><span class="v">${esc(c.comment)}</span></div>` : ''}</div>
+    <div class="detail-block"><div class="detail-row"><span class="k">Суд / орган</span><span class="v">${esc(c.court || c.agency || '—')}</span></div><div class="detail-row"><span class="k">№ в суде</span><span class="v">${esc(c.courtNo || '—')}</span></div>${(c.courtNoApp||c.courtNoCass)?`<div class="detail-row"><span class="k">Ап./касс.</span><span class="v">${esc([c.courtNoApp?'ап. '+c.courtNoApp:'',c.courtNoCass?'касс. '+c.courtNoCass:''].filter(Boolean).join(' · '))}</span></div>`:''}<div class="detail-row"><span class="k">Стадия</span><span class="v">${esc(c.stage || '—')}</span></div>${c.comment ? `<div class="detail-row"><span class="k">Комментарий</span><span class="v">${esc(c.comment)}</span></div>` : ''}</div>
     <button class="btn-primary" onclick="crmV161OpenFullCase('${jsq(c.id)}')">Полная карточка</button>
     <div class="field-row"><button class="btn-ghost" onclick="editCaseById('${jsq(c.id)}')">Изменить</button><button class="btn-ghost" onclick="crmV161OpenNextAction('${jsq(c.id)}')">Следующий шаг</button></div>`;
 }
@@ -12829,7 +12857,7 @@ function crmMonRows(text,fileName){
 }
 function crmMonField(o,names){for(const n of names){if(o?.[n]!==undefined&&o[n]!==null)return o[n];}return'';}
 async function crmMonNormalizeRows(rows,source){
-  const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const match=cases.find(c=>(caseUid&&crmMonNorm(c.caseUid)===crmMonNorm(caseUid))||(courtNo&&(crmMonNorm(c.courtNo)===crmMonNorm(courtNo)||crmMonNorm(c.number)===crmMonNorm(courtNo))));out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,raw:raw.raw||rawText,hash,caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:'new',receivedAt:Date.now()});}return out;
+  const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const match=cases.find(c=>(caseUid&&crmMonNorm(c.caseUid)===crmMonNorm(caseUid))||(courtNo&&(crmMonNorm(c.courtNo)===crmMonNorm(courtNo)||crmMonNorm(c.number)===crmMonNorm(courtNo)||crmMonNorm(c.courtNoApp)===crmMonNorm(courtNo)||crmMonNorm(c.courtNoCass)===crmMonNorm(courtNo))));out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,raw:raw.raw||rawText,hash,caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:'new',receivedAt:Date.now()});}return out;
 }
 async function crmMonPersist(rows){const old=await getAllRaw('monitorEvents'),hashes=new Set(old.filter(x=>!x._deleted).map(x=>x.hash)),added=[];for(const x of rows){if(hashes.has(x.hash))continue;await put('monitorEvents',x);hashes.add(x.hash);added.push(x);}toast(added.length?`Добавлено событий: ${added.length}`:'Новых событий нет — дубликаты пропущены',!added.length);openMonitorCenter();renderDashboard();}
 async function importMonitorFile(input){const file=input?.files?.[0];if(!file)return;if(file.size>5*1024*1024){toast('Файл больше 5 МБ',true);return;}const rows=crmMonRows(await file.text(),file.name),norm=await crmMonNormalizeRows(rows,fval('v-mon-source')||'Импорт файла');await crmMonPersist(norm);input.value='';}
