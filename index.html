@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v179</title>
+<title>CRM Адвоката v180</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1188,7 +1188,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 21; // схема данных выпуска v170
-const APP_VER = '179'; // v178: доска на всю ширину; v179: вышестоящие инстанции — суд, № и ссылка для апелляции и кассации
+const APP_VER = '180'; // v179: инстанции; v180: судьи апелляции/кассации, заседание подтягивает суд и судью по стадии дела
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
@@ -5665,15 +5665,21 @@ async function openCaseForm(existing) {
     </div>
     <div class="field"><label>№ дела в суде / № уголовного дела</label><input id="f-courtNo" value="${esc(c.courtNo||'')}" placeholder="А40-.../2025, 2-.../2026 или № у органа"></div>
     <div class="field"><label>УИД дела (ГАС «Правосудие»)</label><input id="f-caseUid" value="${esc(c.caseUid||'')}" placeholder="59RS0005-01-2025-..."></div>
-    <details ${(c.courtApp||c.courtNoApp||c.linkApp||c.courtCass||c.courtNoCass||c.linkCass)?'open':''} style="margin:2px 0 14px;border:1px solid var(--border);border-radius:12px;padding:10px 12px">
+    <details ${(c.courtApp||c.courtNoApp||c.linkApp||c.judgeApp||c.courtCass||c.courtNoCass||c.linkCass||c.judgeCass)?'open':''} style="margin:2px 0 14px;border:1px solid var(--border);border-radius:12px;padding:10px 12px">
       <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Вышестоящие инстанции (апелляция, кассация)</summary>
       <div class="meta" style="margin:8px 0 10px">Заполняется, когда дело ушло в апелляцию или кассацию: там у дела другой суд, другой номер и другая страница на сайте суда.</div>
-      <div class="field"><label>Суд апелляционной инстанции</label>${refSelect('f-courtApp','courts',c.courtApp,'—')}</div>
+      <div class="field-row">
+        <div class="field"><label>Суд апелляционной инстанции</label>${refSelect('f-courtApp','courts',c.courtApp,'—')}</div>
+        <div class="field"><label>Судья (апелляция)</label>${refSelect('f-judgeApp','judges',c.judgeApp,'—')}</div>
+      </div>
       <div class="field-row">
         <div class="field"><label>№ дела в апелляции</label><input id="f-courtNoApp" value="${esc(c.courtNoApp||'')}" placeholder="33-.../2026"></div>
         <div class="field"><label>Ссылка на дело (апелляция)</label><input id="f-linkApp" type="url" value="${esc(c.linkApp||'')}" placeholder="https://..."></div>
       </div>
-      <div class="field"><label>Суд кассационной инстанции</label>${refSelect('f-courtCass','courts',c.courtCass,'—')}</div>
+      <div class="field-row">
+        <div class="field"><label>Суд кассационной инстанции</label>${refSelect('f-courtCass','courts',c.courtCass,'—')}</div>
+        <div class="field"><label>Судья (кассация)</label>${refSelect('f-judgeCass','judges',c.judgeCass,'—')}</div>
+      </div>
       <div class="field-row">
         <div class="field"><label>№ дела в кассации</label><input id="f-courtNoCass" value="${esc(c.courtNoCass||'')}" placeholder="8Г-.../2026"></div>
         <div class="field"><label>Ссылка на дело (кассация)</label><input id="f-linkCass" type="url" value="${esc(c.linkCass||'')}" placeholder="https://..."></div>
@@ -6029,8 +6035,8 @@ async function saveCase(id) {
     docLinks,
     courtNo: fval('f-courtNo'),
     caseUid: fval('f-caseUid'),
-    courtApp: fval('f-courtApp'), courtNoApp: fval('f-courtNoApp'), linkApp: safeExternalUrl(rawLinkApp),
-    courtCass: fval('f-courtCass'), courtNoCass: fval('f-courtNoCass'), linkCass: safeExternalUrl(rawLinkCass),
+    courtApp: fval('f-courtApp'), judgeApp: fval('f-judgeApp'), courtNoApp: fval('f-courtNoApp'), linkApp: safeExternalUrl(rawLinkApp),
+    courtCass: fval('f-courtCass'), judgeCass: fval('f-judgeCass'), courtNoCass: fval('f-courtNoCass'), linkCass: safeExternalUrl(rawLinkCass),
     fsspNo: fval('f-fsspNo'),
     stage: fval('f-stage'),
     // Уголовное дело — стадии УПК (поля пустые для других видов дел)
@@ -6366,7 +6372,7 @@ const CPX = {}; // fieldId → { items, shown, onPick }
 function cpxRegister(fieldId, items, onPick) { CPX[fieldId] = { items, shown: [], onPick: onPick || null }; }
 function cpxCaseItems(cases) {
   return sortCasesByClient(cases.filter(c => !c.archived))
-    .map(c => ({ n: c.number, client: c.client || '', court: c.court || '', judge: c.judge || '' }));
+    .map(c => { const sc = caseStageCourt(c); return { n: c.number, client: c.client || '', court: sc.court, judge: sc.judge }; });
 }
 function cpxLabelFor(cases, num) {
   const c = num ? cases.find(x => x.number === num) : null;
@@ -6412,6 +6418,13 @@ function cpxHide(fieldId) {
 // Подставить суд и судью из выбранного дела.
 // initial=true (открытие формы) заполняет, только если поля пустые — чтобы не затирать.
 // При ручной смене дела (initial=false) — обновляем всегда, если в деле есть данные.
+// v180: суд и судья по текущей стадии — в апелляции/кассации подтягиваются их реквизиты
+function caseStageCourt(c) {
+  const s = (c && c.stage) || '';
+  if (s === 'Кассация' || s === 'Надзор') return { court: c.courtCass || c.courtApp || c.court || '', judge: c.judgeCass || c.judgeApp || c.judge || '' };
+  if (s === 'Апелляция') return { court: c.courtApp || c.court || '', judge: c.judgeApp || c.judge || '' };
+  return { court: (c && c.court) || '', judge: (c && c.judge) || '' };
+}
 function hearingCaseChanged(initial) {
   const hid = document.getElementById('f-caseNum');
   if (!hid) return;
@@ -6941,8 +6954,8 @@ async function viewCase(id, tab) {
       <div class="detail-row"><span class="k">Суд</span><span class="v">${esc(c.court||'—')}</span></div>
       ${c.agency?`<div class="detail-row"><span class="k">Правоохр. орган</span><span class="v">${esc(c.agency)}</span></div>`:''}
       ${c.judge?`<div class="detail-row"><span class="k">Судья</span><span class="v">${esc(c.judge)}</span></div>`:''}
-      ${(c.courtApp||c.courtNoApp)?`<div class="detail-row"><span class="k">Апелляция</span><span class="v">${esc(c.courtApp||'')}${c.courtNoApp?(c.courtApp?' · ':'')+'№ '+esc(c.courtNoApp):''}</span></div>`:''}
-      ${(c.courtCass||c.courtNoCass)?`<div class="detail-row"><span class="k">Кассация</span><span class="v">${esc(c.courtCass||'')}${c.courtNoCass?(c.courtCass?' · ':'')+'№ '+esc(c.courtNoCass):''}</span></div>`:''}
+      ${(c.courtApp||c.courtNoApp||c.judgeApp)?`<div class="detail-row"><span class="k">Апелляция</span><span class="v">${esc(c.courtApp||'')}${c.courtNoApp?(c.courtApp?' · ':'')+'№ '+esc(c.courtNoApp):''}${c.judgeApp?' · судья '+esc(c.judgeApp):''}</span></div>`:''}
+      ${(c.courtCass||c.courtNoCass||c.judgeCass)?`<div class="detail-row"><span class="k">Кассация</span><span class="v">${esc(c.courtCass||'')}${c.courtNoCass?(c.courtCass?' · ':'')+'№ '+esc(c.courtNoCass):''}${c.judgeCass?' · судья '+esc(c.judgeCass):''}</span></div>`:''}
       ${c.official?`<div class="detail-row"><span class="k">Должностное лицо</span><span class="v">${esc(c.official)}</span></div>`:''}
       <div class="detail-row"><span class="k">Юрист</span><span class="v">${esc(c.lawyer||'—')}</span></div>
       <div class="detail-row"><span class="k">Дата рег.</span><span class="v">${fmtDate(c.regdate)}</span></div>
@@ -7383,8 +7396,8 @@ async function exportCase(id) {
   const info = row('Внутренний №', c.number) + row('№ в суде / органе', c.courtNo) +
     row('Вид дела', c.kind) + row('Категория', c.category) + row('Статус', c.status) +
     row('Суд', c.court) + row('Правоохранительный орган', c.agency) + row('Судья', c.judge) +
-    row('Апелляция', ((c.courtApp||'') + (c.courtNoApp?((c.courtApp?' · ':'')+'№ '+c.courtNoApp):'')).trim()) +
-    row('Кассация', ((c.courtCass||'') + (c.courtNoCass?((c.courtCass?' · ':'')+'№ '+c.courtNoCass):'')).trim()) +
+    row('Апелляция', ((c.courtApp||'') + (c.courtNoApp?((c.courtApp?' · ':'')+'№ '+c.courtNoApp):'') + (c.judgeApp?' · судья '+c.judgeApp:'')).trim()) +
+    row('Кассация', ((c.courtCass||'') + (c.courtNoCass?((c.courtCass?' · ':'')+'№ '+c.courtNoCass):'') + (c.judgeCass?' · судья '+c.judgeCass:'')).trim()) +
     row('Должностное лицо', c.official) + row('Доверитель', c.client) +
     row('Юрист', c.lawyer) + row('Соглашение №', c.agreementNo) +
     row('Дата соглашения', c.agreementDate ? fmtDate(c.agreementDate) : '') +
@@ -12868,7 +12881,7 @@ async function fetchMonitorEndpoint(){
   localStorage.setItem('crm_monitor_url',u.href);if(token)localStorage.setItem('crm_monitor_token',token);bumpSettings?.();try{toast('Получаю события…');const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),30000),res=await fetch(u.href,{headers:token?{Authorization:`Bearer ${token}`}:{},signal:ctrl.signal,cache:'no-store'});clearTimeout(timer);if(!res.ok)throw new Error(`HTTP ${res.status}`);const body=await res.text();await crmMonPersist(await crmMonNormalizeRows(crmMonRows(body,res.headers.get('content-type')?.includes('json')?'events.json':'events.txt'),'HTTPS-адаптер'));}catch(e){toast(`Не удалось получить события: ${e.message||'ошибка'}`,true);}
 }
 async function reviewMonitorEvent(id){const e=(await getAll('monitorEvents')).find(x=>x.id===id),cases=(await getAll('cases')).filter(c=>!c.archived);if(!e)return;showSheet(`<h3>${esc(e.title)}</h3><div class="sheet-sub">${esc(e.source)} · ${e.date?fmtDate(e.date):'дата не распознана'}</div><div class="field"><label>Связать с делом</label><select id="v-mon-case"><option value="">— выберите —</option>${cases.map(c=>`<option value="${esc(c.id)}" ${c.id===e.caseId?'selected':''}>${esc(c.number)} · ${esc(c.client||'')}</option>`).join('')}</select></div><div class="v-monitor-raw">${esc(e.raw||'')}</div><div class="v-storage-note">CRM ничего не меняет автоматически. Выберите одно действие; запись источника и исходный текст сохранятся в журнале.</div><div class="v-hub-grid"><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','hearing')"><span class="v-hub-icon">📅</span><b>Заседание</b><span>Добавить событие в календарь</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','task')"><span class="v-hub-icon">✓</span><b>Задача</b><span>Создать задачу на указанную дату</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','deadline')"><span class="v-hub-icon">⏱</span><b>Срок дела</b><span>Добавить внутренний контрольный срок</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','note')"><span class="v-hub-icon">▤</span><b>Заметка</b><span>Сохранить только в истории дела</span></button></div><button class="btn-ghost" onclick="ignoreMonitorEvent('${jsq(e.id)}')">Не применять</button><button class="btn-ghost" onclick="openMonitorCenter()">← К событиям</button>`);}
-async function applyMonitorEvent(id,action){const e=(await getAll('monitorEvents')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===fval('v-mon-case'));if(e?.status==='applied'){toast('Это событие уже применено',true);return;}if(!e||!c){toast('Сначала выберите дело',true);return;}const date=e.date||todayISO();let createdId='';if(action==='hearing'){const x={id:uid('ЗС'),caseId:c.id,caseNum:c.number,date,time:'',court:c.court||'',status:'Назначено',note:e.title,monitorEventId:e.id};await put('hearings',x);createdId=x.id;}else if(action==='task'){const x={id:uid('З'),caseId:c.id,caseNum:c.number,title:e.title,due:date,done:false,createdAt:Date.now(),monitorEventId:e.id};await put('tasks',x);createdId=x.id;}else if(action==='deadline'){const x={id:uid('СР'),title:e.title,date,done:false,source:'monitor',monitorEventId:e.id};c.deadlines=Array.isArray(c.deadlines)?c.deadlines:[];c.deadlines.push(x);await put('cases',c);createdId=x.id;}else{c.monitorNotes=Array.isArray(c.monitorNotes)?c.monitorNotes:[];c.monitorNotes.push({id:uid('ЗАМ'),at:Date.now(),title:e.title,date,source:e.source,eventId:e.id});addCaseHistoryEvent(c,'monitor','',e.title,'monitor');await put('cases',c);createdId=c.monitorNotes.at(-1).id;}e.caseId=c.id;e.caseNum=c.number;e.status='applied';e.appliedAction=action;e.appliedRecordId=createdId;e.appliedAt=Date.now();await put('monitorEvents',e);toast('Событие применено');openMonitorCenter();renderDashboard();renderCases();}
+async function applyMonitorEvent(id,action){const e=(await getAll('monitorEvents')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===fval('v-mon-case'));if(e?.status==='applied'){toast('Это событие уже применено',true);return;}if(!e||!c){toast('Сначала выберите дело',true);return;}const date=e.date||todayISO();let createdId='';if(action==='hearing'){const x={id:uid('ЗС'),caseId:c.id,caseNum:c.number,date,time:'',court:caseStageCourt(c).court,status:'Назначено',note:e.title,monitorEventId:e.id};await put('hearings',x);createdId=x.id;}else if(action==='task'){const x={id:uid('З'),caseId:c.id,caseNum:c.number,title:e.title,due:date,done:false,createdAt:Date.now(),monitorEventId:e.id};await put('tasks',x);createdId=x.id;}else if(action==='deadline'){const x={id:uid('СР'),title:e.title,date,done:false,source:'monitor',monitorEventId:e.id};c.deadlines=Array.isArray(c.deadlines)?c.deadlines:[];c.deadlines.push(x);await put('cases',c);createdId=x.id;}else{c.monitorNotes=Array.isArray(c.monitorNotes)?c.monitorNotes:[];c.monitorNotes.push({id:uid('ЗАМ'),at:Date.now(),title:e.title,date,source:e.source,eventId:e.id});addCaseHistoryEvent(c,'monitor','',e.title,'monitor');await put('cases',c);createdId=c.monitorNotes.at(-1).id;}e.caseId=c.id;e.caseNum=c.number;e.status='applied';e.appliedAction=action;e.appliedRecordId=createdId;e.appliedAt=Date.now();await put('monitorEvents',e);toast('Событие применено');openMonitorCenter();renderDashboard();renderCases();}
 async function ignoreMonitorEvent(id){const e=(await getAll('monitorEvents')).find(x=>x.id===id);if(!e)return;if(e.status==='applied'){toast('Применённое событие нельзя пометить пропущенным',true);return;}e.status='ignored';e.reviewedAt=Date.now();await put('monitorEvents',e);toast('Событие оставлено без применения');openMonitorCenter();renderDashboard();}
 function crmMonSetFilter(v){CRM_MON_FILTER=v;openMonitorCenter();}
 async function openMonitorCenter(){
