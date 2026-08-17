@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v180</title>
+<title>CRM Адвоката v181</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1188,7 +1188,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 21; // схема данных выпуска v170
-const APP_VER = '180'; // v179: инстанции; v180: судьи апелляции/кассации, заседание подтягивает суд и судью по стадии дела
+const APP_VER = '181'; // v180: судьи инстанций; v181: комментарий к заседанию с маркером 💬 в сводке, календаре и деле
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
@@ -2021,7 +2021,7 @@ async function openDeadlinesSheet() {
     if (d === null) return;
     const hid = h.id;
     items.push({ date: h.date, time: h.time||'', d, type: 'Заседание', icon: '🏛',
-      title: h.court || 'Заседание', sub: [h.caseNum, hearingPerson(h)].filter(Boolean).join(' · '), act: `closeSheet();viewHearing('${hid}')` });
+      title: h.court || 'Заседание', sub: [h.caseNum, hearingPerson(h)].filter(Boolean).join(' · '), note: h.comment ? String(h.comment).trim() : '', act: `closeSheet();viewHearing('${hid}')` });
   });
   // Процессуальные сроки (на делах)
   cases.forEach(c => (c.deadlines||[]).forEach(dl => {
@@ -2200,7 +2200,7 @@ async function renderDashboard() {
         ? evs.map(e=>`<div class="ag-row" onclick="${e.act||''}">
             <span class="ag-mark" style="background:${e.color||'var(--accent)'}"></span>
             <span class="ag-time">${esc(e.time||'—')}</span>
-            <span class="ag-body"><b>${esc(e.title||'')}</b>${e.sub?`<br><span class="ag-sub">${esc(e.sub)}</span>`:''}</span>
+            <span class="ag-body"><b>${esc(e.title||'')}</b>${e.sub?`<br><span class="ag-sub">${esc(e.sub)}</span>`:''}${e.note?`<br><span class="ag-sub" style="color:var(--sig-amber);font-weight:600">💬 ${esc(String(e.note).slice(0,80))}${String(e.note).length>80?'…':''}</span>`:''}</span>
           </div>`).join('')
         : `<div class="ag-empty">${i===0&&hiddenPast?'✔ Все события дня прошли':'☕ свободно'}</div>`);
     }
@@ -2505,7 +2505,7 @@ async function calEventsByDate() {
   const push = (date, ev) => { if (!date) return; const k = String(date).slice(0,10); (map[k] = map[k] || []).push(ev); };
   const hearings = await getAll('hearings');
   hearings.forEach(h => push(h.date, { type:'hearing', color: h.status==='Проведено' ? 'var(--text-faint)' : '#4F46E5',
-    time: h.time||'', title: '⚖️ ' + (clientByCase(h.caseNum) || caseLabel(h.caseNum) || 'Заседание'), sub: [h.court, hearingPerson(h)].filter(Boolean).join(' · '), status: h.status||'', id: h.id, act:`viewHearing('${h.id}')` }));
+    time: h.time||'', title: '⚖️ ' + (clientByCase(h.caseNum) || caseLabel(h.caseNum) || 'Заседание'), sub: [h.court, hearingPerson(h)].filter(Boolean).join(' · '), status: h.status||'', note: h.comment ? String(h.comment).trim() : '', id: h.id, act:`viewHearing('${h.id}')` }));
   const leads = await getAll('leads');
   leads.forEach(l => {
     if (l.status === 'Взято в работу' || l.status === 'Отказ') return;
@@ -2640,7 +2640,7 @@ async function renderCalendar() {
       const isPast = d!==null && d<0;
       const swipe = isPlanned(h) ? `data-swipe="hearing" data-id="${h.id}"` : '';
       return `<div class="card" ${swipe} onclick="viewHearing('${h.id}')" style="${isToday?'border:2px solid var(--sig-green);background:rgba(34,197,94,0.08)':''}${isPast?'opacity:.6':''}"><div class="row1">
-        <div style="flex:1;min-width:0"><div class="title">${esc(caseLabel(h.caseNum)||'Заседание')}</div><div class="meta">${esc(h.court||'')}</div><div class="meta" style="font-size:11px">${esc(hearingPerson(h))}</div></div>
+        <div style="flex:1;min-width:0"><div class="title">${esc(caseLabel(h.caseNum)||'Заседание')}</div><div class="meta">${esc(h.court||'')}</div><div class="meta" style="font-size:11px">${esc(hearingPerson(h))}</div>${h.comment?`<div class="meta" style="color:var(--sig-amber);font-weight:600">💬 ${esc(String(h.comment).slice(0,90))}${String(h.comment).length>90?'…':''}</div>`:''}</div>
         <div style="text-align:right"><div style="font-weight:700">${esc(h.time||'')}</div>${statusBadge(h.status)}</div>
       </div></div>`;
     }).join('');
@@ -6196,6 +6196,7 @@ async function openHearingForm(existing) {
     <div class="field"><label>Судья</label>${refSelect('f-judge','judges',h.judge,'—')}</div>
     <div class="field"><label>Статус</label>${refSelect('f-status','hearingStatus',h.status,null)}</div>
     <div class="field"><label>Результат</label><textarea id="f-result" rows="2" placeholder="решение, определение, отложено — на что и почему">${esc(h.result||'')}</textarea></div>
+    <div class="field"><label>Комментарий к заседанию</label><textarea id="f-hcomment" rows="2" placeholder="что подготовить: доп. документы, судебная практика, расчёты…">${esc(h.comment||'')}</textarea></div>
     <label style="display:flex;align-items:center;gap:10px;margin-bottom:14px;font-size:14px;cursor:pointer">
       <input type="checkbox" id="f-attended" ${(h.attended===true)?'checked':''} style="width:18px;height:18px"> Участвовал(а) лично в заседании
     </label>
@@ -6220,7 +6221,8 @@ async function hearingNext(id) {
     judge: document.getElementById('f-judge')?.value ?? prev.judge,
     status: 'Проведено',
     attended: document.getElementById('f-attended')?.checked ?? prev.attended,
-    result: (document.getElementById('f-result')?.value || '').trim()
+    result: (document.getElementById('f-result')?.value || '').trim(),
+    comment: (document.getElementById('f-hcomment')?.value || '').trim()
   });
   await put('hearings', cur);
   if (typeof gcalTouch === 'function') gcalTouch();
@@ -6230,7 +6232,8 @@ async function hearingNext(id) {
   if (inp) inp.value = cur.caseNum ? (caseLabel(cur.caseNum) || cur.caseNum) : '';
   const setSel = (sid, v) => { const el = document.getElementById(sid); if (el && v) el.value = v; };
   setSel('f-court', cur.court); setSel('f-judge', cur.judge);
-  toast('Прошлое — «Проведено». Дату и время возьмите из новой повестки');
+  const hcEl = document.getElementById('f-hcomment'); if (hcEl) hcEl.value = cur.comment || ''; // v181: заметка «что подготовить» переезжает в следующее заседание
+  toast('Прошлое — «Проведено»' + (cur.comment ? ', комментарий перенесён в новое' : '') + '. Дату и время возьмите из новой повестки');
   if (typeof renderCalendar === 'function') renderCalendar();
   renderDashboard(); navBadgeRefresh();
 }
@@ -6460,7 +6463,8 @@ async function saveHearing(id) {
     court: document.getElementById('f-court').value, judge: document.getElementById('f-judge').value,
     status: document.getElementById('f-status').value,
     attended: document.getElementById('f-attended').checked,
-    result: (document.getElementById('f-result')?.value || '').trim()
+    result: (document.getElementById('f-result')?.value || '').trim(),
+    comment: (document.getElementById('f-hcomment')?.value || '').trim()
   });
   await put('hearings', obj);
   // Уведомление в Telegram и обновление Google Календаря (если подключены)
@@ -6978,7 +6982,7 @@ async function viewCase(id, tab) {
             <span class="k">${isUp?'Назначено':esc(h.status||'Проведено')}</span>
             <span class="v" style="text-align:right">${isUp
               ? `<span style="color:var(--blue);font-weight:600">${fmtDate(h.date)}${h.time?' · '+esc(String(h.time).slice(0,5)):''}${near(h.date)}</span>`
-              : `${fmtDate(h.date)}${h.time?' · '+esc(String(h.time).slice(0,5)):''}${h.attended?' ✅':''}`}${!isUp&&h.result?`<br><span style="font-size:12px;color:var(--text-faint)">${esc(String(h.result).slice(0,60))}${String(h.result).length>60?'…':''}</span>`:''}</span>
+              : `${fmtDate(h.date)}${h.time?' · '+esc(String(h.time).slice(0,5)):''}${h.attended?' ✅':''}`}${!isUp&&h.result?`<br><span style="font-size:12px;color:var(--text-faint)">${esc(String(h.result).slice(0,60))}${String(h.result).length>60?'…':''}`:''}${h.comment?`<br><span style="font-size:12px;color:var(--sig-amber)">💬 ${esc(String(h.comment).slice(0,60))}${String(h.comment).length>60?'…':''}</span>`:''}</span>
           </div>`;
         return up.map(h=>line(h,true)).join('') + past.map(h=>line(h,false)).join('');
       })()}
@@ -7721,7 +7725,9 @@ async function viewHearing(id) {
       ${c&&c.official?`<div class="detail-row"><span class="k">Долж. лицо</span><span class="v">${esc(c.official)}</span></div>`:''}
       <div class="detail-row"><span class="k">Статус</span><span class="v">${esc(h.status)}</span></div>
       <div class="detail-row"><span class="k">Участие</span><span class="v">${h.attended===true?'✅ участвовал(а) лично':'➖ без личного участия'}</span></div>
+      ${h.result?`<div class="detail-row"><span class="k">Результат</span><span class="v">${esc(h.result)}</span></div>`:''}
     </div>
+    ${h.comment?`<div class="card" style="border-left:3px solid var(--sig-amber);margin-bottom:10px"><div class="meta" style="margin-bottom:4px">💬 Комментарий к заседанию</div><div style="font-size:14px;white-space:pre-wrap">${esc(h.comment)}</div></div>`:''}
     <button class="btn-primary" onclick="editHearingById('${jsq(h.id)}')">Редактировать</button>
     ${c?`<button class="btn-ghost" onclick="viewCase('${c.id}')">💼 Открыть дело</button>`:''}
     <button class="btn-ghost" onclick="hearingToICS('${h.id}')">📅 В календарь</button>
