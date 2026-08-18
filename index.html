@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v182</title>
+<title>CRM Адвоката v184</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -948,6 +948,7 @@
       <div class="kpi" onclick="taskFilter='open';nav('tasks')" style="cursor:pointer"><div class="label">Просроч. задач</div><div class="value" id="kpi-tasks">0</div></div>
       <div class="kpi" onclick="nav('finance')" style="cursor:pointer"><div class="label">Долг, ₽</div><div class="value" id="kpi-debt" style="font-size:22px">0</div></div>
       <div id="kpi-attention" style="grid-column:1/-1"></div>
+      <div id="v184-deadlines" style="grid-column:1/-1"></div>
     </div>
   </details>
 
@@ -1162,6 +1163,12 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14.7 6.3a4 4 0 00-5.4 5.4l-6 6a2 2 0 003 3l6-6a4 4 0 005.4-5.4l-2.5 2.5-2.5-.6-.6-2.5z"/></svg>Калькуляторы
   </button>
   <!-- v177: разделы бывшего «Рабочего центра» — прямыми пунктами панели -->
+  <button class="nav-sec" onclick="openInboxSheet()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>Инбокс
+  </button>
+  <button class="nav-sec" onclick="openCounterpartySheet()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>Контрагент
+  </button>
   <button class="nav-sec" onclick="openAiImport()">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>Импорт от ИИ
   </button>
@@ -1192,7 +1199,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 21; // схема данных выпуска v170
-const APP_VER = '182'; // v181: комментарии к заседаниям; v182: журнал дела, контроль тишины, триггеры процессов, пакет нового дела, импорт от нейросети
+const APP_VER = '184'; // v183: коллектор судов, чистка; v184: инбокс, эскалация сроков 7/3/1, проверка контрагента
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
@@ -1640,12 +1647,6 @@ async function fixCaseNumber(id) {
   openDuplicatesSheet();
 }
 
-// Перепривязать связанные записи при смене номера дела
-async function relinkCaseNumber(oldNum, newNum) {
-  if (!oldNum || oldNum === newNum) return;
-  const c = (await getAll('cases')).find(x=>x.number===newNum);
-  if (c) await caseRelinkAfterRename(c.id, oldNum, newNum);
-}
 async function autoCaseNo() {
   const inp = document.getElementById('f-number');
   if (inp) { inp.value = await nextCaseNo(); toast('Номер обновлён'); }
@@ -1819,9 +1820,7 @@ function toast(msg, warn) {
 // ════════════════════════════════════════════════════════════
 let currentScreen = 'dashboard';
 let showPastHearings = false;     // вкладка «Заседания»
-let showPastDashboard = false;    // вкладка «Обзор»
 function togglePastHearings() { showPastHearings = !showPastHearings; renderCalendar(); }
-function togglePastDashboard() { showPastDashboard = !showPastDashboard; renderDashboard(); }
 function nav(s, fromPop) {
   // Если открыта карточка — сначала закрываем её
   if (_sheetOpen) closeSheet();
@@ -2301,6 +2300,7 @@ async function renderDashboard() {
       (_silent.length ? `<div class="card" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin:2px 0 6px" onclick="casesQuickFilter='stale';nav('cases')"><div class="meta" style="color:var(--sig-amber);font-weight:700">⏳ Без движения дольше ${CRM_STALE_DAYS} дн: ${_silent.length} ${plural(_silent.length,'дело','дела','дел')} — показать</div></div>` : '') +
       (_noNext.length ? `<div class="card" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin:0" onclick="casesQuickFilter='noNext';nav('cases')"><div class="meta" style="color:var(--sig-amber);font-weight:700">✏️ Без следующего действия: ${_noNext.length} ${plural(_noNext.length,'дело','дела','дел')} — показать</div></div>` : '');
   } catch (e) {}
+  try { await crmRenderDeadlineControl(); } catch (e) {} // v184: инбокс + эскалация сроков 7/3/1
   // Условный гонорар успеха (pending) не входит в долг — он ещё не висит на клиенте
   const debt = finance.reduce((a,f)=>a+(f.pending?0:Math.max(0, Number(f.amount||0)-Number(f.paid||0))),0);
   const kpiDebtEl = document.getElementById('kpi-debt');
@@ -3324,7 +3324,7 @@ async function viewLead(id) {
       <div class="detail-row"><span class="k">Email</span><span class="v">${emailHtml(l.email,'lead',l.id)}</span></div>
       <div class="detail-row"><span class="k">Суть</span><span class="v">${esc(l.topic||'—')}</span></div>
       ${l.addr?`<div class="detail-row"><span class="k">Адрес</span><span class="v">${addrHtml(l.addr,'lead',l.id)}</span></div>`:''}
-      ${l.opponent?`<div class="detail-row"><span class="k">Оппонент</span><span class="v">${esc(l.opponent)}${l.opponentInn?'<br><span style="font-size:12px;color:var(--text-faint)">ИНН '+esc(l.opponentInn)+'</span>':''}${l.opponentInfo?'<br><span style="font-size:12px;color:var(--text-faint)">'+esc(l.opponentInfo)+'</span>':''}</span></div>`:''}
+      ${l.opponent?`<div class="detail-row"><span class="k">Оппонент</span><span class="v">${esc(l.opponent)}${l.opponentInn?'<br><span style="font-size:12px;color:var(--text-faint)">ИНН '+esc(l.opponentInn)+'</span>':''}${l.opponentInfo?'<br><span style="font-size:12px;color:var(--text-faint)">'+esc(l.opponentInfo)+'</span>':''}</span></div><button class="btn-ghost" style="margin:2px 0 8px" onclick="openCounterpartySheet('${jsq(l.opponent)}','${jsq(l.opponentInn||'')}')">🔎 Проверить оппонента: КАД · ЕФРСБ · ФССП · ФНС</button>`:''}
       <div class="detail-row"><span class="k">Вид</span><span class="v">${esc(l.kind||'—')}</span></div>
       <div class="detail-row"><span class="k">Источник</span><span class="v">${esc(l.source||'—')}</span></div>
       <div class="detail-row"><span class="k">Статус</span><span class="v"><span class="badge ${LEAD_BADGE[l.status]||'b-new'}"><span class="dot"></span>${esc(l.status||'Новое')}</span></span></div>
@@ -3533,7 +3533,7 @@ async function toggleTask(id) {
   t.doneAt = t.done ? todayISO() : '';
   await put('tasks', t);
   if (t.caseNum) await crmCaseLogByNum(t.caseNum, 'task', (t.done ? 'Задача выполнена: ' : 'Задача возвращена: ') + t.title);
-  if (typeof gcalTouch === 'function') gcalTouch();
+  if (typeof icsTouch === 'function') icsTouch();
   renderTasks(); renderDashboard();
 }
 
@@ -3587,7 +3587,7 @@ async function saveTask(id) {
     createdAt: prev?.createdAt || Date.now()
   };
   await put('tasks', obj);
-  if (typeof gcalTouch === 'function') gcalTouch();
+  if (typeof icsTouch === 'function') icsTouch();
   closeSheet(); toast('Задача сохранена'); renderTasks(); renderDashboard();
 }
 
@@ -3607,14 +3607,14 @@ async function collectAll() {
 }
 
 // ── Синхронизация пользовательских настроек ──
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr'];
+const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
 
 // Секреты переносятся только внутри зашифрованного контейнера .crm. PIN
 // хранится и переносится как PBKDF2-хэш с солью, а не как исходные цифры.
 // Биометрическая привязка и идентификатор устройства намеренно не переносятся:
 // WebAuthn-ключ аппаратно связан с конкретным телефоном/компьютером.
 const SYNC_SECRET_KEYS = [
-  'crm_ya_token','crm_ya_client','crm_dbx_token','crm_dbx_client','crm_gcal_url','crm_gcal_secret','crm_mail_url','crm_mail_secret','crm_srv_url','crm_srv_secret','crm_dadata_token','crm_tg_token','crm_tg_chat','crm_sync_pass','crm_fsync_pass','crm_license','crm_lock_on','crm_lock_hash','crm_lock_salt','crm_lock_len','crm_lock_iter','crm_monitor_token','crm_ai_key'
+  'crm_ya_token','crm_ya_client','crm_srv_url','crm_srv_secret','crm_dadata_token','crm_tg_token','crm_tg_chat','crm_sync_pass','crm_fsync_pass','crm_license','crm_lock_on','crm_lock_hash','crm_lock_salt','crm_lock_len','crm_lock_iter','crm_monitor_token','crm_ai_key'
 ];
 
 function nextLocalStamp(key) {
@@ -4356,10 +4356,6 @@ async function fsyncSetPass() {
   }
   openFileSyncSheet();
 }
-async function fsyncRemovePass() {
-  toast('Шифрование обязательно. Можно только сменить пароль.', true);
-  openFileSyncSheet();
-}
 function fsyncSetStatus(msg, warn) {
   const el = document.getElementById('fsync-status');
   if (!el) return;
@@ -4572,7 +4568,6 @@ function openSyncSheet() {
       </div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
-    </div>
 
     <div class="card" onclick="openSrvSheet()" style="cursor:pointer;margin-bottom:10px">
       <div class="row1"><div style="flex:1">
@@ -4580,18 +4575,10 @@ function openSyncSheet() {
         <div class="meta">Яндекс Облако: письма без Google-скрипта + подписка календаря (.ics)</div>
       </div></div>
     </div>
-    <div class="card" onclick="openGcalSheet()" style="cursor:pointer;margin-bottom:10px">
+    <div class="card" onclick="openCloudSheet()" style="cursor:pointer;margin-bottom:10px">
       <div class="row1"><div style="flex:1">
-        <div class="title">${ic("calendar",16)} Google Календарь ${GCAL.url?'<span style="color:var(--green);font-size:12px">● подключён</span>':''}</div>
-        <div class="meta">Заседания и задачи автоматически попадают в ваш календарь с напоминаниями</div>
-      </div>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
-    </div>
-
-    <div class="card" onclick="checkFilesIntegrity()" style="cursor:pointer;margin-bottom:10px">
-      <div class="row1"><div style="flex:1">
-        <div class="title">${ic("tools",16)} Проверка файлов дел</div>
-        <div class="meta">Все ли файлы на месте на Яндекс Диске</div>
+        <div class="title">${ic("cloud",16)} Яндекс Диск (прямой канал) ${CLOUD.token?'<span style="color:var(--green);font-size:12px">● подключён</span>':''}</div>
+        <div class="meta">Автосинхронизация базы через API Диска — альтернатива файлу в папке облака</div>
       </div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
@@ -4607,7 +4594,7 @@ function openSyncSheet() {
     <div class="card" onclick="openMailSheet()" style="cursor:pointer;margin-bottom:10px">
       <div class="row1"><div style="flex:1">
         <div class="title">${ic("mail",16)} Письма и движение дел</div>
-        <div class="meta">Трекинг отправлений Почты России по трек-номеру (через отдельный мост «Почта России»)</div>
+        <div class="meta">Трекинг отправлений Почты России по трек-номеру (через ваш личный сервер)</div>
       </div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
@@ -5027,8 +5014,8 @@ function openConsultantLinks() {
     ${link('https://calc.consultant.ru/days','Дни в периоде','Календарные и рабочие — по произв. календарю')}
 
     <div class="sect-title" style="margin:14px 0 8px">Госпошлина</div>
-    ${link('https://calc.consultant.ru/gosposhlina-soj','Госпошлина в суд общей юрисдикции','Альтернатива встроенному калькулятору')}
-    ${link('https://calc.consultant.ru/gosposhlina-arbitr','Госпошлина в арбитражный суд','Альтернатива встроенному калькулятору')}
+    ${link('https://calc.consultant.ru/gosposhlina-soj','Госпошлина в суд общей юрисдикции','Расчёт по действующим ставкам')}
+    ${link('https://calc.consultant.ru/gosposhlina-arbitr','Госпошлина в арбитражный суд','Расчёт по действующим ставкам')}
 
     <div class="sect-title" style="margin:14px 0 8px">Госзакупки (44-ФЗ)</div>
     ${link('https://calc.consultant.ru/44z','Неустойка с заказчика по 44-ФЗ','Пени и штрафы')}
@@ -5049,130 +5036,6 @@ function openConsultantLinks() {
   `);
 }
 
-// Госпошлина по цене иска (имущественный иск, подлежащий оценке)
-function gp_goyu(s) {
-  if (s <= 100000) return 4000;
-  if (s <= 300000) return 4000 + (s-100000)*0.03;
-  if (s <= 500000) return 10000 + (s-300000)*0.025;
-  if (s <= 1000000) return 15000 + (s-500000)*0.02;
-  if (s <= 3000000) return 25000 + (s-1000000)*0.01;
-  if (s <= 8000000) return 45000 + (s-3000000)*0.007;
-  if (s <= 24000000) return 80000 + (s-8000000)*0.0035;
-  if (s <= 50000000) return 136000 + (s-24000000)*0.003;
-  if (s <= 100000000) return 214000 + (s-50000000)*0.002;
-  return Math.min(314000 + (s-100000000)*0.0015, 900000);
-}
-function gp_arb(s) {
-  if (s <= 100000) return 10000;
-  if (s <= 1000000) return 10000 + (s-100000)*0.05;
-  if (s <= 10000000) return 55000 + (s-1000000)*0.03;
-  if (s <= 50000000) return 325000 + (s-10000000)*0.01;
-  return Math.min(725000 + (s-50000000)*0.005, 10000000);
-}
-function calcGosposhlina() {
-  showSheet(`
-    <h3>⚖️ Госпошлина в суд</h3>
-    <div class="sheet-sub">Имущественный иск, подлежащий оценке</div>
-    <div class="field"><label>Цена иска, ₽</label>
-      <input id="gp-sum" type="text" inputmode="decimal" placeholder="например, 350000" oninput="gpCalc()"></div>
-    <div class="field"><label>Суд</label>
-      <select id="gp-court" onchange="gpCalc()">
-        <option value="goyu">Суд общей юрисдикции / мировой</option>
-        <option value="arb">Арбитражный суд</option>
-      </select></div>
-    <div class="field"><label>Вид обращения</label>
-      <select id="gp-type" onchange="gpCalc()">
-        <option value="isk">Исковое заявление</option>
-        <option value="prikaz">Судебный приказ (50%)</option>
-      </select></div>
-    <div class="card" id="gp-result" style="background:var(--accent);margin-top:6px">
-      <div class="meta" style="color:rgba(255,255,255,.8)">Госпошлина</div>
-      <div class="title" style="color:#fff;font-size:24px" id="gp-out">—</div>
-    </div>
-    <div class="card" style="margin-top:10px">
-      <div class="meta" style="line-height:1.6">Неимущественный иск (не подлежит оценке): <b>физлица — 3000 ₽</b>, организации — 20 000 ₽ (в арбитраж — 15 000 / 50 000 ₽). Расторжение брака — 5000 ₽. Апелляция — 3000 / 15 000 ₽, кассация — 5000 / 20 000 ₽.</div>
-    </div>
-    <div class="meta" style="margin-top:8px;line-height:1.5">Ставки ст. 333.19 и 333.21 НК РФ (для дел после 08.09.2024). Расчёт ориентировочный — проверяйте льготы (ст. 333.36) и особенности (ст. 333.20).</div>
-    <button class="btn-ghost" onclick="openCalcSheet()">← Назад</button>
-  `);
-  gpCalc();
-}
-function gpCalc() {
-  const s = calcNum('gp-sum');
-  const court = document.getElementById('gp-court')?.value || 'goyu';
-  const type = document.getElementById('gp-type')?.value || 'isk';
-  let g = court === 'arb' ? gp_arb(s) : gp_goyu(s);
-  if (type === 'prikaz') {
-    g = g * 0.5;
-    if (court === 'arb') g = Math.max(g, 8000); // в арбитраже приказ не менее 8000 ₽
-  }
-  const out = document.getElementById('gp-out');
-  if (out) out.textContent = s > 0 ? fmtRub(g) : '—';
-}
-
-// Неустойка / пени
-function calcNeustoika() {
-  showSheet(`
-    <h3>📊 Неустойка / пени</h3>
-    <div class="sheet-sub">Договорная неустойка за просрочку</div>
-    <div class="field"><label>Сумма задолженности, ₽</label>
-      <input id="ne-sum" type="text" inputmode="decimal" placeholder="например, 100000" oninput="neCalc()"></div>
-    <div class="field"><label>Ставка неустойки, % за день</label>
-      <input id="ne-rate" type="text" inputmode="decimal" placeholder="например, 0.1" oninput="neCalc()">
-      <div class="meta" style="margin-top:4px">Часто в договорах: 0,1% или 0,5% в день. 1/300 ключевой ставки внесите как % в день.</div></div>
-    <div class="field"><label>Дней просрочки</label>
-      <input id="ne-days" type="text" inputmode="numeric" placeholder="например, 45" oninput="neCalc()"></div>
-    <div class="card" id="ne-result" style="background:var(--accent);margin-top:6px">
-      <div class="meta" style="color:rgba(255,255,255,.8)">Неустойка</div>
-      <div class="title" style="color:#fff;font-size:24px" id="ne-out">—</div>
-    </div>
-    <div class="meta" style="margin-top:8px;line-height:1.5">Формула: сумма × ставка% в день × дни. Суд может снизить неустойку по ст. 333 ГК РФ. В цену иска неустойка включается (ст. 91 ГПК / 103 АПК).</div>
-    <button class="btn-ghost" onclick="openCalcSheet()">← Назад</button>
-  `);
-  neCalc();
-}
-function neCalc() {
-  const s = calcNum('ne-sum'), r = calcNum('ne-rate'), d = calcNum('ne-days');
-  const out = document.getElementById('ne-out');
-  const res = s * (r/100) * d;
-  if (out) out.textContent = (s>0&&r>0&&d>0) ? fmtRub(res) : '—';
-}
-
-// Проценты по ст. 395 ГК РФ
-function calc395() {
-  showSheet(`
-    <h3>💰 Проценты по ст. 395 ГК</h3>
-    <div class="sheet-sub">За пользование чужими денежными средствами</div>
-    <div class="field"><label>Сумма долга, ₽</label>
-      <input id="p395-sum" type="text" inputmode="decimal" placeholder="например, 100000" oninput="p395Calc()"></div>
-    <div class="field"><label>Ключевая ставка ЦБ, % годовых</label>
-      <input id="p395-rate" type="text" inputmode="decimal" placeholder="например, 21" oninput="p395Calc()">
-      <div class="meta" style="margin-top:4px">Действующую ставку смотрите на сайте ЦБ РФ. Если в периоде ставка менялась — посчитайте по частям.</div></div>
-    <div class="field"><label>Число дней просрочки</label>
-      <input id="p395-days" type="text" inputmode="numeric" placeholder="например, 90" oninput="p395Calc()"></div>
-    <div class="field"><label>Дней в году</label>
-      <select id="p395-year" onchange="p395Calc()">
-        <option value="365">365 (обычный год)</option>
-        <option value="366">366 (високосный)</option>
-      </select></div>
-    <div class="card" id="p395-result" style="background:var(--accent);margin-top:6px">
-      <div class="meta" style="color:rgba(255,255,255,.8)">Проценты</div>
-      <div class="title" style="color:#fff;font-size:24px" id="p395-out">—</div>
-    </div>
-    <div class="meta" style="margin-top:8px;line-height:1.5">Формула: сумма × ставка% × дни ÷ дней в году. По ст. 395 ГК РФ применяется ключевая ставка ЦБ за соответствующие периоды. Для расчёта по периодам с разными ставками складывайте результаты.</div>
-    <button class="btn-ghost" onclick="openCalcSheet()">← Назад</button>
-  `);
-  p395Calc();
-}
-function p395Calc() {
-  const s = calcNum('p395-sum'), r = calcNum('p395-rate'), d = calcNum('p395-days');
-  const y = parseFloat(document.getElementById('p395-year')?.value||'365');
-  const out = document.getElementById('p395-out');
-  const res = s * (r/100) * d / y;
-  if (out) out.textContent = (s>0&&r>0&&d>0) ? fmtRub(res) : '—';
-}
-
-// Расчёт срока: дата + N дней/месяцев/лет
 function calcSrok() {
   showSheet(`
     <h3>📅 Расчёт срока</h3>
@@ -6189,7 +6052,7 @@ async function saveMeeting(id) {
     createdAt: prev.createdAt || Date.now()
   });
   await put('meetings', obj);
-  if (typeof gcalTouch === 'function') gcalTouch();
+  if (typeof icsTouch === 'function') icsTouch();
   toast(id ? 'Встреча обновлена' : '🤝 Встреча создана — попадёт в календарь');
   closeSheet();
   renderDashboard();
@@ -6197,7 +6060,7 @@ async function saveMeeting(id) {
 async function deleteMeeting(id) {
   if (!confirm('Удалить встречу?')) return;
   await del('meetings', id);
-  if (typeof gcalTouch === 'function') gcalTouch();
+  if (typeof icsTouch === 'function') icsTouch();
   toast('Встреча удалена');
   closeSheet();
   renderDashboard();
@@ -6250,7 +6113,7 @@ async function hearingNext(id) {
   });
   await put('hearings', cur);
   if (cur.caseNum) await crmCaseLogByNum(cur.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(cur.date) + (cur.result ? ' · ' + String(cur.result).slice(0, 60) : ''));
-  if (typeof gcalTouch === 'function') gcalTouch();
+  if (typeof icsTouch === 'function') icsTouch();
   await openHearingForm();
   const hid = document.getElementById('f-caseNum'), inp = document.getElementById('f-caseNum-q');
   if (hid) hid.value = cur.caseNum || '';
@@ -6495,7 +6358,7 @@ async function saveHearing(id) {
   if (obj.caseNum) await crmCaseLogByNum(obj.caseNum, prev ? 'hearing_upd' : 'hearing', (prev ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(obj.date) + (obj.time ? ' ' + obj.time : '') + (obj.status && obj.status !== 'Назначено' ? ' · ' + obj.status : ''));
   // Уведомление в Telegram и обновление Google Календаря (если подключены)
   if (typeof tgHearingNotify === 'function') tgHearingNotify(obj, !!id);
-  if (typeof gcalTouch === 'function') gcalTouch();
+  if (typeof icsTouch === 'function') icsTouch();
   closeSheet(); toast('Заседание сохранено'); renderCalendar(); renderDashboard();
 }
 
@@ -7607,53 +7470,6 @@ async function removeParticipant(caseId, idx) {
 }
 
 // ── Файлы дела (Яндекс Диск) ──
-const fmtFileSize = b => b>1048576 ? (b/1048576).toFixed(1)+' МБ' : Math.max(1,Math.round(b/1024))+' КБ';
-
-function uploadCaseFile(caseId) {
-  if (!CLOUD.token) { toast('Сначала подключите Яндекс Диск (Настройки → Синхронизация)', true); return; }
-  const inp = document.createElement('input');
-  inp.type = 'file';
-  inp.onchange = async () => {
-    const file = inp.files[0]; if (!file) return;
-    if (file.size > 100*1048576) { toast('Файл больше 100 МБ — загрузите вручную на Диск', true); return; }
-    const btn = document.getElementById('vc-upload-btn');
-    if (btn) { btn.textContent = '⏳ Загружаю...'; btn.disabled = true; }
-    const safeName = file.name.replace(/[\/\\'"]/g, '_');
-    const path = `app:/files/${caseId}/${Date.now()}_${safeName}`;
-    try {
-      await yaUploadPath(path, file);
-      await put('files', { id: uid('Ф'), caseId, name: safeName, size: file.size, path, uploadedAt: Date.now(), account: CLOUD.account || '' });
-      toast('Файл загружен на Яндекс Диск');
-      viewCase(caseId, 4);
-    } catch(e) {
-      toast(e.message==='auth' ? 'Токен Яндекс Диска недействителен' : 'Не удалось загрузить — проверьте сеть', true);
-      if (btn) { btn.textContent = '📎 Загрузить файл'; btn.disabled = false; }
-    }
-  };
-  inp.click();
-}
-async function openCaseFile(fileId) {
-  const f = (await getAll('files')).find(x=>x.id===fileId); if (!f) return;
-  if (!CLOUD.token) { toast('Подключите Яндекс Диск для доступа к файлам', true); return; }
-  try {
-    toast('Получаю ссылку...');
-    const href = await yaDownloadHref(f.path);
-    window.open(href, '_blank');
-  } catch(e) {
-    // Частая причина: Диск переподключён под другим аккаунтом — файл лежит на прежнем
-    const sameAcc = !f.account || f.account === CLOUD.account;
-    toast(sameAcc ? 'Файл недоступен — возможно, удалён с Диска' : 'Файл загружен с другого аккаунта Яндекса. Войдите под аккаунтом «'+f.account+'»', true);
-  }
-}
-async function removeCaseFile(fileId) {
-  const f = (await getAll('files')).find(x=>x.id===fileId); if (!f) return;
-  if (!confirm('Удалить файл с Яндекс Диска и из базы?')) return;
-  if (CLOUD.token) { try { await yaDeletePath(f.path); } catch(e) {} }
-  await del('files', f.id);
-  toast('Файл удалён');
-  viewCase(f.caseId, 4);
-}
-
 async function viewClient(id) {
   const c = (await getAll('clients')).find(x=>x.id===id); if (!c) return;
   const casesById = await getAllByIndex('cases','by_clientId',c.id);
@@ -7690,6 +7506,8 @@ async function viewClient(id) {
     </div>`:''}
 
     ${cases.length?`<div class="sect-title">Дела участника (${cases.length})</div>`+cases.map(cs=>`<div class="card" onclick="viewCase('${cs.id}')"><div class="row1"><div class="title" style="color:var(--blue);font-size:14px">${esc(cs.number)}</div>${statusBadge(cs.status)}</div></div>`).join(''):'<div class="meta" style="margin:8px 0">Пока нет дел у этого участника.</div>'}
+
+    <button class="btn-ghost" onclick="openCounterpartySheet('${jsq(c.name||'')}','${jsq(c.inn||'')}')" style="margin-bottom:10px">🔎 Проверка контрагента: КАД · ЕФРСБ · ФССП · ФНС</button>
 
     <div class="sect-title">Журнал контактов${log.length?' ('+log.length+')':''}</div>
     <button class="btn-ghost" onclick="addContactLog('${c.id}')" style="margin-bottom:8px">${ic('edit',15)} Добавить запись о контакте</button>
@@ -8057,7 +7875,7 @@ async function removeItem(store, id, screen) {
   if (!confirm('Переместить запись в корзину? Её можно будет восстановить в настройках.')) return;
   await del(store, id); closeSheet(); toast('Перемещено в корзину');
   // Удалённое заседание/задача должны исчезнуть и из Google Календаря
-  if ((store === 'hearings' || store === 'tasks' || store === 'meetings') && typeof gcalTouch === 'function') gcalTouch();
+  if ((store === 'hearings' || store === 'tasks' || store === 'meetings') && typeof icsTouch === 'function') icsTouch();
   nav(screen);
 }
 
@@ -8181,28 +7999,6 @@ async function yaUpload(text) {
   const r2 = await fetch(href, { method: 'PUT', body: text });
   if (!r2.ok && r2.status !== 201 && r2.status !== 202) throw new Error('upload');
 }
-// — Файлы дел: произвольные пути в папке приложения —
-async function yaUploadPath(path, body) {
-  const r1 = await yaFetch(`${YA_API}/resources/upload?path=${encodeURIComponent(path)}&overwrite=true`);
-  if (!r1.ok) throw new Error('api');
-  const { href } = await r1.json();
-  const r2 = await fetch(href, { method: 'PUT', body });
-  if (!r2.ok && r2.status !== 201 && r2.status !== 202) throw new Error('upload');
-}
-async function yaDownloadHref(path) {
-  const r = await yaFetch(`${YA_API}/resources/download?path=${encodeURIComponent(path)}`);
-  if (!r.ok) throw new Error('api');
-  return (await r.json()).href;
-}
-async function yaDeletePath(path) {
-  const r = await fetch(`${YA_API}/resources?path=${encodeURIComponent(path)}&permanently=true`, {
-    method: 'DELETE', headers: { Authorization: 'OAuth ' + CLOUD.token }
-  });
-  return r.ok || r.status === 202 || r.status === 404;
-}
-
-// ── Движок синхронизации ──
-let cloudPushTimer = null, cloudLoopTimer = null, cloudBusy = false;
 function syncRevision() {
   return [
     localStorage.getItem('crm_last_write_stamp') || '0',
@@ -8413,12 +8209,6 @@ async function cloudConnect() {
   }
   CLOUD.pass = pass;
   CLOUD.lastMod = '';
-  // Яндекс и Dropbox взаимоисключающие — отключаем Dropbox, если был включён
-  if (typeof DBX !== 'undefined' && DBX.token) {
-    if (typeof stopDbxLoop === 'function') stopDbxLoop();
-    DBX.token = ''; DBX.rev = ''; DBX.dirty = false; DBX.account = '';
-    toast('Dropbox отключён — активен Яндекс Диск');
-  }
   cloudSetStatus('Первая синхронизация...');
   await pullCloud(true);      // если в облаке уже есть файл — сольётся; если нет — отправится
   CLOUD.dirty = true;
@@ -8452,318 +8242,7 @@ function cloudDisconnect() {
   startCloudLoop();
 })();
 
-// ════════════════════════════════════════════════════════════
-// DROPBOX — второй провайдер автосинхронизации (по образцу Яндекс Диска).
-// API Dropbox разрешает прямой доступ из браузера; данные шифруются
-// тем же AES-GCM до загрузки. Яндекс и Dropbox взаимоисключающие —
-// активен один источник истины.
-// ════════════════════════════════════════════════════════════
-const DBX = {
-  get token()   { return localStorage.getItem('crm_dbx_token') || ''; },
-  set token(v)  { v ? localStorage.setItem('crm_dbx_token', v) : localStorage.removeItem('crm_dbx_token'); bumpSecrets('crm_dbx_token'); },
-  get clientId(){ return localStorage.getItem('crm_dbx_client') || ''; },
-  set clientId(v){ v ? localStorage.setItem('crm_dbx_client', v) : localStorage.removeItem('crm_dbx_client'); bumpSecrets('crm_dbx_client'); },
-  get pass()    { return localStorage.getItem('crm_sync_pass') || ''; }, // общий с Яндексом ключ шифрования
-  set pass(v)   { v ? localStorage.setItem('crm_sync_pass', v) : localStorage.removeItem('crm_sync_pass'); bumpSecrets('crm_sync_pass'); },
-  get rev()     { return localStorage.getItem('crm_dbx_rev') || ''; },
-  set rev(v)    { v ? localStorage.setItem('crm_dbx_rev', v) : localStorage.removeItem('crm_dbx_rev'); },
-  get dirty()   { return localStorage.getItem('crm_dbx_dirty') === '1'; },
-  set dirty(v)  { v ? localStorage.setItem('crm_dbx_dirty','1') : localStorage.removeItem('crm_dbx_dirty'); },
-  get lastAt()  { return Number(localStorage.getItem('crm_dbx_lastat') || 0); },
-  set lastAt(v) { localStorage.setItem('crm_dbx_lastat', String(v)); },
-  account: ''
-};
-const DBX_FILE = '/crm-advocate.crypt'; // в папке приложения Dropbox
-let dbxPushTimer = null, dbxLoopTimer = null, dbxBusy = false;
 
-function dbxSetStatus(msg, warn) {
-  const el = document.getElementById('dbx-status');
-  if (!el) return;
-  if (msg) { el.textContent = msg; el.style.color = warn ? 'var(--orange)' : 'var(--text-dim)'; return; }
-  const t = DBX.lastAt ? new Date(DBX.lastAt).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit'}) : '—';
-  el.textContent = `Последняя синхронизация: ${t}` + (DBX.dirty ? ' · есть неотправленные изменения' : '');
-  el.style.color = 'var(--text-dim)';
-}
-
-// Проверка токена + имя аккаунта
-async function dbxAccount() {
-  const r = await fetch('https://api.dropboxapi.com/2/users/get_current_account', {
-    method: 'POST', headers: { Authorization: 'Bearer ' + DBX.token }
-  });
-  if (r.status === 401) { dbxSetStatus('Токен недействителен — переподключитесь', true); throw new Error('auth'); }
-  if (!r.ok) throw new Error('api');
-  const j = await r.json();
-  return (j.name && j.name.display_name) || (j.email) || 'аккаунт Dropbox';
-}
-// Метаданные файла: возвращаем rev или null, если файла ещё нет
-async function dbxMeta() {
-  const r = await fetch('https://api.dropboxapi.com/2/files/get_metadata', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + DBX.token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: DBX_FILE })
-  });
-  if (r.status === 409) return null; // path/not_found
-  if (r.status === 401) throw new Error('auth');
-  if (!r.ok) {
-    // 409 иногда приходит с телом — подстрахуемся
-    try { const j = await r.json(); if (j && j.error_summary && /not_found/.test(j.error_summary)) return null; } catch(e){}
-    throw new Error('api');
-  }
-  return (await r.json()).rev || '';
-}
-async function dbxDownload() {
-  const r = await fetch('https://content.dropboxapi.com/2/files/download', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + DBX.token, 'Dropbox-API-Arg': JSON.stringify({ path: DBX_FILE }) }
-  });
-  if (r.status === 401) throw new Error('auth');
-  if (!r.ok) throw new Error('download');
-  return r.text();
-}
-async function dbxUpload(text, baseRev) {
-  const mode = baseRev ? { '.tag':'update', update:baseRev } : 'add';
-  const r = await fetch('https://content.dropboxapi.com/2/files/upload', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + DBX.token,
-      'Content-Type': 'application/octet-stream',
-      'Dropbox-API-Arg': JSON.stringify({ path: DBX_FILE, mode, autorename:false, mute:true })
-    },
-    body: new Blob([text], { type: 'application/octet-stream' })
-  });
-  if (r.status === 401) throw new Error('auth');
-  if (r.status === 409) throw new Error('conflict');
-  if (!r.ok) throw new Error('upload');
-  return (await r.json()).rev || '';
-}
-
-function dbxTouch() {
-  if (!DBX.token) return;
-  DBX.dirty = true;
-  clearTimeout(dbxPushTimer);
-  dbxPushTimer = setTimeout(() => dbxPush().catch(()=>{}), 4000);
-}
-async function dbxPush() {
-  if (!DBX.token || !DBX.pass || dbxBusy) return;
-  dbxBusy = true;
-  let retry = false;
-  try {
-    // Dropbox позволяет условную запись по rev. Это закрывает окно гонки:
-    // если другой аппарат записал файл после нашего чтения, получаем conflict,
-    // снова сливаем свежий снимок и только затем повторяем отправку.
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const remoteRev = await dbxMeta();
-      if (remoteRev && remoteRev !== DBX.rev) {
-        const text = await dbxDownload();
-        let remote;
-        try { remote = await decryptDump(text, DBX.pass); }
-        catch(e) { dbxSetStatus('Не удалось расшифровать: проверьте пароль шифрования', true); return; }
-        if (!remote || remote._fmt !== SYNC_FMT || !remote.data) throw new Error('bad_remote');
-        const { added, updated } = await mergeIncoming(remote, true);
-        DBX.rev = remoteRev;
-        if (added || updated) {
-          await loadRefs();
-          const cur = document.querySelector('.navbar button.active')?.dataset.screen || 'dashboard';
-          nav(cur);
-        }
-      }
-      const revision = syncRevision();
-      const dump = await collectAll();
-      const enc  = await encryptDump(dump, DBX.pass);
-      try {
-        DBX.rev = await dbxUpload(enc, remoteRev);
-        DBX.dirty = syncRevision() !== revision;
-        retry = DBX.dirty;
-        DBX.lastAt = Date.now();
-        dbxSetStatus();
-        return;
-      } catch(e) {
-        if (e.message !== 'conflict' || attempt === 1) throw e;
-      }
-    }
-  } catch(e) {
-    if (e.message === 'conflict') dbxSetStatus('Файл изменился на другом устройстве — повторю синхронизацию', true);
-    else if (e.message !== 'auth') dbxSetStatus('Нет связи — отправлю при появлении сети', true);
-  } finally {
-    dbxBusy = false;
-    if (retry && DBX.token && DBX.pass) {
-      clearTimeout(dbxPushTimer);
-      dbxPushTimer = setTimeout(() => dbxPush().catch(()=>{}), 250);
-    }
-  }
-}
-async function dbxPull(force) {
-  if (!DBX.token || !DBX.pass || dbxBusy) return;
-  dbxBusy = true;
-  let shouldPush = false;
-  try {
-    const rev = await dbxMeta();
-    if (rev !== null && (force || rev !== DBX.rev)) {
-      const text = await dbxDownload();
-      let dump;
-      try { dump = await decryptDump(text, DBX.pass); }
-      catch(e) { dbxSetStatus('Не удалось расшифровать: проверьте пароль шифрования', true); return; }
-      if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return;
-      const { added, updated } = await mergeIncoming(dump, true);
-      DBX.rev = rev;
-      DBX.lastAt = Date.now();
-      if (added || updated) {
-        await loadRefs();
-        const cur = document.querySelector('.navbar button.active')?.dataset.screen || 'dashboard';
-        nav(cur);
-        toast(`☁️ Синхронизировано: +${added} нов., ${updated} обновл.`);
-      }
-    }
-    shouldPush = rev === null ? (DBX.dirty || force) : DBX.dirty;
-    dbxSetStatus();
-  } catch(e) {
-    if (e.message !== 'auth') dbxSetStatus('Нет связи с Dropbox', true);
-  } finally {
-    dbxBusy = false;
-    if (shouldPush) await dbxPush();
-  }
-}
-function startDbxLoop() { stopDbxLoop(); dbxLoopTimer = setInterval(() => dbxPull().catch(()=>{}), 25000); }
-function stopDbxLoop() { if (dbxLoopTimer) { clearInterval(dbxLoopTimer); dbxLoopTimer = null; } }
-
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && DBX.token) dbxPull().catch(()=>{});
-});
-window.addEventListener('online', () => { if (DBX.token) dbxPull(true).catch(()=>{}); });
-
-function openDropboxSheet() {
-  if (DBX.token) {
-    showSheet(`
-      <h3>${ic("cloud",18)} Dropbox</h3>
-      <div class="sheet-sub">Автосинхронизация включена. Данные шифруются на устройстве — в облаке лежит только шифроблок.</div>
-      <div class="card" style="margin-bottom:10px">
-        <div class="row1"><div style="flex:1">
-          <div class="title" style="color:var(--green)">● Подключено${DBX.account ? ': ' + esc(DBX.account) : ''}</div>
-          <div class="meta" id="dbx-status"></div>
-          <div class="meta" style="margin-top:4px">Проверка обновлений: каждые 25 сек и при открытии приложения</div>
-        </div></div>
-      </div>
-      <button class="btn-primary" onclick="dbxSyncNow()">${ic("refresh",16)} Синхронизировать сейчас</button>
-      <button class="btn-ghost" onclick="dbxDisconnect()" style="color:var(--red)">Отключить синхронизацию</button>
-      <div class="sheet-sub" style="margin-top:10px">При отключении данные на устройстве и файл в облаке сохраняются. Пароль шифрования — общий с Яндекс Диском.</div>
-      <button class="btn-ghost" onclick="openSyncSheet()">← Назад</button>
-    `);
-    dbxSetStatus();
-    return;
-  }
-  const cid = esc(DBX.clientId);
-  showSheet(`
-    <h3>${ic("cloud",18)} Подключение Dropbox</h3>
-    <div class="sheet-sub">Настраивается один раз, ~5 минут. Данные будут лежать в папке приложения Dropbox в зашифрованном виде.</div>
-
-    <div class="card" style="margin-bottom:12px">
-      <div class="title" style="margin-bottom:6px">Шаг 1 · Создайте приложение в Dropbox</div>
-      <div class="meta" style="line-height:1.55">
-        Откройте <a href="https://www.dropbox.com/developers/apps/create" target="_blank" style="color:var(--blue)">dropbox.com/developers/apps</a> →
-        «Create app».<br>
-        Тип: <b>Scoped access</b>. Доступ: <b>App folder</b> (только своя папка).<br>
-        Название — любое. После создания на вкладке <b>Permissions</b> включите
-        <b>files.content.read</b> и <b>files.content.write</b>, сохраните.<br>
-        На вкладке <b>Settings</b> в поле <b>OAuth 2 → Redirect URIs</b> добавьте
-        <b>https://www.dropbox.com/1/oauth2/redirect_receiver</b> и скопируйте <b>App key</b>.
-      </div>
-    </div>
-
-    <div class="field">
-      <label>App key приложения</label>
-      <input id="dbx-cid" value="${esc(cid)}" placeholder="например: a1b2c3d4e5f6g7h" autocomplete="off">
-    </div>
-
-    <div class="card" style="margin-bottom:12px">
-      <div class="title" style="margin-bottom:6px">Шаг 2 · Получите токен</div>
-      <div class="meta" style="line-height:1.55">Нажмите кнопку, разрешите доступ — и скопируйте сюда <b>весь адрес</b> открывшейся страницы (токен извлечётся сам).</div>
-      <button class="btn-ghost" style="margin-top:10px" onclick="dbxOpenAuth()">Открыть страницу авторизации Dropbox</button>
-    </div>
-
-    <div class="field">
-      <label>Токен (или адресная строка целиком)</label>
-      <input id="dbx-token" placeholder="вставьте сюда..." autocomplete="off">
-    </div>
-
-    <div class="field">
-      <label>Пароль шифрования <span class="req">*</span></label>
-      <input id="dbx-pass" type="password" placeholder="придумайте надёжный пароль" autocomplete="new-password" value="${esc(CLOUD.pass||'')}">
-      <div class="meta" style="margin-top:6px">Этим паролем база шифруется до отправки. Введите <b>одинаковый</b> пароль на всех устройствах. Если уже пользуетесь Яндекс Диском — пароль тот же. Потерян пароль — облачную копию расшифровать невозможно.</div>
-    </div>
-
-    <button class="btn-primary" onclick="dbxConnect()">Подключить</button>
-    <div class="meta" id="dbx-status" style="text-align:center;margin-top:8px"></div>
-    <button class="btn-ghost" onclick="openSyncSheet()">← Назад</button>
-  `);
-}
-
-function dbxOpenAuth() {
-  const cid = (document.getElementById('dbx-cid')?.value || '').trim();
-  if (!cid) { toast('Сначала вставьте App key из шага 1', true); return; }
-  DBX.clientId = cid;
-  // token flow: токен вернётся во фрагменте URL на redirect_receiver
-  const url = 'https://www.dropbox.com/oauth2/authorize?response_type=token&token_access_type=legacy'
-    + '&client_id=' + encodeURIComponent(cid)
-    + '&redirect_uri=' + encodeURIComponent('https://www.dropbox.com/1/oauth2/redirect_receiver');
-  window.open(url, '_blank');
-}
-
-async function dbxConnect() {
-  let raw  = (document.getElementById('dbx-token')?.value || '').trim();
-  const pass = (document.getElementById('dbx-pass')?.value || '').trim();
-  const cid  = (document.getElementById('dbx-cid')?.value || '').trim();
-  if (cid) DBX.clientId = cid;
-  const m = raw.match(/access_token=([^&\s#]+)/);
-  const token = m ? decodeURIComponent(m[1]) : raw;
-  if (!token) { toast('Вставьте токен из шага 2', true); return; }
-  if (!pass || pass.length < 6) { toast('Пароль шифрования — минимум 6 символов', true); return; }
-  dbxSetStatus('Проверяю доступ к Dropbox...');
-  DBX.token = token;
-  try {
-    DBX.account = await dbxAccount();
-  } catch(e) {
-    DBX.token = '';
-    dbxSetStatus('Токен не подошёл — проверьте шаг 2', true);
-    return;
-  }
-  // Dropbox и Яндекс взаимоисключающие — отключаем Яндекс, если был включён
-  if (CLOUD.token) {
-    stopCloudLoop();
-    CLOUD.token = ''; CLOUD.lastMod = ''; CLOUD.dirty = false; CLOUD.account = '';
-    toast('Яндекс Диск отключён — активен Dropbox');
-  }
-  DBX.pass = pass;
-  DBX.rev = '';
-  dbxSetStatus('Первая синхронизация...');
-  await dbxPull(true);
-  DBX.dirty = true;
-  await dbxPush();
-  startDbxLoop();
-  toast('☁️ Dropbox подключён');
-  openDropboxSheet();
-}
-
-async function dbxSyncNow() {
-  dbxSetStatus('Синхронизирую...');
-  await dbxPull(true);
-  dbxSetStatus();
-  toast('Готово');
-}
-function dbxDisconnect() {
-  stopDbxLoop();
-  DBX.token = ''; DBX.rev = ''; DBX.dirty = false; DBX.account = '';
-  toast('Синхронизация отключена. Данные на устройстве сохранены.');
-  openSyncSheet();
-}
-
-(async function dbxInit() {
-  if (!DBX.token) return;
-  for (let i = 0; i < 100 && !db; i++) await new Promise(r => setTimeout(r, 100));
-  if (!db) return;
-  dbxAccount().then(a => { DBX.account = a; }).catch(()=>{});
-  dbxPull().catch(()=>{});
-  startDbxLoop();
-})();
 
 // ════════════════════════════════════════════════════════════
 // TELEGRAM — уведомления о заседаниях и утренняя сводка
@@ -8923,7 +8402,7 @@ function openTgSheet() {
       <div class="card" style="margin-bottom:10px">
         <div class="title" style="color:var(--green)">● Подключено</div>
         <div class="meta" style="margin-top:4px">При создании или изменении заседания бот пришлёт уведомление. Утренняя сводка — при первом открытии приложения за день.</div>
-        <div class="meta" style="margin-top:8px">chat_id: <b style="user-select:all">${esc(TG.chat)}</b> — пригодится для утренней сводки через Google-мост (приходит по расписанию, даже когда CRM закрыта; токен и chat_id задаются как TG_TOKEN и TG_CHAT в свойствах скрипта, затем включается триггер).</div>
+        <div class="meta" style="margin-top:8px">chat_id: <b style="user-select:all">${esc(TG.chat)}</b>. Утренняя сводка отправляется самим приложением при первом открытии за день (включается ниже).</div>
         <label style="display:flex;align-items:center;gap:10px;margin-top:12px;font-size:14px;cursor:pointer">
           <input type="checkbox" ${TG.digest?'checked':''} onchange="TG.digest=this.checked" style="width:18px;height:18px"> Ежедневная сводка
         </label>
@@ -9219,170 +8698,19 @@ async function srvdbToggle(on) {
   openSrvSheet();
 }
 
-const GCAL = {
-  get url()    { return localStorage.getItem('crm_gcal_url') || ''; },
-  set url(v)   { v ? localStorage.setItem('crm_gcal_url', v) : localStorage.removeItem('crm_gcal_url'); bumpSecrets('crm_gcal_url'); },
-  get secret() { return localStorage.getItem('crm_gcal_secret') || ''; },
-  set secret(v){ v ? localStorage.setItem('crm_gcal_secret', v) : localStorage.removeItem('crm_gcal_secret'); bumpSecrets('crm_gcal_secret'); },
-  get lastAt() { return Number(localStorage.getItem('crm_gcal_lastat') || 0); },
-  set lastAt(v){ localStorage.setItem('crm_gcal_lastat', String(v)); }
-};
-// Отдельный мост для Почты России (свой URL и секрет)
-const MAILBR = {
-  get url()    { return localStorage.getItem('crm_mail_url') || ''; },
-  set url(v)   { v ? localStorage.setItem('crm_mail_url', v) : localStorage.removeItem('crm_mail_url'); bumpSecrets('crm_mail_url'); },
-  get secret() { return localStorage.getItem('crm_mail_secret') || ''; },
-  set secret(v){ v ? localStorage.setItem('crm_mail_secret', v) : localStorage.removeItem('crm_mail_secret'); bumpSecrets('crm_mail_secret'); }
-};
-let gcalTimer = null;
-
-// Вызывается после изменения заседаний/задач — отправка с задержкой 5 сек
-function gcalTouch() {
-  srvIcsTouch(); // личный сервер: обновить календарную ленту
-  if (!GCAL.url) return;
-  clearTimeout(gcalTimer);
-  gcalTimer = setTimeout(() => gcalPush(true).catch(()=>{}), 5000);
-}
-
-// Собираем будущие заседания и задачи и шлём скрипту (идемпотентно: скрипт сам решает создать/обновить)
-async function gcalPush(silent) {
-  if (!GCAL.url) { if (!silent) toast('Google Календарь не подключён', true); return; }
-  await refreshCasesCache();
-  const hearings = await getAllRaw('hearings'); // включая надгробия — чтобы удалить событие из календаря
-  const tasks = await getAllRaw('tasks');
-  const events = [];
-  for (const h of hearings) {
-    if (!h) continue;
-    if (h._deleted) { events.push({ uid: 'hearing-' + h.id, date: '1970-01-01', cancelled: true }); continue; }
-    const d = daysUntil(h.date);
-    if (d === null || d < 0) continue;
-    const cl = clientByCase(h.caseNum);
-    events.push({
-      uid: 'hearing-' + h.id,
-      title: `Заседание: ${h.caseNum||''}${cl?' · '+cl:''}`.trim(),
-      date: h.date, time: h.time || '', durationMin: 60,
-      location: h.court || '',
-      desc: [h.judge?'Судья: '+h.judge:'', h.status?'Статус: '+h.status:''].filter(Boolean).join('\n'),
-      cancelled: h.status === 'Отменено'
-    });
-  }
-  for (const t of tasks) {
-    if (!t) continue;
-    if (t._deleted) { events.push({ uid: 'task-' + t.id, date: '1970-01-01', cancelled: true }); continue; }
-    const d = daysUntil(t.due);
-    if (d === null || d < 0) continue;
-    events.push({
-      uid: 'task-' + t.id,
-      title: 'Задача: ' + t.title,
-      date: t.due, time: t.time || '', durationMin: 30,
-      location: '', desc: t.note || '',
-      cancelled: !!t.done
-    });
-  }
-  // Apps Script отвечает редиректом на другой домен Google, из-за чего обычный
-  // fetch из браузера часто не может прочитать ответ (CORS/redirect) и падает,
-  // хотя скрипт при этом отрабатывает. Поэтому: пробуем обычный запрос (чтобы
-  // увидеть результат), а при ошибке — повторяем в режиме no-cors, который
-  // надёжно доставляет данные до скрипта (но ответ браузеру недоступен).
-  const payload = JSON.stringify({ secret: GCAL.secret, events });
-  try {
-    const r = await fetch(GCAL.url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: payload
-    });
-    const j = await r.json().catch(()=>null);
-    if (j && j.ok) {
-      GCAL.lastAt = Date.now();
-      if (!silent) toast(`Google Календарь: +${j.created||0} нов., ${j.updated||0} обновл., ${j.removed||0} удал.`);
-      return;
-    }
-    if (j && j.error === 'auth') { if (!silent) toast('Неверный секретный код', true); return; }
-    // ответ непрочитан/пустой — пробуем no-cors ниже
-  } catch(e) { /* падение fetch — пробуем no-cors */ }
-
-  // Запасной путь: доставка без чтения ответа
-  try {
-    await fetch(GCAL.url, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: payload
-    });
-    GCAL.lastAt = Date.now();
-    if (!silent) toast('Отправлено в Google Календарь. Откройте календарь и проверьте события.');
-  } catch(e) {
-    if (!silent) toast('Не удалось отправить — проверьте адрес скрипта и интернет', true);
-  }
-}
-
-function gcalDisconnect() { GCAL.url=''; GCAL.secret=''; toast('Google Календарь отключён'); openSyncSheet(); }
-
-async function gcalConnect() {
-  const url = (document.getElementById('gcal-url')?.value || '').trim();
-  const secret = (document.getElementById('gcal-secret')?.value || '').trim();
-  if (!/^https:\/\/script\.google\.com\//.test(url)) { toast('Адрес должен начинаться с https://script.google.com/', true); return; }
-  if (secret.length < 12) { toast('Секретный код — минимум 12 символов', true); return; }
-  GCAL.url = url; GCAL.secret = secret;
-  toast('Проверяю связь...');
-  await gcalPush(false);
-  openGcalSheet();
-}
-
-function openGcalSheet() {
-  if (GCAL.url) {
-    const t = GCAL.lastAt ? new Date(GCAL.lastAt).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : 'ещё не было';
-    showSheet(`
-      <h3>${ic("calendar",18)} Google Календарь</h3>
-      <div class="sheet-sub">Заседания и задачи автоматически появляются в вашем Google Календаре</div>
-      <div class="card" style="margin-bottom:10px">
-        <div class="title" style="color:var(--green)">● Подключено</div>
-        <div class="meta" style="margin-top:4px">Последняя отправка: ${t}. События обновляются через 5 секунд после изменения заседания или задачи. Напоминание за 60 минут добавляет сам скрипт.</div>
-        <div class="meta" style="margin-top:6px;line-height:1.5">Из-за ограничений Google приложение отправляет данные в скрипт, но не получает ответ обратно — поэтому результат проверяйте в самом Google Календаре. Если события не появляются, см. подсказку ниже.</div>
-      </div>
-      <button class="btn-primary" onclick="gcalPush(false)">🔄 Отправить все события сейчас</button>
-      <div class="card" style="margin-top:10px">
-        <div class="title" style="margin-bottom:4px;font-size:14px">События не появляются?</div>
-        <div class="meta" style="line-height:1.6">1. В скрипте при развёртывании должен быть доступ <b>«Все»</b> и запуск <b>«От моего имени»</b>.<br>2. После любого изменения кода создавайте <b>новое развёртывание</b> и обновляйте адрес здесь.<br>3. Значение <b>SECRET</b> в свойствах скрипта и в приложении должно совпадать.<br>4. Проверьте, что есть будущие заседания или задачи (прошедшие не отправляются).</div>
-      </div>
-      <button class="btn-ghost" onclick="gcalDisconnect()" style="color:var(--red)">Отключить</button>
-      <button class="btn-ghost" onclick="openSyncSheet()">← Назад</button>
-    `);
-    return;
-  }
-  showSheet(`
-    <h3>${ic("calendar",18)} Подключение Google Календаря</h3>
-    <div class="sheet-sub">Один раз создаётся бесплатный скрипт-мост в вашем Google-аккаунте (~5 минут). Данные идут напрямую из CRM в ваш календарь, без посредников.</div>
-    <div class="card" style="margin-bottom:12px">
-      <div class="title" style="margin-bottom:6px">Шаг 1 · Создайте скрипт</div>
-      <div class="meta" style="line-height:1.6">
-        1. Откройте <a href="https://script.google.com/home/start" target="_blank" style="color:var(--blue)">script.google.com</a> → «Создать проект».<br>
-        2. Удалите содержимое и вставьте код из файла <b>Google-Календарь-скрипт.gs</b> (приложен к CRM).<br>
-        3. «Настройки проекта» → «Свойства скрипта»: добавьте свойство <b>SECRET</b> с длинным случайным значением.<br>
-        4. «Развернуть» → «Новое развёртывание» → тип «Веб-приложение» → выполнять «От моего имени», доступ «Все» → «Развернуть».<br>
-        5. Разрешите доступ к календарю и скопируйте <b>URL веб-приложения</b>.
-      </div>
-    </div>
-    <div class="field"><label>URL веб-приложения</label><input id="gcal-url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off"></div>
-    <div class="field"><label>SECRET (из свойств скрипта)</label><input id="gcal-secret" autocomplete="off"></div>
-    <button class="btn-primary" onclick="gcalConnect()">Подключить и отправить события</button>
-    <button class="btn-ghost" onclick="openSyncSheet()">← Назад</button>
-  `);
-}
+// Обновление живой .ics-ленты личного сервера после изменения заседаний/задач/встреч
+// (v183: мост Google Календаря удалён; историческое имя icsTouch заменено на icsTouch)
+function icsTouch() { if (typeof srvIcsTouch === 'function') srvIcsTouch(); }
 
 // ════════════════════════════════════════════════════════════
-// ПИСЬМА И ДВИЖЕНИЕ ДЕЛ — через тот же Google-мост (Apps Script)
+// ПИСЬМА И ДВИЖЕНИЕ ДЕЛ — через «Личный сервер» (Яндекс Облако)
 //
-//  • Почта России: официальный API трекинга. Логин/пароль API
-//    (бесплатная регистрация на tracking.pochta.ru) хранятся в
-//    свойствах скрипта. CRM шлёт трек-номера — мост возвращает историю.
-//  • КАД Арбитр: напрямую парсить КАД нельзя (антибот). Вместо
-//    этого официальный сервис «Электронный страж» (guard.arbitr.ru)
-//    шлёт уведомления о движении дел на ваш Gmail, а мост читает
-//    эти письма и отдаёт CRM список событий.
+//  • Почта России: официальный API трекинга (rtm34) вызывает функция
+//    сервера; CRM шлёт трек-номера — сервер возвращает историю.
+//  • КАД Арбитр: напрямую парсить КАД нельзя (антибот). Официальный
+//    «Электронный страж» (guard.arbitr.ru) шлёт уведомления на почту,
+//    а в CRM события попадают через «Мониторинг» или коллектор судов.
 // ════════════════════════════════════════════════════════════
-
-// Ручная отметка статуса отправления (когда мост не настроен — статус с pochta.ru в два касания)
 async function setMailStatus(id, status) {
   const m = (await getAll('mail')).find(x=>x.id===id); if (!m) return;
   m.status = status;
@@ -9485,62 +8813,20 @@ async function invPrint(mailId) {
   else toast('Разрешите всплывающие окна для печати', true);
 }
 
-// Общий вызов моста (адрес и секрет — те же, что у Google Календаря)
+// Вызов «Личного сервера» для трекинга Почты России (мост Apps Script удалён в v183)
 async function mailBridgeCall(action, payload) {
-  // Мост «Почта России» приоритетен; если он пуст — работаем через «Личный сервер»
-  const url = MAILBR.url || SRV.url;
-  const secret = MAILBR.url ? MAILBR.secret : SRV.secret;
-  if (!url) { toast('Подключите «Личный сервер» или мост «Почта России» в настройках', true); return null; }
+  if (!SRV.url) { toast('Подключите «Личный сервер» в настройках синхронизации', true); return null; }
   try {
-    const r = await fetch(url, {
+    const r = await fetch(SRV.url, {
       method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ secret, action }, payload || {}))
+      body: JSON.stringify(Object.assign({ secret: SRV.secret, action }, payload || {}))
     });
     return await r.json();
-  } catch(e) { toast('Нет связи с мостом «Почта России»', true); return null; }
+  } catch(e) { toast('Нет связи с личным сервером', true); return null; }
 }
 
 // Совместимость: карточка в настройках теперь ведёт на экран «Письма»
 function openMailSheet() { closeSheet(); nav('mail'); }
-
-// Подключение моста «Почта России» (свой URL и секрет)
-function openMailBridgeSheet() {
-  showSheet(`
-    <h3>${ic("mail",18)} Мост «Почта России»</h3>
-    <div class="sheet-sub">Отдельный скрипт Google Apps Script: по трек-номерам запрашивает статусы в API Почты России.</div>
-
-    <div class="card" style="margin-bottom:12px">
-      <div class="title" style="margin-bottom:6px">Как настроить</div>
-      <div class="meta" style="line-height:1.6">
-        1. Зарегистрируйте доступ к API: <a href="https://tracking.pochta.ru" target="_blank" style="color:var(--blue)">tracking.pochta.ru</a> → «Получить доступ к API».<br>
-        2. Откройте <a href="https://script.google.com" target="_blank" style="color:var(--blue)">script.google.com</a> → «Создать проект» → вставьте файл <b>«Почта-России-скрипт.gs»</b>.<br>
-        3. «Настройки проекта» → «Свойства скрипта»: добавьте <b>SECRET</b>, <b>POCHTA_LOGIN</b> и <b>POCHTA_PASS</b>.<br>
-        4. «Развернуть» → «Веб-приложение» (доступ «Все», от вашего имени) → скопируйте URL.
-      </div>
-    </div>
-
-    <div class="field"><label>URL веб-приложения</label>
-      <input id="mailbr-url" value="${esc(MAILBR.url)}" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off"></div>
-    <div class="field"><label>SECRET (из свойств скрипта)</label>
-      <input id="mailbr-secret" value="${esc(MAILBR.secret)}" placeholder="то же значение, что в свойствах скрипта" autocomplete="off"></div>
-
-    <button class="btn-primary" onclick="saveMailBridge()">Подключить</button>
-    ${MAILBR.url?`<button class="btn-ghost" onclick="disconnectMailBridge()" style="color:var(--red)">Отключить</button>`:''}
-    <button class="btn-ghost" onclick="nav('mail')">← Назад</button>
-  `);
-}
-async function saveMailBridge() {
-  const url = (document.getElementById('mailbr-url').value||'').trim();
-  const secret = (document.getElementById('mailbr-secret').value||'').trim();
-  if (!url || !/^https:\/\/script\.google\.com\//.test(url)) { toast('Вставьте корректный URL веб-приложения', true); return; }
-  if (secret.length < 12) { toast('Секретный код — минимум 12 символов', true); return; }
-  MAILBR.url = url; MAILBR.secret = secret;
-  toast('Мост «Почта России» подключён'); nav('mail');
-}
-function disconnectMailBridge() {
-  MAILBR.url = ''; MAILBR.secret = '';
-  toast('Мост «Почта России» отключён'); nav('mail');
-}
 
 // Классификация статуса отправления для цветовой индикации
 function mailStatusKind(m) {
@@ -9784,7 +9070,7 @@ function mailIsDelivered(m) {
 async function mailRefreshAll() {
   const mail = await getAll('mail');
   if (!mail.length) { toast('Сначала добавьте трек-номера', true); return; }
-  if (!MAILBR.url && !SRV.url) { toast('Подключите «Личный сервер» или мост «Почта России»: Настройки → Синхронизация', true); return; }
+  if (!SRV.url) { toast('Подключите «Личный сервер»: Настройки → Синхронизация', true); return; }
   const withCode = mail.filter(m => m.barcode);
   const toTrack = withCode.filter(m => !mailIsDelivered(m));
   const skipped = withCode.length - toTrack.length;
@@ -11625,46 +10911,7 @@ async function openDossier(caseId, mode) {
 // ════════════════════════════════════════════════════════════
 // ПРОВЕРКА ЦЕЛОСТНОСТИ ФАЙЛОВ на Яндекс Диске
 // ════════════════════════════════════════════════════════════
-async function checkFilesIntegrity() {
-  if (!CLOUD.token) { toast('Сначала подключите Яндекс Диск', true); return; }
-  const files = await getAll('files');
-  if (!files.length) { toast('В базе нет файлов дел'); return; }
-  toast(`Проверяю ${files.length} файлов...`);
-  await refreshCasesCache();
-  const results = [];
-  for (const f of files) {
-    try {
-      const r = await yaFetch(`${YA_API}/resources?path=${encodeURIComponent(f.path)}&fields=size`);
-      results.push({ f, ok: r.ok });
-    } catch(e) { results.push({ f, ok: false, net: true }); }
-  }
-  const missing = results.filter(r=>!r.ok);
-  const caseOf = id => { const c = Object.values(CASES_BY_NUM).find(c=>c.id===id); return c ? c.number : ''; };
-  showSheet(`
-    <h3>${ic("tools",18)} Проверка файлов</h3>
-    <div class="sheet-sub">Проверено: ${results.length} · на месте: ${results.length-missing.length} · ${missing.length?`<span style="color:var(--red)">недоступно: ${missing.length}</span>`:'все файлы на месте ✅'}</div>
-    ${missing.length?missing.map(({f})=>`
-      <div class="card" style="margin-bottom:8px;border-left:3px solid var(--red)">
-        <div class="row1">
-          <div style="flex:1;min-width:0">
-            <div class="title" style="font-size:13px;word-break:break-all">📄 ${esc(f.name)}</div>
-            <div class="meta">${esc(caseOf(f.caseId)||'дело не найдено')} · файл отсутствует на Диске</div>
-          </div>
-          <button onclick="removeCaseFileMeta('${f.id}')" style="background:var(--red-l);color:var(--red);border:none;border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer;flex-shrink:0">Убрать из базы</button>
-        </div>
-      </div>`).join('')+`<div class="sheet-sub">Причины: файл удалён с Диска вручную или Диск переподключён под другим аккаунтом.</div>`:''}
-    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
-  `);
-}
-async function removeCaseFileMeta(fileId) {
-  await del('files', fileId);
-  toast('Запись о файле удалена');
-  checkFilesIntegrity();
-}
-
-// ════════════════════════════════════════════════════════════
-// ТЕМЫ ОФОРМЛЕНИЯ — авто (как в системе) / светлая / тёмная
-// ════════════════════════════════════════════════════════════
+async // ════════════════════════════════════════════════════════════
 const THEME_NAVY = '#2A2F6E';
 function effectiveTheme(mode) {
   if (mode === 'light' || mode === 'dark') return mode;
@@ -12430,7 +11677,7 @@ function openNotifSheet() {
 
     <div class="card" style="margin-top:12px">
       <div class="title" style="margin-bottom:4px;font-size:14px">Важно про надёжность</div>
-      <div class="meta" style="line-height:1.6">Эти локальные уведомления проверяются, когда приложение открыто. На iPhone/iPad Web Push доступен для сайтов, добавленных на экран «Домой», но для фоновой доставки этой CRM всё равно нужен сервер уведомлений.<br><br>Для надёжных напоминаний <b>при закрытом приложении</b> используйте <b>Google Календарь</b> или <b>Telegram</b> — они настраиваются в разделе «Синхронизация».</div>
+      <div class="meta" style="line-height:1.6">Эти локальные уведомления проверяются, когда приложение открыто. На iPhone/iPad Web Push доступен для сайтов, добавленных на экран «Домой», но для фоновой доставки этой CRM всё равно нужен сервер уведомлений.<br><br>Для надёжных напоминаний <b>при закрытом приложении</b> используйте <b>Telegram</b> или подписку календаря <b>.ics</b> личного сервера — настраиваются в разделе «Синхронизация».</div>
     </div>
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
   `);
@@ -12468,10 +11715,6 @@ document.addEventListener('keydown', e => {
 // CRM Адвоката v161 — next action, избранное, сохранённые виды, черновики, desktop preview.
 window.CRM_UPGRADE = window.CRM_UPGRADE || { modules: [], selectedCaseId: '', startedAt: Date.now() };
 CRM_UPGRADE.modules.push('v161');
-
-function crmV161HtmlButton(label, action, kind) {
-  return `<button type="button" class="${kind || 'v-mini-btn'}" onclick="${action}">${label}</button>`;
-}
 
 function crmV161InstallShell() {
   // v172: баннер «Рабочий центр адвоката» с главного экрана убран по решению
@@ -12656,6 +11899,8 @@ openMoreSheet = function() {
   if (!grid || document.getElementById('v177-more-cor')) return;
   const tile = (id, icon, label, fn) => `<div id="${id}" class="card" style="cursor:pointer;margin:0;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 10px" onclick="${fn}"><div style="font-size:25px;color:var(--blue)">${icon}</div><div style="font-size:13px;font-weight:700">${label}</div></div>`;
   grid.insertAdjacentHTML('afterbegin',
+    tile('v184-more-inbox','⚡','Инбокс','openInboxSheet()') +
+    tile('v184-more-check','🔎','Контрагент','openCounterpartySheet()') +
     tile('v182-more-import','⇪','Импорт от ИИ','openAiImport()') +
     tile('v177-more-cor','✉','Корреспонденция','openCorrespondenceCenter()') +
     tile('v177-more-docs','▤','Документы','openDocumentCenter()') +
@@ -12773,7 +12018,7 @@ function crmCaseIsSilent(c, days) {
 function crmCaseNoNext(c) {
   return !!c && c.status !== 'Завершено' && c.stage !== 'Завершено' && !String(c.nextAction || '').trim();
 }
-const CRM_LOG_LABEL = { status:'Статус', stage:'Стадия', workflow:'Процесс', hearing:'Заседание', hearing_upd:'Заседание', task:'Задача', finance:'Финансы', doc:'Документ', import:'Импорт', nextAction:'След. действие', bundle:'Старт' };
+const CRM_LOG_LABEL = { status:'Статус', stage:'Стадия', workflow:'Процесс', hearing:'Заседание', hearing_upd:'Заседание', task:'Задача', finance:'Финансы', doc:'Документ', import:'Импорт', nextAction:'След. действие', bundle:'Старт', inbox:'Инбокс', deadline:'Срок' };
 async function openCaseJournal(id) {
   const c = (await getAll('cases')).find(x => x.id === id); if (!c) return;
   const ev = (Array.isArray(c.history) ? c.history.slice() : []).sort((a,b)=>Number(b.at)-Number(a.at));
@@ -12969,6 +12214,299 @@ function crmAiImportBuildPlan(data, existingCases, existingClients) {
   return plan;
 }
 /*__AI_IMPORT_END__*/
+
+/*__COLLECTOR_BEGIN__*/
+// v183: выгрузка списка дел для коллектора судов (collector-sud.mjs)
+async function crmCollectorExport() {
+  const all = await getAll('cases');
+  const cases = all.filter(c => !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено' && (c.link || c.linkApp || c.linkCass));
+  if (!cases.length) { toast('Нет незавершённых дел со ссылками на сайт суда', true); return; }
+  const rows = cases.map(c => ({
+    number: c.number || '', uid: c.caseUid || '', stage: c.stage || '',
+    courtNo: c.courtNo || '', courtNoApp: c.courtNoApp || '', courtNoCass: c.courtNoCass || '',
+    links: [
+      c.link    ? { stage: 'Первая инстанция', courtNo: c.courtNo    || '', url: c.link }    : null,
+      c.linkApp ? { stage: 'Апелляция',        courtNo: c.courtNoApp || '', url: c.linkApp } : null,
+      c.linkCass? { stage: 'Кассация',         courtNo: c.courtNoCass|| '', url: c.linkCass }: null
+    ].filter(Boolean)
+  }));
+  const payload = JSON.stringify({ format: 'crm-advokat-links', version: 1, exportedAt: new Date().toISOString(), cases: rows }, null, 2);
+  downloadTextFile(payload, 'дела-для-коллектора.json', 'application/json;charset=utf-8');
+  toast(`Выгружено дел: ${rows.length}`);
+}
+/*__COLLECTOR_END__*/
+
+/*__V184_BEGIN__*/
+// ═══════ v184: ИНБОКС · ЭСКАЛАЦИЯ СРОКОВ 7/3/1 · ПРОВЕРКА КОНТРАГЕНТА ═══════
+
+// ── Инбокс: молниеносный ввод, разбор потом ──
+// Хранение: localStorage crm_inbox (массив {id,text,at}); ключ включён в
+// SYNC_SETTINGS_KEYS и расходится между устройствами вместе с настройками.
+function crmInboxItems() {
+  try { const a = JSON.parse(localStorage.getItem('crm_inbox') || '[]'); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function crmInboxSave(list) {
+  localStorage.setItem('crm_inbox', JSON.stringify((list || []).slice(0, 200)));
+  if (typeof bumpSettings === 'function') bumpSettings();
+}
+function crmInboxParse(text) {
+  const t = String(text || '');
+  const out = { date: '', time: '', caseNum: '' };
+  const tm = t.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/); if (tm) out.time = (tm[1].length === 1 ? '0' + tm[1] : tm[1]) + ':' + tm[2];
+  let m = t.match(/\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b/);
+  if (m) out.date = m[3] + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[1]).padStart(2, '0');
+  else if ((m = t.match(/\b(\d{1,2})\.(\d{1,2})\b(?!\.\d)/))) {
+    const today = todayISO(); const yr = Number(today.slice(0, 4));
+    let iso = yr + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[1]).padStart(2, '0');
+    if (iso < today) iso = (yr + 1) + iso.slice(4);
+    out.date = iso;
+  } else if (/послезавтра/i.test(t)) out.date = addDaysLocalISO(todayISO(), 2);
+  else if (/завтра/i.test(t)) out.date = addDaysLocalISO(todayISO(), 1);
+  else if (/сегодня/i.test(t)) out.date = todayISO();
+  const cn = t.match(/Д-\d+\/\d{4}\b/); if (cn) out.caseNum = cn[0]; // \b перед кириллицей не работает
+  return out;
+}
+async function crmInboxMatchCase(text) {
+  const t = String(text || '');
+  const cases = (await getAll('cases')).filter(c => !c.archived && c.status !== 'Завершено');
+  return cases.find(c =>
+    (c.number && t.includes(c.number)) ||
+    (c.courtNo && c.courtNo.length > 4 && t.includes(c.courtNo)) ||
+    (c.courtNoApp && c.courtNoApp.length > 4 && t.includes(c.courtNoApp)) ||
+    (c.courtNoCass && c.courtNoCass.length > 4 && t.includes(c.courtNoCass))
+  ) || null;
+}
+async function openInboxSheet() {
+  await refreshCasesCache();
+  const items = crmInboxItems().slice().sort((a, b) => (b.at || 0) - (a.at || 0));
+  const chip = (x) => { const p = crmInboxParse(x.text); const bits = [];
+    if (p.date) bits.push('📅 ' + fmtDate(p.date)); if (p.time) bits.push('🕐 ' + p.time); if (p.caseNum) bits.push('💼 ' + p.caseNum);
+    return bits.length ? `<div class="meta" style="margin-top:3px">${bits.map(esc).join(' · ')}</div>` : ''; };
+  showSheet(`<h3>⚡ Инбокс</h3>
+    <div class="sheet-sub">Записывайте мысли на бегу — разложите по местам, когда будет минута. Каждая строка — отдельная запись; дата, время и номер дела распознаются сами.</div>
+    <div class="field"><textarea id="v184-inbox-text" rows="2" placeholder="позвонить Петрову завтра · заседание 25.09 10:30 по Д-3/2026 · запросить выписку" onkeydown="crmInboxKey(event)"></textarea></div>
+    <button class="btn-primary" onclick="crmInboxAddUI()" style="margin-bottom:12px">Добавить (Enter)</button>
+    ${items.length ? items.map(x => `
+      <div class="card" style="margin-bottom:8px">
+        <div class="row1"><div style="flex:1;min-width:0">
+          <div class="title" style="font-size:13.5px;white-space:pre-wrap">${esc(x.text)}</div>${chip(x)}
+          <div class="meta" style="margin-top:2px">${new Date(x.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</div>
+        </div>
+        <button onclick="crmInboxRemove('${jsq(x.id)}')" style="background:none;border:none;color:var(--text-faint);font-size:16px;cursor:pointer;padding:2px 6px">✕</button></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+          <button class="v-mini-btn" onclick="crmInboxToTask('${jsq(x.id)}')">✓ Задача</button>
+          <button class="v-mini-btn" onclick="crmInboxToHearing('${jsq(x.id)}')">🏛 Заседание</button>
+          <button class="v-mini-btn" onclick="crmInboxAttach('${jsq(x.id)}','deadline')">⏰ Срок</button>
+          <button class="v-mini-btn" onclick="crmInboxAttach('${jsq(x.id)}','note')">▤ Заметка к делу</button>
+        </div>
+      </div>`).join('') : '<div class="empty" style="padding:18px"><p>Инбокс пуст. И это прекрасно.</p></div>'}
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
+  setTimeout(() => document.getElementById('v184-inbox-text')?.focus(), 60);
+}
+function crmInboxKey(ev) { if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); crmInboxAddUI(); } }
+function crmInboxAddUI() {
+  const el = document.getElementById('v184-inbox-text'); if (!el) return;
+  const lines = String(el.value || '').split('\n').map(x => x.trim()).filter(Boolean);
+  if (!lines.length) { toast('Введите текст', true); return; }
+  const list = crmInboxItems();
+  for (const ln of lines) list.push({ id: uid('ИН'), text: ln.slice(0, 500), at: Date.now() });
+  crmInboxSave(list);
+  toast(lines.length > 1 ? `Добавлено записей: ${lines.length}` : 'Записано');
+  openInboxSheet(); renderDashboard();
+}
+function crmInboxRemove(id, silent) {
+  crmInboxSave(crmInboxItems().filter(x => x.id !== id));
+  if (!silent) { openInboxSheet(); renderDashboard(); }
+}
+async function crmInboxToTask(id) {
+  const x = crmInboxItems().find(i => i.id === id); if (!x) return;
+  const p = crmInboxParse(x.text);
+  const c = await crmInboxMatchCase(x.text);
+  const t = { id: uid('З'), caseId: c ? c.id : '', caseNum: c ? c.number : '', title: x.text.slice(0, 200), due: p.date || '', done: false, createdAt: Date.now(), source: 'inbox' };
+  await put('tasks', t);
+  if (t.caseNum) await crmCaseLogByNum(t.caseNum, 'task', 'Задача из инбокса: ' + t.title.slice(0, 80));
+  crmInboxRemove(id, true);
+  toast('Задача создана' + (t.due ? ' · до ' + fmtDate(t.due) : '') + (t.caseNum ? ' · ' + t.caseNum : ''));
+  openInboxSheet(); renderDashboard(); if (typeof renderTasks === 'function') renderTasks(); navBadgeRefresh?.();
+}
+async function crmInboxToHearing(id) {
+  const x = crmInboxItems().find(i => i.id === id); if (!x) return;
+  const p = crmInboxParse(x.text);
+  const c = await crmInboxMatchCase(x.text);
+  crmInboxRemove(id, true);
+  await openHearingForm();
+  const set = (sid, v) => { const el = document.getElementById(sid); if (el && v) el.value = v; };
+  set('f-date', p.date); set('f-time', p.time);
+  if (c) {
+    const hid = document.getElementById('f-caseNum'), inp = document.getElementById('f-caseNum-q');
+    if (hid) hid.value = c.number || '';
+    if (inp) inp.value = c.number ? (caseLabel(c.number) || c.number) : '';
+    hearingCaseChanged(false); // суд и судья по стадии дела
+  }
+  set('f-hcomment', x.text);
+  toast('Черновик заседания заполнен — проверьте и сохраните');
+}
+async function crmInboxAttach(id, mode) {
+  const x = crmInboxItems().find(i => i.id === id); if (!x) return;
+  const p = crmInboxParse(x.text);
+  const match = await crmInboxMatchCase(x.text);
+  const cases = (await getAll('cases')).filter(c => !c.archived && c.status !== 'Завершено')
+    .sort((a, b) => String(a.number).localeCompare(String(b.number), 'ru'));
+  if (!cases.length) { toast('Нет активных дел', true); return; }
+  showSheet(`<h3>${mode === 'deadline' ? '⏰ Срок из инбокса' : '▤ Заметка к делу'}</h3>
+    <div class="sheet-sub" style="white-space:pre-wrap">${esc(x.text)}</div>
+    <div class="field"><label>Дело</label><select id="v184-att-case">${cases.map(c => `<option value="${esc(c.id)}" ${match && match.id === c.id ? 'selected' : ''}>${esc(c.number)}${c.client ? ' · ' + esc(c.client) : ''}</option>`).join('')}</select></div>
+    ${mode === 'deadline' ? `<div class="field"><label>Дата срока</label><input id="v184-att-date" type="date" value="${esc(p.date || '')}"></div>` : ''}
+    <button class="btn-primary" onclick="crmInboxAttachApply('${jsq(id)}','${mode}')">${mode === 'deadline' ? 'Добавить срок' : 'Сохранить заметку'}</button>
+    <button class="btn-ghost" onclick="openInboxSheet()">← Инбокс</button>`);
+}
+async function crmInboxAttachApply(id, mode) {
+  const x = crmInboxItems().find(i => i.id === id); if (!x) return;
+  const c = (await getAll('cases')).find(k => k.id === fval('v184-att-case'));
+  if (!c) { toast('Выберите дело', true); return; }
+  if (mode === 'deadline') {
+    const date = fval('v184-att-date');
+    if (!date) { toast('Укажите дату срока', true); return; }
+    c.deadlines = Array.isArray(c.deadlines) ? c.deadlines : [];
+    c.deadlines.push({ title: x.text.slice(0, 200), date, done: false, source: 'inbox' });
+    await put('cases', c);
+    await crmCaseLogByNum(c.number, 'deadline', 'Срок из инбокса: ' + x.text.slice(0, 80) + ' · до ' + fmtDate(date));
+    toast('Срок добавлен · ' + c.number);
+  } else {
+    await crmCaseLogByNum(c.number, 'inbox', x.text.slice(0, 500));
+    toast('Заметка сохранена в журнал · ' + c.number);
+  }
+  crmInboxRemove(id, true);
+  openInboxSheet(); renderDashboard(); if (typeof renderCases === 'function') renderCases();
+}
+
+// ── Эскалация сроков 7/3/1 с отметкой «срок подтверждён» ──
+// Ярус: 7 (жёлтый), 3 (оранжевый), 1 вместе с «сегодня» и просрочкой (красный).
+// Подтверждение фиксируется на ярусе (ackTier) и на дате (ackDate): пока срок
+// в том же ярусе — тревога скрыта; перешёл в следующий — поднимается снова.
+// На красном ярусе подтверждённый срок остаётся в списке приглушённым.
+function crmDlTier(d) {
+  if (d === null || d > 7) return null;
+  if (d <= 1) return 1;
+  if (d <= 3) return 3;
+  return 7;
+}
+function crmDlState(rec, tier) {
+  // rec: {ackTier, ackDate, date}; tier: 1|3|7
+  const acked = rec.ackTier && rec.ackDate === rec.date && rec.ackTier <= tier;
+  if (!acked) return 'alarm';
+  return tier === 1 ? 'ack' : 'hidden';
+}
+async function crmRenderDeadlineControl() {
+  const host = document.getElementById('v184-deadlines'); if (!host) return;
+  const cases = await getAll('cases');
+  const rows = [];
+  cases.forEach(c => {
+    if (c.archived || c.status === 'Завершено' || c.stage === 'Завершено') return;
+    (c.deadlines || []).forEach((dl, idx) => {
+      if (dl.done || !dl.date) return;
+      const d = daysUntil(dl.date); const tier = crmDlTier(d); if (tier === null) return;
+      const st = crmDlState({ ackTier: dl.ackTier, ackDate: dl.ackDate, date: dl.date }, tier);
+      if (st === 'hidden') return;
+      rows.push({ kind: 'dl', c, idx, title: dl.title || 'Процессуальный срок', date: dl.date, d, tier, st });
+    });
+    if (c.nextActionDue && c.nextAction) {
+      const d = daysUntil(c.nextActionDue); const tier = crmDlTier(d);
+      if (tier !== null) {
+        const st = crmDlState({ ackTier: c.nextAckTier, ackDate: c.nextAckDate, date: c.nextActionDue }, tier);
+        if (st !== 'hidden') rows.push({ kind: 'next', c, title: 'След. действие: ' + c.nextAction, date: c.nextActionDue, d, tier, st });
+      }
+    }
+  });
+  rows.sort((a, b) => a.d - b.d || String(a.date).localeCompare(String(b.date)));
+  const inbox = crmInboxItems().length;
+  const inboxRow = inbox ? `<div class="card" style="cursor:pointer;border-left:3px solid var(--accent);margin:2px 0 6px" onclick="openInboxSheet()"><div class="meta" style="font-weight:700">⚡ Инбокс: ${inbox} ${plural(inbox, 'запись', 'записи', 'записей')} — разобрать</div></div>` : '';
+  if (!rows.length && !inbox) { host.innerHTML = ''; return; }
+  const mark = t => t === 1 ? '🔴' : t === 3 ? '🟠' : '🟡';
+  const when = d => d < 0 ? `просрочен ${-d} дн.` : d === 0 ? 'СЕГОДНЯ' : d === 1 ? 'завтра' : `через ${d} дн.`;
+  const shown = rows.slice(0, 6);
+  const line = (r, i) => {
+    const color = r.st === 'ack' ? 'var(--text-faint)' : r.tier === 1 ? 'var(--red)' : r.tier === 3 ? 'var(--sig-amber)' : 'var(--sig-amber)';
+    const ackBtn = r.st === 'alarm'
+      ? `<button class="v-mini-btn" onclick="event.stopPropagation();${r.kind === 'dl' ? `crmDlAck('${jsq(r.c.id)}',${r.idx},${r.tier})` : `crmNextAck('${jsq(r.c.id)}',${r.tier})`}">✋ Подтверждаю</button>`
+      : `<span class="meta" style="color:var(--green)">✓ подтверждён</span>`;
+    const doneBtn = r.kind === 'dl' ? `<button class="v-mini-btn" onclick="event.stopPropagation();crmDlDone('${jsq(r.c.id)}',${r.idx})">Исполнен</button>` : '';
+    return `<div class="card" style="cursor:pointer;border-left:3px solid ${color};margin:${i ? '6px' : '2px'} 0 0" onclick="viewCase('${jsq(r.c.id)}')">
+      <div class="row1"><div style="flex:1;min-width:0">
+        <div class="meta" style="font-weight:700;${r.st === 'ack' ? 'color:var(--text-faint)' : ''}">${mark(r.tier)} ${esc(r.title)} — ${when(r.d)}</div>
+        <div class="meta">${esc(r.c.number || '')}${r.c.client ? ' · ' + esc(r.c.client) : ''} · до ${fmtDate(r.date)}</div>
+      </div></div>
+      <div style="display:flex;gap:6px;margin-top:6px;align-items:center">${ackBtn}${doneBtn}</div>
+    </div>`;
+  };
+  host.innerHTML = inboxRow + (rows.length ? `
+    <div class="meta" style="font-weight:700;margin:${inbox ? '8px' : '2px'} 0 4px">⏰ Контроль сроков · 7/3/1</div>
+    ${shown.map(line).join('')}
+    ${rows.length > shown.length ? `<div class="card" style="cursor:pointer;margin-top:6px" onclick="openDeadlinesSheet()"><div class="meta">…и ещё ${rows.length - shown.length} — все сроки</div></div>` : ''}` : '');
+}
+async function crmDlAck(caseId, idx, tier) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c || !c.deadlines || !c.deadlines[idx]) return;
+  const dl = c.deadlines[idx];
+  dl.ackTier = tier; dl.ackDate = dl.date; dl.ackAt = Date.now();
+  await put('cases', c);
+  await crmCaseLogByNum(c.number, 'deadline', `Срок подтверждён (ярус ${tier} дн.): ` + String(dl.title || '').slice(0, 80));
+  toast('Срок подтверждён — под контролем');
+  renderDashboard();
+}
+async function crmNextAck(caseId, tier) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  c.nextAckTier = tier; c.nextAckDate = c.nextActionDue; c.nextAckAt = Date.now();
+  await put('cases', c);
+  toast('Срок подтверждён — под контролем');
+  renderDashboard();
+}
+async function crmDlDone(caseId, idx) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c || !c.deadlines || !c.deadlines[idx]) return;
+  const dl = c.deadlines[idx];
+  dl.done = true; dl.doneAt = Date.now();
+  await put('cases', c);
+  await crmCaseLogByNum(c.number, 'deadline', 'Срок исполнен: ' + String(dl.title || '').slice(0, 80));
+  toast('Срок отмечен исполненным');
+  renderDashboard(); if (typeof renderCases === 'function') renderCases();
+}
+
+// ── Проверка контрагента: КАД, ЕФРСБ, ФССП, ФНС ──
+// Открываем официальные сервисы; реквизит (ИНН приоритетнее названия)
+// автоматически копируется в буфер — вставьте в поиск на сайте.
+const CRM_CHECK_SERVICES = [
+  { code: 'kad',   title: '⚖️ КАД Арбитр',            desc: 'Арбитражные дела: истец/ответчик, банкротные дела', url: q => 'https://kad.arbitr.ru/' },
+  { code: 'efrsb', title: '📉 ЕФРСБ (Федресурс)',      desc: 'Сообщения о банкротстве граждан и организаций',     url: q => 'https://bankrot.fedresurs.ru/bankrupts?searchString=' + encodeURIComponent(q) },
+  { code: 'fssp',  title: '🧾 ФССП — исполн. производства', desc: 'Банк данных исполнительных производств',       url: q => 'https://fssp.gov.ru/iss/ip' },
+  { code: 'egrul', title: '🏛 ФНС — ЕГРЮЛ/ЕГРИП',      desc: 'Выписка по организации или ИП',                     url: q => 'https://egrul.nalog.ru/' },
+  { code: 'pb',    title: '🔎 ФНС — Прозрачный бизнес', desc: 'Комплексные сведения: адреса, дисквалификация, долги', url: q => 'https://pb.nalog.ru/' }
+];
+function openCounterpartySheet(name, inn) {
+  showSheet(`<h3>🔎 Проверка контрагента</h3>
+    <div class="sheet-sub">ИНН точнее названия. Реквизит копируется в буфер — если поле поиска на сайте не заполнилось само, просто вставьте (Ctrl+V).</div>
+    <div class="field"><label>Название организации / ФИО</label><input id="v184-chk-name" value="${esc(name || '')}" placeholder="ООО «Ромашка» или Иванов Иван Иванович"></div>
+    <div class="field"><label>ИНН (если известен)</label><input id="v184-chk-inn" value="${esc(inn || '')}" inputmode="numeric" placeholder="10 или 12 цифр"></div>
+    ${CRM_CHECK_SERVICES.map(sv => `
+      <div class="card" style="cursor:pointer;margin-bottom:8px" onclick="crmCheckOpen('${sv.code}')">
+        <div class="row1"><div style="flex:1">
+          <div class="title" style="font-size:14px">${sv.title}</div>
+          <div class="meta">${sv.desc}</div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M7 17L17 7M17 7H9M17 7v8"/></svg></div>
+      </div>`).join('')}
+    <div class="meta" style="margin-top:4px;line-height:1.5">КАД, ФССП и ЕГРЮЛ не принимают запрос в адресе страницы (защита от роботов) — там реквизит вставляется из буфера. Результаты смотрите на самих сайтах: CRM ничего не скачивает и не хранит.</div>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
+}
+function crmCheckOpen(code) {
+  const sv = CRM_CHECK_SERVICES.find(x => x.code === code); if (!sv) return;
+  const inn = fval('v184-chk-inn').trim(), name = fval('v184-chk-name').trim();
+  const q = inn || name;
+  if (!q) { toast('Укажите название или ИНН', true); return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(q).catch(() => {});
+  window.open(sv.url(q), '_blank', 'noopener');
+  toast('Скопировано: ' + q.slice(0, 40) + (q.length > 40 ? '…' : '') + ' — вставьте в поиск на сайте');
+}
+/*__V184_END__*/
 
 const CRM_AI_IMPORT_GUIDE = 'Ты помогаешь адвокату подготовить пакет данных для его CRM. Верни ОДИН блок JSON без пояснений, строго такой структуры (любой раздел можно опустить, если нечего добавлять):\n' +
 '{\n' +
@@ -13217,7 +12755,7 @@ async function fetchMonitorEndpoint(){
   localStorage.setItem('crm_monitor_url',u.href);if(token)localStorage.setItem('crm_monitor_token',token);bumpSettings?.();try{toast('Получаю события…');const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),30000),res=await fetch(u.href,{headers:token?{Authorization:`Bearer ${token}`}:{},signal:ctrl.signal,cache:'no-store'});clearTimeout(timer);if(!res.ok)throw new Error(`HTTP ${res.status}`);const body=await res.text();await crmMonPersist(await crmMonNormalizeRows(crmMonRows(body,res.headers.get('content-type')?.includes('json')?'events.json':'events.txt'),'HTTPS-адаптер'));}catch(e){toast(`Не удалось получить события: ${e.message||'ошибка'}`,true);}
 }
 async function reviewMonitorEvent(id){const e=(await getAll('monitorEvents')).find(x=>x.id===id),cases=(await getAll('cases')).filter(c=>!c.archived);if(!e)return;showSheet(`<h3>${esc(e.title)}</h3><div class="sheet-sub">${esc(e.source)} · ${e.date?fmtDate(e.date):'дата не распознана'}</div><div class="field"><label>Связать с делом</label><select id="v-mon-case"><option value="">— выберите —</option>${cases.map(c=>`<option value="${esc(c.id)}" ${c.id===e.caseId?'selected':''}>${esc(c.number)} · ${esc(c.client||'')}</option>`).join('')}</select></div><div class="v-monitor-raw">${esc(e.raw||'')}</div><div class="v-storage-note">CRM ничего не меняет автоматически. Выберите одно действие; запись источника и исходный текст сохранятся в журнале.</div><div class="v-hub-grid"><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','hearing')"><span class="v-hub-icon">📅</span><b>Заседание</b><span>Добавить событие в календарь</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','task')"><span class="v-hub-icon">✓</span><b>Задача</b><span>Создать задачу на указанную дату</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','deadline')"><span class="v-hub-icon">⏱</span><b>Срок дела</b><span>Добавить внутренний контрольный срок</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','note')"><span class="v-hub-icon">▤</span><b>Заметка</b><span>Сохранить только в истории дела</span></button></div><button class="btn-ghost" onclick="ignoreMonitorEvent('${jsq(e.id)}')">Не применять</button><button class="btn-ghost" onclick="openMonitorCenter()">← К событиям</button>`);}
-async function applyMonitorEvent(id,action){const e=(await getAll('monitorEvents')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===fval('v-mon-case'));if(e?.status==='applied'){toast('Это событие уже применено',true);return;}if(!e||!c){toast('Сначала выберите дело',true);return;}const date=e.date||todayISO();let createdId='';if(action==='hearing'){const x={id:uid('ЗС'),caseId:c.id,caseNum:c.number,date,time:'',court:caseStageCourt(c).court,status:'Назначено',note:e.title,monitorEventId:e.id};await put('hearings',x);createdId=x.id;if(x.caseNum)await crmCaseLogByNum(x.caseNum,'hearing','Заседание из мониторинга: '+fmtDate(x.date));}else if(action==='task'){const x={id:uid('З'),caseId:c.id,caseNum:c.number,title:e.title,due:date,done:false,createdAt:Date.now(),monitorEventId:e.id};await put('tasks',x);createdId=x.id;}else if(action==='deadline'){const x={id:uid('СР'),title:e.title,date,done:false,source:'monitor',monitorEventId:e.id};c.deadlines=Array.isArray(c.deadlines)?c.deadlines:[];c.deadlines.push(x);await put('cases',c);createdId=x.id;}else{c.monitorNotes=Array.isArray(c.monitorNotes)?c.monitorNotes:[];c.monitorNotes.push({id:uid('ЗАМ'),at:Date.now(),title:e.title,date,source:e.source,eventId:e.id});addCaseHistoryEvent(c,'monitor','',e.title,'monitor');await put('cases',c);createdId=c.monitorNotes.at(-1).id;}e.caseId=c.id;e.caseNum=c.number;e.status='applied';e.appliedAction=action;e.appliedRecordId=createdId;e.appliedAt=Date.now();await put('monitorEvents',e);toast('Событие применено');openMonitorCenter();renderDashboard();renderCases();}
+async function applyMonitorEvent(id,action){const e=(await getAll('monitorEvents')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===fval('v-mon-case'));if(e?.status==='applied'){toast('Это событие уже применено',true);return;}if(!e||!c){toast('Сначала выберите дело',true);return;}const date=e.date||todayISO();let createdId='';if(action==='hearing'){const sc=caseStageCourt(c),tm=((String(e.title||'')+' '+String(e.raw||'')).match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/)||[])[0]||'';const x={id:uid('ЗС'),caseId:c.id,caseNum:c.number,date,time:tm,court:sc.court,judge:sc.judge||'',status:'Назначено',note:e.title,monitorEventId:e.id};await put('hearings',x);createdId=x.id;if(x.caseNum)await crmCaseLogByNum(x.caseNum,'hearing','Заседание из мониторинга: '+fmtDate(x.date));}else if(action==='task'){const x={id:uid('З'),caseId:c.id,caseNum:c.number,title:e.title,due:date,done:false,createdAt:Date.now(),monitorEventId:e.id};await put('tasks',x);createdId=x.id;}else if(action==='deadline'){const x={id:uid('СР'),title:e.title,date,done:false,source:'monitor',monitorEventId:e.id};c.deadlines=Array.isArray(c.deadlines)?c.deadlines:[];c.deadlines.push(x);await put('cases',c);createdId=x.id;}else{c.monitorNotes=Array.isArray(c.monitorNotes)?c.monitorNotes:[];c.monitorNotes.push({id:uid('ЗАМ'),at:Date.now(),title:e.title,date,source:e.source,eventId:e.id});addCaseHistoryEvent(c,'monitor','',e.title,'monitor');await put('cases',c);createdId=c.monitorNotes.at(-1).id;}e.caseId=c.id;e.caseNum=c.number;e.status='applied';e.appliedAction=action;e.appliedRecordId=createdId;e.appliedAt=Date.now();await put('monitorEvents',e);toast('Событие применено');openMonitorCenter();renderDashboard();renderCases();}
 async function ignoreMonitorEvent(id){const e=(await getAll('monitorEvents')).find(x=>x.id===id);if(!e)return;if(e.status==='applied'){toast('Применённое событие нельзя пометить пропущенным',true);return;}e.status='ignored';e.reviewedAt=Date.now();await put('monitorEvents',e);toast('Событие оставлено без применения');openMonitorCenter();renderDashboard();}
 function crmMonSetFilter(v){CRM_MON_FILTER=v;openMonitorCenter();}
 async function openMonitorCenter(){
@@ -13225,6 +12763,7 @@ async function openMonitorCenter(){
   showSheet(`<h3>Мониторинг событий</h3><div class="sheet-sub">${newCount} новых · источники подключаются через импорт или ваш HTTPS-адаптер.</div><div class="chips">${[['new','Новые'],['applied','Применённые'],['ignored','Не применены'],['all','Все']].map(([v,l])=>`<div class="chip ${CRM_MON_FILTER===v?'active':''}" onclick="crmMonSetFilter('${v}')">${l}</div>`).join('')}</div>
     <details open><summary>Получить события</summary><div class="v-adapter-grid"><div class="v-adapter"><b>Файл JSON / CSV / TXT</b><div class="meta">Экспорт уведомлений или таблица вашего поставщика</div><input type="file" accept=".json,.csv,.txt" onchange="importMonitorFile(this)" style="margin-top:8px"><button class="v-mini-btn" onclick="crmMonDownloadTemplate()">Шаблон CSV</button></div><div class="v-adapter"><b>Вставить уведомление</b><div class="meta">Письмо или текст из карточки суда</div><textarea id="v-mon-paste" rows="3" placeholder="Вставьте одно или несколько уведомлений"></textarea><button class="v-mini-btn" onclick="importMonitorPaste()">Разобрать</button></div></div><div class="field"><label>Название источника</label><input id="v-mon-source" value="Судебное уведомление"></div></details>
     <details><summary>HTTPS-адаптер личного сервера</summary><div class="meta">Запрос выполняется только по кнопке. Ответ: JSON, CSV или текст.</div><div class="field"><label>URL</label><input id="v-mon-url" type="url" value="${esc(localStorage.getItem('crm_monitor_url')||'')}" placeholder="https://server.example/events"></div><div class="field"><label>Bearer-токен</label><input id="v-mon-token" type="password" value="${esc(localStorage.getItem('crm_monitor_token')||'')}" autocomplete="off"></div><button class="btn-primary" onclick="fetchMonitorEndpoint()">Получить сейчас</button></details>
+    <details><summary>Коллектор судов — автосбор с сайтов</summary><div class="meta" style="line-height:1.55;margin:6px 0 8px">Скрипт на вашем компьютере раз в день обходит ссылки дел (СОЮ: *.sudrf.ru, мос-суды: mos-gorsud.ru / mos-sud.ru), извлекает назначенные заседания, результаты и публикации актов и присылает их сюда через ваш личный сервер. КАД Арбитр антиботом не пускает скрипты — арбитражные ссылки коллектор помечает «проверить вручную».<br><br><b>Настройка (один раз):</b> 1) скачайте список дел кнопкой ниже; 2) положите его в папку рядом с <b>collector-sud.mjs</b>; 3) заполните <b>collector-config.json</b> — адрес /bridge и секрет вашего сервера; 4) запускайте двойным щелчком по <b>коллектор.bat</b> или добавьте его в Планировщик Windows. Подробности — в файле «КОЛЛЕКТОР_СУДОВ_настройка».</div><button class="v-mini-btn" onclick="crmCollectorExport()">⬇ Скачать список дел (JSON)</button><div class="meta" style="margin-top:6px">В список попадают незавершённые дела, у которых заполнена хотя бы одна ссылка на сайт суда. ФИО доверителей в файл не выгружаются — только номера, УИД и ссылки. После изменения ссылок или появления новых дел скачайте список заново.</div></details>
     ${list.length?list.map(e=>`<div class="card v-monitor-card ${e.caseId?'matched':''} ${e.status==='applied'?'applied':''}" onclick="reviewMonitorEvent('${jsq(e.id)}')" style="cursor:pointer"><div class="v-monitor-head"><div><div class="v-monitor-title">${esc(e.title)}</div><div class="v-monitor-meta">${esc(e.source)}${e.date?' · '+fmtDate(e.date):''}${e.courtNo?' · '+esc(e.courtNo):''}${e.caseNum?' · найдено '+esc(e.caseNum):''}</div></div><span class="badge ${e.status==='new'?'b-wait':e.status==='applied'?'b-work':'b-done'}"><span class="dot"></span>${e.status==='new'?(e.caseId?'совпадение':'проверить'):e.status==='applied'?'применено':'пропущено'}</span></div></div>`).join(''):'<div class="empty"><p>Событий по фильтру нет.</p></div>'}<button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
 }
 async function crmMonRenderDashboard(){let h=document.getElementById('v165-monitor-alerts');if(!h){h=document.createElement('div');h.id='v165-monitor-alerts';document.getElementById('v163-cor-alerts')?.insertAdjacentElement('afterend',h);}if(!h)return;const n=(await getAll('monitorEvents')).filter(x=>x.status==='new').length;h.innerHTML=n?`<div class="card" onclick="openMonitorCenter()" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin-top:10px"><div class="row1"><div><div class="title">◎ Новые события мониторинга</div><div class="meta">${n} ${plural(n,'событие','события','событий')} нужно проверить и подтвердить</div></div><span class="badge b-wait"><span class="dot"></span>${n}</span></div></div>`:'';}
