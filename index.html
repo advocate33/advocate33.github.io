@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v181</title>
+<title>CRM Адвоката v182</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -947,6 +947,7 @@
       <div class="kpi purple" onclick="nav('calendar')" style="cursor:pointer"><div class="label">Заседаний 7 дней</div><div class="value" id="kpi-hearings">0</div></div>
       <div class="kpi" onclick="taskFilter='open';nav('tasks')" style="cursor:pointer"><div class="label">Просроч. задач</div><div class="value" id="kpi-tasks">0</div></div>
       <div class="kpi" onclick="nav('finance')" style="cursor:pointer"><div class="label">Долг, ₽</div><div class="value" id="kpi-debt" style="font-size:22px">0</div></div>
+      <div id="kpi-attention" style="grid-column:1/-1"></div>
     </div>
   </details>
 
@@ -961,7 +962,7 @@
     <input id="cases-search" placeholder="Поиск по номеру, доверителю, суду..." oninput="renderCases()">
   </div>
   <!-- v177: сохранённые подборки живут на экране дел -->
-  <div style="display:flex;justify-content:flex-end;margin:-2px 0 4px"><button class="v-mini-btn" onclick="openSavedViews()">◫ Сохранённые виды</button></div>
+  <div style="display:flex;justify-content:flex-end;margin:-2px 0 4px"><button class="v-mini-btn" onclick="openSavedViews()">◫ Сохранённые виды</button><button id="cases-quickfilter-chip" class="v-mini-btn" style="display:none;border-color:var(--sig-amber);color:var(--sig-amber)" onclick="casesQuickFilter=null;renderCases()">✕ фильтр</button></div>
   <div class="chips" id="cases-chips"></div>
   <div id="cases-dup-warn"></div>
   <div id="cases-arch-hint"></div>
@@ -1161,6 +1162,9 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14.7 6.3a4 4 0 00-5.4 5.4l-6 6a2 2 0 003 3l6-6a4 4 0 005.4-5.4l-2.5 2.5-2.5-.6-.6-2.5z"/></svg>Калькуляторы
   </button>
   <!-- v177: разделы бывшего «Рабочего центра» — прямыми пунктами панели -->
+  <button class="nav-sec" onclick="openAiImport()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/></svg>Импорт от ИИ
+  </button>
   <button class="nav-sec" onclick="openCorrespondenceCenter()">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>Корреспонденция
   </button>
@@ -1188,7 +1192,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 21; // схема данных выпуска v170
-const APP_VER = '181'; // v180: судьи инстанций; v181: комментарий к заседанию с маркером 💬 в сводке, календаре и деле
+const APP_VER = '182'; // v181: комментарии к заседаниям; v182: журнал дела, контроль тишины, триггеры процессов, пакет нового дела, импорт от нейросети
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
@@ -2287,6 +2291,16 @@ async function renderDashboard() {
   const kpiTasksEl = document.getElementById('kpi-tasks');
   kpiTasksEl.textContent = kpiOverdue;
   kpiTasksEl.closest('.kpi').classList.toggle('red', kpiOverdue > 0); // v176: красный — только при реальной просрочке
+  // v182: контроль тишины — дела без движения и без следующего действия
+  try {
+    const _cs = await getAll('cases');
+    const _silent = _cs.filter(c => crmCaseIsSilent(c, CRM_STALE_DAYS));
+    const _noNext = _cs.filter(crmCaseNoNext);
+    const _att = document.getElementById('kpi-attention');
+    if (_att) _att.innerHTML =
+      (_silent.length ? `<div class="card" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin:2px 0 6px" onclick="casesQuickFilter='stale';nav('cases')"><div class="meta" style="color:var(--sig-amber);font-weight:700">⏳ Без движения дольше ${CRM_STALE_DAYS} дн: ${_silent.length} ${plural(_silent.length,'дело','дела','дел')} — показать</div></div>` : '') +
+      (_noNext.length ? `<div class="card" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin:0" onclick="casesQuickFilter='noNext';nav('cases')"><div class="meta" style="color:var(--sig-amber);font-weight:700">✏️ Без следующего действия: ${_noNext.length} ${plural(_noNext.length,'дело','дела','дел')} — показать</div></div>` : '');
+  } catch (e) {}
   // Условный гонорар успеха (pending) не входит в долг — он ещё не висит на клиенте
   const debt = finance.reduce((a,f)=>a+(f.pending?0:Math.max(0, Number(f.amount||0)-Number(f.paid||0))),0);
   const kpiDebtEl = document.getElementById('kpi-debt');
@@ -2299,7 +2313,8 @@ async function renderDashboard() {
 // ════════════════════════════════════════════════════════════
 // РЕНДЕР: ДЕЛА
 // ════════════════════════════════════════════════════════════
-let casesFilter = '__active'; // __active | __done | __archive | конкретный статус (переход из отчётов)
+let casesFilter = '__active';
+let casesQuickFilter = null; // v182: 'stale' | 'noNext' — фильтры контроля тишины // __active | __done | __archive | конкретный статус (переход из отчётов)
 let casesView = localStorage.getItem('crm_cases_view') || 'list'; // list | board (доска по стадиям, ПК)
 function setCasesView(v) { casesView = v; localStorage.setItem('crm_cases_view', v); renderCases(); }
 let casesFocus = null; // фокус-фильтр при переходе из «Требует внимания»
@@ -2373,8 +2388,14 @@ async function renderCases() {
     else if (casesFilter==='__active') ok = c.status !== 'Завершено';
     else if (casesFilter==='__done') ok = c.status === 'Завершено';
     else ok = c.status === casesFilter; // временный фильтр по статусу (переход из отчётов)
+    if (ok && casesQuickFilter === 'stale' && !crmCaseIsSilent(c, CRM_STALE_DAYS)) ok = false;
+    if (ok && casesQuickFilter === 'noNext' && !crmCaseNoNext(c)) ok = false;
     return ok && ((c.number||'')+(c.courtNo||'')+(c.caseUid||'')+(c.client||'')+(c.court||'')+(c.courtApp||'')+(c.courtNoApp||'')+(c.courtCass||'')+(c.courtNoCass||'')+((c.labels||[]).join(' '))).toLowerCase().includes(q);
   });
+  // v182: чип активного фильтра тишины
+  { const chip = document.getElementById('cases-quickfilter-chip');
+    if (chip) { chip.style.display = casesQuickFilter ? '' : 'none';
+      chip.textContent = casesQuickFilter === 'stale' ? '✕ фильтр: без движения' : '✕ фильтр: без след. действия'; } }
   const cont = document.getElementById('cases-list');
   if (!list.length) {
     const msg = showArchived ? 'В архиве пусто.'
@@ -3511,6 +3532,7 @@ async function toggleTask(id) {
   t.done = !t.done;
   t.doneAt = t.done ? todayISO() : '';
   await put('tasks', t);
+  if (t.caseNum) await crmCaseLogByNum(t.caseNum, 'task', (t.done ? 'Задача выполнена: ' : 'Задача возвращена: ') + t.title);
   if (typeof gcalTouch === 'function') gcalTouch();
   renderTasks(); renderDashboard();
 }
@@ -5983,8 +6005,10 @@ async function commitCaseSave(obj, prev, editingId) {
   await caseRelinkAfterRename(obj.id, prev && prev.number, obj.number);
   await refreshCasesCache();
   await stageSuggestDeadline(obj, prev?.stage);
+  await crmWorkflowStageTriggers(obj, prev?.stage);
   await maybeCreateOrderForCase(editingId, obj.number);
   closeSheet(); toast('Дело сохранено'); renderCases(); renderDashboard(); navBadgeRefresh();
+  if (!editingId) setTimeout(() => crmNewCaseBundle(obj.id), 150);
 }
 
 async function saveCase(id) {
@@ -6225,6 +6249,7 @@ async function hearingNext(id) {
     comment: (document.getElementById('f-hcomment')?.value || '').trim()
   });
   await put('hearings', cur);
+  if (cur.caseNum) await crmCaseLogByNum(cur.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(cur.date) + (cur.result ? ' · ' + String(cur.result).slice(0, 60) : ''));
   if (typeof gcalTouch === 'function') gcalTouch();
   await openHearingForm();
   const hid = document.getElementById('f-caseNum'), inp = document.getElementById('f-caseNum-q');
@@ -6467,6 +6492,7 @@ async function saveHearing(id) {
     comment: (document.getElementById('f-hcomment')?.value || '').trim()
   });
   await put('hearings', obj);
+  if (obj.caseNum) await crmCaseLogByNum(obj.caseNum, prev ? 'hearing_upd' : 'hearing', (prev ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(obj.date) + (obj.time ? ' ' + obj.time : '') + (obj.status && obj.status !== 'Назначено' ? ' · ' + obj.status : ''));
   // Уведомление в Telegram и обновление Google Календаря (если подключены)
   if (typeof tgHearingNotify === 'function') tgHearingNotify(obj, !!id);
   if (typeof gcalTouch === 'function') gcalTouch();
@@ -6688,6 +6714,7 @@ async function saveFinance(id) {
     paidAt: paid>0 ? ((document.getElementById('f-paidAt')?.value) || prev?.paidAt || todayISO()) : '' };
   if (Array.isArray(obj.payments) && obj.payments.length) finRecalc(obj); // журнал — источник истины
   await put('finance', obj);
+  if (obj.caseNum) await crmCaseLogByNum(obj.caseNum, 'finance', 'Финансы: ' + (obj.service || 'запись обновлена'));
   closeSheet(); toast('Счёт сохранён'); renderFinance(); renderDashboard();
 }
 // Дата через месяц (для абонентских платежей).
@@ -6874,6 +6901,7 @@ async function kbNextStage(id) {
   await put('cases', c);
   renderCases(); renderDashboard(); navBadgeRefresh();
   await stageSuggestDeadline(c, prevStage);
+  await crmWorkflowStageTriggers(c, prevStage);
 }
 function stageStepperHtml(c) {
   const cur = c.stage || '';
@@ -10527,6 +10555,9 @@ async function openDocsSheet(caseId) {
     <h3>📄 Документы по делу</h3>
     <div class="sheet-sub">${esc(c.number)} · реквизиты подставятся автоматически из дела, доверителя и участников</div>
     <div class="sect-title">Сводные документы</div>
+    <div class="card" style="margin-bottom:8px;cursor:pointer" onclick="openCaseJournal('${caseId}')">
+      <div class="row1"><div class="title" style="font-size:14px">📜 Журнал дела — автоистория событий</div></div>
+    </div>
     <div class="card" style="margin-bottom:8px;cursor:pointer" onclick="openDossier('${caseId}','full')">
       <div class="row1"><div class="title" style="font-size:14px">📚 Досье по делу — полная сводка</div>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
@@ -12625,6 +12656,7 @@ openMoreSheet = function() {
   if (!grid || document.getElementById('v177-more-cor')) return;
   const tile = (id, icon, label, fn) => `<div id="${id}" class="card" style="cursor:pointer;margin:0;display:flex;flex-direction:column;align-items:center;gap:8px;padding:18px 10px" onclick="${fn}"><div style="font-size:25px;color:var(--blue)">${icon}</div><div style="font-size:13px;font-weight:700">${label}</div></div>`;
   grid.insertAdjacentHTML('afterbegin',
+    tile('v182-more-import','⇪','Импорт от ИИ','openAiImport()') +
     tile('v177-more-cor','✉','Корреспонденция','openCorrespondenceCenter()') +
     tile('v177-more-docs','▤','Документы','openDocumentCenter()') +
     tile('v177-more-mon','◎','Мониторинг','openMonitorCenter()') +
@@ -12687,7 +12719,7 @@ function crmWorkflowParseSteps(text) {
 async function saveWorkflowTemplate() {
   const name=fval('v-wf-name').trim(), kind=fval('v-wf-kind'), steps=crmWorkflowParseSteps(fval('v-wf-steps'));
   if(!name||!steps.length){toast('Укажите название и хотя бы один шаг',true);return;}
-  await put('workflows',{id:uid('ПРОЦ'),name,kind,steps,createdAt:Date.now()}); toast('Шаблон сохранён'); openWorkflowCenter();
+  await put('workflows',{id:uid('ПРОЦ'),name,kind,steps,autoStage:fval('v-wf-autostage')||'',createdAt:Date.now()}); toast('Шаблон сохранён'); openWorkflowCenter();
 }
 async function deleteWorkflowTemplate(id){ if(!confirm('Удалить пользовательский шаблон?'))return; await del('workflows',id); openWorkflowCenter(); }
 
@@ -12713,6 +12745,304 @@ async function applyWorkflowTemplate() {
   const run={id:uid('ЗАП'),caseId:c.id,caseNum:c.number,templateId:tpl.id,templateName:tpl.name,start,created,deadlineIds,nextApplied,prevNextAction,prevNextActionDue,createdAt:Date.now(),status:'active'};
   await put('workflowRuns',run); await refreshCasesCache(); toast('Процесс применён'); openWorkflowCenter(); renderDashboard(); renderCases();
 }
+
+// ═══════════ v182 — ЖУРНАЛ, ТИШИНА, ТРИГГЕРЫ, ПАКЕТ, ИМПОРТ ОТ ИИ ═══════════
+const CRM_STALE_DAYS = Math.max(3, Number(localStorage.getItem('crm_stale_days')) || 14);
+
+// — Журнал дела: запись события по номеру дела (поверх встроенной history) —
+async function crmCaseLogByNum(caseNum, field, text) {
+  try {
+    if (!caseNum || !text) return;
+    const c = (await getAll('cases')).find(x => x.number === caseNum);
+    if (!c) return;
+    addCaseHistoryEvent(c, field, '', String(text).slice(0, 200), 'auto');
+    await put('cases', c);
+    if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  } catch (e) {}
+}
+function crmCaseLastActivity(c) {
+  let m = Number(c && c.createdAt) || 0;
+  if (c && Array.isArray(c.history)) for (const e of c.history) { const t = Number(e && e.at) || 0; if (t > m) m = t; }
+  return m;
+}
+function crmCaseIsSilent(c, days) {
+  if (!c || c.status === 'Завершено' || c.stage === 'Завершено') return false;
+  const last = crmCaseLastActivity(c);
+  return last > 0 && (Date.now() - last) > (days || CRM_STALE_DAYS) * 864e5;
+}
+function crmCaseNoNext(c) {
+  return !!c && c.status !== 'Завершено' && c.stage !== 'Завершено' && !String(c.nextAction || '').trim();
+}
+const CRM_LOG_LABEL = { status:'Статус', stage:'Стадия', workflow:'Процесс', hearing:'Заседание', hearing_upd:'Заседание', task:'Задача', finance:'Финансы', doc:'Документ', import:'Импорт', nextAction:'След. действие', bundle:'Старт' };
+async function openCaseJournal(id) {
+  const c = (await getAll('cases')).find(x => x.id === id); if (!c) return;
+  const ev = (Array.isArray(c.history) ? c.history.slice() : []).sort((a,b)=>Number(b.at)-Number(a.at));
+  const line = e => {
+    const d = new Date(Number(e.at)||0);
+    const when = `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    const lab = CRM_LOG_LABEL[e.field] || e.field || '';
+    const txt = e.from ? `${esc(e.from)} → ${esc(e.to||'')}` : esc(e.to||'');
+    return `<div class="detail-row"><span class="k" style="min-width:118px">${when}</span><span class="v"><b>${esc(lab)}</b>${txt?': '+txt:''}</span></div>`;
+  };
+  showSheet(`<h3>📜 Журнал дела</h3><div class="sheet-sub">${esc(c.number)} · ${ev.length} записей — заполняется автоматически</div>
+    <div class="detail-block" style="max-height:60vh;overflow:auto">${ev.length ? ev.map(line).join('') : '<div class="meta">Пока пусто: журнал наполняется при изменениях стадий, заседаниях, задачах и платежах.</div>'}</div>
+    <button class="btn-ghost" onclick="viewCase('${jsq(c.id)}')">← К делу</button>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
+}
+
+// — Триггеры процессов: автозапуск шаблона при переводе дела в стадию —
+async function crmWorkflowRunSilent(c, tpl, start) {
+  const created = [], deadlineIds = []; let nextApplied = '';
+  const prevNextAction = c.nextAction || '', prevNextActionDue = c.nextActionDue || '';
+  for (const step of tpl.steps || []) {
+    const due = crmWorkflowAddBusinessDays(start, step.days);
+    if (step.type === 'task') { const row = { id: uid('З'), title: step.title, due, done: false, caseId: c.id, caseNum: c.number, createdAt: Date.now(), workflowTemplateId: tpl.id }; await put('tasks', row); created.push({ store: 'tasks', id: row.id }); }
+    else if (step.type === 'deadline') { const row = { id: uid('СР'), title: step.title, date: due, done: false, source: 'workflow', workflowTemplateId: tpl.id }; c.deadlines = Array.isArray(c.deadlines) ? c.deadlines : []; c.deadlines.push(row); deadlineIds.push(row.id); }
+    else if (step.type === 'nextAction' && !nextApplied) { c.nextAction = step.title; c.nextActionDue = due; nextApplied = step.title; }
+  }
+  addCaseHistoryEvent(c, 'workflow', '', tpl.name + ' (авто)', 'trigger');
+  await put('cases', c);
+  await put('workflowRuns', { id: uid('ЗАП'), caseId: c.id, caseNum: c.number, templateId: tpl.id, templateName: tpl.name, start, created, deadlineIds, nextApplied, prevNextAction, prevNextActionDue, createdAt: Date.now(), status: 'active', auto: true });
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast(`⚙ Процесс «${tpl.name}» запущен автоматически (стадия «${c.stage}»)`);
+}
+async function crmWorkflowStageTriggers(c, prevStage) {
+  try {
+    if (!c || !c.stage || c.stage === prevStage) return;
+    const templates = await crmWorkflowTemplates();
+    const hits = templates.filter(t => t.autoStage && t.autoStage === c.stage && (!t.kind || !c.kind || t.kind === c.kind));
+    for (const t of hits) await crmWorkflowRunSilent(c, t, todayISO());
+    if (hits.length) { renderDashboard(); if (typeof renderTasks === 'function') renderTasks(); }
+    if (c.stage === 'Завершено' && prevStage !== 'Завершено' && c.status !== 'Завершено') {
+      setTimeout(() => { if (confirm(`Дело ${c.number} переведено в стадию «Завершено».\n\nПоставить статус «Завершено» (в архив списка)?`)) crmCaseMarkDone(c.id); }, 150);
+    }
+  } catch (e) {}
+}
+async function crmCaseMarkDone(id) {
+  const c = (await getAll('cases')).find(x => x.id === id);
+  if (!c || c.status === 'Завершено') return;
+  const prevStatus = c.status;
+  c.status = 'Завершено'; c.closedAt = c.closedAt || todayISO();
+  addCaseHistoryEvent(c, 'status', prevStatus || '', 'Завершено', 'auto');
+  await put('cases', c);
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast('Дело получило статус «Завершено»'); renderCases(); renderDashboard(); navBadgeRefresh();
+}
+
+// — Пакет при создании дела: заседание + процесс + следующее действие одним листом —
+async function crmNewCaseBundle(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  const templates = await crmWorkflowTemplates();
+  const tplOpts = templates.filter(t => !t.kind || !c.kind || t.kind === c.kind);
+  showSheet(`<h3>Дело ${esc(c.number)} создано</h3><div class="sheet-sub">Что подготовить сразу? Отметьте нужное — создам одним нажатием.</div>
+    <label style="display:flex;align-items:center;gap:10px;margin:10px 0 6px;font-size:14px;cursor:pointer"><input type="checkbox" id="nb-hear-on"> <b>Первое заседание</b></label>
+    <div class="field-row">
+      <div class="field"><label>Дата</label><input id="nb-hear-date" type="date" value="${todayISO()}"></div>
+      <div class="field"><label>Время</label><input id="nb-hear-time" type="time" value="10:00"></div>
+    </div>
+    ${tplOpts.length ? `<label style="display:flex;align-items:center;gap:10px;margin:10px 0 6px;font-size:14px;cursor:pointer"><input type="checkbox" id="nb-wf-on"> <b>Запустить процесс</b></label>
+    <div class="field"><select id="nb-wf-tpl">${tplOpts.map(t=>`<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('')}</select></div>` : ''}
+    <label style="display:flex;align-items:center;gap:10px;margin:10px 0 6px;font-size:14px;cursor:pointer"><input type="checkbox" id="nb-na-on" checked> <b>Следующее действие</b></label>
+    <div class="field-row">
+      <div class="field"><label>Что сделать</label><input id="nb-na-title" placeholder="Изучить материалы, запросить документы…"></div>
+      <div class="field"><label>Контрольная дата</label><input id="nb-na-date" type="date" value="${todayISO()}"></div>
+    </div>
+    <button class="btn-primary" onclick="crmNewCaseBundleApply('${jsq(c.id)}')">Создать отмеченное</button>
+    <button class="btn-ghost" onclick="closeSheet()">Пропустить</button>`);
+}
+async function crmNewCaseBundleApply(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return;
+  const on = id => !!document.getElementById(id)?.checked;
+  const val = id => (document.getElementById(id)?.value || '').trim();
+  let made = [];
+  if (on('nb-hear-on') && val('nb-hear-date')) {
+    const sc = caseStageCourt(c);
+    const h = { id: uid('С'), caseId: c.id, caseNum: c.number, date: val('nb-hear-date'), time: val('nb-hear-time'), court: sc.court, judge: sc.judge, status: 'Назначено', attended: false, result: '', comment: '' };
+    await put('hearings', h);
+    addCaseHistoryEvent(c, 'hearing', '', 'Заседание добавлено: ' + fmtDate(h.date) + (h.time ? ' ' + h.time : ''), 'bundle');
+    made.push('заседание');
+  }
+  if (on('nb-wf-on')) {
+    const tpl = (await crmWorkflowTemplates()).find(t => t.id === val('nb-wf-tpl'));
+    if (tpl) { await crmWorkflowRunSilent(c, tpl, todayISO()); made.push('процесс'); }
+  }
+  if (on('nb-na-on') && val('nb-na-title')) {
+    c.nextAction = val('nb-na-title'); c.nextActionDue = val('nb-na-date') || todayISO();
+    addCaseHistoryEvent(c, 'nextAction', '', c.nextAction, 'bundle');
+    made.push('след. действие');
+  }
+  await put('cases', c);
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  closeSheet();
+  toast(made.length ? 'Создано: ' + made.join(', ') : 'Ничего не отмечено');
+  renderCases(); renderDashboard(); if (typeof renderCalendar === 'function') renderCalendar(); navBadgeRefresh();
+}
+
+/*__AI_IMPORT_BEGIN__*/
+// — Импорт от нейросети (любой): разбор пакета, план, применение —
+function crmImpDate(v) {
+  v = String(v == null ? '' : v).trim(); if (!v) return '';
+  let m = v.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return m[0];
+  m = v.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+  if (m) return m[3] + '-' + String(m[2]).padStart(2, '0') + '-' + String(m[1]).padStart(2, '0');
+  return '';
+}
+function crmImpExtractJson(text) {
+  let t = String(text || '').replace(/```[a-zA-Zа-яА-Я]*\r?\n?/g, '').replace(/```/g, '');
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+  try { return JSON.parse(t.slice(a, b + 1)); } catch (e) { return null; }
+}
+function crmNextCaseNumber(existingCases, extraNumbers) {
+  const yr = new Date().getFullYear(); let mx = 0;
+  const scan = n => { const m = String(n || '').match(/^Д-(\d+)\/(\d{4})$/); if (m && Number(m[2]) === yr) mx = Math.max(mx, Number(m[1])); };
+  (existingCases || []).forEach(c => scan(c && c.number));
+  (extraNumbers || []).forEach(scan);
+  return 'Д-' + (mx + 1) + '/' + yr;
+}
+function crmAiImportBuildPlan(data, existingCases, existingClients) {
+  const plan = { clients: [], cases: [], hearings: [], tasks: [], notes: [], errors: [] };
+  if (!data || typeof data !== 'object') { plan.errors.push('Не удалось разобрать JSON. Проверьте, что скопирован весь блок целиком.'); return plan; }
+  const arr = x => Array.isArray(x) ? x : [];
+  const norm = s => String(s || '').trim();
+  const low = s => norm(s).toLowerCase();
+  const exClientByName = new Map((existingClients || []).map(c => [low(c.name), c]));
+  const newClientByName = new Map();
+  for (const raw of arr(data.clients)) {
+    const name = norm(raw && (raw.name || raw.fio || raw['фио'] || raw['имя']));
+    if (!name) { plan.errors.push('Участник без имени — пропущен.'); continue; }
+    if (exClientByName.has(low(name))) { plan.notes.push('Участник «' + name + '» уже есть — использую существующего.'); continue; }
+    if (newClientByName.has(low(name))) continue;
+    const obj = { id: uid('К'), name, phone: norm(raw.phone || raw['телефон']), comment: norm(raw.comment || raw.note || raw['заметка']), type: norm(raw.type || raw['тип']) || 'Физическое лицо', createdAt: Date.now() };
+    newClientByName.set(low(name), obj); plan.clients.push(obj);
+  }
+  const caseRefIndex = new Map();
+  const regRef = (key, entry) => { const k = low(key); if (k && !caseRefIndex.has(k)) caseRefIndex.set(k, entry); };
+  for (const c of (existingCases || [])) { const e = { existing: c }; regRef(c.number, e); regRef(c.courtNo, e); regRef(c.client, e); }
+  const plannedNumbers = [];
+  for (const raw of arr(data.cases)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const clientName = norm(raw.client || raw['доверитель'] || raw['клиент']);
+    const courtNo = norm(raw.courtNo || raw['номер_в_суде'] || raw['номер дела в суде']);
+    const givenNum = norm(raw.number || raw['номер']);
+    const exist = (givenNum && caseRefIndex.get(low(givenNum)) && caseRefIndex.get(low(givenNum)).existing) || (courtNo && caseRefIndex.get(low(courtNo)) && caseRefIndex.get(low(courtNo)).existing) || null;
+    if (exist) { const entry = { existing: exist }; plan.notes.push('Дело «' + exist.number + '» уже есть — новые заседания/задачи привяжу к нему.'); regRef(clientName, entry); continue; }
+    let number = /^Д-\d+\/\d{4}$/.test(givenNum) && !caseRefIndex.has(low(givenNum)) ? givenNum : crmNextCaseNumber(existingCases, plannedNumbers);
+    plannedNumbers.push(number);
+    if (clientName && !exClientByName.has(low(clientName)) && !newClientByName.has(low(clientName))) {
+      const cl = { id: uid('К'), name: clientName, phone: '', comment: '', type: 'Физическое лицо', createdAt: Date.now() };
+      newClientByName.set(low(clientName), cl); plan.clients.push(cl);
+      plan.notes.push('Участник «' + clientName + '» создан из карточки дела.');
+    }
+    const clientRec = exClientByName.get(low(clientName)) || newClientByName.get(low(clientName)) || null;
+    const stage = norm(raw.stage || raw['стадия']);
+    const obj = {
+      id: uid('Д'), number, client: clientRec ? clientRec.name : clientName, clientId: clientRec ? clientRec.id : '',
+      kind: norm(raw.kind || raw['вид']), court: norm(raw.court || raw['суд']), courtNo, caseUid: norm(raw.caseUid || raw['уид']),
+      stage: (typeof CASE_STAGES !== 'undefined' && CASE_STAGES.includes(stage)) ? stage : '',
+      category: norm(raw.category || raw['категория']), comment: norm(raw.comment || raw['заметка'] || raw['описание']),
+      nextAction: norm(raw.nextAction || raw['следующее_действие']), nextActionDue: crmImpDate(raw.nextActionDue || raw['срок']),
+      status: 'Новое', createdAt: Date.now(), history: []
+    };
+    const entry = { plannedCase: obj };
+    regRef(number, entry); regRef(courtNo, entry); regRef(clientName, entry);
+    plan.cases.push(obj);
+  }
+  const resolveCase = ref => caseRefIndex.get(low(ref)) || null;
+  for (const raw of arr(data.hearings)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const ref = norm(raw.case || raw.caseNum || raw['дело'] || raw.number || raw.client || raw['доверитель']);
+    const date = crmImpDate(raw.date || raw['дата']);
+    if (!date) { plan.errors.push('Заседание без корректной даты (нужно ГГГГ-ММ-ДД или ДД.ММ.ГГГГ) — пропущено.'); continue; }
+    const hit = resolveCase(ref);
+    if (!hit) { plan.errors.push('Заседание ' + date + ': дело «' + ref + '» не найдено ни среди существующих, ни в пакете — пропущено.'); continue; }
+    plan.hearings.push({ ref: hit, date, time: norm(raw.time || raw['время']).slice(0, 5), court: norm(raw.court || raw['суд']), note: norm(raw.comment || raw.note || raw['заметка']) });
+  }
+  for (const raw of arr(data.tasks)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const title = norm(raw.title || raw['название'] || raw.text || raw['текст']);
+    if (!title) { plan.errors.push('Задача без названия — пропущена.'); continue; }
+    const ref = norm(raw.case || raw.caseNum || raw['дело'] || raw.client || raw['доверитель']);
+    plan.tasks.push({ ref: ref ? resolveCase(ref) : null, refRaw: ref, title, due: crmImpDate(raw.due || raw['срок']), priority: norm(raw.priority || raw['приоритет']) });
+  }
+  for (const t of plan.tasks) if (t.refRaw && !t.ref) plan.notes.push('Задача «' + t.title + '»: дело «' + t.refRaw + '» не найдено — создам задачу без привязки.');
+  return plan;
+}
+/*__AI_IMPORT_END__*/
+
+const CRM_AI_IMPORT_GUIDE = 'Ты помогаешь адвокату подготовить пакет данных для его CRM. Верни ОДИН блок JSON без пояснений, строго такой структуры (любой раздел можно опустить, если нечего добавлять):\n' +
+'{\n' +
+'  "format": "crm-advokat-import",\n' +
+'  "clients": [ { "name": "Фамилия Имя Отчество", "phone": "+7...", "comment": "" } ],\n' +
+'  "cases": [ { "client": "ФИО как выше", "kind": "Гражданское", "court": "Название суда", "courtNo": "2-1234/2026", "stage": "Первая инстанция", "comment": "суть поручения", "nextAction": "первый шаг", "nextActionDue": "2026-08-25" } ],\n' +
+'  "hearings": [ { "case": "courtNo дела или ФИО доверителя", "date": "2026-08-25", "time": "10:00", "comment": "" } ],\n' +
+'  "tasks": [ { "case": "то же", "title": "что сделать", "due": "2026-08-22" } ]\n' +
+'}\n' +
+'Правила: даты в формате ГГГГ-ММ-ДД (допустимо ДД.ММ.ГГГГ); значения stage только из списка: Досудебная, Первая инстанция, Апелляция, Кассация, Надзор, Исполнение, Завершено; внутренний номер дела НЕ придумывай — CRM присвоит сама; ничего не выдумывай — только то, что сказал адвокат; никакого текста вне JSON.';
+
+let CRM_AI_IMPORT_PLAN = null;
+async function openAiImport() {
+  CRM_AI_IMPORT_PLAN = null;
+  showSheet(`<h3>⇪ Импорт от нейросети</h3><div class="sheet-sub">Продиктуйте любой нейросети (Claude, ChatGPT, Gemini…) что завести, попросите пакет по инструкции ниже — и вставьте её ответ сюда. Разбор идёт на этом устройстве, данные никуда не отправляются.</div>
+    <details style="margin:0 0 12px;border:1px solid var(--border);border-radius:12px;padding:10px 12px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Инструкция для нейросети (скопируйте ей целиком)</summary>
+      <pre id="ai-imp-guide" style="white-space:pre-wrap;font-size:12px;line-height:1.45;margin:8px 0;user-select:all">${esc(CRM_AI_IMPORT_GUIDE)}</pre>
+      <button class="v-mini-btn" onclick="crmAiImportCopyGuide()">Скопировать инструкцию</button>
+    </details>
+    <div class="field"><label>Ответ нейросети (JSON, можно с обрамлением из трёх кавычек)</label><textarea id="ai-imp-text" rows="8" placeholder='{ "format": "crm-advokat-import", ... }'></textarea></div>
+    <button class="btn-primary" onclick="crmAiImportParseUI()">Разобрать пакет</button>
+    <div id="ai-imp-preview" style="margin-top:12px"></div>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
+}
+function crmAiImportCopyGuide() {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(CRM_AI_IMPORT_GUIDE).then(()=>toast('Инструкция скопирована')).catch(()=>toast('Выделите текст инструкции и скопируйте вручную', true));
+  else toast('Выделите текст инструкции и скопируйте вручную', true);
+}
+async function crmAiImportParseUI() {
+  const host = document.getElementById('ai-imp-preview'); if (!host) return;
+  const data = crmImpExtractJson(document.getElementById('ai-imp-text') ? document.getElementById('ai-imp-text').value : '');
+  const cases = await getAll('cases'); const clients = await getAll('clients');
+  const plan = crmAiImportBuildPlan(data, cases, clients);
+  CRM_AI_IMPORT_PLAN = plan;
+  const cnt = plan.clients.length + plan.cases.length + plan.hearings.length + plan.tasks.length;
+  const li = (a, f) => a.map(x => `<div class="detail-row"><span class="v">${f(x)}</span></div>`).join('');
+  host.innerHTML = `
+    ${plan.errors.length ? `<div class="card" style="border-left:3px solid var(--red-hot);margin-bottom:8px">${plan.errors.map(e=>`<div class="meta" style="color:var(--red-hot)">⚠ ${esc(e)}</div>`).join('')}</div>` : ''}
+    ${plan.notes.length ? `<div class="card" style="margin-bottom:8px">${plan.notes.map(e=>`<div class="meta">ℹ ${esc(e)}</div>`).join('')}</div>` : ''}
+    ${cnt ? `<div class="detail-block">
+      ${plan.clients.length?`<div class="sect-title">Участники · ${plan.clients.length}</div>`+li(plan.clients,x=>'👤 '+esc(x.name)+(x.phone?' · '+esc(x.phone):'')):''}
+      ${plan.cases.length?`<div class="sect-title">Дела · ${plan.cases.length}</div>`+li(plan.cases,x=>'💼 <b>'+esc(x.number)+'</b> · '+esc(x.client||'без участника')+(x.court?' · '+esc(x.court):'')+(x.courtNo?' · '+esc(x.courtNo):'')):''}
+      ${plan.hearings.length?`<div class="sect-title">Заседания · ${plan.hearings.length}</div>`+li(plan.hearings,x=>'⚖ '+esc(fmtDate(x.date))+(x.time?' '+esc(x.time):'')+' — '+esc(x.ref.existing?x.ref.existing.number:x.ref.plannedCase.number)):''}
+      ${plan.tasks.length?`<div class="sect-title">Задачи · ${plan.tasks.length}</div>`+li(plan.tasks,x=>'☑ '+esc(x.title)+(x.due?' · до '+esc(fmtDate(x.due)):'')+(x.ref?' — '+esc(x.ref.existing?x.ref.existing.number:x.ref.plannedCase.number):'')):''}
+    </div>
+    <button class="btn-primary" onclick="crmAiImportApply()">Создать: ${cnt} ${plural(cnt,'объект','объекта','объектов')}</button>` : (plan.errors.length ? '' : '<div class="meta">В пакете не нашлось ничего для создания.</div>')}`;
+}
+async function crmAiImportApply() {
+  const plan = CRM_AI_IMPORT_PLAN; if (!plan) return;
+  let n = 0;
+  for (const cl of plan.clients) { await put('clients', cl); n++; }
+  for (const c of plan.cases) {
+    addCaseHistoryEvent(c, 'import', '', 'Создано импортом от нейросети', 'import');
+    await put('cases', c); n++;
+  }
+  const caseOf = ref => ref ? (ref.existing || ref.plannedCase) : null;
+  for (const h of plan.hearings) {
+    const c = caseOf(h.ref); if (!c) continue;
+    const sc = (typeof caseStageCourt === 'function') ? caseStageCourt(c) : { court: c.court || '', judge: c.judge || '' };
+    await put('hearings', { id: uid('С'), caseId: c.id, caseNum: c.number, date: h.date, time: h.time || '', court: h.court || sc.court, judge: sc.judge, status: 'Назначено', attended: false, result: '', comment: h.note || '' });
+    await crmCaseLogByNum(c.number, 'hearing', 'Заседание добавлено (импорт): ' + fmtDate(h.date) + (h.time ? ' ' + h.time : '')); n++;
+  }
+  for (const t of plan.tasks) {
+    const c = caseOf(t.ref);
+    await put('tasks', { id: uid('З'), title: t.title, due: t.due || '', done: false, caseId: c ? c.id : '', caseNum: c ? c.number : '', priority: t.priority || '', createdAt: Date.now(), source: 'ai-import' });
+    if (c) await crmCaseLogByNum(c.number, 'task', 'Задача (импорт): ' + t.title); n++;
+  }
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  CRM_AI_IMPORT_PLAN = null;
+  closeSheet(); toast('Импорт завершён: создано ' + n + ' ' + plural(n, 'объект', 'объекта', 'объектов'));
+  renderCases(); renderDashboard(); if (typeof renderCalendar === 'function') renderCalendar(); if (typeof renderTasks === 'function') renderTasks(); navBadgeRefresh();
+}
+
 async function undoWorkflowRun(id){
   const run=(await getAll('workflowRuns')).find(x=>x.id===id); if(!run||run.status==='undone')return;
   if(!confirm('Отменить созданные этим запуском задачи и сроки?'))return;
@@ -12733,7 +13063,7 @@ async function openWorkflowCenter() {
     <div class="field"><label>Дата начала</label><input id="v-wf-start" type="date" value="${todayISO()}" onchange="crmWorkflowPreview()"></div><div id="v-wf-preview"></div>
     <button class="btn-primary" onclick="applyWorkflowTemplate()">Проверить и применить</button></div>
     <details><summary>Нерабочие даты для расчёта</summary><div class="v-holiday-list">${holidays.map(x=>`<span class="v-holiday">${fmtDate(x)} <button aria-label="Удалить" onclick="removeWorkflowHoliday('${jsq(x)}')">×</button></span>`).join('')||'<span class="meta">Дополнительные даты не указаны</span>'}</div><div style="display:flex;gap:8px"><input id="v-holiday" type="date"><button class="v-mini-btn" onclick="addWorkflowHoliday()">Добавить</button></div></details>
-    <details><summary>Создать свой шаблон</summary><div class="field"><label>Название</label><input id="v-wf-name" placeholder="Мой процесс"></div><div class="field"><label>Вид дела</label><select id="v-wf-kind"><option value="">Любой</option>${(REF.caseKind||[]).map(x=>`<option>${esc(x)}</option>`).join('')}</select></div><div class="field"><label>Шаги: тип | рабочих дней | название</label><textarea id="v-wf-steps" rows="5" placeholder="task | 0 | Проверить материалы\ndeadline | 5 | Подготовить документ\nnextAction | 1 | Позвонить доверителю"></textarea></div><button class="btn-primary" onclick="saveWorkflowTemplate()">Сохранить шаблон</button>${templates.filter(t=>!String(t.id).startsWith('builtin-')).map(t=>`<div class="v-saved-row"><div class="v-name">${esc(t.name)}</div><button class="v-mini-btn v-danger-text" onclick="deleteWorkflowTemplate('${jsq(t.id)}')">Удалить</button></div>`).join('')}</details>
+    <details><summary>Создать свой шаблон</summary><div class="field"><label>Название</label><input id="v-wf-name" placeholder="Мой процесс"></div><div class="field"><label>Вид дела</label><select id="v-wf-kind"><option value="">Любой</option>${(REF.caseKind||[]).map(x=>`<option>${esc(x)}</option>`).join('')}</select></div><div class="field"><label>Автозапуск при переводе дела в стадию</label><select id="v-wf-autostage"><option value="">— выключен —</option>${CASE_STAGES.map(s=>`<option>${esc(s)}</option>`).join('')}</select></div><div class="field"><label>Шаги: тип | рабочих дней | название</label><textarea id="v-wf-steps" rows="5" placeholder="task | 0 | Проверить материалы\ndeadline | 5 | Подготовить документ\nnextAction | 1 | Позвонить доверителю"></textarea></div><button class="btn-primary" onclick="saveWorkflowTemplate()">Сохранить шаблон</button>${templates.filter(t=>!String(t.id).startsWith('builtin-')).map(t=>`<div class="v-saved-row"><div class="v-name">${esc(t.name)}</div><button class="v-mini-btn v-danger-text" onclick="deleteWorkflowTemplate('${jsq(t.id)}')">Удалить</button></div>`).join('')}</details>
     <details ${runs.length?'open':''}><summary>История запусков (${runs.length})</summary>${runs.sort((a,b)=>b.createdAt-a.createdAt).slice(0,20).map(r=>`<div class="v-run-row"><div class="v-run-head"><b>${esc(r.caseNum)} · ${esc(r.templateName)}</b><span class="badge ${r.status==='undone'?'b-done':'b-work'}"><span class="dot"></span>${r.status==='undone'?'отменён':'активен'}</span></div><div class="meta">${new Date(r.createdAt).toLocaleString('ru-RU')}</div>${r.status!=='undone'?`<button class="v-mini-btn" onclick="undoWorkflowRun('${jsq(r.id)}')">Отменить запуск</button>`:''}</div>`).join('')||'<div class="meta">Запусков пока нет</div>'}</details>
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
   setTimeout(crmWorkflowPreview,0);
@@ -12836,7 +13166,7 @@ async function saveDocument(id){
   const title=fval('v-doc-title').trim(),rawUrl=fval('v-doc-url').trim(),file=document.getElementById('v-doc-file')?.files?.[0];if(!title){toast('Укажите название документа',true);return;}if(rawUrl&&!safeExternalUrl(rawUrl)){toast('Внешняя ссылка должна начинаться с http:// или https://',true);return;}
   const [docs,versions,cases]=await Promise.all([getAll('documents'),getAll('docVersions'),getAll('cases')]),prev=id?docs.find(x=>x.id===id):null,c=cases.find(x=>x.id===fval('v-doc-case'));const doc={...(prev||{}),id:id||uid('ДОК'),title,category:fval('v-doc-category'),caseId:c?.id||'',caseNum:c?.number||'',tags:fval('v-doc-tags').split(',').map(x=>x.trim()).filter(Boolean),sourceUrl:safeExternalUrl(rawUrl),manualText:fval('v-doc-text').trim(),createdAt:prev?.createdAt||Date.now(),updatedAt:Date.now()};
   if(file){let payload;try{payload=await crmDocFilePayload(file);}catch(e){toast(e.message||'Не удалось прочитать файл',true);return;}const same=versions.find(v=>v.documentId===doc.id&&v.hash===payload.hash);if(same){toast('Такая версия файла уже сохранена',true);return;}const no=Math.max(0,...versions.filter(v=>v.documentId===doc.id).map(v=>Number(v.versionNo)||0))+1;const ver={id:uid('ВЕР'),documentId:doc.id,versionNo:no,...payload,createdAt:Date.now()};await put('docVersions',ver);doc.currentVersionId=ver.id;doc.fileName=ver.fileName;doc.mime=ver.mime;doc.size=ver.size;doc.detached=ver.detached;}
-  if(!prev&&!file&&!doc.sourceUrl&&!doc.manualText){toast('Добавьте файл, ссылку или текст',true);return;}await put('documents',doc);toast(file&&file.size>8*1024*1024?'Карточка сохранена; большой файл оставлен внешним':'Документ сохранён');openDocumentCenter();
+  if(!prev&&!file&&!doc.sourceUrl&&!doc.manualText){toast('Добавьте файл, ссылку или текст',true);return;}await put('documents',doc);if(doc.caseNum)await crmCaseLogByNum(doc.caseNum,'doc','Документ: '+(doc.title||doc.fileName||'без названия'));toast(file&&file.size>8*1024*1024?'Карточка сохранена; большой файл оставлен внешним':'Документ сохранён');openDocumentCenter();
 }
 async function crmDocDownload(versionId){const v=(await getAll('docVersions')).find(x=>x.id===versionId);if(!v)return;if(!v.dataUrl){toast('Файл не хранится в CRM — используйте исходное место хранения',true);return;}const a=document.createElement('a');a.href=v.dataUrl;a.download=v.fileName||'document';document.body.appendChild(a);a.click();a.remove();}
 async function crmDocNativeOcr(documentId){
@@ -12887,7 +13217,7 @@ async function fetchMonitorEndpoint(){
   localStorage.setItem('crm_monitor_url',u.href);if(token)localStorage.setItem('crm_monitor_token',token);bumpSettings?.();try{toast('Получаю события…');const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),30000),res=await fetch(u.href,{headers:token?{Authorization:`Bearer ${token}`}:{},signal:ctrl.signal,cache:'no-store'});clearTimeout(timer);if(!res.ok)throw new Error(`HTTP ${res.status}`);const body=await res.text();await crmMonPersist(await crmMonNormalizeRows(crmMonRows(body,res.headers.get('content-type')?.includes('json')?'events.json':'events.txt'),'HTTPS-адаптер'));}catch(e){toast(`Не удалось получить события: ${e.message||'ошибка'}`,true);}
 }
 async function reviewMonitorEvent(id){const e=(await getAll('monitorEvents')).find(x=>x.id===id),cases=(await getAll('cases')).filter(c=>!c.archived);if(!e)return;showSheet(`<h3>${esc(e.title)}</h3><div class="sheet-sub">${esc(e.source)} · ${e.date?fmtDate(e.date):'дата не распознана'}</div><div class="field"><label>Связать с делом</label><select id="v-mon-case"><option value="">— выберите —</option>${cases.map(c=>`<option value="${esc(c.id)}" ${c.id===e.caseId?'selected':''}>${esc(c.number)} · ${esc(c.client||'')}</option>`).join('')}</select></div><div class="v-monitor-raw">${esc(e.raw||'')}</div><div class="v-storage-note">CRM ничего не меняет автоматически. Выберите одно действие; запись источника и исходный текст сохранятся в журнале.</div><div class="v-hub-grid"><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','hearing')"><span class="v-hub-icon">📅</span><b>Заседание</b><span>Добавить событие в календарь</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','task')"><span class="v-hub-icon">✓</span><b>Задача</b><span>Создать задачу на указанную дату</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','deadline')"><span class="v-hub-icon">⏱</span><b>Срок дела</b><span>Добавить внутренний контрольный срок</span></button><button class="v-hub-tile" onclick="applyMonitorEvent('${jsq(e.id)}','note')"><span class="v-hub-icon">▤</span><b>Заметка</b><span>Сохранить только в истории дела</span></button></div><button class="btn-ghost" onclick="ignoreMonitorEvent('${jsq(e.id)}')">Не применять</button><button class="btn-ghost" onclick="openMonitorCenter()">← К событиям</button>`);}
-async function applyMonitorEvent(id,action){const e=(await getAll('monitorEvents')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===fval('v-mon-case'));if(e?.status==='applied'){toast('Это событие уже применено',true);return;}if(!e||!c){toast('Сначала выберите дело',true);return;}const date=e.date||todayISO();let createdId='';if(action==='hearing'){const x={id:uid('ЗС'),caseId:c.id,caseNum:c.number,date,time:'',court:caseStageCourt(c).court,status:'Назначено',note:e.title,monitorEventId:e.id};await put('hearings',x);createdId=x.id;}else if(action==='task'){const x={id:uid('З'),caseId:c.id,caseNum:c.number,title:e.title,due:date,done:false,createdAt:Date.now(),monitorEventId:e.id};await put('tasks',x);createdId=x.id;}else if(action==='deadline'){const x={id:uid('СР'),title:e.title,date,done:false,source:'monitor',monitorEventId:e.id};c.deadlines=Array.isArray(c.deadlines)?c.deadlines:[];c.deadlines.push(x);await put('cases',c);createdId=x.id;}else{c.monitorNotes=Array.isArray(c.monitorNotes)?c.monitorNotes:[];c.monitorNotes.push({id:uid('ЗАМ'),at:Date.now(),title:e.title,date,source:e.source,eventId:e.id});addCaseHistoryEvent(c,'monitor','',e.title,'monitor');await put('cases',c);createdId=c.monitorNotes.at(-1).id;}e.caseId=c.id;e.caseNum=c.number;e.status='applied';e.appliedAction=action;e.appliedRecordId=createdId;e.appliedAt=Date.now();await put('monitorEvents',e);toast('Событие применено');openMonitorCenter();renderDashboard();renderCases();}
+async function applyMonitorEvent(id,action){const e=(await getAll('monitorEvents')).find(x=>x.id===id),c=(await getAll('cases')).find(x=>x.id===fval('v-mon-case'));if(e?.status==='applied'){toast('Это событие уже применено',true);return;}if(!e||!c){toast('Сначала выберите дело',true);return;}const date=e.date||todayISO();let createdId='';if(action==='hearing'){const x={id:uid('ЗС'),caseId:c.id,caseNum:c.number,date,time:'',court:caseStageCourt(c).court,status:'Назначено',note:e.title,monitorEventId:e.id};await put('hearings',x);createdId=x.id;if(x.caseNum)await crmCaseLogByNum(x.caseNum,'hearing','Заседание из мониторинга: '+fmtDate(x.date));}else if(action==='task'){const x={id:uid('З'),caseId:c.id,caseNum:c.number,title:e.title,due:date,done:false,createdAt:Date.now(),monitorEventId:e.id};await put('tasks',x);createdId=x.id;}else if(action==='deadline'){const x={id:uid('СР'),title:e.title,date,done:false,source:'monitor',monitorEventId:e.id};c.deadlines=Array.isArray(c.deadlines)?c.deadlines:[];c.deadlines.push(x);await put('cases',c);createdId=x.id;}else{c.monitorNotes=Array.isArray(c.monitorNotes)?c.monitorNotes:[];c.monitorNotes.push({id:uid('ЗАМ'),at:Date.now(),title:e.title,date,source:e.source,eventId:e.id});addCaseHistoryEvent(c,'monitor','',e.title,'monitor');await put('cases',c);createdId=c.monitorNotes.at(-1).id;}e.caseId=c.id;e.caseNum=c.number;e.status='applied';e.appliedAction=action;e.appliedRecordId=createdId;e.appliedAt=Date.now();await put('monitorEvents',e);toast('Событие применено');openMonitorCenter();renderDashboard();renderCases();}
 async function ignoreMonitorEvent(id){const e=(await getAll('monitorEvents')).find(x=>x.id===id);if(!e)return;if(e.status==='applied'){toast('Применённое событие нельзя пометить пропущенным',true);return;}e.status='ignored';e.reviewedAt=Date.now();await put('monitorEvents',e);toast('Событие оставлено без применения');openMonitorCenter();renderDashboard();}
 function crmMonSetFilter(v){CRM_MON_FILTER=v;openMonitorCenter();}
 async function openMonitorCenter(){
