@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v190</title>
+<title>CRM Адвоката v191</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -375,6 +375,20 @@
   .sheet .handle { width: 40px; height: 4px; background: var(--border); border-radius: 2px; margin: 8px auto 16px; }
   .sheet h3 { font-family: Georgia, 'Times New Roman', serif; font-size: 20px; margin-bottom: 4px; }
   .sheet .sheet-sub { color: var(--text-faint); font-size: 13px; margin-bottom: 18px; }
+
+  /* v191: полноэкранная карточка дела */
+  .case-screen { position: fixed; inset: 0; z-index: 95; background: var(--bg); display: flex; flex-direction: column; }
+  .case-screen[hidden] { display: none; }
+  .case-screen-top { display: flex; align-items: center; gap: 4px; padding: calc(8px + env(safe-area-inset-top)) 10px 8px; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .case-back { background: none; border: none; color: var(--accent); font: inherit; font-size: 15px; font-weight: 700; padding: 8px 10px; cursor: pointer; flex-shrink: 0; }
+  .case-screen-title { flex: 1; min-width: 0; text-align: center; font-family: Georgia, 'Times New Roman', serif; font-size: 18px; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .case-top-spacer { width: 66px; flex-shrink: 0; }
+  .case-screen-sub { padding: 6px 16px 10px; background: var(--surface); color: var(--text-dim); font-size: 13px; }
+  .case-tabs { display: flex; overflow-x: auto; background: var(--surface); border-bottom: 1px solid var(--border); -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .case-tabs::-webkit-scrollbar { display: none; }
+  .case-tabs button { flex: 0 0 auto; border: none; background: none; color: var(--text-dim); font: inherit; font-size: 14.5px; font-weight: 700; padding: 13px 16px; cursor: pointer; white-space: nowrap; }
+  .case-tabs button.active { background: var(--accent); color: #fff; }
+  .case-screen-body { flex: 1; overflow-y: auto; padding: 14px 16px calc(28px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
 
   .field { margin-bottom: 14px; }
   .field label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
@@ -1176,6 +1190,17 @@
 </div>
 
 <!-- SHEET (форма) -->
+<div class="case-screen" id="caseScreen" hidden>
+  <div class="case-screen-top">
+    <button class="case-back" onclick="closeCaseScreen()">‹ Назад</button>
+    <div class="case-screen-title" id="caseScreenTitle"></div>
+    <div class="case-top-spacer"></div>
+  </div>
+  <div class="case-screen-sub" id="caseScreenSub"></div>
+  <div class="case-tabs" id="caseScreenTabs"></div>
+  <div class="case-screen-body" id="caseScreenBody"></div>
+</div>
+
 <div class="sheet-backdrop" id="sheetBackdrop" onclick="if(event.target===this)closeSheet()">
   <div class="sheet" id="sheetContent" role="dialog" aria-modal="true" aria-label="Форма" tabindex="-1"></div>
 </div>
@@ -1188,7 +1213,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 21; // схема данных выпуска v170
-const APP_VER = '190'; // v189: положение доверителя, проверка участников, зал, импорт роли; v190: лента «Движение дела · данные суда» (caseflow), обновление событий по externalId, привязка к делу
+const APP_VER = '191'; // v190: лента «Движение дела · данные суда» (caseflow); v191: полноэкранная карточка дела, «Участники» рядом с «Движением», доверитель с реквизитами среди участников
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions"];
 let db;
 
@@ -5265,6 +5290,7 @@ async function removeRefItem(key, idx) {
 // ════════════════════════════════════════════════════════════
 let _sheetOpen = false;
 let _ignorePop = false;
+let _caseScreenOpen = false, _caseScreenLastId = null; // v191: полноэкранная карточка дела
 let _sheetReturnFocus = null;
 function showSheet(html) {
   if (!_sheetOpen) _sheetReturnFocus = document.activeElement;
@@ -5283,7 +5309,7 @@ function showSheet(html) {
 }
 function closeSheet(fromPop) {
   document.getElementById('sheetBackdrop').classList.remove('show');
-  document.body.style.overflow = '';
+  document.body.style.overflow = _caseScreenOpen ? 'hidden' : ''; // v191: под листом может быть полноэкранная карточка
   document.getElementById('sheetContent').innerHTML = '';
   const wasOpen = _sheetOpen;
   _sheetOpen = false;
@@ -5293,6 +5319,31 @@ function closeSheet(fromPop) {
   _sheetReturnFocus = null;
   // Закрыто крестиком/кнопкой (не системным «Назад») — снимаем нашу запись истории.
   // Ставим флаг, чтобы обработчик popstate проигнорировал этот переход.
+  if (wasOpen && !fromPop) { _ignorePop = true; try { history.back(); } catch(e) { _ignorePop = false; } }
+}
+
+// ── v191: полноэкранная карточка дела ──
+function openCaseScreen(c, tabsHtml, bodyHtml) {
+  const body = document.getElementById('caseScreenBody');
+  const same = _caseScreenOpen && _caseScreenLastId === c.id;
+  const keep = (same && body) ? body.scrollTop : 0;
+  document.getElementById('caseScreenTitle').innerHTML = copyHtml(c.number, 'Номер дела скопирован');
+  document.getElementById('caseScreenSub').innerHTML = `${esc(c.kind||'')} · ${statusBadge(c.status)}`;
+  document.getElementById('caseScreenTabs').innerHTML = tabsHtml;
+  body.innerHTML = bodyHtml;
+  document.getElementById('caseScreen').hidden = false;
+  document.body.style.overflow = 'hidden';
+  body.scrollTop = keep;
+  if (!_caseScreenOpen) { _caseScreenOpen = true; try { history.pushState({ caseScreen: true }, ''); } catch(e) {} }
+  _caseScreenLastId = c.id;
+}
+function closeCaseScreen(fromPop) {
+  const scr = document.getElementById('caseScreen'); if (!scr) return;
+  scr.hidden = true;
+  document.getElementById('caseScreenBody').innerHTML = '';
+  const wasOpen = _caseScreenOpen;
+  _caseScreenOpen = false; _caseScreenLastId = null;
+  if (!_sheetOpen) document.body.style.overflow = '';
   if (wasOpen && !fromPop) { _ignorePop = true; try { history.back(); } catch(e) { _ignorePop = false; } }
 }
 const opts = (arr,sel) => arr.map(o=>`<option ${o===sel?'selected':''}>${esc(o)}</option>`).join('');
@@ -6782,6 +6833,65 @@ function stageStepperHtml(c) {
   </div>`;
 }
 
+// v191: карточка доверителя во вкладке «Участники» — все реквизиты и контакты из справочника
+function caseClientCardHtml(c, cl) {
+  const name = (cl && cl.name) || c.client || '';
+  const rows = [];
+  const add = (k, v) => { if (v) rows.push(`<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`); };
+  if (cl) {
+    add('Тип', esc(cl.type||''));
+    add('Телефон', cl.phone ? phoneHtml(cl.phone,'case',c.id) : '');
+    add('E-mail', cl.email ? emailHtml(cl.email,'case',c.id) : '');
+    add('ИНН', cl.inn ? copyHtml(cl.inn,'ИНН скопирован') : '');
+    add('Адрес', esc([cl.zip, cl.addr].filter(Boolean).join(', ')));
+    add('Дата рождения', cl.birthDate ? esc(fmtDate(cl.birthDate)) + (cl.birthPlace ? ', ' + esc(cl.birthPlace) : '') : '');
+    add('Паспорт', esc([cl.passport, cl.passportInfo].filter(Boolean).join(' · ')));
+    add('Заметка', cl.comment ? esc(cl.comment) : '');
+  }
+  return `<div class="card" style="margin-bottom:8px;border-left:3px solid var(--accent)">
+    <div class="row1">
+      <div style="display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0">
+        ${avatarHTML(name, 36)}
+        <div style="flex:1;min-width:0">
+          <div class="title" style="font-size:14px">${esc(name||'—')}</div>
+          <div class="meta"><span style="color:var(--accent);font-weight:700">Доверитель</span>${c.clientRole?` · ${esc(c.clientRole)}`:''}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        <button onclick="openCounterpartySheet('${jsq(name)}','${jsq((cl&&cl.inn)||'')}')" title="Проверить: КАД, ЕФРСБ, ФССП, ФНС" style="background:var(--surface-2);color:var(--text-dim);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer">🔎</button>
+        ${cl?`<button onclick="viewClient('${jsq(cl.id)}')" title="Карточка доверителя" style="background:var(--surface-2);color:var(--text-dim);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer">✏️</button>`:''}
+      </div>
+    </div>
+    ${rows.length?`<div style="margin-top:8px">${rows.join('')}</div>`:`<div class="meta" style="margin-top:8px">${cl?'Реквизиты не заполнены — откройте карточку доверителя.':'Карточки в справочнике нет — добавьте доверителя в разделе «Доверители», чтобы реквизиты подтянулись сюда.'}</div>`}
+  </div>`;
+}
+// v191: карточка участника — реквизиты и контакты строками
+function caseParticipantCardHtml(c, p, i) {
+  const rows = [];
+  const add = (k, v) => { if (v) rows.push(`<div class="detail-row"><span class="k">${k}</span><span class="v">${v}</span></div>`); };
+  add('Телефон', p.phone ? phoneHtml(p.phone,'case',c.id) : '');
+  add('E-mail', p.email ? `<a href="mailto:${esc(p.email)}" style="color:var(--blue)">${esc(p.email)}</a>` : '');
+  add('ИНН', p.inn ? copyHtml(p.inn,'ИНН скопирован') : '');
+  add('Заметка', p.note ? esc(p.note) : '');
+  return `<div class="card" style="margin-bottom:8px">
+    <div class="row1">
+      <div style="display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0">
+        ${avatarHTML(p.name, 36)}
+        <div style="flex:1;min-width:0">
+          <div class="title" style="font-size:14px">${esc(p.name||'')}</div>
+          <div class="meta">${esc(p.role||'')}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-shrink:0">
+        <button onclick="openCounterpartySheet('${jsq(p.name||'')}','${jsq(p.inn||'')}')" title="Проверить: КАД, ЕФРСБ, ФССП, ФНС" style="background:var(--surface-2);color:var(--text-dim);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer">🔎</button>
+        <button onclick="openParticipantForm('${c.id}',${i})" style="background:var(--surface-2);color:var(--text-dim);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer">✏️</button>
+        <button onclick="removeParticipant('${c.id}',${i})" style="background:var(--red-l);color:var(--red);border:none;border-radius:8px;width:32px;height:32px;font-size:18px;cursor:pointer">×</button>
+      </div>
+    </div>
+    ${rows.length?`<div style="margin-top:8px">${rows.join('')}</div>`:''}
+  </div>`;
+}
+
 async function viewCase(id, tab) {
   if (window.CRM_UPGRADE) CRM_UPGRADE.selectedCaseId = id; // v187: последнее открытое дело — умолчание в процессах, документах, ИИ
   tab = tab || 0;
@@ -6816,16 +6926,13 @@ async function viewCase(id, tab) {
   const hasCrim = c.kind==='Уголовное' && (c.crimArticle||c.crimStage||c.crimMeasure||c.crimStartDate);
   const hasCiv = (c.kind==='Гражданское'||c.kind==='Арбитраж'||c.kind==='КАС') && (c.prResult||c.prDate||c.i1Result||c.i1FilingDate||c.apResult||c.apFilingDate);
 
-  showSheet(`
-    <h3>${copyHtml(c.number,'Номер дела скопирован')}</h3><div class="sheet-sub">${esc(c.kind)} · ${statusBadge(c.status)}</div>
-    <div class="ftabs">
+  openCaseScreen(c, `
       <button class="${tab===0?'active':''}" onclick="vcTab(0,this)">Основное</button>
       <button class="${tab===1?'active':''}" onclick="vcTab(1,this)">Движение</button>
-      <button class="${tab===2?'active':''}" onclick="vcTab(2,this)">Хронология</button>
       <button class="${tab===3?'active':''}" onclick="vcTab(3,this)">Участники${parts.length?' '+parts.length:''}</button>
+      <button class="${tab===2?'active':''}" onclick="vcTab(2,this)">Хронология</button>
       <button class="${tab===4?'active':''}" onclick="vcTab(4,this)">Документы${(c.docLinks&&c.docLinks.length)?' '+c.docLinks.length:''}</button>
-    </div>
-
+  `, `
     <div class="vc-pane ${tab===0?'active':''}" id="vc-0">
     ${stageStepperHtml(c)}
     ${(() => {
@@ -7020,24 +7127,10 @@ async function viewCase(id, tab) {
     </div>
 
     <div class="vc-pane ${tab===3?'active':''}" id="vc-3">
-    ${parts.length?parts.map((p,i)=>`
-      <div class="card" style="margin-bottom:8px">
-        <div class="row1">
-          <div style="display:flex;gap:10px;align-items:flex-start;flex:1;min-width:0">
-          ${avatarHTML(p.name, 36)}
-          <div style="flex:1;min-width:0">
-            <div class="title" style="font-size:14px">${esc(p.name||'')}</div>
-            <div class="meta">${esc(p.role||'')}${p.phone?` · <span style="color:var(--blue)">${phoneHtml(p.phone,'case',c.id)}</span>`:''}${p.email?` · <a href="mailto:${esc(p.email)}" style="color:var(--blue)">${esc(p.email)}</a>`:''}</div>
-            ${p.note?`<div class="meta" style="margin-top:3px">${esc(p.note)}</div>`:''}
-          </div>
-          </div>
-          <div style="display:flex;gap:6px;flex-shrink:0">
-            <button onclick="openCounterpartySheet('${jsq(p.name||'')}','${jsq(p.inn||'')}')" title="Проверить: КАД, ЕФРСБ, ФССП, ФНС" style="background:var(--surface-2);color:var(--text-dim);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer">🔎</button>
-            <button onclick="openParticipantForm('${c.id}',${i})" style="background:var(--surface-2);color:var(--text-dim);border:none;border-radius:8px;width:32px;height:32px;cursor:pointer">✏️</button>
-            <button onclick="removeParticipant('${c.id}',${i})" style="background:var(--red-l);color:var(--red);border:none;border-radius:8px;width:32px;height:32px;font-size:18px;cursor:pointer">×</button>
-          </div>
-        </div>
-      </div>`).join(''):`<div class="empty" style="padding:24px"><p>Участники не добавлены.<br>Оппонент, его представитель, третьи лица,<br>эксперты — с телефонами под рукой.</p></div>`}
+    <div class="sect-title">Доверитель</div>
+    ${caseClientCardHtml(c, cl)}
+    <div class="sect-title" style="margin-top:14px">Другие участники${parts.length?` (${parts.length})`:''}</div>
+    ${parts.length?parts.map((p,i)=>caseParticipantCardHtml(c,p,i)).join(''):`<div class="empty" style="padding:18px"><p>Другие участники не добавлены.<br>Оппонент, его представитель, третьи лица,<br>эксперты — с контактами под рукой.</p></div>`}
     <button class="btn-primary" onclick="openParticipantForm('${c.id}')">+ Добавить участника</button>
     </div>
 
@@ -7059,7 +7152,6 @@ async function viewCase(id, tab) {
     <button class="btn-ghost" onclick="toggleArchiveCase('${c.id}')">${ic(c.archived?'refresh':'folder',16)} ${c.archived?'Вернуть из архива':'В архив'}</button>
     <button class="btn-ghost" onclick="exportCase('${c.id}')">${ic('print',16)} Выгрузить дело (для печати)</button>
     <button class="btn-ghost" onclick="deleteCase('${c.id}')" style="color:var(--red)">${ic('alert',16)} Удалить в корзину</button>
-    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
   `);
 }
 
@@ -7401,7 +7493,7 @@ async function toggleArchiveCase(id) {
   if (!obj.archived) delete obj.archived;
   await put('cases', obj);
   toast(obj.archived ? 'Дело перенесено в архив' : 'Дело возвращено из архива');
-  closeSheet(); renderCases(); renderDashboard();
+  closeCaseScreen(); renderCases(); renderDashboard();
 }
 
 // Удалить дело в корзину (мягкое удаление)
@@ -7411,7 +7503,7 @@ async function deleteCase(id) {
   if (!confirm(`Удалить дело «${c.number||''}» в корзину?\n\nЕго можно будет восстановить из Настройки → Корзина.`)) return;
   await del('cases', id);
   toast('Дело перемещено в корзину');
-  closeSheet(); renderCases(); renderDashboard();
+  closeCaseScreen(); renderCases(); renderDashboard();
 }
 
 // ── Участники дела ──
@@ -11050,6 +11142,11 @@ window.addEventListener('popstate', () => {
   if (_ignorePop) { _ignorePop = false; return; }
   if (_sheetOpen) {
     closeSheet(true); // вызвано системным «Назад» — историю не трогаем повторно
+    history.pushState({ guard: true }, '');
+    return;
+  }
+  if (_caseScreenOpen) {
+    closeCaseScreen(true); // v191: «Назад» с полноэкранной карточки дела
     history.pushState({ guard: true }, '');
     return;
   }
