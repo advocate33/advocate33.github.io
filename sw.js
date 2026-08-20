@@ -12,7 +12,7 @@
 
    При выходе новой версии приложения поднимите число в CACHE.
 */
-const CACHE = 'crm-advocate-v20';
+const CACHE = 'crm-advocate-v24';
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
 const BASE = new URL('./', self.location).pathname;
