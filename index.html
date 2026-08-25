@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v197</title>
+<title>CRM Адвоката v199</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1213,7 +1213,7 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 22; // v197: + стор caseEvents (журнал дела)
-const APP_VER = '197'; // v196: серверный сбор судов; v197: журнал дела caseEvents — отдельный append-only стор (DB_VER 22), журнал в хронологии и печати, статусные вехи дублируются в записи дела для аналитики
+const APP_VER = '199'; // v198: починка выбора дела; v199: «Проведено + следующее заседание» — одна кнопка вместо случайного дубля, перенос суда и судьи даже вне справочника, защита от двойного нажатия
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions","caseEvents"];
 let db;
 
@@ -5325,7 +5325,7 @@ function showSheet(html) {
   }
   setTimeout(() => {
     const sheet = document.getElementById('sheetContent');
-    const first = sheet?.querySelector('input:not([type="hidden"]),select,textarea,button,a[href]');
+    const first = sheet?.querySelector('input:not([type="hidden"]):not([data-combo]),select,textarea,button,a[href]'); // v198: автофокус обходит комбо-поля — их onfocus раскрывал список поверх полей ниже
     (first || sheet)?.focus({preventScroll:true});
   }, 0);
 }
@@ -6185,7 +6185,6 @@ async function openHearingForm(existing) {
       <input type="checkbox" id="f-attended" ${(h.attended===true)?'checked':''} style="width:18px;height:18px"> Участвовал(а) лично в заседании
     </label>
     <button class="btn-primary" onclick="saveHearing('${h.id||''}')">Сохранить</button>
-    ${existing?`<button class="btn-ghost" onclick="hearingNext('${h.id}')">✅ Проведено + создать следующее</button>`:''}
     ${existing?`<button class="btn-ghost" onclick="hearingNext('${h.id}')">✅ Проведено + следующее заседание</button>`:''}
     ${existing?`<button class="btn-ghost" onclick="removeItem('hearings','${h.id}','calendar')">Удалить</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Отмена</button>
@@ -6194,7 +6193,11 @@ async function openHearingForm(existing) {
   if (!existing) hearingCaseChanged(true);
 }
 // Проведено + следующее заседание: текущее закрывается, новое наследует дело/суд/судью
+var _hearingNextBusy = false; // v199: двойной тап по кнопке не должен запускать сценарий дважды
 async function hearingNext(id) {
+  if (_hearingNextBusy) return;
+  _hearingNextBusy = true;
+  try {
   const prev = (await getAll('hearings')).find(x => x.id === id);
   if (!prev) return;
   const cur = Object.assign({}, prev, {
@@ -6215,12 +6218,21 @@ async function hearingNext(id) {
   const hid = document.getElementById('f-caseNum'), inp = document.getElementById('f-caseNum-q');
   if (hid) hid.value = cur.caseNum || '';
   if (inp) inp.value = cur.caseNum ? (caseLabel(cur.caseNum) || cur.caseNum) : '';
-  const setSel = (sid, v) => { const el = document.getElementById(sid); if (el && v) el.value = v; };
+  // v199: суд и судья переносятся, даже если их нет в справочнике — пункт добавляется в список
+  const setSel = (sid, v) => { const el = document.getElementById(sid); if (!el || !v) return;
+    el.value = v;
+    if (el.tagName === 'SELECT' && el.value !== v) {
+      const o = document.createElement('option'); o.value = v; o.textContent = v;
+      const addOpt = el.querySelector('option[data-add="1"]');
+      if (addOpt) el.insertBefore(o, addOpt); else el.appendChild(o);
+      el.value = v;
+    } };
   setSel('f-court', cur.court); setSel('f-judge', cur.judge); setSel('f-room', cur.room);
   const hcEl = document.getElementById('f-hcomment'); if (hcEl) hcEl.value = cur.comment || ''; // v181: заметка «что подготовить» переезжает в следующее заседание
   toast('Прошлое — «Проведено»' + (cur.comment ? ', комментарий перенесён в новое' : '') + '. Дату и время возьмите из новой повестки');
   if (typeof renderCalendar === 'function') renderCalendar();
   renderDashboard(); navBadgeRefresh();
+  } finally { _hearingNextBusy = false; }
 }
 
 // ═══════ ПОИСКОВЫЙ ВЫБОР ДЕЛА ═══════
@@ -6367,7 +6379,7 @@ function cpxLabelFor(cases, num) {
   return c ? c.number + (c.client ? ' · ' + c.client : '') : (num || '');
 }
 function cpxHtml(fieldId, num, label, ph) {
-  return `<input id="${fieldId}-q" placeholder="${ph || 'Поиск: фамилия, № дела, суд…'}" autocomplete="off" value="${esc(label||'')}" oninput="cpxFilter('${fieldId}')" onfocus="cpxFilter('${fieldId}')" onblur="cpxHide('${fieldId}')">
+  return `<input id="${fieldId}-q" data-combo="1" placeholder="${ph || 'Поиск: фамилия, № дела, суд…'}" autocomplete="off" value="${esc(label||'')}" oninput="cpxFilter('${fieldId}')" onfocus="cpxFilter('${fieldId}')" onblur="cpxHide('${fieldId}')">
       <input type="hidden" id="${fieldId}" value="${esc(num||'')}">
       <div class="cp-list" id="${fieldId}-list" style="display:none"></div>`;
 }
@@ -6376,7 +6388,13 @@ function cpxFilter(fieldId) {
   const inp = document.getElementById(fieldId + '-q');
   const list = document.getElementById(fieldId + '-list');
   if (!st || !inp || !list) return;
-  const q = (inp.value || '').trim().toLowerCase();
+  let q = (inp.value || '').trim().toLowerCase();
+  // v198: у выбранного дела в поле стоит подпись «№ · ФИО» — по такому тексту поиск ничего
+  // не находил и список-тупик закрывал дату и время. Подпись запросом не считается:
+  // фокус на выбранном деле показывает полный список для быстрой смены дела.
+  const hid = document.getElementById(fieldId);
+  const selNum = (hid && hid.value ? String(hid.value) : '').trim().toLowerCase();
+  if (selNum && q.startsWith(selNum)) q = '';
   st.shown = st.items.filter(x => !q || (x.n + ' ' + x.client + ' ' + x.court).toLowerCase().includes(q)).slice(0, 30);
   list.innerHTML =
     `<div class="cp-item" onmousedown="cpxPick('${fieldId}',-1)"><div class="cp-t" style="color:var(--text-faint)">✕ без дела</div></div>` +
@@ -6531,7 +6549,7 @@ async function openFinanceForm(existing, leadId) {
     </div>
     <div class="field" style="position:relative"><label>Дело</label>${cpxHtml('f-caseNum', f.caseNum, curCaseLabel)}</div>
     <div class="field" style="position:relative"><label>Участник</label>
-      <input id="f-client-q" placeholder="Поиск по фамилии…" autocomplete="off" value="${esc(f.client||(_lead?_lead.name:'')||'')}" oninput="clFilter(this)" onfocus="clFilter(this)" onblur="clHideSoon()">
+      <input id="f-client-q" data-combo="1" placeholder="Поиск по фамилии…" autocomplete="off" value="${esc(f.client||(_lead?_lead.name:'')||'')}" oninput="clFilter(this)" onfocus="clFilter(this)" onblur="clHideSoon()">
       <input type="hidden" id="f-client" value="${esc(f.client||(_lead?_lead.name:'')||'')}">
       <div class="cp-list" id="f-client-list" style="display:none"></div>
     </div>
