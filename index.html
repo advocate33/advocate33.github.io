@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v206</title>
+<title>CRM Адвоката v208</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -766,6 +766,10 @@
 .cp-t{font-size:13.5px;font-weight:600;line-height:1.3}
 .cp-s{font-size:11.5px;color:var(--text-faint);margin-top:1px}
 .cp-none{padding:10px 12px;font-size:12.5px;color:var(--text-faint)}
+/* v208: поиск в справочниках — select скрыт, виден ввод с фильтром */
+.rpx{position:relative}
+.rpx select{display:none}
+.rpx .cp-item.cp-add .cp-t{color:var(--blue)}
 
 /* ── Лента ближайших 7 дней (Обзор) ── */
 .ag-day{font-size:11.5px;font-weight:800;letter-spacing:.5px;text-transform:uppercase;color:var(--text-faint);margin:12px 2px 6px}
@@ -1215,7 +1219,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '206'; // v206: карточка заседания — итог одним нажатием (Проведено / + следующее / решение), «В календарь» только для предстоящих; hearingNext из карточки не затирает результат и комментарий
+const APP_VER = '208'; // v208: поиск в длинных справочниках (суд, судья, орган, должностное лицо, адвокат…) и в выборе участника — rpx*
+// v207 → // v207: кнопка «Проведено, участвовал(а) лично»; кнопка «В календарь» и hearingToICS удалены по решению пользователя (лента /cal/<SECRET> покрывает)
+// v206 → // v206: карточка заседания — итог одним нажатием (Проведено / + следующее / решение), «В календарь» только для предстоящих; hearingNext из карточки не затирает результат и комментарий
 // v205 → // v204: исполнительное производство; v205: офлайн-калькулятор госпошлины — ст. 333.19 и 333.21 НК РФ в ред. 259-ФЗ (сверено 08.09.2026), запись в дело, плейсхолдер {{Госпошлина}}
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions","caseEvents","docBlobs"];
 let db;
@@ -4613,17 +4619,6 @@ async function exportCalendarICS() {
   } catch(e) { toast('Ошибка экспорта календаря', true); }
 }
 
-// Точечная выгрузка одного заседания
-async function hearingToICS(id) {
-  await refreshCasesCache();
-  const h = (await getAll('hearings')).find(x=>x.id===id); if (!h || !h.date) { toast('У заседания нет даты', true); return; }
-  const cl = clientByCase(h.caseNum);
-  const title = `Заседание: ${h.caseNum||''}${cl?' · '+cl:''}`.trim();
-  const desc = [h.judge?'Судья: '+h.judge:'', h.status?'Статус: '+h.status:''].filter(Boolean).join('\n');
-  const ev = icsEvent({ uid:`hearing-${h.id}@crm`, title, desc, location:h.court, dateStr:h.date, timeStr:h.time, durationMin:60, alarmMin:60 });
-  downloadICS([ev], `Заседание-${(h.caseNum||'').replace(/[\/\\]/g,'-')||h.date}.ics`);
-}
-
 // Точечная выгрузка одной задачи
 async function taskToICS(id) {
   await refreshCasesCache();
@@ -5433,15 +5428,77 @@ const opts = (arr,sel) => arr.map(o=>`<option ${o===sel?'selected':''}>${esc(o)}
 // Справочный <select> с возможностью добавить новое значение прямо из формы.
 // id — id селекта (его читает сохранение через .value); refKey — ключ справочника в REF;
 // blank — текст пустого пункта (или null, если пустой пункт не нужен).
+const RPX_MIN = 8; // v208: справочник от стольких записей получает поиск вместо прокрутки
 function refSelect(id, refKey, current, blank) {
   const arr = REF[refKey] || [];
   const inList = current && arr.includes(current);
-  return `<select id="${id}" onchange="refSelectChanged(this,'${refKey}')">
+  const sel = `<select id="${id}" onchange="refSelectChanged(this,'${refKey}')">
     ${blank!==null ? `<option value="">${blank||'—'}</option>` : ''}
     ${arr.map(x=>`<option ${x===current?'selected':''}>${esc(x)}</option>`).join('')}
     ${(current && !inList) ? `<option selected>${esc(current)}</option>` : ''}
     <option value="__add__" data-add="1">➕ Добавить новое…</option>
   </select>`;
+  if (arr.length < RPX_MIN) return sel;
+  return rpxWrap(id, sel, current || '', 'ref', refKey, blank !== null);
+}
+// ── v208: поисковый выбор поверх скрытого <select> (суд, судья, орган, участник…).
+// Сам <select id> остаётся в форме — код сохранения читает его .value как раньше.
+// mode 'ref' — значение = подпись, добавление в справочник REF[key]; mode 'client' — значение = id участника.
+function rpxWrap(id, selectHtml, label, mode, key, canBlank) {
+  return `<div class="rpx" data-mode="${mode}" data-key="${esc(key||'')}" data-blank="${canBlank?1:0}">${selectHtml}` +
+    `<input id="${id}-q" data-combo="1" autocomplete="off" placeholder="Поиск… или введите новое" value="${esc(label)}" ` +
+    `oninput="rpxFilter('${id}')" onfocus="rpxFilter('${id}')" onblur="rpxHide('${id}')">` +
+    `<div class="cp-list" id="${id}-list" style="display:none"></div></div>`;
+}
+function rpxItems(sel) { // пункты скрытого select без служебных
+  return Array.from(sel.options).filter(o => !o.dataset.add && o.value !== '').map(o => ({ v: o.value, t: o.textContent }));
+}
+function rpxLabel(sel) { const o = sel.options[sel.selectedIndex]; return (o && !o.dataset.add && o.value !== '') ? o.textContent : ''; }
+function rpxSync(id) { // подпись после программной смены select.value
+  const sel = document.getElementById(id), inp = document.getElementById(id + '-q');
+  if (sel && inp) inp.value = rpxLabel(sel);
+}
+function rpxFilter(id) {
+  const sel = document.getElementById(id), inp = document.getElementById(id + '-q'), list = document.getElementById(id + '-list');
+  if (!sel || !inp || !list) return;
+  const wrap = list.parentElement;
+  let q = (inp.value || '').trim();
+  if (q === rpxLabel(sel)) q = ''; // фокус на выбранном — полный список для быстрой смены
+  const ql = q.toLowerCase();
+  const items = rpxItems(sel);
+  const shown = items.filter(x => !ql || x.t.toLowerCase().includes(ql)).slice(0, 40);
+  const exact = q && items.some(x => x.t.toLowerCase() === ql);
+  list.innerHTML =
+    (wrap.dataset.blank === '1' ? `<div class="cp-item" onmousedown="rpxPick('${id}','')"><div class="cp-t" style="color:var(--text-faint)">✕ не указано</div></div>` : '') +
+    shown.map(x => `<div class="cp-item" onmousedown="rpxPick('${id}',${JSON.stringify(x.v).replace(/"/g, '&quot;')})"><div class="cp-t">${esc(x.t)}</div></div>`).join('') +
+    (!shown.length && !q ? `<div class="cp-none">Список пуст</div>` : '') +
+    (q && !exact ? `<div class="cp-item cp-add" onmousedown="rpxAdd('${id}')"><div class="cp-t">➕ Добавить «${esc(q)}»</div></div>` : '');
+  list.style.display = 'block';
+}
+function rpxPick(id, v) {
+  const sel = document.getElementById(id), inp = document.getElementById(id + '-q');
+  if (!sel) return;
+  sel.value = v; _refPrev[id] = v;
+  if (inp) inp.value = rpxLabel(sel);
+  const l = document.getElementById(id + '-list'); if (l) l.style.display = 'none';
+  try { sel.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+}
+async function rpxAdd(id) {
+  const sel = document.getElementById(id), inp = document.getElementById(id + '-q'), list = document.getElementById(id + '-list');
+  if (!sel || !inp) return;
+  const name = (inp.value || '').trim(); if (!name) return;
+  const wrap = list.parentElement;
+  if (wrap.dataset.mode === 'client') await clientAddByName(sel, name);
+  else refAddValue(sel, wrap.dataset.key, name);
+  inp.value = rpxLabel(sel);
+  if (list) list.style.display = 'none';
+}
+function rpxHide(id) {
+  setTimeout(() => {
+    const l = document.getElementById(id + '-list'); if (l) l.style.display = 'none';
+    const sel = document.getElementById(id), inp = document.getElementById(id + '-q');
+    if (sel && inp && document.activeElement !== inp) inp.value = rpxLabel(sel); // ввод без выбора не считается значением
+  }, 180);
 }
 // Запоминаем предыдущее значение, чтобы вернуть его, если добавление отменили
 let _refPrev = {};
@@ -5449,6 +5506,9 @@ function refSelectChanged(sel, refKey) {
   if (sel.value !== '__add__') { _refPrev[sel.id] = sel.value; return; }
   const name = (window.prompt('Новое значение для справочника:') || '').trim();
   if (!name) { sel.value = _refPrev[sel.id] || ''; return; }
+  refAddValue(sel, refKey, name);
+}
+function refAddValue(sel, refKey, name) { // v208: общее для prompt-пути и поиска
   const arr = (REF[refKey] || []).slice();
   if (!arr.includes(name)) {
     arr.push(name);
@@ -5469,6 +5529,9 @@ async function clientSelChanged(sel) {
   if (sel.value !== '__addclient__') { _refPrev[sel.id] = sel.value; return; }
   const name = (window.prompt('ФИО или наименование нового участника:') || '').trim();
   if (!name) { sel.value = _refPrev[sel.id] || ''; return; }
+  await clientAddByName(sel, name);
+}
+async function clientAddByName(sel, name) { // v208: общее для prompt-пути и поиска
   const all = await getAll('clients');
   // Если такой участник уже есть — просто выбираем его
   let exist = all.find(c => (c.name||'').toLowerCase() === name.toLowerCase());
@@ -5794,7 +5857,7 @@ async function openCaseForm(existing) {
       <div class="field"><label>Телефон секретаря</label><input id="f-secretaryPhone" type="tel" value="${esc(c.secretaryPhone||'')}" placeholder="+7…"></div>
     </div>
     <div class="field"><label>Кабинет (секретарь / канцелярия)</label><input id="f-cabinet" value="${esc(c.cabinet||'')}" placeholder="№ кабинета, этаж"></div>
-    <div class="field"><label>Участник <span class="req">*</span></label><select id="f-client" onchange="clientSelChanged(this)">${clientOpts}<option value="__addclient__" data-add="1">➕ Новый участник…</option></select></div>
+    <div class="field"><label>Участник <span class="req">*</span></label>${clients.length >= RPX_MIN ? rpxWrap('f-client', `<select id="f-client" onchange="clientSelChanged(this)">${clientOpts}<option value="__addclient__" data-add="1">➕ Новый участник…</option></select>`, (clients.find(cl=>cl.id===c.clientId || (!c.clientId && cl.name===c.client))||{}).name || '', 'client', '', true) : `<select id="f-client" onchange="clientSelChanged(this)">${clientOpts}<option value="__addclient__" data-add="1">➕ Новый участник…</option></select>`}</div>
     <div class="field"><label>Процессуальное положение участника</label>
       <select id="f-clientRole">${['','Истец','Ответчик','Заявитель','Третье лицо','Потерпевший','Обвиняемый (подсудимый)','Административный истец','Административный ответчик','Взыскатель','Должник','Привлекаемое лицо (КоАП)','Иное'].map(o=>`<option ${o===(c.clientRole||'')?'selected':''}>${o||'— не указано —'}</option>`).join('')}</select>
       <div class="meta" style="margin-top:4px">Роль доверителя в процессе — видна в карточке и доступна в шаблонах как {{ПоложениеДоверителя}}</div>
@@ -6348,6 +6411,7 @@ async function hearingNext(id) {
       el.value = v;
     } };
   setSel('f-court', cur.court); setSel('f-judge', cur.judge); setSel('f-room', cur.room);
+  rpxSync('f-court'); rpxSync('f-judge'); // v208
   const hcEl = document.getElementById('f-hcomment'); if (hcEl) hcEl.value = cur.comment || ''; // v181: заметка «что подготовить» переезжает в следующее заседание
   toast('Прошлое — «Проведено»' + (cur.comment ? ', комментарий перенесён в новое' : '') + '. Дату и время возьмите из новой повестки');
   if (typeof renderCalendar === 'function') renderCalendar();
@@ -6837,6 +6901,7 @@ function hearingCaseChanged(initial) {
   };
   if (court && (!initial || !courtEl.value)) setSel(courtEl, court);
   if (judge && (!initial || !judgeEl.value)) setSel(judgeEl, judge);
+  rpxSync('f-court'); rpxSync('f-judge'); // v208
 }
 async function saveHearing(id) {
   const date = document.getElementById('f-date').value;
@@ -8206,18 +8271,18 @@ async function viewHearing(id) {
     ${h.comment?`<div class="card" style="border-left:3px solid var(--sig-amber);margin-bottom:10px"><div class="meta" style="margin-bottom:4px">💬 Комментарий к заседанию</div><div style="font-size:14px;white-space:pre-wrap">${esc(h.comment)}</div></div>`:''}
     ${(()=>{ /* v206: итог заседания одним нажатием. Предстоящее — все действия; проведённое без результата — только итоговые; с результатом — ничего лишнего */
       const upcoming = h.status !== 'Проведено', needResult = upcoming || !h.result;
-      return (upcoming ? `<button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}')">✅ Проведено</button>` : '')
+      return (upcoming ? `<button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}', true)">✅ Проведено, участвовал(а) лично</button>
+    <button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}')">✅ Проведено</button>` : '')
         + (needResult ? `<button class="btn-ghost" onclick="hearingNext('${jsq(h.id)}')">✅ Проведено + следующее заседание</button>
     <button class="btn-ghost" onclick="hearingDecision('${jsq(h.id)}')">⚖️ Вынесено решение</button>` : ''); })()}
     <button class="btn-primary" onclick="editHearingById('${jsq(h.id)}')">Редактировать</button>
     ${c?`<button class="btn-ghost" onclick="viewCase('${c.id}')">💼 Открыть дело</button>`:''}
-    ${h.status!=='Проведено'?`<button class="btn-ghost" onclick="hearingToICS('${h.id}')">📅 В календарь</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
   `);
 }
 // v206: отметить «Проведено» из карточки без формы; результат и участие не трогаются
 var _hearingMarkDoneBusy = false;
-async function hearingMarkDone(id) {
+async function hearingMarkDone(id, attended) { // v207: attended === true — отметить и личное участие
   if (_hearingMarkDoneBusy) return;
   _hearingMarkDoneBusy = true;
   try {
@@ -8225,8 +8290,9 @@ async function hearingMarkDone(id) {
     if (!h) return;
     if (h.status === 'Проведено') { toast('Заседание уже отмечено проведённым'); return; }
     h.status = 'Проведено';
+    if (attended === true) h.attended = true;
     await put('hearings', h);
-    if (h.caseNum) { try { await crmCaseLogByNum(h.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(h.date)); } catch (e) {} }
+    if (h.caseNum) { try { await crmCaseLogByNum(h.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(h.date) + (attended === true ? ' (участие лично)' : '')); } catch (e) {} }
     if (typeof icsTouch === 'function') icsTouch();
     toast('Заседание — «Проведено». Результат можно дописать через «Редактировать»');
     if (typeof renderCalendar === 'function') renderCalendar();
