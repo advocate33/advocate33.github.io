@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v205</title>
+<title>CRM Адвоката v206</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1215,7 +1215,8 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '205'; // v204: исполнительное производство; v205: офлайн-калькулятор госпошлины — ст. 333.19 и 333.21 НК РФ в ред. 259-ФЗ (сверено 08.09.2026), запись в дело, плейсхолдер {{Госпошлина}}
+const APP_VER = '206'; // v206: карточка заседания — итог одним нажатием (Проведено / + следующее / решение), «В календарь» только для предстоящих; hearingNext из карточки не затирает результат и комментарий
+// v205 → // v204: исполнительное производство; v205: офлайн-калькулятор госпошлины — ст. 333.19 и 333.21 НК РФ в ред. 259-ФЗ (сверено 08.09.2026), запись в дело, плейсхолдер {{Госпошлина}}
 const STORES = ["clients","cases","hearings","finance","refs","tasks","mail","files","expenses","templates","orders","time","deposits","leads","poa","meetings","workflows","workflowRuns","correspondence","documents","docVersions","monitorEvents","aiSessions","caseEvents","docBlobs"];
 let db;
 
@@ -6327,8 +6328,8 @@ async function hearingNext(id) {
     judge: document.getElementById('f-judge')?.value ?? prev.judge,
     status: 'Проведено',
     attended: document.getElementById('f-attended')?.checked ?? prev.attended,
-    result: (document.getElementById('f-result')?.value || '').trim(),
-    comment: (document.getElementById('f-hcomment')?.value || '').trim()
+    result: (document.getElementById('f-result')?.value ?? prev.result ?? '').trim(), // v206: без формы — из записи
+    comment: (document.getElementById('f-hcomment')?.value ?? prev.comment ?? '').trim()
   });
   await put('hearings', cur);
   if (cur.caseNum) await crmCaseLogByNum(cur.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(cur.date) + (cur.result ? ' · ' + String(cur.result).slice(0, 60) : ''));
@@ -8203,12 +8204,35 @@ async function viewHearing(id) {
       ${h.result?`<div class="detail-row"><span class="k">Результат</span><span class="v">${esc(h.result)}</span></div>`:''}
     </div>
     ${h.comment?`<div class="card" style="border-left:3px solid var(--sig-amber);margin-bottom:10px"><div class="meta" style="margin-bottom:4px">💬 Комментарий к заседанию</div><div style="font-size:14px;white-space:pre-wrap">${esc(h.comment)}</div></div>`:''}
+    ${(()=>{ /* v206: итог заседания одним нажатием. Предстоящее — все действия; проведённое без результата — только итоговые; с результатом — ничего лишнего */
+      const upcoming = h.status !== 'Проведено', needResult = upcoming || !h.result;
+      return (upcoming ? `<button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}')">✅ Проведено</button>` : '')
+        + (needResult ? `<button class="btn-ghost" onclick="hearingNext('${jsq(h.id)}')">✅ Проведено + следующее заседание</button>
+    <button class="btn-ghost" onclick="hearingDecision('${jsq(h.id)}')">⚖️ Вынесено решение</button>` : ''); })()}
     <button class="btn-primary" onclick="editHearingById('${jsq(h.id)}')">Редактировать</button>
-    ${h.status!=='Проведено'?`<button class="btn-ghost" onclick="hearingDecision('${jsq(h.id)}')">⚖️ Вынесено решение</button>`:''}
     ${c?`<button class="btn-ghost" onclick="viewCase('${c.id}')">💼 Открыть дело</button>`:''}
-    <button class="btn-ghost" onclick="hearingToICS('${h.id}')">📅 В календарь</button>
+    ${h.status!=='Проведено'?`<button class="btn-ghost" onclick="hearingToICS('${h.id}')">📅 В календарь</button>`:''}
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
   `);
+}
+// v206: отметить «Проведено» из карточки без формы; результат и участие не трогаются
+var _hearingMarkDoneBusy = false;
+async function hearingMarkDone(id) {
+  if (_hearingMarkDoneBusy) return;
+  _hearingMarkDoneBusy = true;
+  try {
+    const h = (await getAll('hearings')).find(x => x.id === id);
+    if (!h) return;
+    if (h.status === 'Проведено') { toast('Заседание уже отмечено проведённым'); return; }
+    h.status = 'Проведено';
+    await put('hearings', h);
+    if (h.caseNum) { try { await crmCaseLogByNum(h.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(h.date)); } catch (e) {} }
+    if (typeof icsTouch === 'function') icsTouch();
+    toast('Заседание — «Проведено». Результат можно дописать через «Редактировать»');
+    if (typeof renderCalendar === 'function') renderCalendar();
+    renderDashboard(); navBadgeRefresh();
+    viewHearing(id);
+  } finally { _hearingMarkDoneBusy = false; }
 }
 async function editHearingById(id) {
   const hearing = (await getAll('hearings')).find(item => item.id === id);
