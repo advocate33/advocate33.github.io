@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v208</title>
+<title>CRM Адвоката v209</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1219,7 +1219,8 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '208'; // v208: поиск в длинных справочниках (суд, судья, орган, должностное лицо, адвокат…) и в выборе участника — rpx*
+const APP_VER = '209'; // v209: реквизиты судов (адрес, телефон, сайт, e-mail) в справочнике; подстановка в дело, карточку и шапку документов
+// v208 → // v208: поиск в длинных справочниках (суд, судья, орган, должностное лицо, адвокат…) и в выборе участника — rpx*
 // v207 → // v207: кнопка «Проведено, участвовал(а) лично»; кнопка «В календарь» и hearingToICS удалены по решению пользователя (лента /cal/<SECRET> покрывает)
 // v206 → // v206: карточка заседания — итог одним нажатием (Проведено / + следующее / решение), «В календарь» только для предстоящих; hearingNext из карточки не затирает результат и комментарий
 // v205 → // v204: исполнительное производство; v205: офлайн-калькулятор госпошлины — ст. 333.19 и 333.21 НК РФ в ред. 259-ФЗ (сверено 08.09.2026), запись в дело, плейсхолдер {{Госпошлина}}
@@ -1466,6 +1467,7 @@ async function loadRefs() {
   REF = JSON.parse(JSON.stringify(DEFAULT_REF));
   const saved = await getAll('refs');
   saved.forEach(rec => { if (Array.isArray(rec.items)) REF[rec.id] = rec.items.slice(); });
+  await loadCourtInfo(); // v209
   // Систематизация: все справочники упорядочены по алфавиту
   Object.keys(REF).forEach(k => { if (Array.isArray(REF[k])) REF[k].sort((a,b)=>String(a).localeCompare(String(b),'ru')); });
 }
@@ -1473,6 +1475,68 @@ async function saveRef(key, items) {
   items = items.slice().sort((a,b)=>String(a).localeCompare(String(b),'ru'));
   await put('refs', { id: key, items });
   REF[key] = items.slice();
+}
+// ── v209: реквизиты судов. Запись refs/courtInfo = { id, items:[], info:{ «Название»: {addr, phone, site, email} } }
+// (по образцу licDevices: items:[] — чтобы loadRefs и синхронизация видели обычную запись справочника).
+let COURT_INFO = {};
+async function loadCourtInfo() {
+  const rec = (await getAll('refs')).find(r => r && r.id === 'courtInfo');
+  COURT_INFO = (rec && rec.info && typeof rec.info === 'object') ? JSON.parse(JSON.stringify(rec.info)) : {};
+}
+function courtInfoGet(name) { return (name && COURT_INFO[name]) || null; }
+async function courtInfoSave(name, data) {
+  if (!name) return;
+  const clean = {};
+  ['addr', 'phone', 'site', 'email'].forEach(k => { const v = String((data || {})[k] || '').trim(); if (v) clean[k] = v; });
+  if (Object.keys(clean).length) COURT_INFO[name] = clean; else delete COURT_INFO[name];
+  await put('refs', { id: 'courtInfo', items: [], info: COURT_INFO });
+}
+// адрес суда по названию: сначала справочник, затем снимок в записи (если справочник ещё не заполнен)
+function courtAddrOf(name, snapshot) { const i = courtInfoGet(name); return (i && i.addr) || snapshot || ''; }
+// строка реквизитов под названием суда в карточке дела
+function courtInfoLine(name, snapshot, backType, backId) {
+  const i = courtInfoGet(name) || {};
+  const bits = [];
+  const addr = i.addr || snapshot || '';
+  if (addr) bits.push(esc(addr));
+  if (i.phone) bits.push(phoneHtml(i.phone, backType, backId));
+  const site = safeExternalUrl(i.site);
+  if (site) bits.push(`<a href="${esc(site)}" target="_blank" rel="noopener" style="color:inherit">сайт</a>`);
+  if (i.email) bits.push(`<a href="mailto:${esc(i.email)}" style="color:inherit">${esc(i.email)}</a>`);
+  return bits.length ? `<div class="meta" style="margin-top:2px">${bits.join(' · ')}</div>` : '';
+}
+// подсказка под полем суда в форме дела
+function courtHintHtml(name) {
+  const i = courtInfoGet(name);
+  if (!name) return '';
+  return i && i.addr ? `📍 ${esc(i.addr)}${i.phone ? ' · ' + esc(i.phone) : ''}`
+    : `<span style="color:var(--text-faint)">адрес не заполнен — Настройки → Справочники → Суды → 📍</span>`;
+}
+function courtHintRefresh(fieldId) {
+  const sel = document.getElementById(fieldId), h = document.getElementById(fieldId + '-hint');
+  if (sel && h) h.innerHTML = courtHintHtml(sel.value);
+}
+// форма реквизитов суда (из справочника «Суды»)
+function openCourtInfoForm(name) {
+  const i = courtInfoGet(name) || {};
+  showSheet(`
+    <h3>📍 ${esc(name)}</h3>
+    <div class="sheet-sub">Реквизиты подставляются в дела и в шапку документов</div>
+    <div class="field"><label>Адрес</label><input id="ci-addr" value="${esc(i.addr||'')}" placeholder="индекс, город, улица, дом"></div>
+    <div class="field"><label>Телефон</label><input id="ci-phone" value="${esc(i.phone||'')}" placeholder="+7 ..."></div>
+    <div class="field"><label>Сайт</label><input id="ci-site" type="url" value="${esc(i.site||'')}" placeholder="https://..."></div>
+    <div class="field"><label>Электронная почта</label><input id="ci-email" value="${esc(i.email||'')}" placeholder="для подачи документов"></div>
+    <button class="btn-primary" onclick="saveCourtInfo('${jsq(name)}')">Сохранить</button>
+    <button class="btn-ghost" onclick="openRefEditor('courts')">← Назад</button>
+  `);
+}
+async function saveCourtInfo(name) {
+  const site = document.getElementById('ci-site').value.trim();
+  if (site && !safeExternalUrl(site)) { toast('Сайт должен начинаться с http:// или https://', true); return; }
+  await courtInfoSave(name, { addr: document.getElementById('ci-addr').value, phone: document.getElementById('ci-phone').value,
+    site, email: document.getElementById('ci-email').value });
+  toast('Реквизиты суда сохранены');
+  openRefEditor('courts');
 }
 
 // УТИЛИТЫ
@@ -5285,6 +5349,7 @@ function openRefEditor(key) {
       ${items.length ? items.map((v,i)=>`
         <div class="card" style="margin-bottom:8px"><div class="row1">
           <div class="title" style="flex:1;font-size:14px;font-weight:600">${esc(v)}</div>
+          ${key==='courts'?`<button onclick="openCourtInfoForm('${jsq(v)}')" style="background:${courtInfoGet(v)?'var(--card2)':'transparent'};color:${courtInfoGet(v)?'var(--text)':'var(--text-faint)'};border:1px solid var(--border);border-radius:8px;width:40px;height:40px;font-size:15px;cursor:pointer;flex-shrink:0;margin-right:6px" title="${courtInfoGet(v)?'Реквизиты суда':'Реквизиты не заполнены'}">📍</button>`:''}
           <button onclick="renameRefItem('${key}',${i})" style="background:var(--card2);color:var(--text-dim);border:1px solid var(--border);border-radius:8px;width:40px;height:40px;font-size:14px;cursor:pointer;flex-shrink:0;margin-right:6px" title="Редактировать">✎</button>
           <button onclick="removeRefItem('${key}',${i})" style="background:var(--red-l);color:var(--red);border:none;border-radius:8px;width:40px;height:40px;font-size:18px;cursor:pointer;flex-shrink:0">×</button>
         </div></div>`).join('') : `<div class="empty" style="padding:20px"><p>Список пуст</p></div>`}
@@ -5306,6 +5371,11 @@ const REF_PROPAGATE = {
 async function refPropagate(key, oldVal, newVal) {
   const map = REF_PROPAGATE[key];
   if (!map || oldVal === newVal) return 0;
+  if (key === 'courts' && COURT_INFO[oldVal]) { // v209: реквизиты переезжают на новое название (при объединении — если у цели их нет)
+    if (!COURT_INFO[newVal]) COURT_INFO[newVal] = COURT_INFO[oldVal];
+    delete COURT_INFO[oldVal];
+    await put('refs', { id: 'courtInfo', items: [], info: COURT_INFO });
+  }
   let n = 0;
   for (const [store, field] of map) {
     const rows = await getAll(store);
@@ -5369,6 +5439,11 @@ let _sheetOpen = false;
 let _ignorePop = false;
 let _caseScreenOpen = false, _caseScreenLastId = null; // v191: полноэкранная карточка дела
 let _sheetReturnFocus = null;
+// v209: подсказка с адресом под полем суда обновляется при любом выборе (поиск rpx и обычный select шлют change)
+document.addEventListener('change', e => {
+  const id = e.target && e.target.id;
+  if (id === 'f-court' || id === 'f-courtApp' || id === 'f-courtCass') courtHintRefresh(id);
+});
 function showSheet(html) {
   if (!_sheetOpen) _sheetReturnFocus = document.activeElement;
   document.getElementById('sheetContent').innerHTML = '<div class="handle"></div>' + html;
@@ -5739,7 +5814,7 @@ async function openCaseForm(existing) {
       <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Вышестоящие инстанции (апелляция, кассация)</summary>
       <div class="meta" style="margin:8px 0 10px">Заполняется, когда дело ушло в апелляцию или кассацию: там у дела другой суд, другой номер и другая страница на сайте суда.</div>
       <div class="field-row">
-        <div class="field"><label>Суд апелляционной инстанции</label>${refSelect('f-courtApp','courts',c.courtApp,'—')}</div>
+        <div class="field"><label>Суд апелляционной инстанции</label>${refSelect('f-courtApp','courts',c.courtApp,'—')}<div class="meta" id="f-courtApp-hint" style="margin-top:4px">${courtHintHtml(c.courtApp)}</div></div>
         <div class="field"><label>Судья (апелляция)</label>${refSelect('f-judgeApp','judges',c.judgeApp,'—')}</div>
       </div>
       <div class="field-row">
@@ -5752,7 +5827,7 @@ async function openCaseForm(existing) {
         <div class="field"><label>Ссылка на дело (апелляция)</label><input id="f-linkApp" type="url" value="${esc(c.linkApp||'')}" placeholder="https://..."></div>
       </div>
       <div class="field-row">
-        <div class="field"><label>Суд кассационной инстанции</label>${refSelect('f-courtCass','courts',c.courtCass,'—')}</div>
+        <div class="field"><label>Суд кассационной инстанции</label>${refSelect('f-courtCass','courts',c.courtCass,'—')}<div class="meta" id="f-courtCass-hint" style="margin-top:4px">${courtHintHtml(c.courtCass)}</div></div>
         <div class="field"><label>Судья (кассация)</label>${refSelect('f-judgeCass','judges',c.judgeCass,'—')}</div>
       </div>
       <div class="field-row">
@@ -5846,7 +5921,7 @@ async function openCaseForm(existing) {
       <div class="field"><label>Дата ордера</label><input id="f-orderDate" type="date" value="${todayISO()}"></div>
     </div>
     <div class="meta" style="margin:-6px 0 14px">Если выписан ордер — он сразу попадёт в реестр ордеров по делу. Можно оставить пустым.</div>`}
-    <div class="field"><label>Суд</label>${refSelect('f-court','courts',c.court,'— выберите —')}</div>
+    <div class="field"><label>Суд</label>${refSelect('f-court','courts',c.court,'— выберите —')}<div class="meta" id="f-court-hint" style="margin-top:4px">${courtHintHtml(c.court)}</div></div>
     <div class="field" id="f-agency-wrap" style="display:${(c.kind==='Уголовное'||c.kind==='КоАП')?'block':'none'}"><label>Правоохранительный орган</label>${refSelect('f-agency','agencies',c.agency,'—')}</div>
     <div class="field-row">
       <div class="field"><label>Судья</label>${refSelect('f-judge','judges',c.judge,'—')}</div>
@@ -6195,6 +6270,10 @@ async function saveCase(id) {
     caseUid: fval('f-caseUid'),
     courtApp: fval('f-courtApp'), judgeApp: fval('f-judgeApp'), courtNoApp: fval('f-courtNoApp'), linkApp: safeExternalUrl(rawLinkApp),
     courtCass: fval('f-courtCass'), judgeCass: fval('f-judgeCass'), courtNoCass: fval('f-courtNoCass'), linkCass: safeExternalUrl(rawLinkCass),
+    // v209: снимок адреса суда на момент сохранения (актуальный берётся из справочника, снимок — запасной)
+    courtAddress: courtAddrOf(court, prev && prev.court === court ? prev.courtAddress : ''),
+    courtAddressApp: courtAddrOf(fval('f-courtApp'), prev && prev.courtApp === fval('f-courtApp') ? prev.courtAddressApp : ''),
+    courtAddressCass: courtAddrOf(fval('f-courtCass'), prev && prev.courtCass === fval('f-courtCass') ? prev.courtAddressCass : ''),
     secretary: fval('f-secretary'), secretaryPhone: fval('f-secretaryPhone'), cabinet: fval('f-cabinet'), // v202: секретарь по инстанциям
     secretaryApp: fval('f-secretaryApp'), secretaryPhoneApp: fval('f-secretaryPhoneApp'), cabinetApp: fval('f-cabinetApp'),
     secretaryCass: fval('f-secretaryCass'), secretaryPhoneCass: fval('f-secretaryPhoneCass'), cabinetCass: fval('f-cabinetCass'),
@@ -7484,12 +7563,12 @@ async function viewCase(id, tab) {
       ${c.category?`<div class="detail-row"><span class="k">${c.kind==='Уголовное'?'Статья УК РФ':c.kind==='КоАП'?'Статья КоАП РФ':'Категория'}</span><span class="v">${esc(c.category)}</span></div>`:''}
       ${c.agreementNo?`<div class="detail-row"><span class="k">Соглашение №</span><span class="v">${esc(c.agreementNo)}${c.agreementDate?' от '+fmtDate(c.agreementDate):''}${c.agreementSigned==='Да'?' <span style="color:var(--sig-green)">✓ подписано</span>':c.agreementSigned==='Нет — ждёт подписи'?' <span style="color:var(--red)">⚠ не подписано</span>':''}</span></div>`:''}
       ${c.actSigned&&c.actSigned!=='Не требуется'?`<div class="detail-row"><span class="k">Акт услуг</span><span class="v">${c.actSigned==='Подписан'?'<span style="color:var(--sig-green)">✓ подписан</span>':'<span style="color:var(--sig-amber)">не подписан</span>'}</span></div>`:''}
-      <div class="detail-row"><span class="k">Суд</span><span class="v">${esc(c.court||'—')}</span></div>
+      <div class="detail-row"><span class="k">Суд</span><span class="v">${esc(c.court||'—')}${courtInfoLine(c.court,c.courtAddress,'case',c.id)}</span></div>
       ${c.agency?`<div class="detail-row"><span class="k">Правоохр. орган</span><span class="v">${esc(c.agency)}</span></div>`:''}
       ${c.judge?`<div class="detail-row"><span class="k">Судья</span><span class="v">${esc(c.judge)}</span></div>`:''}
       ${secretaryLine(c.secretary,c.secretaryPhone,c.cabinet,c.id)?`<div class="detail-row"><span class="k">Секретарь</span><span class="v">${secretaryLine(c.secretary,c.secretaryPhone,c.cabinet,c.id)}</span></div>`:''}
-      ${(c.courtApp||c.courtNoApp||c.judgeApp||c.secretaryApp)?`<div class="detail-row"><span class="k">Апелляция</span><span class="v">${esc(c.courtApp||'')}${c.courtNoApp?(c.courtApp?' · ':'')+'№ '+esc(c.courtNoApp):''}${c.judgeApp?' · судья '+esc(c.judgeApp):''}${secretaryLine(c.secretaryApp,c.secretaryPhoneApp,c.cabinetApp,c.id)?'<br>секретарь: '+secretaryLine(c.secretaryApp,c.secretaryPhoneApp,c.cabinetApp,c.id):''}</span></div>`:''}
-      ${(c.courtCass||c.courtNoCass||c.judgeCass||c.secretaryCass)?`<div class="detail-row"><span class="k">Кассация</span><span class="v">${esc(c.courtCass||'')}${c.courtNoCass?(c.courtCass?' · ':'')+'№ '+esc(c.courtNoCass):''}${c.judgeCass?' · судья '+esc(c.judgeCass):''}${secretaryLine(c.secretaryCass,c.secretaryPhoneCass,c.cabinetCass,c.id)?'<br>секретарь: '+secretaryLine(c.secretaryCass,c.secretaryPhoneCass,c.cabinetCass,c.id):''}</span></div>`:''}
+      ${(c.courtApp||c.courtNoApp||c.judgeApp||c.secretaryApp)?`<div class="detail-row"><span class="k">Апелляция</span><span class="v">${esc(c.courtApp||'')}${c.courtNoApp?(c.courtApp?' · ':'')+'№ '+esc(c.courtNoApp):''}${c.judgeApp?' · судья '+esc(c.judgeApp):''}${secretaryLine(c.secretaryApp,c.secretaryPhoneApp,c.cabinetApp,c.id)?'<br>секретарь: '+secretaryLine(c.secretaryApp,c.secretaryPhoneApp,c.cabinetApp,c.id):''}${courtInfoLine(c.courtApp,c.courtAddressApp,'case',c.id)}</span></div>`:''}
+      ${(c.courtCass||c.courtNoCass||c.judgeCass||c.secretaryCass)?`<div class="detail-row"><span class="k">Кассация</span><span class="v">${esc(c.courtCass||'')}${c.courtNoCass?(c.courtCass?' · ':'')+'№ '+esc(c.courtNoCass):''}${c.judgeCass?' · судья '+esc(c.judgeCass):''}${secretaryLine(c.secretaryCass,c.secretaryPhoneCass,c.cabinetCass,c.id)?'<br>секретарь: '+secretaryLine(c.secretaryCass,c.secretaryPhoneCass,c.cabinetCass,c.id):''}${courtInfoLine(c.courtCass,c.courtAddressCass,'case',c.id)}</span></div>`:''}
       ${c.official?`<div class="detail-row"><span class="k">Должностное лицо</span><span class="v">${esc(c.official)}</span></div>`:''}
       <div class="detail-row"><span class="k">Юрист</span><span class="v">${esc(c.lawyer||'—')}</span></div>
       <div class="detail-row"><span class="k">Дата рег.</span><span class="v">${fmtDate(c.regdate)}</span></div>
@@ -10478,7 +10557,8 @@ async function removeExpense(id, caseId) {
 // редактирование перед выводом, печать и скачивание в Word
 // ════════════════════════════════════════════════════════════
 function docHeaderHTML(c, cl) {
-  return `<p style="text-align:right">В ${esc(c.court||'__________ суд')}<br>
+  const ca = courtAddrOf(c.court, c.courtAddress); // v209
+  return `<p style="text-align:right">В ${esc(c.court||'__________ суд')}<br>${ca?esc(ca)+'<br>':''}
 ${c.courtNo?'Дело № '+esc(c.courtNo)+'<br>':''}
 от: ${esc(c.client||'____________')}${cl&&cl.addr?',<br>адрес: '+esc(cl.addr):''}${cl&&cl.inn?',<br>ИНН: '+esc(cl.inn):''}${cl&&cl.phone?',<br>тел.: '+esc(cl.phone):''}<br>
 ${c.lawyer?'представитель: '+esc(c.lawyer):''}</p>`;
@@ -10552,7 +10632,7 @@ async function buildDocument(tpl, c) {
     ${sign}`;
 
   if (tpl==='cover') return `
-    <p style="text-align:right">В ${esc(c.court||'____________')}<br>${c.courtNo?'Дело № '+esc(c.courtNo):''}</p>
+    <p style="text-align:right">В ${esc(c.court||'____________')}<br>${(()=>{const ca=courtAddrOf(c.court,c.courtAddress);return ca?esc(ca)+'<br>':'';})()}${c.courtNo?'Дело № '+esc(c.courtNo):''}</p>
     <h2 style="text-align:center">СОПРОВОДИТЕЛЬНОЕ ПИСЬМО</h2>
     <p>Направляю в Ваш адрес следующие документы по делу ${c.courtNo?'№ '+esc(c.courtNo):'№ ____'}:</p>
     <p>1. <i>[документ]</i> — на ___ л. в 1 экз.;<br>2. <i>[документ]</i> — на ___ л. в 1 экз.</p>
@@ -10617,6 +10697,7 @@ async function buildPlaceholders(c) {
     'НомерДела': c.number||'', 'НомерВСуде': c.courtNo||'', 'УИД': c.caseUid||'',
     'ВидДела': c.kind||'', 'Категория': c.category||'', 'СтатусДела': c.status||'',
     'Суд': c.court||'', 'Судья': c.judge||'',
+    'АдресСуда': courtAddrOf(c.court, c.courtAddress), 'ТелефонСуда': (courtInfoGet(c.court)||{}).phone||'', // v209
     'НомерИП': c.fsspNo||'', 'ОСП': c.ipOsp||'', 'Пристав': c.ipBailiff||'', 'ИсполнительныйДокумент': ipDocLine(c), 'ДатаВозбужденияИП': c.ipStartDate?fmtDate(c.ipStartDate):'', // v204
     'ПравоохранительныйОрган': c.agency||'', 'ДолжностноеЛицо': c.official||'',
     'ДатаРегистрации': c.regdate?fmtDate(c.regdate):'',
@@ -10637,7 +10718,7 @@ function applyPlaceholders(text, P) {
     return (k in P) ? esc(P[k]) : m; // незнакомые плейсхолдеры оставляем как есть
   });
 }
-const PLACEHOLDER_LIST = ['Доверитель','ТипУчастника','РольДоверителя','ДатаРождения','МестоРождения','Паспорт','ПаспортВыдан','АдресДоверителя','Индекс','ИНН','ТелефонДоверителя','EmailДоверителя','НомерДела','НомерВСуде','УИД','ВидДела','Категория','СтатусДела','Суд','Судья','НомерИП','ОСП','Пристав','ИсполнительныйДокумент','ДатаВозбужденияИП','Госпошлина','ПравоохранительныйОрган','ДолжностноеЛицо','ДатаРегистрации','Юрист','Представитель','Оппонент','АдресОппонента','СоглашениеНомер','СоглашениеДата','СуммаИска','СудебныеРасходы','Город','Дата','ДатаПрописью','Год'];
+const PLACEHOLDER_LIST = ['Доверитель','ТипУчастника','РольДоверителя','ДатаРождения','МестоРождения','Паспорт','ПаспортВыдан','АдресДоверителя','Индекс','ИНН','ТелефонДоверителя','EmailДоверителя','НомерДела','НомерВСуде','УИД','ВидДела','Категория','СтатусДела','Суд','АдресСуда','ТелефонСуда','Судья','НомерИП','ОСП','Пристав','ИсполнительныйДокумент','ДатаВозбужденияИП','Госпошлина','ПравоохранительныйОрган','ДолжностноеЛицо','ДатаРегистрации','Юрист','Представитель','Оппонент','АдресОппонента','СоглашениеНомер','СоглашениеДата','СуммаИска','СудебныеРасходы','Город','Дата','ДатаПрописью','Год'];
 
 async function openDocsSheet(caseId) {
   const c = (await getAll('cases')).find(x=>x.id===caseId); if (!c) return;
@@ -10694,7 +10775,7 @@ async function openTemplateForm(caseId, tplId) {
     <div class="field"><label>Доступные поля (тап — вставить)</label>
       <div class="meta" style="margin:2px 0 6px">Дело и суд:</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${['НомерДела','НомерВСуде','УИД','ВидДела','Категория','СтатусДела','Суд','Судья','ПравоохранительныйОрган','ДолжностноеЛицо','ДатаРегистрации','СуммаИска','СоглашениеНомер','СоглашениеДата','Юрист','Представитель','Оппонент','АдресОппонента','СудебныеРасходы','НомерИП','ОСП','Пристав','ИсполнительныйДокумент','ДатаВозбужденияИП','Госпошлина'].map(p=>`<span onclick="tplInsert('${p}')" style="background:var(--surface-2);border:1px solid var(--border);color:var(--blue);border-radius:14px;padding:5px 10px;font-size:12px;cursor:pointer">${p}</span>`).join('')}
+        ${['НомерДела','НомерВСуде','УИД','ВидДела','Категория','СтатусДела','Суд','АдресСуда','ТелефонСуда','Судья','ПравоохранительныйОрган','ДолжностноеЛицо','ДатаРегистрации','СуммаИска','СоглашениеНомер','СоглашениеДата','Юрист','Представитель','Оппонент','АдресОппонента','СудебныеРасходы','НомерИП','ОСП','Пристав','ИсполнительныйДокумент','ДатаВозбужденияИП','Госпошлина'].map(p=>`<span onclick="tplInsert('${p}')" style="background:var(--surface-2);border:1px solid var(--border);color:var(--blue);border-radius:14px;padding:5px 10px;font-size:12px;cursor:pointer">${p}</span>`).join('')}
       </div>
       <div class="meta" style="margin:10px 0 6px">Доверитель / участник:</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
