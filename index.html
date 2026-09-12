@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v228</title>
+<title>CRM Адвоката v231</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,10 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '228'; // v228: папка обмена с Claude Cowork (запрос → SKILL.md → ответ), обезличивание туда и обратно; сроки и участники в плане импорта; «извлечь факты» → план; имена восстанавливаются в ответах ИИ
+const APP_VER = '231'; // v231: предупреждение о занятости — прямо в форме, со всеми конфликтами и реквизитами (дело, доверитель, суд, судья), с переходом к мешающему событию
+// v230 → // v230: занятость времени — заседания и встречи проверяются друг против друга; слот по умолчанию 30 минут; длительность встречи
+// v229 → // v229: контроль сроков — «Сделано» и «Перенести» для следующего действия прямо с обзора
+// v228 → // v228: папка обмена с Claude Cowork (запрос → SKILL.md → ответ), обезличивание туда и обратно; сроки и участники в плане импорта; «извлечь факты» → план; имена восстанавливаются в ответах ИИ
 // v227 → // v227: центр документов — честные подсказки о поиске и размере, предупреждение о файле >8 МБ до сохранения, кнопка OCR только при поддержке
 // v226 → // v226: процессы — четыре предметных шаблона (ЗПП, ДТП/ОСАГО, залив, долг) с календарными сроками закона; шаги «к» — календарные дни
 // v225 → // v225: «Корреспонденция» — реестр писем слит с трекингом Почты России в одном сторе mail; старый стор correspondence переносится
@@ -6703,6 +6706,7 @@ async function openMeetingForm(id) {
     <div class="row2">
       <div class="field"><label>Дата <span class="req">*</span></label><input id="mt-date" type="date" value="${esc(m.date || todayISO())}"></div>
       <div class="field"><label>Время</label><input id="mt-time" type="time" value="${esc(m.time || '')}"></div>
+      <div class="field"><label>Длительность, мин.</label><input id="mt-duration" type="number" inputmode="numeric" min="5" step="5" value="${esc(m.duration || SLOT_MIN)}"></div>
     </div>
     <div class="field"><label>С кем <span class="req">*</span></label><input id="mt-with" value="${esc(m.with || '')}" placeholder="доверитель, оппонент, следователь…"></div>
     <div class="field"><label>Место</label><input id="mt-place" value="${esc(m.place || '')}" placeholder="офис, суд, СИЗО, кафе «…»"></div>
@@ -6719,10 +6723,16 @@ async function saveMeeting(id) {
   if (!date) { toast('Укажите дату встречи', true); return; }
   if (!withWho) { toast('Укажите, с кем встреча', true); return; }
   if (!id && !(await demoAllow('meetings'))) return;
-  const prev = id ? (await getAll('meetings')).find(x => x.id === id) || {} : {};
+  const allM = await getAll('meetings');
+  const prev = id ? allM.find(x => x.id === id) || {} : {};
+  { // v230/v231: занятость времени — карточка в форме
+    const item = { id, date, time: document.getElementById('mt-time').value || '', duration: Number(document.getElementById('mt-duration')?.value) || SLOT_MIN };
+    if (await busyWarn('meeting', item, busyClashAll('meeting', item, await getAll('hearings'), allM))) return;
+  }
   const obj = Object.assign({}, prev, {
     id: id || uid('В'),
     date, time: document.getElementById('mt-time').value || '',
+    duration: Number(document.getElementById('mt-duration')?.value) || SLOT_MIN,
     with: withWho,
     place: (document.getElementById('mt-place').value || '').trim(),
     caseNum: document.getElementById('mt-case').value || '',
@@ -7362,9 +7372,9 @@ async function saveHearing(id) {
   if (!id && !(await demoAllow('hearings'))) return;
   const allH = await getAll('hearings');
   const prev = id ? allH.find(x => x.id === id) : null;
-  { // v220: накладка с другим заседанием того же дня
-    const clash = hearingClash({ id, date, time: document.getElementById('f-time').value, court: document.getElementById('f-court').value }, allH);
-    if (clash && !confirm(`Возможная накладка: ${clash}\n\nВсё равно сохранить?`)) return;
+  { // v220/v231: занятость — карточка в форме с реквизитами мешающих событий; второе нажатие сохраняет
+    const item = { id, date, time: document.getElementById('f-time').value, court: document.getElementById('f-court').value };
+    if (await busyWarn('hearing', item, busyClashAll('hearing', item, allH, await getAll('meetings')))) return;
   }
   const obj = Object.assign({}, prev || {}, {
     id: id || uid('С'),
@@ -10719,20 +10729,59 @@ function actLabel(kind, act) {
 const cap1 = t => t.charAt(0).toUpperCase() + t.slice(1);
 // v220: накладка заседаний. Возвращает текст предупреждения или '' . В одном суде — зазор 60 минут;
 // в разных — сумма «времени в пути» до каждого из реквизитов судов (по умолчанию 60 минут на суд). Заседание без времени — не проверяется.
-function hearingClash(h, all) {
+// v230: занятость времени. Слот заседания и встречи — 30 минут (SLOT_MIN), у встречи может быть своя длительность.
+// Заседание ↔ заседание: один суд — 30 мин, разные — сумма «времени в пути» до судов (реквизиты, по умолчанию 60);
+// заседание ↔ встреча: 30 мин + время в пути до суда; встреча ↔ встреча: большая из длительностей. Возвращает текст или ''.
+const SLOT_MIN = 30;
+function busyClash(kind, item, hearings, meetings, found) {
+  found = found || [];
   const toMin = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? +m[1] * 60 + +m[2] : null; };
-  const t0 = toMin(h.time); if (t0 === null || !h.date) return '';
+  const t0 = toMin(item.time); if (t0 === null || !item.date) return '';
   const travel = name => { const i = courtInfoGet(name); const v = i && Number(i.travel); return v > 0 ? v : 60; };
-  for (const o of all) {
-    if (o.id === h.id || o.date !== h.date || o.status === 'Отменено' || o.status === 'Проведено') continue;
-    const t1 = toMin(o.time); if (t1 === null) continue;
-    const gap = Math.abs(t1 - t0);
-    const same = (o.court || '') === (h.court || '');
-    const need = same ? 60 : travel(h.court) + travel(o.court);
-    if (gap < need) return `${fmtDate(o.date)} ${o.time} — ${o.caseNum || 'заседание'}${o.court ? ' (' + o.court + ')' : ''}: между заседаниями ${gap} мин, ${same ? 'в одном суде нужно не менее 60' : 'на дорогу нужно ' + need}`;
+  const dur = m => Number(m && m.duration) > 0 ? Number(m.duration) : SLOT_MIN;
+  const rows = [];
+  (hearings || []).forEach(o => { if (o.id !== item.id && o.date === item.date && o.status !== 'Отменено' && o.status !== 'Проведено') rows.push({ kind: 'hearing', o }); });
+  (meetings || []).forEach(o => { if (o.id !== item.id && o.date === item.date) rows.push({ kind: 'meeting', o }); });
+  for (const r of rows) {
+    const t1 = toMin(r.o.time); if (t1 === null) continue;
+    const gap = Math.abs(t1 - t0); let need, why;
+    if (kind === 'hearing' && r.kind === 'hearing') { const same = (r.o.court || '') === (item.court || ''); need = same ? SLOT_MIN : travel(item.court) + travel(r.o.court); why = same ? 'в одном суде нужно не менее ' + SLOT_MIN : 'на дорогу между судами нужно ' + need; }
+    else if (kind === 'meeting' && r.kind === 'meeting') { need = Math.max(dur(item), dur(r.o)); why = 'встречи занимают ' + need; }
+    else { const court = kind === 'hearing' ? item.court : r.o.court; need = SLOT_MIN + travel(court); why = 'встреча и дорога до суда — ' + need; }
+    if (gap < need) {
+      const label = r.kind === 'hearing' ? `заседание ${r.o.caseNum || ''}${r.o.court ? ' (' + r.o.court + ')' : ''}` : `встреча с ${r.o.with || '—'}${r.o.place ? ' (' + r.o.place + ')' : ''}`;
+      found.push({ kind: r.kind, o: r.o, gap, need, why, text: `${fmtDate(r.o.date)} ${r.o.time} — ${label.trim()}: между событиями ${gap} мин, ${why}` });
+    }
   }
-  return '';
+  return found.length ? found[0].text : '';
 }
+// v231: все конфликты списком — для карточки-предупреждения в форме
+function busyClashAll(kind, item, hearings, meetings) { const found = []; busyClash(kind, item, hearings, meetings, found); return found; }
+// Предупреждение внутри формы (лист один, второй открыть нельзя): что занято, кем, реквизиты для решения о приоритете,
+// кнопка перехода к мешающему событию. Возвращает true, если сохранение нужно остановить (первый показ).
+let _busyAckKey = '';
+async function busyWarn(kind, item, conflicts) {
+  const key = kind + '|' + item.id + '|' + item.date + '|' + item.time;
+  if (!conflicts.length) { _busyAckKey = ''; document.getElementById('busy-warn')?.remove(); return false; }
+  if (_busyAckKey === key) { _busyAckKey = ''; return false; } // уже показано для этого времени — сохраняем
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  const rows = conflicts.map(c => {
+    if (c.kind === 'hearing') {
+      const o = c.o, cs = (typeof CASES_BY_NUM !== 'undefined' && o.caseNum) ? CASES_BY_NUM[o.caseNum] : null;
+      const client = cs ? cs.client : (typeof clientByCase === 'function' ? clientByCase(o.caseNum) : '');
+      return `<div style="padding:6px 0;border-top:1px solid var(--border)"><b>${esc(o.time)} · заседание ${esc(o.caseNum || '')}</b>${client ? ' · ' + esc(client) : ''}<div class="meta">${esc(o.court || 'суд не указан')}${o.judge ? ' · судья ' + esc(o.judge) : ''}${o.room ? ' · зал ' + esc(o.room) : ''}${cs && cs.stage ? ' · ' + esc(cs.stage) : ''}${cs && cs.category ? ' · ' + esc(cs.category) : ''}</div><div class="meta">между событиями ${c.gap} мин — ${esc(c.why)}</div><button type="button" class="v-mini-btn" style="margin-top:4px" onclick="viewHearing('${jsq(o.id)}')">Открыть то заседание</button></div>`;
+    }
+    const o = c.o;
+    return `<div style="padding:6px 0;border-top:1px solid var(--border)"><b>${esc(o.time)} · встреча с ${esc(o.with || '—')}</b>${o.caseNum ? ' · ' + esc(o.caseNum) : ''}<div class="meta">${o.place ? esc(o.place) + ' · ' : ''}${Number(o.duration) || SLOT_MIN} мин${o.note ? ' · ' + esc(String(o.note).slice(0, 80)) : ''}</div><div class="meta">между событиями ${c.gap} мин — ${esc(c.why)}</div>${typeof openMeetingForm === 'function' ? `<button type="button" class="v-mini-btn" style="margin-top:4px" onclick="openMeetingForm('${jsq(o.id)}')">Открыть ту встречу</button>` : ''}</div>`;
+  }).join('');
+  const html = `<div id="busy-warn" class="card" style="border-left:3px solid var(--orange);margin:0 0 10px"><div style="font-weight:700">⚠ Время занято — ${conflicts.length} ${plural(conflicts.length, 'событие', 'события', 'событий')} ${fmtDate(item.date)}</div><div class="meta" style="margin-bottom:4px">Решите, что приоритетнее: измените время здесь или откройте мешающее событие и перенесите его.</div>${rows}</div>`;
+  document.getElementById('busy-warn')?.remove();
+  const btn = document.querySelector('#sheetContent .btn-primary');
+  if (btn) { btn.insertAdjacentHTML('beforebegin', html); btn.textContent = 'Сохранить несмотря на занятость'; document.getElementById('busy-warn')?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+  _busyAckKey = key;
+  return true;
+}
+function hearingClash(h, all, meetings) { return busyClash('hearing', h, all, meetings || []); } // совместимость с v220
 // v217: дело рассмотрено мировым судьёй — по названию суда первой инстанции
 const isMagistrateCourt = name => /миров|судебн[а-яё]*\s+участ/i.test(String(name || '')); // \w не покрывает кириллицу
 // Сроки по акту: kind — вид дела, act — decision/appeal/cass, base — ISO-дата акта (для решения: дата мотивированного решения, если есть),
@@ -14315,7 +14364,8 @@ async function crmRenderDeadlineControl() {
     const ackBtn = r.st === 'alarm'
       ? `<button class="v-mini-btn" onclick="event.stopPropagation();${r.kind === 'dl' ? `crmDlAck('${jsq(r.c.id)}',${r.idx},${r.tier})` : `crmNextAck('${jsq(r.c.id)}',${r.tier})`}">✋ Подтверждаю</button>`
       : `<span class="meta" style="color:var(--green)">✓ подтверждён</span>`;
-    const doneBtn = r.kind === 'dl' ? `<button class="v-mini-btn" onclick="event.stopPropagation();crmDlDone('${jsq(r.c.id)}',${r.idx})">Исполнен</button>` : '';
+    const doneBtn = r.kind === 'dl' ? `<button class="v-mini-btn" onclick="event.stopPropagation();crmDlDone('${jsq(r.c.id)}',${r.idx})">Исполнен</button>`
+      : `<button class="v-mini-btn" onclick="event.stopPropagation();crmNextDone('${jsq(r.c.id)}')">✓ Сделано</button><button class="v-mini-btn" onclick="event.stopPropagation();crmNextMove('${jsq(r.c.id)}')">📅 Перенести</button>`; // v229
     return `<div class="card" style="cursor:pointer;border-left:3px solid ${color};margin:${i ? '6px' : '2px'} 0 0" onclick="viewCase('${jsq(r.c.id)}')">
       <div class="row1"><div style="flex:1;min-width:0">
         <div class="meta" style="font-weight:700;${r.st === 'ack' ? 'color:var(--text-faint)' : ''}">${mark(r.tier)} ${esc(r.title)} — ${when(r.d)}</div>
@@ -14356,6 +14406,33 @@ async function crmNextAck(caseId, tier) {
   await put('cases', c);
   toast('Срок подтверждён — под контролем');
   renderDashboard();
+}
+// v229: следующее действие — закрыть или перенести с обзора, без захода в дело
+async function crmNextDone(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c || !c.nextAction) return;
+  const prev = c.nextAction;
+  addCaseHistoryEvent(c, 'nextAction', prev, '', 'dashboard');
+  c.nextAction = ''; c.nextActionDue = ''; c.nextAckTier = 0; c.nextAckDate = '';
+  await put('cases', c);
+  await crmCaseLogByNum(c.number, 'nextAction', 'Следующее действие выполнено: ' + String(prev).slice(0, 120));
+  toast('Следующее действие закрыто · ' + c.number);
+  renderDashboard(); if (typeof renderCases === 'function') renderCases();
+}
+async function crmNextMove(caseId) {
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c || !c.nextAction) return;
+  const cur = c.nextActionDue || todayISO();
+  const raw = window.prompt('Новая дата для «' + String(c.nextAction).slice(0, 80) + '» (ДД.ММ.ГГГГ):', fmtDate(addDaysLocalISO(cur < todayISO() ? todayISO() : cur, 1)));
+  if (raw === null) return;
+  const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(String(raw).trim());
+  const iso = m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : (/^\d{4}-\d{2}-\d{2}$/.test(String(raw).trim()) ? String(raw).trim() : '');
+  if (!iso || !parseLocalDate(iso) || isNaN(parseLocalDate(iso))) { toast('Дата не распознана — формат ДД.ММ.ГГГГ', true); return; }
+  const prevDue = c.nextActionDue || '';
+  c.nextActionDue = iso; c.nextAckTier = 0; c.nextAckDate = ''; // новый срок — новое подтверждение
+  addCaseHistoryEvent(c, 'nextActionDue', prevDue, iso, 'dashboard');
+  await put('cases', c);
+  await crmCaseLogByNum(c.number, 'nextAction', 'Следующее действие перенесено на ' + fmtDate(iso) + ': ' + String(c.nextAction).slice(0, 100));
+  toast('Перенесено на ' + fmtDate(iso));
+  renderDashboard(); if (typeof renderCases === 'function') renderCases();
 }
 async function crmDlDone(caseId, idx) {
   const c = (await getAll('cases')).find(x => x.id === caseId); if (!c || !c.deadlines || !c.deadlines[idx]) return;
