@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v231</title>
+<title>CRM Адвоката v233</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '231'; // v231: предупреждение о занятости — прямо в форме, со всеми конфликтами и реквизитами (дело, доверитель, суд, судья), с переходом к мешающему событию
+const APP_VER = '233'; // v233: данные суда применяются автоматически — заседания создаются/переносятся/дополняются, даты актов записываются, если в деле пусто; всё в журнале дела; выключается в Мониторинге
+// v232 → // v232: даты актов из «Движения дела» (коллектор v3.4, raw.act) → предложение записать в дело и рассчитать сроки; автоотправка списка дел облачному коллектору
+// v231 → // v231: предупреждение о занятости — прямо в форме, со всеми конфликтами и реквизитами (дело, доверитель, суд, судья), с переходом к мешающему событию
 // v230 → // v230: занятость времени — заседания и встречи проверяются друг против друга; слот по умолчанию 30 минут; длительность встречи
 // v229 → // v229: контроль сроков — «Сделано» и «Перенести» для следующего действия прямо с обзора
 // v228 → // v228: папка обмена с Claude Cowork (запрос → SKILL.md → ответ), обезличивание туда и обратно; сроки и участники в плане импорта; «извлечь факты» → план; имена восстанавливаются в ответах ИИ
@@ -4018,7 +4020,7 @@ async function collectAll() {
 }
 
 // ── Синхронизация пользовательских настроек ──
-const SYNC_SETTINGS_KEYS = ['crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
+const SYNC_SETTINGS_KEYS = ['crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
 
 // Секреты переносятся только внутри зашифрованного контейнера .crm. PIN
 // хранится и переносится как PBKDF2-хэш с солью, а не как исходные цифры.
@@ -6513,7 +6515,7 @@ async function caseJournal(c) {
   return out.sort((a, b) => a.at - b.at);
 }
 function crmJournalTitle(j) {
-  const F = { status:'Статус', stage:'Стадия', court:'Суд', judge:'Судья', number:'Номер дела', client:'Доверитель', decisionDate:'Дата решения', crimVerdictDate:'Дата приговора', koapDate:'Дата постановления', ipReceipt:'Поступление по ИП',
+  const F = { status:'Статус', stage:'Стадия', court:'Суд', judge:'Судья', number:'Номер дела', client:'Доверитель', decisionDate:'Дата решения', crimVerdictDate:'Дата приговора', koapDate:'Дата постановления', ipReceipt:'Поступление по ИП', i1DecisionDate:'Дата решения', i1DecisionFullDate:'Мотивированное решение', apDecisionDate:'Апелляционное определение', csDecisionDate:'Кассационное определение',
     kind:'Вид дела', monitor:'Мониторинг', doc:'Документ', finance:'Финансы', hearing:'Заседание',
     deadline:'Срок', task:'Задача', note:'Заметка', ipStatus:'Исполнительное производство', stateFee:'Госпошлина, ₽' };
   const f = F[j.field] || j.field || 'Запись';
@@ -6537,6 +6539,7 @@ async function commitCaseSave(obj, prev, editingId) {
   await stageSuggestDeadline(obj, prev?.stage);
   await crmWorkflowStageTriggers(obj, prev?.stage);
   await maybeCreateOrderForCase(editingId, obj.number);
+  crmCollectorAutoSend(obj); // v232
   closeSheet(); toast(actMsgs.length ? 'Дело сохранено. ' + actMsgs.join(' | ') + ' — сроки в карточке дела, проверьте и подтвердите' : 'Дело сохранено'); renderCases(); renderDashboard(); navBadgeRefresh();
   if (!editingId) setTimeout(() => crmNewCaseBundle(obj.id), 150);
 }
@@ -14876,8 +14879,65 @@ async function mailMigrateCorrespondence() {
   return moved;
 }
 function openCorrespondenceCenter() { closeSheet(); nav('mail'); } // совместимость: плитки и справка ведут на экран
+// ═══════ v232: ДАТЫ АКТОВ ИЗ «ДВИЖЕНИЯ ДЕЛА» ═══════
+// Коллектор v3.4 помечает строки движения raw.act: decision / fullDecision / appeal / cass / inForce.
+// CRM предлагает записать дату в поле дела (и посчитать сроки v210), но сама ничего не меняет.
+const FLOW_ACT_FIELD = { decision: ['i1DecisionDate', 'Дата решения'], fullDecision: ['i1DecisionFullDate', 'Мотивированное решение изготовлено'], appeal: ['apDecisionDate', 'Дата апелляционного определения'], cass: ['csDecisionDate', 'Дата кассационного определения'] };
+function flowActFieldFor(c, act) { // для уголовного и КоАП решение — свои поля
+  if (act === 'decision' && c.kind === 'Уголовное') return ['crimVerdictDate', 'Дата приговора'];
+  if (act === 'decision' && c.kind === 'КоАП') return ['koapDate', 'Дата постановления'];
+  return FLOW_ACT_FIELD[act] || null;
+}
+// предложения: события движения с raw.act, сматченные с делом, у которого поле пусто или отличается; отклонённые (actSkip) не показываются
+function crmFlowActOffers(cases, events) {
+  const out = [];
+  for (const e of events || []) {
+    if (e._deleted || e.eventType !== 'caseflow' || e.actSkip || e.actApplied) continue;
+    let act = ''; try { act = String(JSON.parse(e.raw || '{}').act || ''); } catch (x) {}
+    if (!act || act === 'inForce') continue;
+    const c = (cases || []).find(x => !x.archived && crmFlowMatches(x, e)); if (!c) continue;
+    const f = flowActFieldFor(c, act); if (!f) continue;
+    if (c[f[0]] === e.date) continue;
+    out.push({ e, c, act, field: f[0], label: f[1], current: c[f[0]] || '' });
+  }
+  return out;
+}
+async function crmFlowActRender() {
+  const host = document.getElementById('v232-act-offers') || (() => { const a = document.createElement('div'); a.id = 'v232-act-offers'; document.getElementById('v163-cor-alerts')?.insertAdjacentElement('afterend', a); return a; })();
+  if (!host) return;
+  const offers = crmFlowActOffers(await getAll('cases'), await getAll('monitorEvents'));
+  host.innerHTML = offers.length ? `<div class="card" style="border-left:3px solid var(--accent);margin-top:10px"><div class="title">⚖️ Суд сообщил даты актов — записать в дело?</div>${offers.slice(0, 6).map(o => `<div style="padding:6px 0;border-top:1px solid var(--border)"><div style="font-size:13.5px"><b>${esc(o.c.number)}</b> · ${esc(o.label)}: <b>${fmtDate(o.e.date)}</b>${o.current ? ` <span class="meta">(в деле ${fmtDate(o.current)})</span>` : ''}</div><div class="meta">${esc(o.e.title)}${crmFlowParts(o.e).res ? ' → ' + esc(crmFlowParts(o.e).res) : ''}</div><div style="display:flex;gap:6px;margin-top:4px"><button class="v-mini-btn" onclick="crmFlowActApply('${jsq(o.e.id)}')">✓ Записать и рассчитать сроки</button><button class="v-mini-btn" onclick="crmFlowActSkip('${jsq(o.e.id)}')">Не применять</button></div></div>`).join('')}${offers.length > 6 ? `<div class="meta" style="margin-top:4px">и ещё ${offers.length - 6}</div>` : ''}</div>` : '';
+}
+async function crmFlowActApply(eventId) {
+  const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
+  const cases = await getAll('cases');
+  const o = crmFlowActOffers(cases, [e])[0]; if (!o) { toast('Предложение устарело', true); crmFlowActRender(); return; }
+  const c = cases.find(x => x.id === o.c.id), prev = JSON.parse(JSON.stringify(c));
+  c[o.field] = e.date;
+  addCaseHistoryEvent(c, o.field, prev[o.field] || '', e.date, 'monitor');
+  const msgs = caseActDeadlinesApply(c, prev);
+  if (msgs.length) addCaseHistoryEvent(c, 'deadline', '', msgs.join(' | '), 'monitor');
+  await put('cases', c);
+  e.actApplied = Date.now(); await put('monitorEvents', e);
+  toast(`${o.label}: ${fmtDate(e.date)} записана в ${c.number}${msgs.length ? '. ' + msgs.join(' | ') + ' — проверьте и подтвердите' : ''}`);
+  renderDashboard(); renderCases(); navBadgeRefresh();
+}
+async function crmFlowActSkip(eventId) {
+  const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
+  e.actSkip = Date.now(); await put('monitorEvents', e); crmFlowActRender();
+}
+// 2. Автоотправка списка дел облачному коллектору после сохранения дела со ссылкой (если функция настроена); с задержкой, чтобы не слать на каждое нажатие
+let _collectorAutoTimer = null;
+function crmCollectorAutoSend(obj) {
+  const cfg = crmCollectorSrvCfg(); if (!cfg.url || !cfg.secret) return;
+  if (!(obj && (obj.link || obj.linkApp || obj.linkCass))) return;
+  clearTimeout(_collectorAutoTimer);
+  _collectorAutoTimer = setTimeout(async () => {
+    try { const pack = await crmCollectorPack(); if (!pack) return; const r = await crmCollectorCall({ action: 'linksput', links: pack }, 20000); if (r && r.j && r.j.ok) toast(`Список дел для коллектора обновлён: ${r.j.cases}`); } catch (e) {}
+  }, 4000);
+}
 async function crmCorRenderDashboard(){const host=document.getElementById('v163-cor-alerts')||(()=>{const a=document.createElement('div');a.id='v163-cor-alerts';document.getElementById('v161-next-actions')?.insertAdjacentElement('afterend',a);return a;})();if(!host)return;const rows=(await getAll('mail')).filter(x=>x.needsAction&&(!mailIsPostal(x)||true)&&(!x.responseDue||(daysUntil(x.responseDue)??99)<=30));host.innerHTML=rows.length?`<div class="card" onclick="nav('mail');setMailChip('action')" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin-top:10px"><div class="row1"><div><div class="title">✉ Корреспонденция требует внимания</div><div class="meta">${rows.length} ${plural(rows.length,'письмо','письма','писем')} ждут действия или ответа</div></div><span class="badge b-wait"><span class="dot"></span>${rows.length}</span></div></div>`:'';}
-CRM_UPGRADE.v162RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v162RenderDashboard();await crmCorRenderDashboard();return r;};
+CRM_UPGRADE.v162RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v162RenderDashboard();await crmCorRenderDashboard();await crmFlowActRender().catch(()=>{});return r;};
 
 
 // CRM Адвоката v164 — локальный центр документов, версии, теги и полнотекстовый поиск.
@@ -14959,7 +15019,75 @@ function crmMonField(o,names){for(const n of names){if(o?.[n]!==undefined&&o[n]!
 async function crmMonNormalizeRows(rows,source){
   const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const match=cases.find(c=>(caseUid&&crmMonNorm(c.caseUid)===crmMonNorm(caseUid))||(courtNo&&(crmMonNorm(c.courtNo)===crmMonNorm(courtNo)||crmMonNorm(c.number)===crmMonNorm(courtNo)||crmMonNorm(c.courtNoApp)===crmMonNorm(courtNo)||crmMonNorm(c.courtNoCass)===crmMonNorm(courtNo))));out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,raw:raw.raw||rawText,hash,caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:(type==='caseflow'&&match)?'flow':'new',receivedAt:Date.now()});}return out;
 }
-async function crmMonPersist(rows){const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.source+'|'+x.externalId,x])),added=[];let updated=0;for(const x of rows){if(hashes.has(x.hash))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.source+'|'+x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);added.push(x);}const okAny=added.length||updated;toast(okAny?`Добавлено событий: ${added.length}${updated?`, обновлено: ${updated}`:''}`:'Новых событий нет — дубликаты пропущены',!okAny);openMonitorCenter();renderDashboard();}
+async function crmMonPersist(rows){const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.source+'|'+x.externalId,x])),added=[];let updated=0;for(const x of rows){if(hashes.has(x.hash))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.source+'|'+x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);added.push(x);}const okAny=added.length||updated;toast(okAny?`Добавлено событий: ${added.length}${updated?`, обновлено: ${updated}`:''}`:'Новых событий нет — дубликаты пропущены',!okAny);if(okAny&&crmMonAutoOn()){try{await crmMonAutoApply(null);}catch(e){console.warn('auto-apply',e);}}openMonitorCenter();renderDashboard();}
+// ═══════ v233: АВТОПРИМЕНЕНИЕ ДАННЫХ СУДА ═══════
+// Правило: сведения с сайта суда приоритетнее ручных, но только там, где нет конфликта, который должен решать адвокат:
+//  • заседание на дату, которой в деле нет: если у дела ровно одно будущее заседание, не подтверждённое судом, — оно переносится; иначе создаётся новое;
+//  • заседание на дату, которая в деле есть: дополняются время, зал, судья, результат (если суд их сообщил);
+//  • дата акта из «Движения дела»: записывается, если поле в деле пусто (иначе остаётся предложение на обзоре).
+// Каждое действие — в историю и журнал дела, событие помечается applied/autoApplied.
+const crmMonAutoOn = () => localStorage.getItem('crm_mon_auto') !== '0';
+function crmMonHearingBits(e) {
+  const txt = String(e.title || '') + ' ' + String(e.raw || '');
+  const time = (txt.match(/(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?!\d)/) || []).slice(1).filter(Boolean).map((v, i) => i === 0 ? String(v).padStart(2, '0') : v).join(':');
+  const room = crmRoomFrom(txt) || (txt.match(/каб(?:инет)?\.?\s*№?\s*([0-9]{1,4}[А-Яа-я]?)/i) || [])[1] || '';
+  const res = (String(e.title || '').split(/\s—\s|:\s+/)[1] || '').replace(/^Каб\.?\s*№?\s*\d+\S*$/i, '').trim(); // «: » — результат прошедшего; «09:00» не делится (нет пробела после двоеточия)
+  return { time, room, result: res };
+}
+async function crmMonAutoApply(rows) {
+  const today = todayISO();
+  const all = await getAll('monitorEvents');
+  const cand = (rows || all).filter(e => !e._deleted && e.caseId && e.status !== 'applied' && e.status !== 'ignored' && !e.autoSkip);
+  if (!cand.length) return { hearings: 0, moved: 0, updated: 0, acts: 0 };
+  const cases = await getAll('cases'), hearings = await getAll('hearings');
+  const byCase = id => hearings.filter(h => h.caseId === id || (h.caseNum && cases.find(c => c.id === id)?.number === h.caseNum));
+  const courtDates = {}; all.forEach(e => { if (e.eventType === 'hearing' && e.caseId && e.date >= today) (courtDates[e.caseId] = courtDates[e.caseId] || new Set()).add(e.date); });
+  const n = { hearings: 0, moved: 0, updated: 0, acts: 0 };
+  const touchedCases = new Map();
+  const caseOf = id => { if (!touchedCases.has(id)) { const c = cases.find(x => x.id === id); if (c) touchedCases.set(id, c); } return touchedCases.get(id); };
+  for (const e of cand) {
+    const c = caseOf(e.caseId); if (!c || c.archived) continue;
+    if (e.eventType === 'hearing' && e.date) {
+      const b = crmMonHearingBits(e), list = byCase(c.id).filter(h => h.status !== 'Отменено');
+      let h = list.find(x => x.date === e.date), how = '';
+      if (h) {
+        const ch = [];
+        if (b.time && b.time !== h.time && h.status !== 'Проведено') { ch.push('время ' + (h.time || '—') + ' → ' + b.time); h.time = b.time; }
+        if (b.room && b.room !== h.room) { ch.push('зал ' + (h.room || '—') + ' → ' + b.room); h.room = b.room; }
+        if (e.judge && !h.judge) { ch.push('судья ' + e.judge); h.judge = e.judge; }
+        if (b.result && !h.result && e.date < today) { ch.push('результат: ' + b.result); h.result = b.result; if (h.status !== 'Проведено') h.status = 'Проведено'; }
+        if (!ch.length) { e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); e.autoApplied = true; await put('monitorEvents', e); continue; }
+        how = 'дополнено по данным суда: ' + ch.join(', '); n.updated++;
+      } else if (e.date >= today) {
+        const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date));
+        if (free.length === 1) { h = free[0]; how = `перенесено по данным суда: ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} → ${fmtDate(e.date)}${b.time ? ' ' + b.time : ''}`; h.date = e.date; if (b.time) h.time = b.time; if (b.room) h.room = b.room; if (e.judge) h.judge = e.judge; n.moved++; }
+        else { const sc = caseStageCourt(c); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; }
+      } else {
+        const sc = caseStageCourt(c); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', status: 'Проведено', result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'прошедшее заседание записано по данным суда'; n.hearings++;
+      }
+      h.monitorEventId = h.monitorEventId || e.id; h.courtSync = Date.now();
+      await put('hearings', h);
+      await crmCaseLogByNum(c.number, 'hearing_upd', `Заседание ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} — ${how}`);
+      e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); e.autoApplied = true; await put('monitorEvents', e);
+      if (typeof icsTouch === 'function') icsTouch();
+    } else if (e.eventType === 'caseflow') {
+      let act = ''; try { act = String(JSON.parse(e.raw || '{}').act || ''); } catch (x) {}
+      if (!act || act === 'inForce' || e.actApplied || e.actSkip) continue;
+      const f = flowActFieldFor(c, act); if (!f) continue;
+      if (c[f[0]]) continue; // уже заполнено другим значением — конфликт, остаётся предложение на обзоре
+      const prev = JSON.parse(JSON.stringify(c));
+      c[f[0]] = e.date; addCaseHistoryEvent(c, f[0], '', e.date, 'monitor');
+      const msgs = caseActDeadlinesApply(c, prev); if (msgs.length) addCaseHistoryEvent(c, 'deadline', '', msgs.join(' | '), 'monitor');
+      await put('cases', c); await crmCaseLogByNum(c.number, 'deadline', `${f[1]}: ${fmtDate(e.date)} — записано по данным суда${msgs.length ? '; ' + msgs.join(' | ') : ''}`);
+      e.actApplied = Date.now(); e.autoApplied = true; await put('monitorEvents', e); n.acts++;
+    }
+  }
+  const tot = n.hearings + n.moved + n.updated + n.acts;
+  if (tot) toast(`По данным суда: заседаний создано ${n.hearings}, перенесено ${n.moved}, дополнено ${n.updated}, дат актов ${n.acts} — подробности в журналах дел`);
+  if (typeof renderCalendar === 'function') renderCalendar(); if (typeof renderCases === 'function') renderCases(); navBadgeRefresh();
+  return n;
+}
+async function crmMonAutoApplyAll() { const n = await crmMonAutoApply(null); if (!(n.hearings + n.moved + n.updated + n.acts)) toast('Применять нечего: все совпавшие события уже учтены'); openMonitorCenter(); renderDashboard(); }
 async function importMonitorFile(input){const file=input?.files?.[0];if(!file)return;if(file.size>5*1024*1024){toast('Файл больше 5 МБ',true);return;}const rows=crmMonRows(await file.text(),file.name),norm=await crmMonNormalizeRows(rows,fval('v-mon-source')||'Импорт файла');await crmMonPersist(norm);input.value='';}
 async function importMonitorPaste(){const text=fval('v-mon-paste').trim();if(!text){toast('Вставьте текст уведомления',true);return;}await crmMonPersist(await crmMonNormalizeRows(crmMonRows(text,'notice.txt'),fval('v-mon-source')||'Ручной импорт'));}
 function crmMonDownloadTemplate(){const blob=new Blob(['externalId,title,date,eventType,courtNo,caseUid\n12345,Назначено заседание,2026-09-15,hearing,А40-12345/2026,'],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='monitor_events_template.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
@@ -14986,7 +15114,8 @@ async function openMonitorCenter(){
   const rows=(await getAll('monitorEvents')).sort((a,b)=>(b.receivedAt||0)-(a.receivedAt||0)),list=rows.filter(x=>!(x.eventType==='caseflow'&&x.status==='flow')&&(CRM_MON_FILTER==='all'||x.status===CRM_MON_FILTER));const newCount=rows.filter(x=>x.status==='new').length;
   showSheet(`<h3>Мониторинг событий</h3><div class="sheet-sub">${newCount} новых · источники подключаются через импорт или ваш HTTPS-адаптер.</div><div class="chips">${[['new','Новые'],['applied','Применённые'],['ignored','Не применены'],['all','Все']].map(([v,l])=>`<div class="chip ${CRM_MON_FILTER===v?'active':''}" onclick="crmMonSetFilter('${v}')">${l}</div>`).join('')}</div>
     <details open><summary>Получить события</summary><div class="v-adapter-grid"><div class="v-adapter"><b>Файл JSON / CSV / TXT</b><div class="meta">Экспорт уведомлений или таблица вашего поставщика</div><input type="file" accept=".json,.csv,.txt" onchange="importMonitorFile(this)" style="margin-top:8px"><button class="v-mini-btn" onclick="crmMonDownloadTemplate()">Шаблон CSV</button></div><div class="v-adapter"><b>Вставить уведомление</b><div class="meta">Письмо или текст из карточки суда</div><textarea id="v-mon-paste" rows="3" placeholder="Вставьте одно или несколько уведомлений"></textarea><button class="v-mini-btn" onclick="importMonitorPaste()">Разобрать</button></div></div><div class="field"><label>Название источника</label><input id="v-mon-source" value="Судебное уведомление"></div></details>
-    <details><summary>HTTPS-адаптер личного сервера</summary><div class="meta">Запрос выполняется только по кнопке. Ответ: JSON, CSV или текст.</div><div class="field"><label>URL</label><input id="v-mon-url" type="url" value="${esc(localStorage.getItem('crm_monitor_url')||'')}" placeholder="https://server.example/events"></div><div class="field"><label>Bearer-токен</label><input id="v-mon-token" type="password" value="${esc(localStorage.getItem('crm_monitor_token')||'')}" autocomplete="off"></div><button class="btn-primary" onclick="fetchMonitorEndpoint()">Получить сейчас</button></details>
+    <label style="display:flex;align-items:center;gap:10px;margin:6px 0 10px;font-size:14px;cursor:pointer"><input type="checkbox" id="v-mon-auto" ${crmMonAutoOn()?'checked':''} onchange="localStorage.setItem('crm_mon_auto',this.checked?'1':'0');bumpSettings?.();toast(this.checked?'Данные суда применяются автоматически':'Автоприменение выключено — события разбираются вручную')"> <span><b>Применять данные суда автоматически</b><span class="meta" style="display:block">Совпавшие с делом заседания создаются, переносятся и дополняются временем/залом/результатом; даты актов записываются в дело, если поле пусто. Каждое изменение — в журнале дела.</span></span></label><button class="v-mini-btn" style="margin-bottom:10px" onclick="crmMonAutoApplyAll()">⚡ Применить накопившиеся события сейчас</button><!-- v233 -->
+<details><summary>HTTPS-адаптер личного сервера</summary><div class="meta">Запрос выполняется только по кнопке. Ответ: JSON, CSV или текст.</div><div class="field"><label>URL</label><input id="v-mon-url" type="url" value="${esc(localStorage.getItem('crm_monitor_url')||'')}" placeholder="https://server.example/events"></div><div class="field"><label>Bearer-токен</label><input id="v-mon-token" type="password" value="${esc(localStorage.getItem('crm_monitor_token')||'')}" autocomplete="off"></div><button class="btn-primary" onclick="fetchMonitorEndpoint()">Получить сейчас</button></details>
     <details><summary>Коллектор судов — автосбор с сайтов</summary><div class="meta" style="line-height:1.55;margin:6px 0 8px">Скрипт на вашем компьютере раз в день обходит ссылки дел (СОЮ: *.sudrf.ru, мос-суды: mos-gorsud.ru / mos-sud.ru), извлекает назначенные заседания, результаты и публикации актов и присылает их сюда через ваш личный сервер. КАД Арбитр антиботом не пускает скрипты — арбитражные ссылки коллектор помечает «проверить вручную».<br><br><b>Настройка (один раз):</b> 1) скачайте список дел кнопкой ниже; 2) положите его в папку рядом с <b>collector-sud.mjs</b>; 3) заполните <b>collector-config.json</b> — адрес /bridge и секрет вашего сервера; 4) запускайте двойным щелчком по <b>коллектор.bat</b> или добавьте его в Планировщик Windows. Подробности — в файле «КОЛЛЕКТОР_СУДОВ_настройка».</div><button class="v-mini-btn" onclick="crmCollectorExport()">⬇ Скачать список дел (JSON)</button><div class="meta" style="margin-top:6px">В список попадают незавершённые дела, у которых заполнена хотя бы одна ссылка на сайт суда. ФИО доверителей в файл не выгружаются — только номера, УИД и ссылки. После изменения ссылок или появления новых дел скачайте список заново.</div></details>
     <details ontoggle="if(this.open)crmCollectorStatus(false)"><summary>Сбор в облаке — без компьютера</summary><div class="meta" style="line-height:1.55;margin:6px 0 8px">Функция в вашем Яндекс Облаке обходит суды по таймеру и присылает события сюда — компьютер не нужен. Развёртывание один раз по инструкции «КОЛЛЕКТОР_В_ОБЛАКЕ_настройка» (~20 минут в веб-консоли).</div><div class="field"><label>URL облачной функции</label><input id="col-srv-url" type="url" value="${esc(localStorage.getItem('crm_collector_url')||'')}" placeholder="https://functions.yandexcloud.net/…" autocomplete="off"></div><div class="field"><label>Секрет функции (SECRET)</label><input id="col-srv-secret" type="password" value="${esc(localStorage.getItem('crm_collector_secret')||'')}" autocomplete="off"></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="v-mini-btn" onclick="crmCollectorSrvSave()">💾 Сохранить</button><button class="v-mini-btn" onclick="crmCollectorSendLinks()">📤 Отправить список дел</button><button class="v-mini-btn" onclick="crmCollectorRunNow()">▶ Собрать сейчас</button><button class="v-mini-btn" onclick="crmCollectorStatus(true)">↻ Статус</button></div><div class="meta" id="col-srv-status" style="margin-top:8px">Серверный сбор: укажите URL и секрет функции.</div><div class="meta" style="margin-top:6px">На сервер уходят только номера дел, УИД и ссылки — без ФИО. Список отправляйте заново после изменения ссылок или новых дел.</div></details>
     ${list.length?list.map(e=>`<div class="card v-monitor-card ${e.caseId?'matched':''} ${e.status==='applied'?'applied':''}" onclick="reviewMonitorEvent('${jsq(e.id)}')" style="cursor:pointer"><div class="v-monitor-head"><div><div class="v-monitor-title">${esc(e.title)}</div><div class="v-monitor-meta">${esc(e.source)}${e.date?' · '+fmtDate(e.date):''}${e.courtNo?' · '+esc(e.courtNo):''}${e.caseNum?' · найдено '+esc(e.caseNum):''}</div></div><span class="badge ${e.status==='new'?'b-wait':e.status==='applied'?'b-work':'b-done'}"><span class="dot"></span>${e.status==='new'?(e.caseId?'совпадение':'проверить'):e.status==='applied'?'применено':'пропущено'}</span></div></div>`).join(''):'<div class="empty"><p>Событий по фильтру нет.</p></div>'}<button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
