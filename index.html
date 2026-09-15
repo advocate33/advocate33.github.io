@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v242</title>
+<title>CRM Адвоката v244</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '242'; // v242: уборка чужих заседаний — созданных из событий с УИД другого дела — одной кнопкой
+const APP_VER = '244'; // v244: список дел для коллектора обновляется при завершении/возврате в работу, архивации и удалении дела — завершённые дела не проверяются
+// v243 → // v243: вся история заседаний с сайта суда при подтягивании карточки; прошедшие заседания без статуса получают «Проведено» автоматически
+// v242 → // v242: уборка чужих заседаний — созданных из событий с УИД другого дела — одной кнопкой
 // v241 → // v241: карточка с сайта суда по каждой инстанции (апелляция, кассация); «Подтянуть карточки всех дел»; уборка дублей заседаний
 // v240 → // v240: процессуальные действия (принятие иска к производству и т.п.) не превращаются в заседания при автоприменении; ложные «проведённые» заседания — уборка одной кнопкой; сущности HTML в карточке
 // v239 → // v239: карточка дела с сайта суда — после сохранения ссылки CRM подтягивает номер, УИД, судью, суд, дату поступления, категорию, стороны, заседания и движение (коллектор v3.7, действие collectone); casecard-события при плановом сборе
@@ -8602,6 +8604,7 @@ async function completeCase(id) {
   addCaseHistoryEvent(c, 'status', prevStatus || '', c.status || '', 'quick-action');
   addCaseHistoryEvent(c, 'stage', prevStage || '', c.stage || '', 'quick-action');
   await put('cases', c);
+  if (c.link || c.linkApp || c.linkCass) crmCollectorAutoSend(c, true); // v244: коллектор перестаёт/начинает проверять дело
   renderCases(); renderDashboard(); navBadgeRefresh();
   viewCase(id); // обновляем открытую карточку (появится напоминание про акт, если он не подписан)
 }
@@ -8612,6 +8615,7 @@ async function toggleArchiveCase(id) {
   const obj = { ...c, archived: !c.archived };
   if (!obj.archived) delete obj.archived;
   await put('cases', obj);
+  if (obj.link || obj.linkApp || obj.linkCass) crmCollectorAutoSend(obj, true); // v244
   toast(obj.archived ? 'Дело перенесено в архив' : 'Дело возвращено из архива');
   closeCaseScreen(); renderCases(); renderDashboard();
 }
@@ -10757,6 +10761,16 @@ function actLabel(kind, act) {
 const cap1 = t => t.charAt(0).toUpperCase() + t.slice(1);
 // v220: накладка заседаний. Возвращает текст предупреждения или '' . В одном суде — зазор 60 минут;
 // в разных — сумма «времени в пути» до каждого из реквизитов судов (по умолчанию 60 минут на суд). Заседание без времени — не проверяется.
+// v243: прошедшие заседания, которым статус не выставили вручную, — «Проведено» (дата прошла). Отменённые не трогаются.
+async function hearingsAutoDone() {
+  const today = todayISO(), hs = await getAll('hearings'); let n = 0;
+  for (const h of hs) {
+    if (!h.date || h.date >= today || h.status === 'Проведено' || h.status === 'Отменено') continue;
+    h.status = 'Проведено'; h.autoDone = Date.now(); await put('hearings', h); n++;
+  }
+  if (n) { if (typeof icsTouch === 'function') icsTouch(); }
+  return n;
+}
 // v230: занятость времени. Слот заседания и встречи — 30 минут (SLOT_MIN), у встречи может быть своя длительность.
 // Заседание ↔ заседание: один суд — 30 мин, разные — сумма «времени в пути» до судов (реквизиты, по умолчанию 60);
 // заседание ↔ встреча: 30 мин + время в пути до суда; встреча ↔ встреча: большая из длительностей. Возвращает текст или ''.
@@ -15077,9 +15091,9 @@ async function crmHearingDedup() {
 }
 // 2. Автоотправка списка дел облачному коллектору после сохранения дела со ссылкой (если функция настроена); с задержкой, чтобы не слать на каждое нажатие
 let _collectorAutoTimer = null;
-function crmCollectorAutoSend(obj) {
+function crmCollectorAutoSend(obj, force) { // v244: force — отправить независимо от наличия ссылок (завершение, архив, удаление — дело должно исчезнуть из списка)
   const cfg = crmCollectorSrvCfg(); if (!cfg.url || !cfg.secret) return;
-  if (!(obj && (obj.link || obj.linkApp || obj.linkCass))) return;
+  if (!force && !(obj && (obj.link || obj.linkApp || obj.linkCass))) return;
   clearTimeout(_collectorAutoTimer);
   _collectorAutoTimer = setTimeout(async () => {
     try { const pack = await crmCollectorPack(); if (!pack) return; const r = await crmCollectorCall({ action: 'linksput', links: pack }, 20000); if (r && r.j && r.j.ok) toast(`Список дел для коллектора обновлён: ${r.j.cases}`); } catch (e) {}
@@ -15234,7 +15248,8 @@ async function crmMonAutoApply(rows) {
         if (b.time && b.time !== h.time && h.status !== 'Проведено') { ch.push('время ' + (h.time || '—') + ' → ' + b.time); h.time = b.time; }
         if (b.room && b.room !== h.room) { ch.push('зал ' + (h.room || '—') + ' → ' + b.room); h.room = b.room; }
         if (e.judge && !h.judge) { ch.push('судья ' + e.judge); h.judge = e.judge; }
-        if (b.result && !h.result && e.date < today) { ch.push('результат: ' + b.result); h.result = b.result; if (h.status !== 'Проведено') h.status = 'Проведено'; }
+        if (b.result && !h.result && e.date < today) { ch.push('результат: ' + b.result); h.result = b.result; }
+        if (e.date < today && h.status !== 'Проведено' && h.status !== 'Отменено') { ch.push('статус: проведено'); h.status = 'Проведено'; } // v243
         if (!ch.length) { e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); e.autoApplied = true; await put('monitorEvents', e); continue; }
         how = 'дополнено по данным суда: ' + ch.join(', '); n.updated++;
       } else if (e.date >= today) {
@@ -15457,6 +15472,7 @@ function crmHelpAttach(name,key){var o=window[name];if(typeof o!=='function')ret
   renderDashboard();
   navBadgeRefresh();
   await mailMigrateCorrespondence(); // v225
+  try { const n = await hearingsAutoDone(); if (n) console.log('заседаний отмечено проведёнными автоматически: ' + n); } catch (e) {} // v243
   // Напоминания о заседаниях/сроках (если включены) — после загрузки данных
   setTimeout(() => notifCheck().catch(()=>{}), 1500);
   // v218: запуск сразу в инбокс — ярлык PWA (?inbox=1) или закладка (#inbox); адрес очищается, чтобы обновление страницы не открывало инбокс снова
