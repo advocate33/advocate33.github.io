@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v241</title>
+<title>CRM Адвоката v242</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,8 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '241'; // v241: карточка с сайта суда по каждой инстанции (апелляция, кассация); «Подтянуть карточки всех дел»; уборка дублей заседаний
+const APP_VER = '242'; // v242: уборка чужих заседаний — созданных из событий с УИД другого дела — одной кнопкой
+// v241 → // v241: карточка с сайта суда по каждой инстанции (апелляция, кассация); «Подтянуть карточки всех дел»; уборка дублей заседаний
 // v240 → // v240: процессуальные действия (принятие иска к производству и т.п.) не превращаются в заседания при автоприменении; ложные «проведённые» заседания — уборка одной кнопкой; сущности HTML в карточке
 // v239 → // v239: карточка дела с сайта суда — после сохранения ссылки CRM подтягивает номер, УИД, судью, суд, дату поступления, категорию, стороны, заседания и движение (коллектор v3.7, действие collectone); casecard-события при плановом сборе
 // v238 → // v238: привязка событий суда — сначала УИД дела, затем номер (по номеру CRM, затем по номеру в суде); УИД запоминается в деле при первой привязке; конфликт УИД = чужая ссылка
@@ -15041,6 +15042,26 @@ async function crmCasesFetchAllCards() {
   toast(`Готово: дел ${cases.length}, заполнено ${filled}, с ошибками ${errs}, событий ${ev} — подробности в журналах дел`);
   openMonitorCenter();
 }
+// v242: чужие заседания — созданные по событию, у которого УИД не совпадает с УИД дела (событие пришло с чужой карточки)
+async function crmForeignHearings() {
+  const [hs, evs, cases] = await Promise.all([getAll('hearings'), getAll('monitorEvents'), getAll('cases')]);
+  const byId = new Map(evs.map(e => [e.id, e])), cById = new Map(cases.map(c => [c.id, c])), cByNum = new Map(cases.map(c => [c.number, c]));
+  return hs.filter(h => {
+    if (!h.monitorEventId) return false; const e = byId.get(h.monitorEventId); const c = cById.get(h.caseId) || cByNum.get(h.caseNum); if (!e || !c) return false;
+    return !!(e.caseUid && c.caseUid && crmMonNorm(e.caseUid) !== crmMonNorm(c.caseUid));
+  }).map(h => Object.assign(h, { _ev: byId.get(h.monitorEventId) }));
+}
+async function crmForeignClean() {
+  const list = await crmForeignHearings(); if (!list.length) { toast('Чужих заседаний нет'); return; }
+  if (!confirm(`Удалить ${list.length} ${plural(list.length, 'заседание', 'заседания', 'заседаний')}, созданных по событиям с УИД другого дела (ссылка вела на чужую карточку)?`)) return;
+  for (const h of list) {
+    const e = h._ev; delete h._ev;
+    if (h.movedFrom && h.movedFrom.date) { h.date = h.movedFrom.date; h.time = h.movedFrom.time; h.room = h.movedFrom.room; delete h.movedFrom; delete h.monitorEventId; delete h.courtSync; await put('hearings', h); if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание возвращено на ${fmtDate(h.date)}: перенос был по событию чужого дела`); }
+    else { await del('hearings', h.id); if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание ${fmtDate(h.date)} удалено: создано по событию чужого дела (УИД не совпадает)`); }
+    if (e) { e.status = 'new'; e.caseId = ''; e.caseNum = ''; e.autoSkip = Date.now(); await put('monitorEvents', e); }
+  }
+  toast(`Убрано: ${list.length}`); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderCases(); renderDashboard(); openMonitorCenter();
+}
 // v241: дубли заседаний (одно дело, одна дата и время, не отменённые) — оставить самое раннее, остальные удалить
 async function crmHearingDups() {
   const hs = (await getAll('hearings')).filter(h => h.status !== 'Отменено' && (h.caseNum || h.caseId)); const g = {};
@@ -15276,7 +15297,7 @@ async function crmMonCleanFake() {
 }
 async function crmMonAppliedHtml() {
   const since = Date.now() - 30 * 864e5;
-  const fake = await crmMonFakeHearings(); const dupsN = (await crmHearingDups()).reduce((a, g) => a + g.length - 1, 0);
+  const fake = await crmMonFakeHearings(); const dupsN = (await crmHearingDups()).reduce((a, g) => a + g.length - 1, 0); const foreignN = (await crmForeignHearings()).length;
   const hs = (await getAll('hearings')).filter(h => h.courtSync && h.courtSync >= since).sort((a, b) => b.courtSync - a.courtSync).slice(0, 30);
   const cases = await getAll('cases');
   const byLink = {}; cases.filter(c => !c.archived).forEach(c => [c.link, c.linkApp, c.linkCass].forEach(l => { if (l) (byLink[l] = byLink[l] || []).push(c.number); }));
@@ -15285,6 +15306,7 @@ async function crmMonAppliedHtml() {
   const sameNo = Object.values(nums).filter(a => a.length > 1);
   return `<details style="margin:6px 0 10px"><summary>Применено по данным суда за 30 дней · ${hs.length}${dups.length || sameNo.length ? ' · ⚠ есть что проверить' : ''}</summary>
     ${dups.length ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Одна ссылка на сайт суда стоит у нескольких дел — события с неё попадут не туда: ${dups.map(([l, a]) => esc(a.join(', '))).join('; ')}. Исправьте ссылку в лишних делах.</div>` : ''}
+    ${foreignN ? `<div class="v-storage-note" style="border-left-color:var(--red)">Заседаний по событиям чужого дела (УИД не совпадает): ${foreignN}. <button class="v-mini-btn" onclick="crmForeignClean()">Убрать все</button></div>` : ''}
     ${dupsN ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Дубли заседаний (одно дело, дата и время): ${dupsN}. <button class="v-mini-btn" onclick="crmHearingDedup()">Объединить</button></div>` : ''}
     ${fake.length ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Заседаний, созданных из строк движения (принятие иска к производству и т.п.): ${fake.length}. <button class="v-mini-btn" onclick="crmMonCleanFake()">Удалить все</button></div>` : ''}
     ${sameNo.length ? `<div class="meta" style="margin:4px 0 8px">Одинаковый номер в суде у нескольких дел (разные суды): ${sameNo.map(a => esc(a.join(' и '))).join('; ')}. События по таким номерам привязываются только по номеру дела CRM (коллектор v3.6+) или вручную.</div>` : ''}
