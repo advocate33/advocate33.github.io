@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v239</title>
+<title>CRM Адвоката v241</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '239'; // v239: карточка дела с сайта суда — после сохранения ссылки CRM подтягивает номер, УИД, судью, суд, дату поступления, категорию, стороны, заседания и движение (коллектор v3.7, действие collectone); casecard-события при плановом сборе
+const APP_VER = '241'; // v241: карточка с сайта суда по каждой инстанции (апелляция, кассация); «Подтянуть карточки всех дел»; уборка дублей заседаний
+// v240 → // v240: процессуальные действия (принятие иска к производству и т.п.) не превращаются в заседания при автоприменении; ложные «проведённые» заседания — уборка одной кнопкой; сущности HTML в карточке
+// v239 → // v239: карточка дела с сайта суда — после сохранения ссылки CRM подтягивает номер, УИД, судью, суд, дату поступления, категорию, стороны, заседания и движение (коллектор v3.7, действие collectone); casecard-события при плановом сборе
 // v238 → // v238: привязка событий суда — сначала УИД дела, затем номер (по номеру CRM, затем по номеру в суде); УИД запоминается в деле при первой привязке; конфликт УИД = чужая ссылка
 // v237 → // v237: события суда привязываются по номеру дела CRM (crmNumber), одинаковые номера в разных судах не смешиваются; откат автоприменения; проверка дублей ссылок на суд
 // v236 → // v236: в листе события мониторинга — плитка «Дата акта → в дело» для актов, подсказка о правилах автоприменения; для событий движения — та же плитка
@@ -6555,7 +6557,7 @@ async function commitCaseSave(obj, prev, editingId) {
   await crmWorkflowStageTriggers(obj, prev?.stage);
   await maybeCreateOrderForCase(editingId, obj.number);
   crmCollectorAutoSend(obj); // v232
-  if (obj.link && obj.link !== (prev && prev.link) && crmCollectorSrvCfg().url) setTimeout(() => crmCaseFetchCard(obj.id, { silent: true }).catch(() => {}), 800); // v239: новая ссылка — подтянуть карточку с сайта
+  if (['link', 'linkApp', 'linkCass'].some(f => obj[f] && obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => crmCaseFetchCard(obj.id, { silent: true }).catch(() => {}), 800); // v239/v241: новая ссылка любой инстанции — подтянуть карточку
   closeSheet(); toast(actMsgs.length ? 'Дело сохранено. ' + actMsgs.join(' | ') + ' — сроки в карточке дела, проверьте и подтвердите' : 'Дело сохранено'); renderCases(); renderDashboard(); navBadgeRefresh();
   if (!editingId) setTimeout(() => crmNewCaseBundle(obj.id), 150);
 }
@@ -8098,7 +8100,7 @@ async function viewCase(id, tab) {
     <button class="btn-primary" style="background:var(--purple)" onclick="openDocsSheet('${c.id}')">${ic("doc",16)} Сформировать документ</button>
     <button class="btn-ghost" onclick="openOrdersSheet('${jsq(c.number||'')}')">${ic("scroll",16)} Ордера по делу</button>
     <button class="btn-ghost" onclick="openCourtCheck('${c.id}')">${ic("scale",16)} Проверить дело в суде (КАД / ГАС)</button>
-    ${caseWebUrl&&crmCollectorSrvCfg().url?`<button class="btn-ghost" onclick="crmCaseFetchCard('${c.id}')">⬇ Подтянуть карточку с сайта суда</button>`:''}<!-- v239 -->
+    ${(c.link||c.linkApp||c.linkCass)&&crmCollectorSrvCfg().url?`<button class="btn-ghost" onclick="crmCaseFetchCard('${c.id}')">⬇ Подтянуть карточку с сайта суда${c.link&&(c.linkApp||c.linkCass)?' (все инстанции)':c.linkApp?' (апелляция)':c.linkCass?' (кассация)':''}</button>`:''}<!-- v239/v241 -->
     ${caseWebUrl?`<a href="${esc(caseWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-primary" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Открыть на сайте суда</a>`:''}
     ${appealWebUrl?`<a href="${esc(appealWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Апелляция — дело на сайте суда</a>`:''}
     ${cassWebUrl?`<a href="${esc(cassWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Кассация — дело на сайте суда</a>`:''}
@@ -14985,11 +14987,11 @@ async function crmFlowActSkip(eventId) {
 // ═══════ v239: КАРТОЧКА ДЕЛА С САЙТА СУДА ═══════
 // card = { number, uid, judge, court, registered, category, result, parties:[{role,name}] }. Заполняются только ПУСТЫЕ поля дела;
 // заполненные не трогаются (расхождение показывается в отчёте). Стороны добавляются в участников дела, доверитель пропускается.
-function crmCaseApplyCard(c, card) {
-  const done = [], diff = [];
+function crmCaseApplyCard(c, card, sfx) { // v241: sfx '' — первая инстанция, 'App' — апелляция, 'Cass' — кассация
+  sfx = sfx || ''; const done = [], diff = []; const lbl = sfx === 'App' ? ' (апелляция)' : sfx === 'Cass' ? ' (кассация)' : '';
   const set = (field, val, label) => { if (!val) return; if (!c[field]) { c[field] = val; done.push(label + ': ' + val); } else if (crmMonNorm(c[field]) !== crmMonNorm(val)) diff.push(label + ' — в деле «' + c[field] + '», на сайте «' + val + '»'); };
-  set('courtNo', card.number, '№ в суде'); set('caseUid', card.uid, 'УИД'); set('judge', card.judge, 'судья'); set('court', card.court, 'суд');
-  set('i1FilingDate', card.registered, 'дата поступления'); set('courtCategory', card.category, 'категория по классификатору суда');
+  set('courtNo' + sfx, card.number, '№ в суде' + lbl); set('caseUid', card.uid, 'УИД'); set('judge' + sfx, card.judge, 'судья' + lbl); set('court' + sfx, card.court, 'суд' + lbl);
+  if (!sfx) { set('i1FilingDate', card.registered, 'дата поступления'); set('courtCategory', crmDecodeEntities(card.category), 'категория по классификатору суда'); }
   const client = crmMonNorm(c.client || '');
   c.participants = Array.isArray(c.participants) ? c.participants : [];
   for (const p of (card.parties || [])) {
@@ -15000,22 +15002,57 @@ function crmCaseApplyCard(c, card) {
   return { done, diff };
 }
 // разобрать одну ссылку сразу через облачную функцию (collectone) и применить карточку и события
+const CASE_LINK_STAGES = [['link', 'Первая инстанция', '', 'courtNo'], ['linkApp', 'Апелляция', 'App', 'courtNoApp'], ['linkCass', 'Кассация', 'Cass', 'courtNoCass']];
 async function crmCaseFetchCard(caseId, opts) {
-  const cfg = crmCollectorSrvCfg(); if (!cfg.url || !cfg.secret) { if (!(opts && opts.silent)) toast('Укажите адрес и секрет облачной функции (Мониторинг → Сбор в облаке)', true); return null; }
-  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c || !c.link) return null;
-  if (!(opts && opts.silent)) toast('Читаю карточку дела на сайте суда…');
-  const r = await crmCollectorCall({ action: 'collectone', url: c.link, courtNo: c.courtNo || '', number: c.number, stage: 'Первая инстанция' }, 45000);
-  if (!r || !r.j) { toast('Сайт суда: ' + (r && r.err || 'нет ответа'), true); return null; }
-  if (!r.j.ok) { toast('Сайт суда: ' + (r.j.error || 'ошибка'), true); return null; }
-  const prev = JSON.parse(JSON.stringify(c));
-  const res = crmCaseApplyCard(c, r.j.card || {});
-  if (res.done.length) { addCaseHistoryEvent(c, 'courtCard', '', res.done.join('; '), 'monitor'); await put('cases', c); await crmCaseLogByNum(c.number, 'flow', 'С сайта суда: ' + res.done.join('; ')); }
-  let evMsg = '';
-  if (Array.isArray(r.j.events) && r.j.events.length) { const rows = await crmMonNormalizeRows(r.j.events, 'Коллектор судов'); await crmMonPersist(rows, { quiet: true }); evMsg = `; событий: ${r.j.events.length}`; }
-  toast((res.done.length ? 'Подтянуто: ' + res.done.join('; ') : 'Пустых полей для заполнения нет') + evMsg + (res.diff.length ? '. Расхождения: ' + res.diff.join('; ') : ''));
+  opts = opts || {};
+  const cfg = crmCollectorSrvCfg(); if (!cfg.url || !cfg.secret) { if (!opts.silent) toast('Укажите адрес и секрет облачной функции (Мониторинг → Сбор в облаке)', true); return null; }
+  const c = (await getAll('cases')).find(x => x.id === caseId); if (!c) return null;
+  const stages = CASE_LINK_STAGES.filter(([f]) => c[f]); if (!stages.length) return null;
+  if (!opts.silent) toast('Читаю карточку дела на сайте суда…');
+  const done = [], diff = [], errs = []; let evCount = 0;
+  for (const [f, stage, sfx, noField] of stages) {
+    const r = await crmCollectorCall({ action: 'collectone', url: c[f], courtNo: c[noField] || '', number: c.number, stage }, 45000);
+    if (!r || !r.j) { errs.push(stage + ': ' + (r && r.err || 'нет ответа')); continue; }
+    if (!r.j.ok) { errs.push(stage + ': ' + (r.j.error || 'ошибка')); continue; }
+    const res = crmCaseApplyCard(c, r.j.card || {}, sfx); done.push(...res.done); diff.push(...res.diff);
+    if (Array.isArray(r.j.events) && r.j.events.length) { const rows = await crmMonNormalizeRows(r.j.events, 'Коллектор судов'); await crmMonPersist(rows, { quiet: true }); evCount += r.j.events.length; }
+  }
+  if (done.length) { const fresh = (await getAll('cases')).find(x => x.id === caseId) || c; /* автоприменение могло изменить дело — переносим только поля карточки */
+    for (const k of Object.keys(c)) if (c[k] !== undefined && (fresh[k] === undefined || fresh[k] === '' || fresh[k] === null) && k !== 'participants') fresh[k] = c[k];
+    fresh.participants = c.participants; addCaseHistoryEvent(fresh, 'courtCard', '', done.join('; '), 'monitor'); await put('cases', fresh); await crmCaseLogByNum(c.number, 'flow', 'С сайта суда: ' + done.join('; ')); }
+  const msg = (done.length ? 'Подтянуто: ' + done.join('; ') : 'Пустых полей для заполнения нет') + (evCount ? `; событий: ${evCount}` : '') + (diff.length ? '. Расхождения: ' + diff.join('; ') : '') + (errs.length ? '. Ошибки: ' + errs.join('; ') : '');
+  if (!opts.quiet) toast(msg, !!errs.length && !done.length);
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
-  renderCases(); renderDashboard(); if (!(opts && opts.silent)) viewCase(caseId);
-  return res;
+  renderCases(); renderDashboard(); if (!opts.silent && !opts.quiet) viewCase(caseId);
+  return { done, diff, errs, evCount };
+}
+// v241: все дела в работе со ссылками — по очереди (каждая ссылка 3–10 с), итог одним сообщением
+async function crmCasesFetchAllCards() {
+  const cfg = crmCollectorSrvCfg(); if (!cfg.url || !cfg.secret) { toast('Укажите адрес и секрет облачной функции', true); return; }
+  const cases = (await getAll('cases')).filter(c => !c.archived && c.status !== 'Завершено' && CASE_LINK_STAGES.some(([f]) => c[f]));
+  if (!cases.length) { toast('Нет дел в работе со ссылками на суд'); return; }
+  if (!confirm(`Подтянуть карточки ${cases.length} ${plural(cases.length, 'дела', 'дел', 'дел')} с сайтов судов? Займёт около ${Math.ceil(cases.length * 6 / 60)} мин.`)) return;
+  let filled = 0, errs = 0, ev = 0;
+  for (let i = 0; i < cases.length; i++) {
+    toast(`Карточки: ${i + 1} из ${cases.length} — ${cases[i].number}`);
+    const r = await crmCaseFetchCard(cases[i].id, { silent: true, quiet: true }).catch(() => null);
+    if (r) { if (r.done.length) filled++; if (r.errs.length) errs++; ev += r.evCount; }
+  }
+  toast(`Готово: дел ${cases.length}, заполнено ${filled}, с ошибками ${errs}, событий ${ev} — подробности в журналах дел`);
+  openMonitorCenter();
+}
+// v241: дубли заседаний (одно дело, одна дата и время, не отменённые) — оставить самое раннее, остальные удалить
+async function crmHearingDups() {
+  const hs = (await getAll('hearings')).filter(h => h.status !== 'Отменено' && (h.caseNum || h.caseId)); const g = {};
+  hs.forEach(h => { const k = (h.caseId || h.caseNum) + '|' + h.date + '|' + (h.time || ''); (g[k] = g[k] || []).push(h); });
+  return Object.values(g).filter(a => a.length > 1);
+}
+async function crmHearingDedup() {
+  const groups = await crmHearingDups(); if (!groups.length) { toast('Дублей заседаний нет'); return; }
+  const total = groups.reduce((a, g) => a + g.length - 1, 0);
+  if (!confirm(`Удалить ${total} ${plural(total, 'дубль', 'дубля', 'дублей')} заседаний (одно дело, одна дата и время)? Останется самая ранняя запись.`)) return;
+  for (const g of groups) { g.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)); const keep = g[0]; for (const h of g.slice(1)) { ['room', 'judge', 'result', 'note'].forEach(k => { if (!keep[k] && h[k]) keep[k] = h[k]; }); await del('hearings', h.id); } await put('hearings', keep); if (keep.caseNum) await crmCaseLogByNum(keep.caseNum, 'hearing_upd', `Заседание ${fmtDate(keep.date)}: удалены дубли (${g.length - 1})`); }
+  toast(`Удалено дублей: ${total}`); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderCases(); renderDashboard(); openMonitorCenter();
 }
 // 2. Автоотправка списка дел облачному коллектору после сохранения дела со ссылкой (если функция настроена); с задержкой, чтобы не слать на каждое нажатие
 let _collectorAutoTimer = null;
@@ -15143,6 +15180,10 @@ async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw(
 //  • дата акта из «Движения дела»: записывается, если поле в деле пусто (иначе остаётся предложение на обзоре).
 // Каждое действие — в историю и журнал дела, событие помечается applied/autoApplied.
 const crmMonAutoOn = () => localStorage.getItem('crm_mon_auto') !== '0';
+// v240: событие с датой и временем, которое всё же не заседание — принятие иска, регистрация, передача, оформление и т.п. (страховка для старых коллекторов)
+const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен/i;
+const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(String(e && (e.title || '') + ' ' + (e && e.raw || '').split('\n').slice(2).join(' ')));
+function crmDecodeEntities(t) { const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raquo: '»', rarr: '→', larr: '←', ndash: '–', mdash: '—', hellip: '…', apos: "'" }; return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
 function crmMonHearingBits(e) {
   const txt = String(e.title || '') + ' ' + String(e.raw || '');
   const time = (txt.match(/(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?!\d)/) || []).slice(1).filter(Boolean).map((v, i) => i === 0 ? String(v).padStart(2, '0') : v).join(':');
@@ -15164,6 +15205,7 @@ async function crmMonAutoApply(rows) {
   for (const e of cand) {
     const c = caseOf(e.caseId); if (!c || c.archived) continue;
     if (e.eventType === 'hearing' && e.date) {
+      if (crmMonIsFakeHearing(e)) { e.status = 'flow'; e.eventType = 'caseflow'; await put('monitorEvents', e); continue; } // v240: это движение дела, не заседание
       const b = crmMonHearingBits(e), list = byCase(c.id).filter(h => h.status !== 'Отменено');
       let h = list.find(x => x.date === e.date), how = '';
       if (h) {
@@ -15223,8 +15265,18 @@ async function crmMonUndoHearing(hid) {
   toast('Отменено'); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderCases(); renderDashboard(); openMonitorCenter();
 }
 // список применённого за 30 дней и дубли ссылок на суд — для раздела в Мониторинге
+// v240: заседания, созданные автоматически из строк движения (принятие иска и т.п.) — удалить все разом
+async function crmMonFakeHearings() { return (await getAll('hearings')).filter(h => h.monitorEventId && !h.movedFrom && RE_NOT_HEARING_CRM.test(String(h.note || '') + ' ' + String(h.result || ''))); }
+async function crmMonCleanFake() {
+  const list = await crmMonFakeHearings(); if (!list.length) { toast('Ложных заседаний нет'); return; }
+  if (!confirm(`Удалить ${list.length} ${plural(list.length, 'заседание', 'заседания', 'заседаний')}, созданных из строк движения дела (принятие иска к производству и т.п.)?`)) return;
+  const evs = await getAll('monitorEvents');
+  for (const h of list) { await del('hearings', h.id); if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание ${fmtDate(h.date)} удалено: строка движения дела, а не заседание`); const ev = evs.find(x => x.id === h.monitorEventId); if (ev) { ev.eventType = 'caseflow'; ev.status = 'flow'; ev.autoSkip = Date.now(); await put('monitorEvents', ev); } }
+  toast(`Удалено: ${list.length}`); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderCases(); renderDashboard(); openMonitorCenter();
+}
 async function crmMonAppliedHtml() {
   const since = Date.now() - 30 * 864e5;
+  const fake = await crmMonFakeHearings(); const dupsN = (await crmHearingDups()).reduce((a, g) => a + g.length - 1, 0);
   const hs = (await getAll('hearings')).filter(h => h.courtSync && h.courtSync >= since).sort((a, b) => b.courtSync - a.courtSync).slice(0, 30);
   const cases = await getAll('cases');
   const byLink = {}; cases.filter(c => !c.archived).forEach(c => [c.link, c.linkApp, c.linkCass].forEach(l => { if (l) (byLink[l] = byLink[l] || []).push(c.number); }));
@@ -15233,6 +15285,8 @@ async function crmMonAppliedHtml() {
   const sameNo = Object.values(nums).filter(a => a.length > 1);
   return `<details style="margin:6px 0 10px"><summary>Применено по данным суда за 30 дней · ${hs.length}${dups.length || sameNo.length ? ' · ⚠ есть что проверить' : ''}</summary>
     ${dups.length ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Одна ссылка на сайт суда стоит у нескольких дел — события с неё попадут не туда: ${dups.map(([l, a]) => esc(a.join(', '))).join('; ')}. Исправьте ссылку в лишних делах.</div>` : ''}
+    ${dupsN ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Дубли заседаний (одно дело, дата и время): ${dupsN}. <button class="v-mini-btn" onclick="crmHearingDedup()">Объединить</button></div>` : ''}
+    ${fake.length ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Заседаний, созданных из строк движения (принятие иска к производству и т.п.): ${fake.length}. <button class="v-mini-btn" onclick="crmMonCleanFake()">Удалить все</button></div>` : ''}
     ${sameNo.length ? `<div class="meta" style="margin:4px 0 8px">Одинаковый номер в суде у нескольких дел (разные суды): ${sameNo.map(a => esc(a.join(' и '))).join('; ')}. События по таким номерам привязываются только по номеру дела CRM (коллектор v3.6+) или вручную.</div>` : ''}
     ${hs.length ? hs.map(h => `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border)"><div style="flex:1;min-width:0;font-size:13px"><b>${esc(h.caseNum || '')}</b> · ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''}${h.movedFrom ? ` <span class="meta">(перенесено с ${fmtDate(h.movedFrom.date)})</span>` : ' <span class="meta">(создано)</span>'}<div class="meta">${esc(h.court || '')}</div></div><button class="v-mini-btn" onclick="crmMonUndoHearing('${jsq(h.id)}')">✕ Отменить</button></div>`).join('') : '<div class="meta">Автоматически созданных или перенесённых заседаний за 30 дней нет.</div>'}
   </details>`;
@@ -15268,7 +15322,7 @@ async function openMonitorCenter(){
 ${await crmMonAppliedHtml()}<!-- v237 -->
 <details><summary>HTTPS-адаптер личного сервера</summary><div class="meta">Запрос выполняется только по кнопке. Ответ: JSON, CSV или текст.</div><div class="field"><label>URL</label><input id="v-mon-url" type="url" value="${esc(localStorage.getItem('crm_monitor_url')||'')}" placeholder="https://server.example/events"></div><div class="field"><label>Bearer-токен</label><input id="v-mon-token" type="password" value="${esc(localStorage.getItem('crm_monitor_token')||'')}" autocomplete="off"></div><button class="btn-primary" onclick="fetchMonitorEndpoint()">Получить сейчас</button></details>
     <details><summary>Коллектор судов — автосбор с сайтов</summary><div class="meta" style="line-height:1.55;margin:6px 0 8px">Скрипт на вашем компьютере раз в день обходит ссылки дел (СОЮ: *.sudrf.ru, мос-суды: mos-gorsud.ru / mos-sud.ru), извлекает назначенные заседания, результаты и публикации актов и присылает их сюда через ваш личный сервер. КАД Арбитр антиботом не пускает скрипты — арбитражные ссылки коллектор помечает «проверить вручную».<br><br><b>Настройка (один раз):</b> 1) скачайте список дел кнопкой ниже; 2) положите его в папку рядом с <b>collector-sud.mjs</b>; 3) заполните <b>collector-config.json</b> — адрес /bridge и секрет вашего сервера; 4) запускайте двойным щелчком по <b>коллектор.bat</b> или добавьте его в Планировщик Windows. Подробности — в файле «КОЛЛЕКТОР_СУДОВ_настройка».</div><button class="v-mini-btn" onclick="crmCollectorExport()">⬇ Скачать список дел (JSON)</button><div class="meta" style="margin-top:6px">В список попадают незавершённые дела, у которых заполнена хотя бы одна ссылка на сайт суда. ФИО доверителей в файл не выгружаются — только номера, УИД и ссылки. После изменения ссылок или появления новых дел скачайте список заново.</div></details>
-    <details ontoggle="if(this.open)crmCollectorStatus(false)"><summary>Сбор в облаке — без компьютера</summary><div class="meta" style="line-height:1.55;margin:6px 0 8px">Функция в вашем Яндекс Облаке обходит суды по таймеру и присылает события сюда — компьютер не нужен. Развёртывание один раз по инструкции «КОЛЛЕКТОР_В_ОБЛАКЕ_настройка» (~20 минут в веб-консоли).</div><div class="field"><label>URL облачной функции</label><input id="col-srv-url" type="url" value="${esc(localStorage.getItem('crm_collector_url')||'')}" placeholder="https://functions.yandexcloud.net/…" autocomplete="off"></div><div class="field"><label>Секрет функции (SECRET)</label><input id="col-srv-secret" type="password" value="${esc(localStorage.getItem('crm_collector_secret')||'')}" autocomplete="off"></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="v-mini-btn" onclick="crmCollectorSrvSave()">💾 Сохранить</button><button class="v-mini-btn" onclick="crmCollectorSendLinks()">📤 Отправить список дел</button><button class="v-mini-btn" onclick="crmCollectorRunNow()">▶ Собрать сейчас</button><button class="v-mini-btn" onclick="crmCollectorStatus(true)">↻ Статус</button></div><div class="meta" id="col-srv-status" style="margin-top:8px">Серверный сбор: укажите URL и секрет функции.</div><div class="meta" style="margin-top:6px">На сервер уходят только номера дел, УИД и ссылки — без ФИО. Список отправляйте заново после изменения ссылок или новых дел.</div></details>
+    <details ontoggle="if(this.open)crmCollectorStatus(false)"><summary>Сбор в облаке — без компьютера</summary><div class="meta" style="line-height:1.55;margin:6px 0 8px">Функция в вашем Яндекс Облаке обходит суды по таймеру и присылает события сюда — компьютер не нужен. Развёртывание один раз по инструкции «КОЛЛЕКТОР_В_ОБЛАКЕ_настройка» (~20 минут в веб-консоли).</div><div class="field"><label>URL облачной функции</label><input id="col-srv-url" type="url" value="${esc(localStorage.getItem('crm_collector_url')||'')}" placeholder="https://functions.yandexcloud.net/…" autocomplete="off"></div><div class="field"><label>Секрет функции (SECRET)</label><input id="col-srv-secret" type="password" value="${esc(localStorage.getItem('crm_collector_secret')||'')}" autocomplete="off"></div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="v-mini-btn" onclick="crmCollectorSrvSave()">💾 Сохранить</button><button class="v-mini-btn" onclick="crmCollectorSendLinks()">📤 Отправить список дел</button><button class="v-mini-btn" onclick="crmCollectorRunNow()">▶ Собрать сейчас</button><button class="v-mini-btn" onclick="crmCollectorStatus(true)">↻ Статус</button><button class="v-mini-btn" onclick="crmCasesFetchAllCards()">⬇ Подтянуть карточки всех дел</button></div><div class="meta" id="col-srv-status" style="margin-top:8px">Серверный сбор: укажите URL и секрет функции.</div><div class="meta" style="margin-top:6px">На сервер уходят только номера дел, УИД и ссылки — без ФИО. Список отправляйте заново после изменения ссылок или новых дел.</div></details>
     ${list.length?list.map(e=>`<div class="card v-monitor-card ${e.caseId?'matched':''} ${e.status==='applied'?'applied':''}" onclick="reviewMonitorEvent('${jsq(e.id)}')" style="cursor:pointer"><div class="v-monitor-head"><div><div class="v-monitor-title">${esc(e.title)}</div><div class="v-monitor-meta">${esc(e.source)}${e.date?' · '+fmtDate(e.date):''}${e.courtNo?' · '+esc(e.courtNo):''}${e.caseNum?' · найдено '+esc(e.caseNum):''}</div></div><span class="badge ${e.status==='new'?'b-wait':e.status==='applied'?'b-work':'b-done'}"><span class="dot"></span>${e.status==='new'?(e.caseId?'совпадение':'проверить'):e.status==='applied'?'применено':'пропущено'}</span></div></div>`).join(''):'<div class="empty"><p>Событий по фильтру нет.</p></div>'}<button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
 }
 async function crmMonRenderDashboard(){let h=document.getElementById('v165-monitor-alerts');if(!h){h=document.createElement('div');h.id='v165-monitor-alerts';document.getElementById('v163-cor-alerts')?.insertAdjacentElement('afterend',h);}if(!h)return;const n=(await getAll('monitorEvents')).filter(x=>x.status==='new').length;h.innerHTML=n?`<div class="card" onclick="openMonitorCenter()" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin-top:10px"><div class="row1"><div><div class="title">◎ Новые события мониторинга</div><div class="meta">${n} ${plural(n,'событие','события','событий')} нужно проверить и подтвердить</div></div><span class="badge b-wait"><span class="dot"></span>${n}</span></div></div>`:'';}
