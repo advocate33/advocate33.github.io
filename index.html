@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v244</title>
+<title>CRM Адвоката v246</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '244'; // v244: список дел для коллектора обновляется при завершении/возврате в работу, архивации и удалении дела — завершённые дела не проверяются
+const APP_VER = '246'; // v246: суд и судья заседания из данных суда — по инстанции события (апелляционное заседание → суд апелляции), а не по текущей стадии дела; исправление уже созданных
+// v245 → // v245: онлайн-запись на приём — публичная страница на личном сервере, окна из расписания CRM, заявки → обращение + встреча, подтверждение из CRM
+// v244 → // v244: список дел для коллектора обновляется при завершении/возврате в работу, архивации и удалении дела — завершённые дела не проверяются
 // v243 → // v243: вся история заседаний с сайта суда при подтягивании карточки; прошедшие заседания без статуса получают «Проведено» автоматически
 // v242 → // v242: уборка чужих заседаний — созданных из событий с УИД другого дела — одной кнопкой
 // v241 → // v241: карточка с сайта суда по каждой инстанции (апелляция, кассация); «Подтянуть карточки всех дел»; уборка дублей заседаний
@@ -4031,7 +4033,7 @@ async function collectAll() {
 }
 
 // ── Синхронизация пользовательских настроек ──
-const SYNC_SETTINGS_KEYS = ['crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
+const SYNC_SETTINGS_KEYS = ['crm_book', 'crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
 
 // Секреты переносятся только внутри зашифрованного контейнера .crm. PIN
 // хранится и переносится как PBKDF2-хэш с солью, а не как исходные цифры.
@@ -5302,6 +5304,11 @@ function openCalcSheet() {
     <div class="card" onclick="calcDays()" style="cursor:pointer;margin-bottom:8px">
       <div class="row1"><div style="flex:1"><div class="title">🗓 Дни в периоде</div>
       <div class="meta">Календарные и рабочие дни между двумя датами</div></div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+    </div>
+    <div class="card" onclick="openBookSettings()" style="cursor:pointer;margin-bottom:8px;border-left:3px solid var(--accent)"><!-- v245 -->
+      <div class="row1"><div style="flex:1"><div class="title">📅 Онлайн-запись на приём</div>
+      <div class="meta">Страница для доверителей на личном сервере: свободные окна из вашего расписания, заявки — в обращения и встречи</div></div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
     <div class="card" onclick="openCalcHub()" style="cursor:pointer;margin-bottom:8px;border-left:3px solid var(--green)"><!-- v223 -->
@@ -6765,6 +6772,7 @@ async function saveMeeting(id) {
     createdAt: prev.createdAt || Date.now()
   });
   await put('meetings', obj);
+  bookRepublishSoon(); // v245
   if (typeof icsTouch === 'function') icsTouch();
   toast(id ? 'Встреча обновлена' : '🤝 Встреча создана — попадёт в календарь');
   closeSheet();
@@ -7413,6 +7421,7 @@ async function saveHearing(id) {
     comment: (document.getElementById('f-hcomment')?.value || '').trim()
   });
   await put('hearings', obj);
+  bookRepublishSoon(); // v245
   if (obj.caseNum) await crmCaseLogByNum(obj.caseNum, prev ? 'hearing_upd' : 'hearing', (prev ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(obj.date) + (obj.time ? ' ' + obj.time : '') + (obj.status && obj.status !== 'Назначено' ? ' · ' + obj.status : ''));
   // Уведомление в Telegram и обновление Google Календаря (если подключены)
   if (typeof tgHearingNotify === 'function') tgHearingNotify(obj, !!id);
@@ -10522,6 +10531,120 @@ function addBusinessDaysISO(iso, n) {
   const cur = () => `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
   while (left > 0 && guard++ < 1000) { d.setDate(d.getDate() + 1); if (isWorkdayISO(cur())) left--; }
   return cur();
+}
+// ═══════ v245: ОНЛАЙН-ЗАПИСЬ НА ПРИЁМ ═══════
+// Настройки в localStorage crm_book (синхронизируются). Окна считаются из рабочих часов минус заседания (с временем в пути до суда), встречи и нерабочие дни;
+// публикуются на личный сервер (bookpub). Заявки забираются bookget: обращение + встреча «ожидает подтверждения»; подтверждение/отказ — bookset.
+function bookCfg() {
+  let c = {}; try { c = JSON.parse(localStorage.getItem('crm_book') || '{}'); } catch (e) {}
+  return Object.assign({ enabled: false, publicId: '', title: 'Запись на консультацию', address: '', phone: '', note: '', durationMin: 60, horizonDays: 14, from: '10:00', to: '18:00', breakFrom: '13:00', breakTo: '14:00', days: [1, 2, 3, 4, 5], topics: 'ДТП / ОСАГО\nЗащита прав потребителей\nЗалив квартиры\nДолги, займы\nНаследство\nЖКХ\nДругое', minLeadHours: 3, lastPoll: 0, lastPub: 0 }, c);
+}
+function bookCfgSave(c) { localStorage.setItem('crm_book', JSON.stringify(c)); if (typeof bumpSettings === 'function') bumpSettings(); }
+const bookNewId = () => Array.from(crypto.getRandomValues(new Uint8Array(12))).map(b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+const bookUrl = () => (SRV.url && bookCfg().publicId) ? SRV.url.replace(/\/+$/, '') + '?book=' + bookCfg().publicId : '';
+const toMinB = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? +m[1] * 60 + +m[2] : null; };
+const fromMinB = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+// свободные окна: рабочие часы минус занятость (заседания ± время в пути, встречи ± 15 мин, нерабочие дни)
+function bookAvailability(cfg, hearings, meetings, nowTs) {
+  const now = new Date(nowTs || Date.now()); const days = [];
+  const dur = Number(cfg.durationMin) || 60, start = toMinB(cfg.from) ?? 600, end = toMinB(cfg.to) ?? 1080, b1 = toMinB(cfg.breakFrom), b2 = toMinB(cfg.breakTo);
+  for (let i = 0; i < (Number(cfg.horizonDays) || 14); i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i); const iso = localISO(d);
+    if (!(cfg.days || []).includes(d.getDay()) && !CAL_WORK.has(iso)) continue;
+    if (typeof isWorkdayISO === 'function' && !isWorkdayISO(iso) && !(cfg.days || []).includes(d.getDay())) continue;
+    if (CAL_OFF.has(iso)) continue;
+    const busy = [];
+    hearings.filter(h => h.date === iso && h.status !== 'Отменено').forEach(h => { const t = toMinB(h.time); if (t === null) { busy.push([0, 1440]); return; } const tr = (() => { const i2 = courtInfoGet(h.court); const v = i2 && Number(i2.travel); return v > 0 ? v : 60; })(); busy.push([t - tr, t + 120 + tr]); });
+    meetings.filter(m => m.date === iso).forEach(m => { const t = toMinB(m.time); if (t === null) return; busy.push([t - 15, t + (Number(m.duration) || 30) + 15]); });
+    if (b1 !== null && b2 !== null) busy.push([b1, b2]);
+    const minStart = i === 0 ? now.getHours() * 60 + now.getMinutes() + (Number(cfg.minLeadHours) || 0) * 60 : 0;
+    const slots = [];
+    for (let t = start; t + dur <= end; t += dur) { if (t < minStart) continue; if (busy.some(([a, b]) => t < b && t + dur > a)) continue; slots.push(fromMinB(t)); }
+    if (slots.length) days.push({ date: iso, slots });
+  }
+  return days;
+}
+async function bookPublish(quiet) {
+  const cfg = bookCfg(); if (!cfg.enabled) return null;
+  if (!SRV.url || !SRV.secret) { if (!quiet) toast('Подключите личный сервер (настройки синхронизации)', true); return null; }
+  if (!cfg.publicId) { cfg.publicId = bookNewId(); bookCfgSave(cfg); }
+  const days = bookAvailability(cfg, await getAll('hearings'), await getAll('meetings'));
+  const j = await mailBridgeCall('bookpub', { publicId: cfg.publicId, settings: { title: cfg.title, address: cfg.address, phone: cfg.phone, note: cfg.note, durationMin: Number(cfg.durationMin) || 60, topics: String(cfg.topics || '').split(/\n/).map(x => x.trim()).filter(Boolean) }, days });
+  if (j && j.ok) { cfg.lastPub = Date.now(); bookCfgSave(cfg); if (!quiet) toast(`Опубликовано окон: ${j.slots} на ${j.days} дн.`); }
+  else if (!quiet) toast('Не удалось опубликовать: ' + (j && j.error || 'нет ответа'), true);
+  return j;
+}
+let _bookPubTimer = null;
+function bookRepublishSoon() { if (!bookCfg().enabled) return; clearTimeout(_bookPubTimer); _bookPubTimer = setTimeout(() => bookPublish(true).catch(() => {}), 5000); }
+// заявки → обращение + встреча
+async function bookPoll(quiet) {
+  const cfg = bookCfg(); if (!cfg.enabled || !SRV.url || !SRV.secret) return 0;
+  const j = await mailBridgeCall('bookget', { since: cfg.lastPoll || 0 }); if (!j || !j.ok) return 0;
+  const meetings = await getAll('meetings'), leads = await getAll('leads'); let n = 0, maxTs = cfg.lastPoll || 0;
+  for (const b of j.items || []) {
+    maxTs = Math.max(maxTs, b.updatedAt || b.createdAt || 0);
+    let m = meetings.find(x => x.bookingId === b.id);
+    if (!m) {
+      if (b.status === 'declined' || b.status === 'cancelled') continue;
+      let lead = leads.find(x => x.bookingId === b.id) || leads.find(x => x.phone && b.phone && x.phone.replace(/\D/g, '') === b.phone.replace(/\D/g, ''));
+      if (!lead) { lead = { id: uid('О'), name: b.name, phone: b.phone, email: '', topic: b.topic || 'Консультация', summary: b.comment || '', kind: '', status: 'Новое', source: 'Онлайн-запись', bookingId: b.id, createdAt: Date.now() }; await put('leads', lead); leads.push(lead); }
+      m = { id: uid('В'), date: b.date, time: b.time, duration: Number(cfg.durationMin) || 60, with: b.name, place: cfg.address || '', note: `Онлайн-запись, код ${b.code}${b.topic ? ' · ' + b.topic : ''}${b.comment ? '\n' + b.comment : ''}\nТел. ${b.phone}`, leadId: lead.id, bookingId: b.id, bookingCode: b.code, bookingStatus: b.status, createdAt: Date.now() };
+      await put('meetings', m); meetings.push(m); n++;
+    } else if (m.bookingStatus !== b.status) { m.bookingStatus = b.status; await put('meetings', m); }
+  }
+  cfg.lastPoll = maxTs; bookCfgSave(cfg);
+  if (n) { toast(`Новых записей на приём: ${n}`); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderDashboard(); bookRepublishSoon(); }
+  else if (!quiet) toast('Новых записей нет');
+  return n;
+}
+async function bookSetStatus(meetingId, status) {
+  const m = (await getAll('meetings')).find(x => x.id === meetingId); if (!m || !m.bookingId) return;
+  let note = ''; if (status === 'confirmed') { note = window.prompt('Заметка доверителю (необязательно): что взять с собой, как пройти', 'Возьмите паспорт и документы по делу') ?? null; if (note === null) return; }
+  if (status === 'declined' && !confirm('Отклонить запись? Доверитель увидит это по коду заявки и сможет выбрать другое время.')) return;
+  const j = await mailBridgeCall('bookset', { id: m.bookingId, status, note }); if (!j || !j.ok) { toast('Сервер: ' + (j && j.error || 'нет ответа'), true); return; }
+  m.bookingStatus = status; if (status === 'declined') m.status = 'Отменено'; await put('meetings', m);
+  toast(status === 'confirmed' ? 'Запись подтверждена' : 'Запись отклонена'); renderDashboard(); renderCalendar(); bookRepublishSoon();
+}
+async function bookPendingHtml() { // карточка на обзоре
+  const cfg = bookCfg(); if (!cfg.enabled) return '';
+  const ms = (await getAll('meetings')).filter(m => m.bookingId && m.bookingStatus === 'new').sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  if (!ms.length) return '';
+  return `<div class="card" style="border-left:3px solid var(--accent);margin-top:10px"><div class="title">📅 Записи на приём — ждут подтверждения (${ms.length})</div>${ms.map(m => `<div style="padding:6px 0;border-top:1px solid var(--border)"><div><b>${fmtDate(m.date)} ${esc(m.time)}</b> · ${esc(m.with)}</div><div class="meta" style="white-space:pre-wrap">${esc(m.note || '')}</div><div style="display:flex;gap:6px;margin-top:4px"><button class="v-mini-btn" onclick="bookSetStatus('${jsq(m.id)}','confirmed')">✓ Подтвердить</button><button class="v-mini-btn" onclick="bookSetStatus('${jsq(m.id)}','declined')">Отклонить</button>${m.leadId ? `<button class="v-mini-btn" onclick="viewLead('${jsq(m.leadId)}')">Обращение</button>` : ''}</div></div>`).join('')}</div>`;
+}
+async function bookRenderDashboard() {
+  const host = document.getElementById('v245-book') || (() => { const a = document.createElement('div'); a.id = 'v245-book'; document.getElementById('v163-cor-alerts')?.insertAdjacentElement('afterend', a); return a; })();
+  if (host) host.innerHTML = await bookPendingHtml();
+}
+function openBookSettings() {
+  const c = bookCfg(); const url = bookUrl();
+  const dayBox = (n, l) => `<label style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><input type="checkbox" class="bk-day" value="${n}" ${(c.days || []).includes(n) ? 'checked' : ''}>${l}</label>`;
+  showSheet(`<h3>📅 Онлайн-запись на приём</h3>
+    <div class="sheet-sub">Доверитель открывает страницу, видит свободные окна и оставляет заявку. Заявка становится обращением и встречей «ожидает подтверждения»; подтверждаете с обзора — доверитель видит статус по коду. Уведомление о новой заявке — в Telegram, если у функции моста заданы TG_TOKEN и TG_CHAT.</div>
+    <label style="display:flex;align-items:center;gap:10px;margin:4px 0 10px;font-size:14px;cursor:pointer"><input type="checkbox" id="bk-enabled" ${c.enabled ? 'checked' : ''}> Включить онлайн-запись</label>
+    ${url ? `<div class="v-storage-note">Ссылка для доверителей: <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a> ${copyHtml(url, 'Ссылка скопирована')}</div>` : '<div class="meta" style="margin-bottom:8px">Ссылка появится после первой публикации.</div>'}
+    <div class="field"><label>Заголовок страницы</label><input id="bk-title" value="${esc(c.title)}"></div>
+    <div class="field"><label>Адрес приёма (показывается доверителю)</label><input id="bk-address" value="${esc(c.address)}"></div>
+    <div class="field"><label>Телефон для связи (показывается доверителю)</label><input id="bk-phone" value="${esc(c.phone)}"></div>
+    <div class="field"><label>Примечание на странице</label><input id="bk-note" value="${esc(c.note)}" placeholder="например: консультация 60 мин, первая — бесплатно"></div>
+    <div class="field-row"><div class="field"><label>Длительность приёма, мин</label><select id="bk-dur">${[30, 45, 60, 90].map(v => `<option ${Number(c.durationMin) === v ? 'selected' : ''}>${v}</option>`).join('')}</select></div><div class="field"><label>Окна на дней вперёд</label><input id="bk-horizon" type="number" min="3" max="60" value="${esc(c.horizonDays)}"></div></div>
+    <div class="field"><label>Дни приёма</label><div>${dayBox(1, 'пн')}${dayBox(2, 'вт')}${dayBox(3, 'ср')}${dayBox(4, 'чт')}${dayBox(5, 'пт')}${dayBox(6, 'сб')}${dayBox(0, 'вс')}</div></div>
+    <div class="field-row"><div class="field"><label>Приём с</label><input id="bk-from" type="time" value="${esc(c.from)}"></div><div class="field"><label>до</label><input id="bk-to" type="time" value="${esc(c.to)}"></div></div>
+    <div class="field-row"><div class="field"><label>Перерыв с</label><input id="bk-b1" type="time" value="${esc(c.breakFrom)}"></div><div class="field"><label>до</label><input id="bk-b2" type="time" value="${esc(c.breakTo)}"></div></div>
+    <div class="field"><label>Не раньше чем через, часов (для сегодняшних окон)</label><input id="bk-lead" type="number" min="0" max="72" value="${esc(c.minLeadHours)}"></div>
+    <div class="field"><label>Темы для выбора (по одной в строке)</label><textarea id="bk-topics" rows="4">${esc(c.topics)}</textarea></div>
+    <div class="meta" style="margin-bottom:10px">Окна = рабочие часы минус заседания (с временем в пути до суда), встречи, перерыв и нерабочие дни. Публикация обновляется сама после изменения заседаний и встреч.</div>
+    <button class="btn-primary" onclick="saveBookSettings()">Сохранить и опубликовать окна</button>
+    <button class="btn-ghost" onclick="bookPoll(false)">↻ Проверить заявки</button>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
+}
+async function saveBookSettings() {
+  const c = bookCfg();
+  c.enabled = !!document.getElementById('bk-enabled').checked; c.title = fval('bk-title').trim() || 'Запись на консультацию'; c.address = fval('bk-address').trim(); c.phone = fval('bk-phone').trim(); c.note = fval('bk-note').trim();
+  c.durationMin = Number(fval('bk-dur')) || 60; c.horizonDays = Math.min(60, Math.max(3, Number(fval('bk-horizon')) || 14)); c.from = fval('bk-from') || '10:00'; c.to = fval('bk-to') || '18:00'; c.breakFrom = fval('bk-b1'); c.breakTo = fval('bk-b2'); c.minLeadHours = Number(fval('bk-lead')) || 0;
+  c.days = Array.from(document.querySelectorAll('.bk-day:checked')).map(x => Number(x.value)); c.topics = fval('bk-topics');
+  if (c.enabled && !c.publicId) c.publicId = bookNewId();
+  bookCfgSave(c);
+  if (c.enabled) { const j = await bookPublish(false); if (j && j.ok) openBookSettings(); } else { toast('Онлайн-запись выключена (страница остаётся, но окон не будет)'); closeSheet(); }
 }
 // ═══════ v223: КАЛЬКУЛЯТОРЫ ═══════
 // Справочники: refs/keyRates = { items:[], rates:[{from:'ГГГГ-ММ-ДД', rate:число}] } — ключевая ставка ЦБ; refs/cpi = { items:[], cpi:{'ГГГГ-ММ': число} } — ИПЦ Росстата в % к предыдущему месяцу.
@@ -15056,6 +15179,20 @@ async function crmCasesFetchAllCards() {
   toast(`Готово: дел ${cases.length}, заполнено ${filled}, с ошибками ${errs}, событий ${ev} — подробности в журналах дел`);
   openMonitorCenter();
 }
+// v246: у заседаний, созданных по данным суда, суд/судья могли быть взяты по текущей стадии дела, а не по инстанции события — пересчитать
+async function crmMonFixCourts(dry) {
+  const [hs, evs, cases] = await Promise.all([getAll('hearings'), getAll('monitorEvents'), getAll('cases')]);
+  const byId = new Map(evs.map(e => [e.id, e])); const fixes = [];
+  for (const h of hs) {
+    if (!h.monitorEventId) continue; const e = byId.get(h.monitorEventId); const c = cases.find(x => x.id === h.caseId || (h.caseNum && x.number === h.caseNum)); if (!e || !c) continue;
+    const st = crmMonStageOf(e); if (!st) continue; const sc = crmMonCourtFor(c, st); if (!sc.court || sc.court === h.court) continue;
+    const ownJudges = [c.judge, c.judgeApp, c.judgeCass].filter(Boolean); fixes.push({ h, court: sc.court, judge: (!h.judge || ownJudges.includes(h.judge)) && sc.judge ? sc.judge : h.judge, st }); // судья меняется, если он был взят из дела (не вписан вручную посторонний)
+  }
+  if (dry) return fixes;
+  for (const f of fixes) { const prevCourt = f.h.court; f.h.court = f.court; f.h.judge = f.judge; f.h.stage = f.st; await put('hearings', f.h); if (f.h.caseNum) await crmCaseLogByNum(f.h.caseNum, 'hearing_upd', `Заседание ${fmtDate(f.h.date)}: суд ${prevCourt || '—'} → ${f.court} (инстанция ${f.st})`); }
+  return fixes;
+}
+async function crmMonFixCourtsUI() { const f = await crmMonFixCourts(true); if (!f.length) { toast('Суды у заседаний соответствуют инстанциям'); return; } if (!confirm(`Исправить суд у ${f.length} ${plural(f.length, 'заседания', 'заседаний', 'заседаний')} по инстанции события (например, апелляционное → областной суд)?`)) return; await crmMonFixCourts(false); toast(`Исправлено: ${f.length}`); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderCases(); openMonitorCenter(); }
 // v242: чужие заседания — созданные по событию, у которого УИД не совпадает с УИД дела (событие пришло с чужой карточки)
 async function crmForeignHearings() {
   const [hs, evs, cases] = await Promise.all([getAll('hearings'), getAll('monitorEvents'), getAll('cases')]);
@@ -15100,7 +15237,7 @@ function crmCollectorAutoSend(obj, force) { // v244: force — отправит�
   }, 4000);
 }
 async function crmCorRenderDashboard(){const host=document.getElementById('v163-cor-alerts')||(()=>{const a=document.createElement('div');a.id='v163-cor-alerts';document.getElementById('v161-next-actions')?.insertAdjacentElement('afterend',a);return a;})();if(!host)return;const rows=(await getAll('mail')).filter(x=>x.needsAction&&(!mailIsPostal(x)||true)&&(!x.responseDue||(daysUntil(x.responseDue)??99)<=30));host.innerHTML=rows.length?`<div class="card" onclick="nav('mail');setMailChip('action')" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin-top:10px"><div class="row1"><div><div class="title">✉ Корреспонденция требует внимания</div><div class="meta">${rows.length} ${plural(rows.length,'письмо','письма','писем')} ждут действия или ответа</div></div><span class="badge b-wait"><span class="dot"></span>${rows.length}</span></div></div>`:'';}
-CRM_UPGRADE.v162RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v162RenderDashboard();await crmCorRenderDashboard();await crmFlowActRender().catch(()=>{});return r;};
+CRM_UPGRADE.v162RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v162RenderDashboard();await crmCorRenderDashboard();await crmFlowActRender().catch(()=>{});await bookRenderDashboard().catch(()=>{});return r;};
 
 
 // CRM Адвоката v164 — локальный центр документов, версии, теги и полнотекстовый поиск.
@@ -15215,6 +15352,19 @@ async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw(
 //  • дата акта из «Движения дела»: записывается, если поле в деле пусто (иначе остаётся предложение на обзоре).
 // Каждое действие — в историю и журнал дела, событие помечается applied/autoApplied.
 const crmMonAutoOn = () => localStorage.getItem('crm_mon_auto') !== '0';
+// v246: инстанция события — из raw (JSON st или текстовая шапка «Д-x · Апелляция») → суд и судья этой инстанции
+function crmMonStageOf(e) {
+  const raw = String(e && e.raw || '');
+  try { const j = JSON.parse(raw); if (j && j.st) return String(j.st); } catch (x) {}
+  const m = raw.match(/·\s*(Первая инстанция|Апелляция|Кассация|Надзор)/); if (m) return m[1];
+  const t = String(e && e.title || ''); return /апелляц/i.test(t) ? 'Апелляция' : /кассац/i.test(t) ? 'Кассация' : '';
+}
+function crmMonCourtFor(c, stage) {
+  if (stage === 'Апелляция') return { court: c.courtApp || '', judge: c.judgeApp || '' };
+  if (stage === 'Кассация' || stage === 'Надзор') return { court: c.courtCass || '', judge: c.judgeCass || '' };
+  if (stage === 'Первая инстанция') return { court: c.court || '', judge: c.judge || '' };
+  return caseStageCourt(c);
+}
 // v240: событие с датой и временем, которое всё же не заседание — принятие иска, регистрация, передача, оформление и т.п. (страховка для старых коллекторов)
 const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен/i;
 const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(String(e && (e.title || '') + ' ' + (e && e.raw || '').split('\n').slice(2).join(' ')));
@@ -15247,6 +15397,7 @@ async function crmMonAutoApply(rows) {
         const ch = [];
         if (b.time && b.time !== h.time && h.status !== 'Проведено') { ch.push('время ' + (h.time || '—') + ' → ' + b.time); h.time = b.time; }
         if (b.room && b.room !== h.room) { ch.push('зал ' + (h.room || '—') + ' → ' + b.room); h.room = b.room; }
+        { const sc2 = crmMonCourtFor(c, crmMonStageOf(e)); if (sc2.court && sc2.court !== h.court) { ch.push('суд ' + (h.court || '—') + ' → ' + sc2.court); h.court = sc2.court; if (sc2.judge && !e.judge) h.judge = sc2.judge; } } // v246
         if (e.judge && !h.judge) { ch.push('судья ' + e.judge); h.judge = e.judge; }
         if (b.result && !h.result && e.date < today) { ch.push('результат: ' + b.result); h.result = b.result; }
         if (e.date < today && h.status !== 'Проведено' && h.status !== 'Отменено') { ch.push('статус: проведено'); h.status = 'Проведено'; } // v243
@@ -15255,9 +15406,9 @@ async function crmMonAutoApply(rows) {
       } else if (e.date >= today) {
         const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date));
         if (free.length === 1) { h = free[0]; how = `перенесено по данным суда: ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} → ${fmtDate(e.date)}${b.time ? ' ' + b.time : ''}`; h.movedFrom = { date: h.date, time: h.time || '', room: h.room || '' }; h.date = e.date; if (b.time) h.time = b.time; if (b.room) h.room = b.room; if (e.judge) h.judge = e.judge; n.moved++; }
-        else { const sc = caseStageCourt(c); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; }
+        else { const sc = crmMonCourtFor(c, crmMonStageOf(e)); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } // v246: суд по инстанции события
       } else {
-        const sc = caseStageCourt(c); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', status: 'Проведено', result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'прошедшее заседание записано по данным суда'; n.hearings++;
+        const sc = crmMonCourtFor(c, crmMonStageOf(e)); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Проведено', result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'прошедшее заседание записано по данным суда'; n.hearings++;
       }
       h.monitorEventId = h.monitorEventId || e.id; h.courtSync = Date.now();
       await put('hearings', h);
@@ -15312,7 +15463,7 @@ async function crmMonCleanFake() {
 }
 async function crmMonAppliedHtml() {
   const since = Date.now() - 30 * 864e5;
-  const fake = await crmMonFakeHearings(); const dupsN = (await crmHearingDups()).reduce((a, g) => a + g.length - 1, 0); const foreignN = (await crmForeignHearings()).length;
+  const fake = await crmMonFakeHearings(); const dupsN = (await crmHearingDups()).reduce((a, g) => a + g.length - 1, 0); const foreignN = (await crmForeignHearings()).length; const courtsN = (await crmMonFixCourts(true)).length;
   const hs = (await getAll('hearings')).filter(h => h.courtSync && h.courtSync >= since).sort((a, b) => b.courtSync - a.courtSync).slice(0, 30);
   const cases = await getAll('cases');
   const byLink = {}; cases.filter(c => !c.archived).forEach(c => [c.link, c.linkApp, c.linkCass].forEach(l => { if (l) (byLink[l] = byLink[l] || []).push(c.number); }));
@@ -15321,6 +15472,7 @@ async function crmMonAppliedHtml() {
   const sameNo = Object.values(nums).filter(a => a.length > 1);
   return `<details style="margin:6px 0 10px"><summary>Применено по данным суда за 30 дней · ${hs.length}${dups.length || sameNo.length ? ' · ⚠ есть что проверить' : ''}</summary>
     ${dups.length ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Одна ссылка на сайт суда стоит у нескольких дел — события с неё попадут не туда: ${dups.map(([l, a]) => esc(a.join(', '))).join('; ')}. Исправьте ссылку в лишних делах.</div>` : ''}
+    ${courtsN ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Заседаний с судом не той инстанции (например, апелляционное записано на суд первой инстанции): ${courtsN}. <button class="v-mini-btn" onclick="crmMonFixCourtsUI()">Исправить</button></div>` : ''}
     ${foreignN ? `<div class="v-storage-note" style="border-left-color:var(--red)">Заседаний по событиям чужого дела (УИД не совпадает): ${foreignN}. <button class="v-mini-btn" onclick="crmForeignClean()">Убрать все</button></div>` : ''}
     ${dupsN ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Дубли заседаний (одно дело, дата и время): ${dupsN}. <button class="v-mini-btn" onclick="crmHearingDedup()">Объединить</button></div>` : ''}
     ${fake.length ? `<div class="v-storage-note" style="border-left-color:var(--orange)">Заседаний, созданных из строк движения (принятие иска к производству и т.п.): ${fake.length}. <button class="v-mini-btn" onclick="crmMonCleanFake()">Удалить все</button></div>` : ''}
@@ -15473,6 +15625,7 @@ function crmHelpAttach(name,key){var o=window[name];if(typeof o!=='function')ret
   navBadgeRefresh();
   await mailMigrateCorrespondence(); // v225
   try { const n = await hearingsAutoDone(); if (n) console.log('заседаний отмечено проведёнными автоматически: ' + n); } catch (e) {} // v243
+  setTimeout(() => { bookPoll(true).catch(() => {}); if (Date.now() - (bookCfg().lastPub || 0) > 6 * 3600e3) bookPublish(true).catch(() => {}); }, 4000); // v245: заявки и обновление окон
   // Напоминания о заседаниях/сроках (если включены) — после загрузки данных
   setTimeout(() => notifCheck().catch(()=>{}), 1500);
   // v218: запуск сразу в инбокс — ярлык PWA (?inbox=1) или закладка (#inbox); адрес очищается, чтобы обновление страницы не открывало инбокс снова
