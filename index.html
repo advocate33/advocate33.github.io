@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v247</title>
+<title>CRM Адвоката v249</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '247'; // v247: карточка «Онлайн-запись на приём» — в Справочниках (рядом с «Напоминания»), а не только в калькуляторах
+const APP_VER = '249'; // v249: «Вынесено определение о подготовке/назначении дела…» — не заседание (страховка в CRM + уборка); коллектор v3.10
+// v248 → // v248: онлайн-запись — запас после заседания (доехать до офиса) и перед ним, ожидаемая длительность заседания, приёмы подряд без зазора
+// v247 → // v247: карточка «Онлайн-запись на приём» — в Справочниках (рядом с «Напоминания»), а не только в калькуляторах
 // v246 → // v246: суд и судья заседания из данных суда — по инстанции события (апелляционное заседание → суд апелляции), а не по текущей стадии дела; исправление уже созданных
 // v245 → // v245: онлайн-запись на приём — публичная страница на личном сервере, окна из расписания CRM, заявки → обращение + встреча, подтверждение из CRM
 // v244 → // v244: список дел для коллектора обновляется при завершении/возврате в работу, архивации и удалении дела — завершённые дела не проверяются
@@ -10546,7 +10548,7 @@ function addBusinessDaysISO(iso, n) {
 // публикуются на личный сервер (bookpub). Заявки забираются bookget: обращение + встреча «ожидает подтверждения»; подтверждение/отказ — bookset.
 function bookCfg() {
   let c = {}; try { c = JSON.parse(localStorage.getItem('crm_book') || '{}'); } catch (e) {}
-  return Object.assign({ enabled: false, publicId: '', title: 'Запись на консультацию', address: '', phone: '', note: '', durationMin: 60, horizonDays: 14, from: '10:00', to: '18:00', breakFrom: '13:00', breakTo: '14:00', days: [1, 2, 3, 4, 5], topics: 'ДТП / ОСАГО\nЗащита прав потребителей\nЗалив квартиры\nДолги, займы\nНаследство\nЖКХ\nДругое', minLeadHours: 3, lastPoll: 0, lastPub: 0 }, c);
+  return Object.assign({ enabled: false, publicId: '', title: 'Запись на консультацию', address: '', phone: '', note: '', durationMin: 60, horizonDays: 14, from: '10:00', to: '18:00', breakFrom: '13:00', breakTo: '14:00', days: [1, 2, 3, 4, 5], topics: 'ДТП / ОСАГО\nЗащита прав потребителей\nЗалив квартиры\nДолги, займы\nНаследство\nЖКХ\nДругое', minLeadHours: 3, hearingMin: 60, afterCourtMin: 30, beforeCourtMin: 30, gapMin: 0, lastPoll: 0, lastPub: 0 }, c);
 }
 function bookCfgSave(c) { localStorage.setItem('crm_book', JSON.stringify(c)); if (typeof bumpSettings === 'function') bumpSettings(); }
 const bookNewId = () => Array.from(crypto.getRandomValues(new Uint8Array(12))).map(b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
@@ -10563,8 +10565,11 @@ function bookAvailability(cfg, hearings, meetings, nowTs) {
     if (typeof isWorkdayISO === 'function' && !isWorkdayISO(iso) && !(cfg.days || []).includes(d.getDay())) continue;
     if (CAL_OFF.has(iso)) continue;
     const busy = [];
-    hearings.filter(h => h.date === iso && h.status !== 'Отменено').forEach(h => { const t = toMinB(h.time); if (t === null) { busy.push([0, 1440]); return; } const tr = (() => { const i2 = courtInfoGet(h.court); const v = i2 && Number(i2.travel); return v > 0 ? v : 60; })(); busy.push([t - tr, t + 120 + tr]); });
-    meetings.filter(m => m.date === iso).forEach(m => { const t = toMinB(m.time); if (t === null) return; busy.push([t - 15, t + (Number(m.duration) || 30) + 15]); });
+    // v248: заседание занимает [начало − дорога в суд, начало + длительность заседания + дорога в офис]; дорога — из реквизитов суда, иначе из настроек
+    const hMin = Number(cfg.hearingMin) || 60, afterC = Number(cfg.afterCourtMin) || 0, beforeC = Number(cfg.beforeCourtMin) || 0, gap = Number(cfg.gapMin) || 0;
+    hearings.filter(h => h.date === iso && h.status !== 'Отменено').forEach(h => { const t = toMinB(h.time); if (t === null) { busy.push([0, 1440]); return; } const i2 = courtInfoGet(h.court); const tr = i2 && Number(i2.travel) > 0 ? Number(i2.travel) : 0; busy.push([t - Math.max(tr, beforeC), t + hMin + Math.max(tr, afterC)]); });
+    // встречи и приёмы — подряд, зазор только если задан в настройках
+    meetings.filter(m => m.date === iso).forEach(m => { const t = toMinB(m.time); if (t === null) return; busy.push([t - gap, t + (Number(m.duration) || 30) + gap]); });
     if (b1 !== null && b2 !== null) busy.push([b1, b2]);
     const minStart = i === 0 ? now.getHours() * 60 + now.getMinutes() + (Number(cfg.minLeadHours) || 0) * 60 : 0;
     const slots = [];
@@ -10640,8 +10645,12 @@ function openBookSettings() {
     <div class="field-row"><div class="field"><label>Приём с</label><input id="bk-from" type="time" value="${esc(c.from)}"></div><div class="field"><label>до</label><input id="bk-to" type="time" value="${esc(c.to)}"></div></div>
     <div class="field-row"><div class="field"><label>Перерыв с</label><input id="bk-b1" type="time" value="${esc(c.breakFrom)}"></div><div class="field"><label>до</label><input id="bk-b2" type="time" value="${esc(c.breakTo)}"></div></div>
     <div class="field"><label>Не раньше чем через, часов (для сегодняшних окон)</label><input id="bk-lead" type="number" min="0" max="72" value="${esc(c.minLeadHours)}"></div>
+    <div class="sect-title">Запас вокруг заседаний</div>
+    <div class="field-row"><div class="field"><label>Заседание длится, мин</label><input id="bk-hmin" type="number" min="15" max="480" step="5" value="${esc(c.hearingMin)}"></div><div class="field"><label>После заседания до приёма, мин</label><input id="bk-after" type="number" min="0" max="240" step="5" value="${esc(c.afterCourtMin)}"></div></div>
+    <div class="field-row"><div class="field"><label>Перед заседанием (выехать), мин</label><input id="bk-before" type="number" min="0" max="240" step="5" value="${esc(c.beforeCourtMin)}"></div><div class="field"><label>Зазор между приёмами, мин</label><input id="bk-gap" type="number" min="0" max="120" step="5" value="${esc(c.gapMin)}"></div></div>
+    <div class="meta" style="margin:-4px 0 10px">Если у суда в реквизитах указано время в пути и оно больше, берётся оно. Ноль в «зазоре» — приёмы подряд.</div>
     <div class="field"><label>Темы для выбора (по одной в строке)</label><textarea id="bk-topics" rows="4">${esc(c.topics)}</textarea></div>
-    <div class="meta" style="margin-bottom:10px">Окна = рабочие часы минус заседания (с временем в пути до суда), встречи, перерыв и нерабочие дни. Публикация обновляется сама после изменения заседаний и встреч.</div>
+    <div class="meta" style="margin-bottom:10px">Окна = рабочие часы минус заседания с запасом до и после, встречи, перерыв и нерабочие дни. Публикация обновляется сама после изменения заседаний и встреч.</div>
     <button class="btn-primary" onclick="saveBookSettings()">Сохранить и опубликовать окна</button>
     <button class="btn-ghost" onclick="bookPoll(false)">↻ Проверить заявки</button>
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
@@ -10651,6 +10660,7 @@ async function saveBookSettings() {
   c.enabled = !!document.getElementById('bk-enabled').checked; c.title = fval('bk-title').trim() || 'Запись на консультацию'; c.address = fval('bk-address').trim(); c.phone = fval('bk-phone').trim(); c.note = fval('bk-note').trim();
   c.durationMin = Number(fval('bk-dur')) || 60; c.horizonDays = Math.min(60, Math.max(3, Number(fval('bk-horizon')) || 14)); c.from = fval('bk-from') || '10:00'; c.to = fval('bk-to') || '18:00'; c.breakFrom = fval('bk-b1'); c.breakTo = fval('bk-b2'); c.minLeadHours = Number(fval('bk-lead')) || 0;
   c.days = Array.from(document.querySelectorAll('.bk-day:checked')).map(x => Number(x.value)); c.topics = fval('bk-topics');
+  c.hearingMin = Number(fval('bk-hmin')) || 60; c.afterCourtMin = Number(fval('bk-after')) || 0; c.beforeCourtMin = Number(fval('bk-before')) || 0; c.gapMin = Number(fval('bk-gap')) || 0; // v248
   if (c.enabled && !c.publicId) c.publicId = bookNewId();
   bookCfgSave(c);
   if (c.enabled) { const j = await bookPublish(false); if (j && j.ok) openBookSettings(); } else { toast('Онлайн-запись выключена (страница остаётся, но окон не будет)'); closeSheet(); }
@@ -15375,7 +15385,7 @@ function crmMonCourtFor(c, stage) {
   return caseStageCourt(c);
 }
 // v240: событие с датой и временем, которое всё же не заседание — принятие иска, регистрация, передача, оформление и т.п. (страховка для старых коллекторов)
-const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен/i;
+const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен|вынесен\S* (определени|постановлени)|определени\S* о (подготовке|назначении|принятии|возбуждении|оставлении|возврат)|назначени\S* дела к/i; // v249
 const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(String(e && (e.title || '') + ' ' + (e && e.raw || '').split('\n').slice(2).join(' ')));
 function crmDecodeEntities(t) { const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raquo: '»', rarr: '→', larr: '←', ndash: '–', mdash: '—', hellip: '…', apos: "'" }; return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
 function crmMonHearingBits(e) {
