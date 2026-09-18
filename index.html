@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v253</title>
+<title>CRM Адвоката v254</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1235,7 +1235,8 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '253'; // v253: суд заседания — с самой страницы суда (коллектор v3.11), если у дела нет суда этой инстанции — заполняется; «Судебный зал №7»/«кабинет судьи» — место, не итог; правка уже записанных
+const APP_VER = '254'; // v254: «(регистрация лиц)» в месте заседания больше не принимается за «регистрацию иска» — заседание создаётся; события, ошибочно переведённые в движение, возвращаются
+// v253 → // v253: суд заседания — с самой страницы суда (коллектор v3.11), если у дела нет суда этой инстанции — заполняется; «Судебный зал №7»/«кабинет судьи» — место, не итог; правка уже записанных
 // v252 → // v252: умное слияние дел при синхронизации — по журналу изменений (поле берётся из более поздней правки), списки сроков/участников объединяются; правка ссылки на телефоне больше не затирается автозаписью на компьютере
 // v251 → // v251: изменения ссылок на суд — в историю дела; автоприменение записывает дату акта в свежую копию дела (не затирает правки, сделанные во время сбора)
 // v250 → // v250: заседания внутри дня — по времени (список, месяц, неделя)
@@ -15428,7 +15429,21 @@ function crmMonCourtFor(c, stage, e) { // v253: e — событие; если �
 const RE_ROOM_TEXT = /^(судебн\S*\s+)?зал|^каб(инет|\.)?\b|^кабинет|^помещени/i;
 // v240: событие с датой и временем, которое всё же не заседание — принятие иска, регистрация, передача, оформление и т.п. (страховка для старых коллекторов)
 const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен|вынесен\S* (определени|постановлени)|определени\S* о (подготовке|назначении|принятии|возбуждении|оставлении|возврат)|назначени\S* дела к/i; // v249
-const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(String(e && (e.title || '') + ' ' + (e && e.raw || '').split('\n').slice(2).join(' ')));
+// v254: проверяется только НАЗВАНИЕ события — часть заголовка до даты/тире/двоеточия, без скобок; «Кабинет №232 (регистрация лиц)» — место, а не «регистрация иска»
+const crmMonEventHead = e => String(e && e.title || '').replace(/\([^)]*\)/g, ' ').split(/\s\d{2}\.\d{2}\.\d{4}|\s—\s|:\s+/)[0].trim();
+const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(crmMonEventHead(e));
+// события, которые старая проверка перевела в «движение», хотя это заседания — вернуть в заседания
+async function crmMonRestoreHearings() {
+  const evs = await getAll('monitorEvents'); let n = 0;
+  for (const e of evs) {
+    if (e.eventType !== 'caseflow' || !e.date) continue;
+    let isJson = false; try { JSON.parse(e.raw || ''); isJson = true; } catch (x) {}
+    if (isJson) continue; // настоящие строки движения приходят с JSON в raw
+    if (!/заседани|слушани|беседа/i.test(crmMonEventHead(e)) || crmMonIsFakeHearing(e)) continue;
+    e.eventType = 'hearing'; e.status = 'new'; delete e.autoSkip; await put('monitorEvents', e); n++;
+  }
+  return n;
+}
 function crmDecodeEntities(t) { const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raquo: '»', rarr: '→', larr: '←', ndash: '–', mdash: '—', hellip: '…', apos: "'" }; return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
 function crmMonHearingBits(e) {
   const txt = String(e.title || '') + ' ' + String(e.raw || '');
@@ -15544,7 +15559,7 @@ async function crmMonAppliedHtml() {
     ${hs.length ? hs.map(h => `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--border)"><div style="flex:1;min-width:0;font-size:13px"><b>${esc(h.caseNum || '')}</b> · ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''}${h.movedFrom ? ` <span class="meta">(перенесено с ${fmtDate(h.movedFrom.date)})</span>` : ' <span class="meta">(создано)</span>'}<div class="meta">${esc(h.court || '')}</div></div><button class="v-mini-btn" onclick="crmMonUndoHearing('${jsq(h.id)}')">✕ Отменить</button></div>`).join('') : '<div class="meta">Автоматически созданных или перенесённых заседаний за 30 дней нет.</div>'}
   </details>`;
 }
-async function crmMonAutoApplyAll() { const n = await crmMonAutoApply(null); if (!(n.hearings + n.moved + n.updated + n.acts)) toast('Применять нечего: все совпавшие события уже учтены'); openMonitorCenter(); renderDashboard(); }
+async function crmMonAutoApplyAll() { const r = await crmMonRestoreHearings(); if (r) toast(`Возвращено в заседания: ${r}`); const n = await crmMonAutoApply(null); if (!(n.hearings + n.moved + n.updated + n.acts)) toast('Применять нечего: все совпавшие события уже учтены'); openMonitorCenter(); renderDashboard(); }
 async function importMonitorFile(input){const file=input?.files?.[0];if(!file)return;if(file.size>5*1024*1024){toast('Файл больше 5 МБ',true);return;}const rows=crmMonRows(await file.text(),file.name),norm=await crmMonNormalizeRows(rows,fval('v-mon-source')||'Импорт файла');await crmMonPersist(norm);input.value='';}
 async function importMonitorPaste(){const text=fval('v-mon-paste').trim();if(!text){toast('Вставьте текст уведомления',true);return;}await crmMonPersist(await crmMonNormalizeRows(crmMonRows(text,'notice.txt'),fval('v-mon-source')||'Ручной импорт'));}
 function crmMonDownloadTemplate(){const blob=new Blob(['externalId,title,date,eventType,courtNo,caseUid\n12345,Назначено заседание,2026-09-15,hearing,А40-12345/2026,'],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='monitor_events_template.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
