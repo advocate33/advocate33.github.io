@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v254</title>
+<title>CRM Адвоката v264</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -17,6 +17,7 @@
 <style>
 
   :root {
+  --muted: var(--text-dim); --card2: var(--surface-2); /* v255: раньше не были объявлены */
   --blue: #60a5fa; /* сквозной голубой: ссылки, судьи, оппоненты */
     --navy: #2A2F6E;
     --navy-dark: #1d2150;
@@ -925,6 +926,7 @@
   </div>
   <div style="flex:1;min-width:0;text-align:center">
     <h1>CRM Адвоката</h1>
+    <div id="sync-status" onclick="openSyncSheet()" style="font-size:10.5px;line-height:1.1;opacity:.85;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;margin-top:1px"></div><!-- v256 -->
   </div>
   <button onclick="openGlobalSearch()" style="background:rgba(255,255,255,0.12);border:none;border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;margin-right:8px" aria-label="Поиск везде">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
@@ -1235,7 +1237,17 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '254'; // v254: «(регистрация лиц)» в месте заседания больше не принимается за «регистрацию иска» — заседание создаётся; события, ошибочно переведённые в движение, возвращаются
+const APP_VER = '264'; // v264: папка дела на компьютере (File System Access — список файлов, открытие, путь в буфер) и блок доверенностей в карточке дела
+// v263 → // v263: будильники Android — список напоминаний на 30 дней передаётся приложению-обёртке (AndroidApp.scheduleReminders), уведомления приходят при закрытой программе; настройка «за сколько предупреждать»
+// v262 → // v262: календарная лента без ФИО — переключатель «в ленте только номера дел» (для сервера, который видят посторонние); лента и так уходит на сервер открытым текстом
+// v261 → // v261: исправлено меню «Ещё» — плитка «Настройки» обрывала список (запятая вместо +), пропадали Документы, Мониторинг, Процессы, ИИ-помощник
+// v260 → // v260: настоящий .docx без библиотек — zip из WordprocessingML (абзацы, выравнивание, жирный/курсив/подчёркивание, списки, таблицы, разрывы строк); Times New Roman 14, поля 2/1,5/2/3 см
+// v259 → // v259: форма дела подстраивается под стадию — блок вышестоящих инстанций раскрыт в апелляции/кассации, вкладки будущих инстанций приглушены до наступления стадии; счётчики заполненных полей на свёрнутых блоках
+// v258 → // v258: умное слияние для всех сущностей — каждая запись хранит время изменения по полям (_ch), при коллизии поле берётся из более поздней правки
+// v257 → // v257: глобальный поиск — документы центра (название, теги, заметка, текст файла, с фрагментом) и счета (участник, дело, услуга, комментарий)
+// v256 → // v256: статус синхронизации в шапке — офлайн / изменения ждут / синхронизировано ЧЧ:ММ / коллизия
+// v255 → // v255: «Настройки» и «Справочники и инструменты» разведены по двум листам; объявлены недостающие цвета --muted/--card2
+// v254 → // v254: «(регистрация лиц)» в месте заседания больше не принимается за «регистрацию иска» — заседание создаётся; события, ошибочно переведённые в движение, возвращаются
 // v253 → // v253: суд заседания — с самой страницы суда (коллектор v3.11), если у дела нет суда этой инстанции — заполняется; «Судебный зал №7»/«кабинет судьи» — место, не итог; правка уже записанных
 // v252 → // v252: умное слияние дел при синхронизации — по журналу изменений (поле берётся из более поздней правки), списки сроков/участников объединяются; правка ссылки на телефоне больше не затирается автозаписью на компьютере
 // v251 → // v251: изменения ссылок на суд — в историю дела; автоприменение записывает дату акта в свежую копию дела (не затирает правки, сделанные во время сбора)
@@ -1464,7 +1476,41 @@ function put(store, obj) {
     localStorage.setItem('crm_last_write_stamp', String(obj._upd));
     try { obj._device = deviceId(); } catch(e) {}
   }
-  return new Promise(res => { const r = tx(store,'readwrite').put(obj); r.onsuccess = () => { if (typeof cloudTouch === 'function') cloudTouch(); res(true); }; r.onerror = () => { storageWriteError(r.error); res(false); }; });
+  // v258: метки изменения по полям — для умного слияния при синхронизации (см. mergeByFields)
+  return new Promise(res => {
+    const write = () => { const r = tx(store,'readwrite').put(obj); r.onsuccess = () => { if (typeof cloudTouch === 'function') cloudTouch(); res(true); }; r.onerror = () => { storageWriteError(r.error); res(false); }; };
+    if (!(obj && typeof obj === 'object' && obj.id != null)) return write();
+    try {
+      const g = tx(store).get(obj.id);
+      g.onsuccess = () => { try { fieldStamps(obj, g.result || null, obj._upd); } catch (e) {} write(); };
+      g.onerror = () => write();
+    } catch (e) { write(); }
+  });
+}
+// v258: obj._ch = { поле: время последнего изменения }; сравнение с прежней записью по значению (JSON), служебные поля (_…) не учитываются
+function fieldStamps(obj, prev, ts) {
+  const ch = Object.assign({}, prev && prev._ch || {});
+  const keys = new Set([...Object.keys(obj), ...Object.keys(prev || {})]);
+  for (const k of keys) {
+    if (k.startsWith('_') || k === 'id') continue;
+    const a = obj[k] === undefined ? null : obj[k], b = prev ? (prev[k] === undefined ? null : prev[k]) : undefined;
+    if (b === undefined || JSON.stringify(a) !== JSON.stringify(b)) ch[k] = ts;
+  }
+  obj._ch = ch;
+  return obj;
+}
+// слияние двух версий записи: основа — более новая; каждое поле — из той версии, где оно менялось позже (по _ch); без меток — из более новой
+function mergeByFields(cur, rec) {
+  const newer = (rec._upd || 0) >= (cur._upd || 0) ? rec : cur, older = newer === rec ? cur : rec;
+  const m = JSON.parse(JSON.stringify(newer)); const chN = newer._ch || {}, chO = older._ch || {}; const ch = Object.assign({}, chO, chN);
+  for (const k of Object.keys(older)) {
+    if (k.startsWith('_') || k === 'id') continue;
+    const tN = chN[k] || 0, tO = chO[k] || 0;
+    if (tO > tN) { m[k] = older[k]; ch[k] = tO; }
+  }
+  for (const k of Object.keys(chN)) if ((chO[k] || 0) > (chN[k] || 0) && !(k in older)) { delete m[k]; ch[k] = chO[k]; } // поле удалено позже на другой стороне
+  m._ch = ch; m._upd = Math.max(newer._upd || 0, older._upd || 0) + 1;
+  return m;
 }
 // Удаление = «надгробие»: запись помечается _deleted, но ДАННЫЕ СОХРАНЯЮТСЯ,
 // чтобы её можно было восстановить из Корзины. Пометка с _deletedAt доходит и до
@@ -4042,7 +4088,7 @@ async function collectAll() {
 }
 
 // ── Синхронизация пользовательских настроек ──
-const SYNC_SETTINGS_KEYS = ['crm_book', 'crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
+const SYNC_SETTINGS_KEYS = ['crm_notif_lead', 'crm_ics_anon', 'crm_book', 'crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
 
 // Секреты переносятся только внутри зашифрованного контейнера .crm. PIN
 // хранится и переносится как PBKDF2-хэш с солью, а не как исходные цифры.
@@ -4285,6 +4331,8 @@ function mergeCaseRecords(cur, rec, base, events) {
   m.participants = unionBy(newer.participants, older.participants, p => p && crmMonNorm(p.name || ''));
   m.history = unionBy(newer.history, older.history, h => h && h.id).sort((a, b) => (a.at || 0) - (b.at || 0));
   if (Array.isArray(newer.ipReceipts) || Array.isArray(older.ipReceipts)) m.ipReceipts = unionBy(newer.ipReceipts, older.ipReceipts, r => r && r.id);
+  // v258: остальные поля — по меткам изменения (_ch), если они есть у обеих версий
+  if (newer._ch && older._ch) { const chN = newer._ch, chO = older._ch; for (const k of Object.keys(older)) { if (k.startsWith('_') || k === 'id' || last[CASE_MERGE_FIELDS[k] || k] || ['deadlines', 'participants', 'history', 'ipReceipts'].includes(k)) continue; if ((chO[k] || 0) > (chN[k] || 0)) m[k] = older[k]; } m._ch = Object.assign({}, chO, chN); }
   m._upd = Math.max(newer._upd || 0, older._upd || 0) + 1; // объединённая версия новее обеих — разойдётся на оба устройства
   return m;
 }
@@ -4315,6 +4363,12 @@ async function mergeIncoming(parsed, allowSecrets) {
           const merged = mergeCaseRecords(cur, rec, base, caseEventsAll);
           await putRaw(s, merged); updated++; CLOUD.dirty = true;
           conflicts.push({ store:s, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по журналу изменений' });
+          continue;
+        }
+        if (base && curT > base && newT > base && curT !== newT && s !== 'refs' && (cur._ch || rec._ch)) { // v258: обе стороны правили — по полям
+          const merged = mergeByFields(cur, rec);
+          await putRaw(s, merged); updated++; CLOUD.dirty = true;
+          conflicts.push({ store:s, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по полям' });
           continue;
         }
         if (base && curT > base && newT > base && curT !== newT && s !== 'refs') {
@@ -5546,8 +5600,10 @@ function srCalc() {
 function openRefsSheet() {
   const keys = Object.keys(REF_META).filter(k=>REF_META[k].editable);
   showSheet(`
-    <h3>Справочники</h3>
-    <div class="sheet-sub">Добавляйте свои значения — они появятся в выпадающих списках форм</div>
+    <h3>Справочники и инструменты</h3>
+    <div class="sheet-sub">Справочники подставляются в формы; ниже — инструменты. Внешний вид, напоминания, синхронизация, защита и онлайн-запись — в «Настройках»</div>
+    <div class="card" onclick="openSettingsSheet()" style="cursor:pointer;border-left:3px solid var(--accent)"><div class="row1"><div style="flex:1"><div class="title">⚙️ Настройки</div><div class="meta">Тема, шрифт, напоминания, онлайн-запись, синхронизация, защита входа, лицензия</div></div><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div></div>
+    <div class="sect-title" style="margin-top:14px">Справочники</div>
     ${keys.map(k=>`
       <div class="card" onclick="openRefEditor('${k}')" style="cursor:pointer">
         <div class="row1">
@@ -5563,14 +5619,7 @@ function openRefsSheet() {
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
       </div>
     </div>
-    <div class="card" onclick="openThemeSheet()" style="cursor:pointer;margin-top:4px">
-      <div class="row1"><div style="flex:1">
-        <div class="title">${ic("palette",16)} Тема оформления</div>
-        <div class="meta">${(()=>{const t=localStorage.getItem('crm_theme')||'auto';return t==='light'?'Светлая':t==='dark'?'Тёмная':'Как в системе';})()}</div>
-      </div>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
-    </div>
-
+    
     <div class="card" onclick="openOrdersSheet('')" style="cursor:pointer;margin-top:10px">
       <div class="row1"><div style="flex:1">
         <div class="title">📜 Реестр ордеров</div>
@@ -5587,22 +5636,8 @@ function openRefsSheet() {
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
 
-    <div class="card" onclick="openBookSettings()" style="cursor:pointer;margin-top:10px;border-left:3px solid var(--accent)"><!-- v247 -->
-      <div class="row1"><div style="flex:1">
-        <div class="title">📅 Онлайн-запись на приём ${bookCfg().enabled?'<span style="color:var(--green);font-size:12px">● вкл</span>':''}</div>
-        <div class="meta">${bookCfg().enabled&&bookUrl()?'Ссылка для доверителей опубликована · окна из вашего расписания':'Страница записи для доверителей на личном сервере'}</div>
-      </div>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
-    </div>
-
-    <div class="card" onclick="openNotifSheet()" style="cursor:pointer;margin-top:10px">
-      <div class="row1"><div style="flex:1">
-        <div class="title">${ic("calendar",16)} Напоминания ${notifOn()?'<span style="color:var(--green);font-size:12px">● вкл</span>':''}</div>
-        <div class="meta">Уведомления о заседаниях и сроках (Android)</div>
-      </div>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
-    </div>
-
+    
+    
     <div class="card" onclick="openPriceSheet()" style="cursor:pointer;margin-top:10px">
       <div class="row1"><div style="flex:1">
         <div class="title">${ic("money",16)} Прайс услуг</div>
@@ -5627,38 +5662,71 @@ function openRefsSheet() {
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
 
-    <div class="card" onclick="openFontSheet()" style="cursor:pointer;margin-top:10px">
+    
+    
+    
+        <div class="meta" style="text-align:center;margin-top:14px;opacity:.7">CRM Адвоката · версия ${APP_VER}</div>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
+  `);
+}
+function openSettingsSheet() { // v255: настройки приложения (раньше — вперемешку со справочниками)
+  showSheet(`
+    <h3>⚙️ Настройки</h3>
+    <div class="sheet-sub">Внешний вид, напоминания, запись на приём, синхронизация и защита. Справочники и инструменты — в «Справочниках»</div>
+    <div class="sect-title">Внешний вид</div>
+<div class="card" onclick="openThemeSheet()" style="cursor:pointer;margin-top:4px">
+      <div class="row1"><div style="flex:1">
+        <div class="title">${ic("palette",16)} Тема оформления</div>
+        <div class="meta">${(()=>{const t=localStorage.getItem('crm_theme')||'auto';return t==='light'?'Светлая':t==='dark'?'Тёмная':'Как в системе';})()}</div>
+      </div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+    </div>
+<div class="card" onclick="openFontSheet()" style="cursor:pointer;margin-top:10px">
       <div class="row1"><div style="flex:1">
         <div class="title">${ic("font",16)} Шрифт</div>
         <div class="meta">${(()=>{const s=localStorage.getItem('crm_fontsize')||'m';const f=localStorage.getItem('crm_fontfam')||'golos';const sl={s:'Мелкий',m:'Обычный',l:'Крупный',xl:'Очень крупный'}[s];const fl={golos:'Голос',system:'Системный',serif:'С засечками'}[f];return sl+' · '+fl;})()}</div>
       </div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
-
-    <div class="card" onclick="openLicenseSheet()" style="cursor:pointer;margin-top:10px;border-color:${LIC.ok?'var(--brass)':'var(--orange)'}">
+    <div class="sect-title" style="margin-top:14px">Работа</div>
+<div class="card" onclick="openNotifSheet()" style="cursor:pointer;margin-top:10px">
       <div class="row1"><div style="flex:1">
-        <div class="title" style="color:var(--brass)">${ic("key",16)} Лицензия ${LIC.ok?'<span style="color:var(--green);font-size:12px">● '+esc(LIC.name)+'</span>':'<span style="color:var(--orange);font-size:12px">● деморежим</span>'}</div>
-        <div class="meta">${LIC.ok?'Полная версия'+(LIC.until&&LIC.until!=='бессрочно'?' до '+fmtDate(LIC.until):', бессрочная'):'Демо: до '+DEMO_MONTH_LIMIT+' новых записей в месяц в каждом разделе.'}</div>
+        <div class="title">${ic("calendar",16)} Напоминания ${notifOn()?'<span style="color:var(--green);font-size:12px">● вкл</span>':''}</div>
+        <div class="meta">Уведомления о заседаниях и сроках (Android)</div>
       </div>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
     </div>
-
-    <div class="card" onclick="openSyncSheet()" style="cursor:pointer;margin-top:10px">
+<div class="card" onclick="openBookSettings()" style="cursor:pointer;margin-top:10px;border-left:3px solid var(--accent)"><!-- v247 -->
+      <div class="row1"><div style="flex:1">
+        <div class="title">📅 Онлайн-запись на приём ${bookCfg().enabled?'<span style="color:var(--green);font-size:12px">● вкл</span>':''}</div>
+        <div class="meta">${bookCfg().enabled&&bookUrl()?'Ссылка для доверителей опубликована · окна из вашего расписания':'Страница записи для доверителей на личном сервере'}</div>
+      </div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+    </div>
+    <div class="sect-title" style="margin-top:14px">Данные и доступ</div>
+<div class="card" onclick="openSyncSheet()" style="cursor:pointer;margin-top:10px">
       <div class="row1">
         <div style="flex:1"><div class="title">${ic("refresh",16)} Синхронизация устройств</div>
         <div class="meta">Перенос данных на другой телефон/компьютер</div></div>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
       </div>
     </div>
-
-    <div class="card" onclick="openSecuritySheet()" style="cursor:pointer;margin-top:10px">
+<div class="card" onclick="openSecuritySheet()" style="cursor:pointer;margin-top:10px">
       <div class="row1">
         <div style="flex:1"><div class="title">${ic("lock",16)} Защита входа ${LOCK.enabled?'<span style="color:var(--green);font-size:12px">● включена</span>':''}</div>
         <div class="meta">PIN-код${LOCK.bio?' и биометрия':''} при открытии приложения</div></div>
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>
       </div>
     </div>
+<div class="card" onclick="openLicenseSheet()" style="cursor:pointer;margin-top:10px;border-color:${LIC.ok?'var(--brass)':'var(--orange)'}">
+      <div class="row1"><div style="flex:1">
+        <div class="title" style="color:var(--brass)">${ic("key",16)} Лицензия ${LIC.ok?'<span style="color:var(--green);font-size:12px">● '+esc(LIC.name)+'</span>':'<span style="color:var(--orange);font-size:12px">● деморежим</span>'}</div>
+        <div class="meta">${LIC.ok?'Полная версия'+(LIC.until&&LIC.until!=='бессрочно'?' до '+fmtDate(LIC.until):', бессрочная'):'Демо: до '+DEMO_MONTH_LIMIT+' новых записей в месяц в каждом разделе.'}</div>
+      </div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+    </div>
     <div class="meta" style="text-align:center;margin-top:14px;opacity:.7">CRM Адвоката · версия ${APP_VER}</div>
+    <button class="btn-ghost" onclick="openRefsSheet()">← Справочники и инструменты</button>
     <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>
   `);
 }
@@ -6161,8 +6229,8 @@ async function openCaseForm(existing) {
       <button class="active" onclick="caseTab(0,this)">Основное</button>
       <button id="civ-tab-pr" onclick="caseTab(5,this)" style="display:${c.kind==='КАС'?'none':''}">Претензия</button>
       <button onclick="caseTab(6,this)">Первая инстанция</button>
-      <button onclick="caseTab(7,this)">Апелляция</button>
-      <button onclick="caseTab(9,this)">Кассация</button>
+      <button onclick="caseTab(7,this)" style="${(['Апелляция','Кассация','Надзор','Исполнение','Завершено'].includes(c.stage)||c.apDecisionDate||c.apFiledDate||c.courtApp)?'':'opacity:.55'}" title="Раскрывается при переходе дела в апелляцию">Апелляция</button><!-- v259 -->
+      <button onclick="caseTab(9,this)" style="${(['Кассация','Надзор','Исполнение','Завершено'].includes(c.stage)||c.csDecisionDate||c.csFiledDate||c.courtCass)?'':'opacity:.55'}" title="Раскрывается при переходе дела в кассацию">Кассация</button>
     </div>
     <div class="ftab-pane active" id="ftab-0">
     <div class="field-row">
@@ -6176,8 +6244,8 @@ async function openCaseForm(existing) {
     </div>
     <div class="field"><label>№ дела в суде / № уголовного дела</label><input id="f-courtNo" value="${esc(c.courtNo||'')}" placeholder="А40-.../2025, 2-.../2026 или № у органа"></div>
     <div class="field"><label>УИД дела (ГАС «Правосудие»)</label><input id="f-caseUid" value="${esc(c.caseUid||'')}" placeholder="59RS0005-01-2025-..."></div>
-    <details ${(c.courtApp||c.courtNoApp||c.linkApp||c.judgeApp||c.courtCass||c.courtNoCass||c.linkCass||c.judgeCass||c.secretaryApp||c.secretaryCass||c.cabinetApp||c.cabinetCass)?'open':''} style="margin:2px 0 14px;border:1px solid var(--border);border-radius:12px;padding:10px 12px">
-      <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Вышестоящие инстанции (апелляция, кассация)</summary>
+    <details ${(c.courtApp||c.courtNoApp||c.linkApp||c.judgeApp||c.courtCass||c.courtNoCass||c.linkCass||c.judgeCass||c.secretaryApp||c.secretaryCass||c.cabinetApp||c.cabinetCass||['Апелляция','Кассация','Надзор'].includes(c.stage))?'open':''} style="margin:2px 0 14px;border:1px solid var(--border);border-radius:12px;padding:10px 12px"><!-- v259: раскрыт и по стадии -->
+      <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Вышестоящие инстанции (апелляция, кассация)${(()=>{const n=['courtApp','courtNoApp','linkApp','judgeApp','courtCass','courtNoCass','linkCass','judgeCass'].filter(k=>c[k]).length;return n?` <span style="font-weight:400">· заполнено ${n}</span>`:'';})()}</summary>
       <div class="meta" style="margin:8px 0 10px">Заполняется, когда дело ушло в апелляцию или кассацию: там у дела другой суд, другой номер и другая страница на сайте суда.</div>
       <div class="field-row">
         <div class="field"><label>Суд апелляционной инстанции</label>${refSelect('f-courtApp','courts',c.courtApp,'—')}<div class="meta" id="f-courtApp-hint" style="margin-top:4px">${courtHintHtml(c.courtApp)}</div></div>
@@ -6207,7 +6275,7 @@ async function openCaseForm(existing) {
       </div>
     </details>
     <details ${ipHasData(c)||c.stage==='Исполнение'?'open':''} style="margin:2px 0 14px;border:1px solid var(--border);border-radius:12px;padding:10px 12px">
-      <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Исполнительное производство</summary>
+      <summary style="cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)">Исполнительное производство${ipHasData(c)?` <span style="font-weight:400">· ${c.ipNumber?'ИП № '+esc(c.ipNumber):'есть данные'}</span>`:''}</summary>
       <div class="meta" style="margin:8px 0 10px">Заполняется, когда получен исполнительный документ. Реквизиты подставляются в шаблоны ({{НомерИП}}, {{ОСП}}, {{Пристав}}, {{ИсполнительныйДокумент}}) и в срок по ИП.</div>
       <div class="field-row">
         <div class="field"><label>Исполнительный документ</label><select id="f-ipDocType">${['','Исполнительный лист','Судебный приказ','Исполнительная надпись нотариуса','Постановление (акт органа)','Иной документ'].map(o=>`<option value="${esc(o)}" ${(c.ipDocType||'')===o?'selected':''}>${o||'—'}</option>`).join('')}</select></div>
@@ -6330,6 +6398,10 @@ async function openCaseForm(existing) {
     </div>
     <div class="field"><label>Ссылка на дело (сайт суда)</label><input id="f-link" type="url" value="${esc(c.link||'')}" placeholder="https://..."></div>
 
+    <div class="field"><label>Папка с документами на компьютере</label>
+      <input id="f-docsPath" value="${esc(c.docsPath||'')}" placeholder="D:\\Дела\\Иванов 2-1500-2026">
+      <div class="meta" style="margin-top:4px">Путь к папке дела. В карточке дела его можно скопировать и вставить в проводник, а в Chrome или Edge на компьютере — привязать папку и открывать файлы прямо из CRM.</div>
+    </div>
     <div class="field"><label>Папка с документами в облаке</label>
       <input id="f-docsUrl" type="url" value="${esc(c.docsUrl||'')}" placeholder="ссылка на папку Яндекс.Диск / Google Drive / Dropbox">
       <div class="meta" style="margin-top:4px">Вставьте ссылку на общую папку дела — из карточки её можно будет открыть одним касанием.</div>
@@ -6606,6 +6678,7 @@ async function commitCaseSave(obj, prev, editingId) {
   addCaseHistoryEvent(obj, 'stage', prev?.stage || '', obj.stage || '', editingId ? 'form' : 'created');
   addCaseHistoryEvent(obj, 'ipStatus', prev?.ipStatus || '', obj.ipStatus || '', editingId ? 'form' : 'created'); // v204
   ['link', 'linkApp', 'linkCass'].forEach(f => { if ((obj[f] || '') !== ((prev && prev[f]) || '')) addCaseHistoryEvent(obj, f, (prev && prev[f]) || '', obj[f] || '', editingId ? 'form' : 'created'); }); // v251: кто и когда менял ссылку
+  alarmsTouch(); // v263: сроки дела изменились — перепланировать будильники
   const actMsgs = caseActDeadlinesApply(obj, prev); // v210: сроки по датам судебных актов
   { const m = caseFixDueApply(obj, prev); if (m) actMsgs.push(m); } // v234: срок устранения недостатков
   if (actMsgs.length) addCaseHistoryEvent(obj, 'deadline', '', actMsgs.join(' | '), editingId ? 'form' : 'created');
@@ -6667,6 +6740,7 @@ async function saveCase(id) {
     nextAction: fval('f-nextAction').trim(), nextActionDue: fval('f-nextActionDue'), waitingFor: fval('f-waitingFor').trim(), favorite: !!document.getElementById('f-favorite')?.checked,
     link: safeExternalUrl(rawLink),
     docsUrl: safeExternalUrl(rawDocsUrl),
+    docsPath: fval('f-docsPath').trim(), // v264
     docLinks,
     courtNo: fval('f-courtNo'),
     caseUid: fval('f-caseUid'),
@@ -6822,6 +6896,7 @@ async function saveMeeting(id) {
   });
   await put('meetings', obj);
   bookRepublishSoon(); // v245
+  alarmsTouch(); // v263
   if (typeof icsTouch === 'function') icsTouch();
   toast(id ? 'Встреча обновлена' : '🤝 Встреча создана — попадёт в календарь');
   closeSheet();
@@ -7471,6 +7546,7 @@ async function saveHearing(id) {
   });
   await put('hearings', obj);
   bookRepublishSoon(); // v245
+  alarmsTouch(); // v263
   if (obj.caseNum) await crmCaseLogByNum(obj.caseNum, prev ? 'hearing_upd' : 'hearing', (prev ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(obj.date) + (obj.time ? ' ' + obj.time : '') + (obj.status && obj.status !== 'Назначено' ? ' · ' + obj.status : ''));
   // Уведомление в Telegram и обновление Google Календаря (если подключены)
   if (typeof tgHearingNotify === 'function') tgHearingNotify(obj, !!id);
@@ -7729,10 +7805,12 @@ async function globalSearchExec() {
   if (!el) return;
   if (q.length < 2) { el.innerHTML = `<div class="empty" style="padding:20px"><p>Введите хотя бы 2 символа</p></div>`; return; }
 
-  const [cases, clients, hearings, mail, tasks, templates, leads, poas, orders, meets2] = await Promise.all(
-    ['cases','clients','hearings','mail','tasks','templates','leads','poa','orders','meetings'].map(s=>getAll(s)));
+  const [cases, clients, hearings, mail, tasks, templates, leads, poas, orders, meets2, docs, docVers, fins] = await Promise.all(
+    ['cases','clients','hearings','mail','tasks','templates','leads','poa','orders','meetings','documents','docVersions','finance'].map(s=>getAll(s)));
   const hit = (...vals) => vals.filter(Boolean).join(' ').toLowerCase().includes(q);
   const groups = [];
+  // v257: фрагмент текста вокруг совпадения
+  const snippet = (text) => { const t = String(text || ''); const i = t.toLowerCase().indexOf(q); if (i < 0) return ''; const a = Math.max(0, i - 40), b = Math.min(t.length, i + q.length + 60); return (a > 0 ? '…' : '') + t.slice(a, b).replace(/\s+/g, ' ') + (b < t.length ? '…' : ''); };
 
   const mc = cases.filter(c=>hit(c.number,c.courtNo,c.caseUid,c.client,c.court,c.category,c.comment,c.crimArticle,(c.labels||[]).join(' ')));
   if (mc.length) groups.push(['Дела', mc.map(c=>({icon:({'Уголовное':'🛡️','Гражданское':'🏛️','Арбитраж':'⚖️','Административное':'📋','КАС':'📋','КоАП':'🚔'}[c.kind]||'📁'),title:c.number+(c.courtNo?' · '+c.courtNo:''),sub:c.client||'',act:`viewCase('${c.id}')`}))]);
@@ -7765,6 +7843,13 @@ async function globalSearchExec() {
   const mtHits = meets2.filter(mt=>hit(mt.with,mt.place,mt.note,mt.caseNum));
   if (mtHits.length) groups.push(['Встречи', mtHits.slice(0,8).map(mt=>({icon:'🤝',title:esc(mt.with||'Встреча'),sub:[fmtDate(mt.date)+(mt.time?' · '+mt.time:''),mt.place].filter(Boolean).join(' · '),act:`openMeetingForm('${mt.id}')`}))]);
 
+  // v257: документы центра — название, категория, теги, заметка, текст текущей версии (извлечённый)
+  const verText = new Map(); docVers.forEach(v => { if (v && v.documentId && v.extractedText) verText.set(v.id, v.extractedText); });
+  const mdoc = docs.filter(d => !d._deleted).map(d => { const txt = (d.currentVersionId && verText.get(d.currentVersionId)) || ''; const base = hit(d.title, d.category, (d.tags || []).join(' '), d.caseNum, d.fileName, d.manualText); const inText = !base && txt.toLowerCase().includes(q); return (base || inText) ? { d, frag: snippet(d.manualText && d.manualText.toLowerCase().includes(q) ? d.manualText : txt) } : null; }).filter(Boolean);
+  if (mdoc.length) groups.push(['Документы', mdoc.slice(0, 10).map(({ d, frag }) => ({ icon: '📄', title: d.title || d.fileName || 'Документ', sub: [d.caseNum, d.category, frag].filter(Boolean).join(' · '), act: `viewDocument('${d.id}')` }))]);
+  // v257: счета и платежи — участник, дело, услуга, вид, комментарий, сумма
+  const mfin = fins.filter(f => hit(f.client, f.caseNum, f.service, f.comment, f.status, String(f.amount || '')));
+  if (mfin.length) groups.push(['Финансы', mfin.slice(0, 10).map(f => ({ icon: '₽', title: [f.client, f.service].filter(Boolean).join(' · ') || 'Счёт', sub: [f.caseNum, f.status, f.amount ? fmtMoney(Number(f.amount)) : ''].filter(Boolean).join(' · '), act: `viewFinance('${f.id}')` }))]);
   const total = groups.reduce((a,g)=>a+g[1].length,0);
   if (!total) { el.innerHTML = `<div class="empty" style="padding:20px"><p>Ничего не найдено по запросу «${esc(q)}»</p></div>`; return; }
 
@@ -8031,6 +8116,7 @@ async function viewCase(id, tab) {
   const docsFolderUrl = safeExternalUrl(c.docsUrl);
   const appealWebUrl = safeExternalUrl(c.linkApp);
   const cassWebUrl = safeExternalUrl(c.linkCass);
+  const casePoas = (await getAll('poa')).filter(p => p.caseNum && c.number && crmMonNorm(p.caseNum) === crmMonNorm(c.number)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))); // v264
   const safeDocLinks = (Array.isArray(c.docLinks) ? c.docLinks : [])
     .map(d => ({ name:d?.name || '', url:safeExternalUrl(d?.url) })).filter(d=>d.url);
 
@@ -8166,6 +8252,20 @@ async function viewCase(id, tab) {
     ${appealWebUrl?`<a href="${esc(appealWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Апелляция — дело на сайте суда</a>`:''}
     ${cassWebUrl?`<a href="${esc(cassWebUrl)}" target="_blank" rel="noopener noreferrer" class="btn-ghost" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box">🔗 Кассация — дело на сайте суда</a>`:''}
     ${docsFolderUrl?`<a href="${esc(docsFolderUrl)}" target="_blank" rel="noopener noreferrer" class="btn-primary" style="display:block;text-align:center;text-decoration:none;box-sizing:border-box;background:var(--accent)">📁 Документы в облаке</a>`:''}
+    ${(c.docsPath||caseFolderSupported())?`<div class="card" style="margin-top:10px"><!-- v264 -->
+      <div class="title" style="font-size:14px">🖥 Папка дела на компьютере</div>
+      ${c.docsPath?`<div class="meta" style="margin:4px 0;word-break:break-all">${esc(c.docsPath)} ${copyHtml(c.docsPath,'Путь скопирован — вставьте в проводник')}</div>`:'<div class="meta" style="margin:4px 0">Путь не указан — впишите его в карточке дела или привяжите папку.</div>'}
+      ${caseFolderSupported()?`<button class="v-mini-btn" onclick="caseFolderPick('${c.id}')">Привязать папку</button>`:'<div class="meta">Список файлов доступен в Chrome или Edge на компьютере.</div>'}
+      <div id="v264-folder"></div>
+    </div>`:''}
+    ${casePoas.length?`<div class="sect-title" style="margin-top:12px">📜 Доверенности по делу (${casePoas.length})</div>
+      ${casePoas.map(p=>{const u=poaEffUntil(p);const d=u?daysUntil(u):null;const col=p.revoked?'var(--text-faint)':(d===null?'var(--text-dim)':d<0?'var(--red)':d<=30?'var(--orange)':'var(--green)');
+      return `<div class="card" style="margin-bottom:6px;cursor:pointer" onclick="openPoaForm('${p.id}',null,'case')"><div class="row1"><div style="flex:1;min-width:0">
+        <div style="font-size:13.5px"><b>${esc(p.clientName||'Доверитель не указан')}</b>${p.regno?' · № '+esc(p.regno):''}</div>
+        <div class="meta">${p.date?'выдана '+fmtDate(p.date):''}${u?' · до '+fmtDate(u):''}${p.notary?' · '+esc(p.notary):''}</div></div>
+        <div style="color:${col};font-size:12px;white-space:nowrap">${p.revoked?'отозвана':(d===null?'':d<0?'истекла':d<=30?'осталось '+d+' дн.':'действует')}</div></div></div>`}).join('')}
+      <button class="btn-ghost" onclick="openPoaForm(null,'${jsq(c.clientId||'')}','case')">＋ Доверенность по делу</button>`
+      :`<button class="btn-ghost" style="margin-top:10px" onclick="openPoaForm(null,'${jsq(c.clientId||'')}','case')">📜 Добавить доверенность по делу</button>`}
     ${safeDocLinks.length?`
       <div style="margin-top:10px">
         <div class="meta" style="margin-bottom:6px">Документы по делу</div>
@@ -8270,6 +8370,7 @@ async function viewCase(id, tab) {
     <button class="btn-ghost" onclick="exportCase('${c.id}')">${ic('print',16)} Выгрузить дело (для печати)</button>
     <button class="btn-ghost" onclick="deleteCase('${c.id}')" style="color:var(--red)">${ic('alert',16)} Удалить в корзину</button>
   `);
+  setTimeout(() => caseFolderRender(c.id).catch(() => {}), 60); // v264: список файлов привязанной папки
 }
 
 // Архивировать / вернуть дело из архива
@@ -9413,8 +9514,28 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('online', () => { if (CLOUD.token) pullCloud(true).catch(()=>{}); });
 
+// v256: строка состояния синхронизации в шапке (нажатие — лист синхронизации)
+let _syncBusy = false;
+function syncStatusRender() {
+  const el = document.getElementById('sync-status'); if (!el) return;
+  if (!CLOUD.token) { el.textContent = ''; el.style.display = 'none'; return; }
+  el.style.display = '';
+  const conflicts = lsJSON('crm_sync_conflicts', []).filter(c => c && c.at && Date.now() - c.at < 30 * 60e3 && !/объединено/.test(c.kept || '')); // объединённые — не коллизии
+  let text, color = 'rgba(255,255,255,.85)';
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) { text = '⚫ офлайн — изменения сохранены на устройстве'; color = '#fbbf24'; }
+  else if (_syncBusy) text = '🔄 синхронизация…';
+  else if (conflicts.length) { text = `⚠ коллизия: ${conflicts.length} — нажмите, чтобы посмотреть`; color = '#fbbf24'; }
+  else if (CLOUD.dirty) { text = '● изменения ждут отправки'; color = '#fde68a'; }
+  else if (CLOUD.lastAt) { const m = Math.round((Date.now() - CLOUD.lastAt) / 60000); text = '✓ синхронизировано ' + (m < 1 ? 'только что' : m < 60 ? m + ' мин назад' : new Date(CLOUD.lastAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })); }
+  else text = 'синхронизация не выполнялась';
+  el.textContent = text; el.style.color = color;
+}
+setInterval(() => { try { syncStatusRender(); } catch (e) {} }, 30000);
+window.addEventListener('offline', () => syncStatusRender());
+window.addEventListener('online', () => syncStatusRender());
 // ── Интерфейс: лист «Облачная синхронизация» ──
 function cloudSetStatus(msg, warn) {
+  _syncBusy = !!msg && /синхрониз/i.test(msg) && !warn; try { syncStatusRender(); } catch (e) {} // v256
   const el = document.getElementById('cloud-status');
   if (!el) return;
   if (msg) { el.textContent = msg; el.style.color = warn ? 'var(--orange)' : 'var(--text-dim)'; return; }
@@ -9543,7 +9664,8 @@ function cloudDisconnect() {
   for (let i = 0; i < 100 && !db; i++) await new Promise(r => setTimeout(r, 100)); // ждём openDB()
   if (!db) return;
   yaAccount().then(a => { CLOUD.account = a; }).catch(()=>{});
-  pullCloud().catch(()=>{});
+  syncStatusRender(); // v256
+  pullCloud().catch(()=>{}).finally(() => { try { syncStatusRender(); } catch (e) {} });
   startCloudLoop();
 })();
 
@@ -9793,6 +9915,7 @@ function openSrvSheet() {
     <div class="sheet-sub">Яндекс Облако: статусы Почты России, живая календарная лента и необязательная синхронизация. Открытая база на сервер не попадает — при синхронизации хранится только шифротекст.</div>
     <div class="field"><label>URL моста (…/bridge)</label>
       <input id="srv-url" value="${esc(SRV.url)}" placeholder="https://…apigw.yandexcloud.net/bridge" autocomplete="off"></div>
+    <label style="display:flex;align-items:center;gap:10px;margin:6px 0;font-size:14px;cursor:pointer"><input type="checkbox" id="srv-ics-anon" ${icsAnon()?'checked':''} onchange="localStorage.setItem('crm_ics_anon',this.checked?'1':'0');bumpSettings?.();srvIcsPush(false)"> <span><b>В календарной ленте — только номера дел</b><span class="meta" style="display:block">Лента лежит на сервере открытым текстом. Включите, если сервер общий или ссылка может попасть посторонним: из ленты уйдут ФИО доверителей, имена участников встреч и заметки.</span></span></label><!-- v262 -->
     <div class="field"><label>Секретный код</label>
       <input id="srv-secret" value="${esc(SRV.secret)}" placeholder="тот же, что в переменной SECRET функции" autocomplete="off"></div>
     <button class="btn-primary" onclick="srvSave()">Сохранить</button>
@@ -10703,6 +10826,76 @@ async function saveBookSettings() {
   bookCfgSave(c);
   if (c.enabled) { const j = await bookPublish(false); if (j && j.ok) openBookSettings(); } else { toast('Онлайн-запись выключена (страница остаётся, но окон не будет)'); closeSheet(); }
 }
+// ═══════ v264: ПАПКА ДЕЛА НА КОМПЬЮТЕРЕ ═══════
+// Путь хранится в деле (docsPath) и синхронизируется как обычное поле. Дескриптор папки (разрешение браузера)
+// хранится ТОЛЬКО на этом устройстве, в локальной базе crm_advocate_local — в бакет и на другие устройства не уходит.
+const caseFolderSupported = () => typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function';
+const caseFolderKey = id => 'caseFolder:' + id;
+async function caseFolderPick(caseId) {
+  if (!caseFolderSupported()) { toast('Привязка папки работает в Chrome или Edge на компьютере', true); return; }
+  try {
+    const h = await window.showDirectoryPicker({ mode: 'read', id: 'crm-case-' + caseId });
+    await kvSet(caseFolderKey(caseId), h);
+    const c = (await getAll('cases')).find(x => x.id === caseId);
+    if (c && !c.docsPath) { c.docsPath = h.name; await put('cases', c); } // имя папки — подсказка, полный путь браузер не отдаёт
+    toast('Папка привязана: ' + h.name);
+    viewCase(caseId, 4);
+  } catch (e) { if (e && e.name !== 'AbortError') toast('Не удалось привязать папку: ' + (e.message || e.name), true); }
+}
+async function caseFolderForget(caseId) { await kvDel(caseFolderKey(caseId)); toast('Папка отвязана'); viewCase(caseId, 4); }
+async function caseFolderList(caseId) {
+  const h = await kvGet(caseFolderKey(caseId)); if (!h) return null;
+  if (h.queryPermission) { let p = await h.queryPermission({ mode: 'read' }); if (p !== 'granted') { p = await h.requestPermission({ mode: 'read' }); if (p !== 'granted') return { denied: true, name: h.name }; } }
+  const files = [];
+  for await (const [name, entry] of h.entries()) {
+    if (entry.kind !== 'file') { files.push({ name, dir: true }); continue; }
+    let size = 0, at = 0; try { const f = await entry.getFile(); size = f.size; at = f.lastModified; } catch (e) {}
+    files.push({ name, size, at });
+  }
+  files.sort((a, b) => (a.dir === b.dir) ? (b.at || 0) - (a.at || 0) : (a.dir ? -1 : 1));
+  return { name: h.name, files };
+}
+async function caseFolderOpen(caseId, fileName) {
+  const h = await kvGet(caseFolderKey(caseId)); if (!h) return;
+  try {
+    const fh = await h.getFileHandle(fileName); const f = await fh.getFile();
+    const url = URL.createObjectURL(f); const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener';
+    if (!/\.(pdf|png|jpe?g|gif|webp|txt|html?)$/i.test(fileName)) a.download = fileName; // Word и прочее — сохранением, браузер их не показывает
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch (e) { toast('Не удалось открыть файл: ' + (e.message || e.name), true); }
+}
+async function caseFolderToDocs(caseId, fileName) { // положить файл из папки в центр документов дела
+  const h = await kvGet(caseFolderKey(caseId)); if (!h) return;
+  try {
+    const f = await (await h.getFileHandle(fileName)).getFile();
+    const c = (await getAll('cases')).find(x => x.id === caseId);
+    const payload = await crmDocFilePayload(f);
+    const doc = { id: uid('ДОК'), title: fileName, category: '', caseId, caseNum: c ? c.number : '', tags: ['из папки дела'], sourceUrl: '', manualText: '', createdAt: Date.now(), updatedAt: Date.now() };
+    const ver = { id: uid('ВЕР'), documentId: doc.id, versionNo: 1, ...payload, createdAt: Date.now() };
+    await docVersionSave(ver);
+    doc.currentVersionId = ver.id; doc.fileName = ver.fileName; doc.mime = ver.mime; doc.size = ver.size; doc.detached = ver.detached;
+    await put('documents', doc);
+    toast('Добавлено в документы дела: ' + fileName);
+  } catch (e) { toast('Не удалось добавить: ' + (e.message || e.name), true); }
+}
+async function caseFolderRender(caseId) {
+  const host = document.getElementById('v264-folder'); if (!host) return;
+  const r = await caseFolderList(caseId).catch(() => null);
+  if (!r) { host.innerHTML = ''; return; }
+  if (r.denied) { host.innerHTML = `<div class="meta">Доступ к папке «${esc(r.name)}» не подтверждён — нажмите «Привязать папку» ещё раз.</div>`; return; }
+  const kb = n => !n ? '' : n > 1048576 ? (n / 1048576).toFixed(1) + ' МБ' : Math.max(1, Math.round(n / 1024)) + ' КБ';
+  host.innerHTML = `<div class="meta" style="margin:6px 0">Папка «${esc(r.name)}» · файлов: ${r.files.filter(f => !f.dir).length}</div>
+    ${r.files.slice(0, 40).map(f => f.dir ? `<div class="meta" style="padding:4px 0">📁 ${esc(f.name)}</div>`
+      : `<div class="card" style="margin-bottom:6px;padding:8px 10px"><div class="row1"><div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📄 ${esc(f.name)}</div>
+        <div class="meta">${kb(f.size)}${f.at ? ' · ' + fmtDate(new Date(f.at).toISOString().slice(0, 10)) : ''}</div></div>
+        <button class="v-mini-btn" onclick="caseFolderOpen('${jsq(caseId)}','${jsq(f.name)}')">Открыть</button>
+        <button class="v-mini-btn" onclick="caseFolderToDocs('${jsq(caseId)}','${jsq(f.name)}')">В документы</button></div></div>`).join('')}
+    ${r.files.length > 40 ? `<div class="meta">и ещё ${r.files.length - 40} — откройте папку в проводнике</div>` : ''}
+    <button class="v-mini-btn" onclick="caseFolderForget('${jsq(caseId)}')">Отвязать папку</button>`;
+}
 // ═══════ v223: КАЛЬКУЛЯТОРЫ ═══════
 // Справочники: refs/keyRates = { items:[], rates:[{from:'ГГГГ-ММ-ДД', rate:число}] } — ключевая ставка ЦБ; refs/cpi = { items:[], cpi:{'ГГГГ-ММ': число} } — ИПЦ Росстата в % к предыдущему месяцу.
 // Предзаполнение ключевой ставки — по решениям Банка России до 27.10.2025; дальше вносите по cbr.ru (СВЕРЬТЕ перед расчётом в иске).
@@ -11264,7 +11457,11 @@ async function presetDlCustom(caseId) {
 // ═══════ ЭКСПОРТ ЗАСЕДАНИЙ В КАЛЕНДАРЬ (.ics) ═══════
 // Один файл импортируется в Яндекс.Календарь, Google, Mail.ru и календарь телефона
 // Сборка календарной ленты — общая для файла-экспорта и личного сервера
+// v262: лента .ics лежит на сервере открытым текстом. Если сервер общий (или ссылка может попасть посторонним),
+// включите «только номера дел» — из ленты уйдут ФИО доверителей, участники встреч и заметки.
+const icsAnon = () => localStorage.getItem('crm_ics_anon') === '1';
 async function icsBuild() {
+  const anon = icsAnon();
   await refreshCasesCache();
   const hearings = (await getAll('hearings'))
     .filter(h => h.date && isPlanned(h) && (daysUntil(h.date) ?? -1) >= 0)
@@ -11292,9 +11489,10 @@ async function icsBuild() {
       const nd = new Date(h.date + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
       lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
     }
-    lines.push('SUMMARY:' + escT('⚖️ ' + (cs && cs.client ? cs.client : (caseLabel(h.caseNum) || 'Заседание'))));
+    lines.push('SUMMARY:' + escT('⚖️ ' + (anon ? (h.caseNum || 'Заседание') : (cs && cs.client ? cs.client : (caseLabel(h.caseNum) || 'Заседание')))));
     if (h.court || h.room) lines.push('LOCATION:' + escT([h.court, courtAddrOf(h.court, ''), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', '))); // v211: адрес из справочника
-    const desc = [h.caseNum ? 'Дело: ' + (caseLabel(h.caseNum) || h.caseNum) : '', hearingPerson(h), h.status ? 'Статус: ' + h.status : ''].filter(Boolean).join('; ');
+    const desc = anon ? [h.caseNum ? 'Дело: ' + h.caseNum : '', h.status ? 'Статус: ' + h.status : ''].filter(Boolean).join('; ')
+      : [h.caseNum ? 'Дело: ' + (caseLabel(h.caseNum) || h.caseNum) : '', hearingPerson(h), h.status ? 'Статус: ' + h.status : ''].filter(Boolean).join('; ');
     if (desc) lines.push('DESCRIPTION:' + escT(desc));
     lines.push('END:VEVENT');
   });
@@ -11313,8 +11511,8 @@ async function icsBuild() {
       const nd = new Date(t.due + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
       lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
     }
-    lines.push('SUMMARY:' + escT('📋 ' + (t.title || 'Задача')));
-    const td = [t.caseNum ? 'Дело: ' + (caseLabel(t.caseNum) || t.caseNum) : '', t.note || ''].filter(Boolean).join('; ');
+    lines.push('SUMMARY:' + escT('📋 ' + (anon ? (t.caseNum ? 'Задача по делу ' + t.caseNum : 'Задача') : (t.title || 'Задача'))));
+    const td = anon ? (t.caseNum ? 'Дело: ' + t.caseNum : '') : [t.caseNum ? 'Дело: ' + (caseLabel(t.caseNum) || t.caseNum) : '', t.note || ''].filter(Boolean).join('; ');
     if (td) lines.push('DESCRIPTION:' + escT(td));
     lines.push('END:VEVENT');
   });
@@ -11333,9 +11531,9 @@ async function icsBuild() {
       const nd = new Date(mt.date + 'T00:00:00'); nd.setDate(nd.getDate() + 1);
       lines.push('DTEND;VALUE=DATE:' + nd.getFullYear() + p2(nd.getMonth() + 1) + p2(nd.getDate()));
     }
-    lines.push('SUMMARY:' + escT('🤝 ' + (mt.with || 'Встреча')));
+    lines.push('SUMMARY:' + escT('🤝 ' + (anon ? 'Встреча' : (mt.with || 'Встреча'))));
     if (mt.place) lines.push('LOCATION:' + escT(mt.place));
-    const md = [mt.caseNum ? 'Дело: ' + (caseLabel(mt.caseNum) || mt.caseNum) : '', mt.note || ''].filter(Boolean).join('; ');
+    const md = anon ? (mt.caseNum ? 'Дело: ' + mt.caseNum : '') : [mt.caseNum ? 'Дело: ' + (caseLabel(mt.caseNum) || mt.caseNum) : '', mt.note || ''].filter(Boolean).join('; ');
     if (md) lines.push('DESCRIPTION:' + escT(md));
     lines.push('END:VEVENT');
   });
@@ -12214,14 +12412,94 @@ function docWordHTML() {
 <style>@page{size:A4;margin:2cm 1.5cm 2cm 3cm}body{font-family:'Times New Roman',serif;font-size:14pt;line-height:1.5}h2{font-size:14pt}table{border-collapse:collapse;width:100%}td,th{border:1px solid #000;padding:4pt;font-size:12pt}</style>
 </head><body>${body}<p style="font-size:8pt;color:#999;margin-top:24pt">Сформировано в CRM Адвоката · ${LIC.ok?`лицензия: ${esc(LIC.name)}${LIC.reg?" ("+esc(LIC.reg)+")":""}`:"демоверсия"}</p></body></html>`;
 }
+// ═══════ v260: НАСТОЯЩИЙ DOCX БЕЗ БИБЛИОТЕК ═══════
+// .docx — это zip-архив с XML (WordprocessingML). Zip собирается вручную методом «без сжатия» (stored) с CRC32,
+// поэтому внешних библиотек и сжатия не требуется; Word, LibreOffice и телефонные редакторы открывают такой файл как обычный.
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(bytes) { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function zipStore(files) { // files: [{name, data: string|Uint8Array}] → Uint8Array (метод 0 — без сжатия)
+  const enc = new TextEncoder(); const parts = [], central = []; let offset = 0;
+  const d = new Date(); const dosTime = ((d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1)) & 0xFFFF, dosDate = (((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate()) & 0xFFFF;
+  const u16 = v => [v & 0xFF, (v >> 8) & 0xFF], u32 = v => [v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >>> 24) & 0xFF];
+  for (const f of files) {
+    const name = enc.encode(f.name), data = typeof f.data === 'string' ? enc.encode(f.data) : f.data, crc = crc32(data);
+    const head = new Uint8Array([0x50, 0x4B, 0x03, 0x04, ...u16(20), ...u16(0x0800), ...u16(0), ...u16(dosTime), ...u16(dosDate), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...name]);
+    parts.push(head, data);
+    central.push(new Uint8Array([0x50, 0x4B, 0x01, 0x02, ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0), ...u16(dosTime), ...u16(dosDate), ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...name]));
+    offset += head.length + data.length;
+  }
+  const cdSize = central.reduce((a, c) => a + c.length, 0);
+  const end = new Uint8Array([0x50, 0x4B, 0x05, 0x06, ...u16(0), ...u16(0), ...u16(files.length), ...u16(files.length), ...u32(cdSize), ...u32(offset), ...u16(0)]);
+  const total = offset + cdSize + end.length, out = new Uint8Array(total); let p = 0;
+  for (const chunk of [...parts, ...central, end]) { out.set(chunk, p); p += chunk.length; }
+  return out;
+}
+const xmlEsc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// HTML редактора (contenteditable) → тело document.xml. root — DOM-элемент или объект с тем же интерфейсом (nodeType, nodeName, childNodes, getAttribute, style)
+function htmlToOoxml(root) {
+  const out = [];
+  const alignOf = el => { const st = (el.getAttribute && el.getAttribute('style')) || ''; const m = /text-align\s*:\s*(center|right|justify|left)/i.exec(st); const a = (m && m[1]) || (el.getAttribute && el.getAttribute('align')) || ''; return { center: 'center', right: 'right', justify: 'both', left: 'left' }[String(a).toLowerCase()] || ''; };
+  const runs = (node, fmt, acc) => { // inline → w:r
+    if (node.nodeType === 3) { const t = node.nodeValue || ''; if (!t) return; const rpr = (fmt.b ? '<w:b/>' : '') + (fmt.i ? '<w:i/>' : '') + (fmt.u ? '<w:u w:val="single"/>' : '') + (fmt.s ? '<w:strike/>' : ''); acc.push(`<w:r>${rpr ? '<w:rPr>' + rpr + '</w:rPr>' : ''}<w:t xml:space="preserve">${xmlEsc(t)}</w:t></w:r>`); return; }
+    if (node.nodeType !== 1) return;
+    const n = node.nodeName.toLowerCase();
+    if (n === 'br') { acc.push('<w:r><w:br/></w:r>'); return; }
+    const f = Object.assign({}, fmt); if (n === 'b' || n === 'strong') f.b = true; if (n === 'i' || n === 'em') f.i = true; if (n === 'u') f.u = true; if (n === 's' || n === 'strike' || n === 'del') f.s = true;
+    const st = (node.getAttribute && node.getAttribute('style')) || ''; if (/font-weight\s*:\s*(bold|[6-9]00)/i.test(st)) f.b = true; if (/font-style\s*:\s*italic/i.test(st)) f.i = true; if (/text-decoration[^;]*underline/i.test(st)) f.u = true;
+    for (const ch of Array.from(node.childNodes || [])) runs(ch, f, acc);
+  };
+  const para = (node, extraPPr) => { const acc = []; runs(node, {}, acc); const al = node.nodeType === 1 ? alignOf(node) : ''; const ppr = (extraPPr || '') + (al ? `<w:jc w:val="${al}"/>` : ''); out.push(`<w:p>${ppr ? '<w:pPr>' + ppr + '</w:pPr>' : ''}${acc.join('')}</w:p>`); };
+  const isBlock = n => ['p', 'div', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'li', 'table', 'blockquote', 'section', 'article', 'header', 'footer', 'hr'].includes(n);
+  const walk = (node, ctx) => {
+    if (node.nodeType === 3) { if ((node.nodeValue || '').trim()) para(node); return; }
+    if (node.nodeType !== 1) return;
+    const n = node.nodeName.toLowerCase();
+    if (n === 'script' || n === 'style') return;
+    if (n === 'table') { walkTable(node); return; }
+    if (n === 'ul' || n === 'ol') { let i = 0; for (const li of Array.from(node.childNodes || [])) { if (li.nodeType === 1 && li.nodeName.toLowerCase() === 'li') { i++; walkLi(li, n === 'ol' ? i + '. ' : '• '); } } return; }
+    if (n === 'hr') { out.push('<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>'); return; }
+    const kids = Array.from(node.childNodes || []);
+    const hasBlockChild = kids.some(k => k.nodeType === 1 && isBlock(k.nodeName.toLowerCase()));
+    if (isBlock(n) && !hasBlockChild) { const head = /^h[1-4]$/.test(n) ? '<w:keepNext/>' : ''; if (/^h[1-4]$/.test(n)) { const acc = []; runs(node, { b: true }, acc); const al = alignOf(node); out.push(`<w:p><w:pPr>${head}${al ? `<w:jc w:val="${al}"/>` : ''}</w:pPr>${acc.join('')}</w:p>`); } else para(node); return; }
+    if (!isBlock(n) && !hasBlockChild) { para(node); return; }
+    // контейнер с блочными детьми: inline-хвосты собираем в абзацы
+    let inline = [];
+    const flush = () => { if (inline.length) { const fake = { nodeType: 1, nodeName: 'span', childNodes: inline, getAttribute: () => '' }; para(fake); inline = []; } };
+    for (const k of kids) { if (k.nodeType === 1 && isBlock(k.nodeName.toLowerCase())) { flush(); walk(k, ctx); } else if (k.nodeType === 3 && !(k.nodeValue || '').trim()) { inline.push(k); } else inline.push(k); }
+    flush();
+  };
+  const walkLi = (li, prefix) => { const acc = [`<w:r><w:t xml:space="preserve">${xmlEsc(prefix)}</w:t></w:r>`]; runs(li, {}, acc); out.push(`<w:p><w:pPr><w:ind w:left="567" w:hanging="283"/></w:pPr>${acc.join('')}</w:p>`); };
+  const walkTable = tbl => {
+    const rows = []; const collect = node => { for (const k of Array.from(node.childNodes || [])) { if (k.nodeType !== 1) continue; const n = k.nodeName.toLowerCase(); if (n === 'tr') rows.push(k); else if (n === 'thead' || n === 'tbody' || n === 'tfoot') collect(k); } }; collect(tbl);
+    if (!rows.length) return;
+    const trs = rows.map(tr => { const cells = Array.from(tr.childNodes || []).filter(k => k.nodeType === 1 && /^t[dh]$/.test(k.nodeName.toLowerCase())); return `<w:tr>${cells.map(td => { const sub = []; const save = out.length; walk(td, {}); const inner = out.splice(save); const isTh = td.nodeName.toLowerCase() === 'th'; const content = inner.length ? (isTh ? inner.map(p => p.replace(/<w:r>(<w:rPr>)?/g, (m, r) => r ? '<w:r><w:rPr><w:b/>' : '<w:r><w:rPr><w:b/></w:rPr>')) : inner).join('') : '<w:p/>'; return `<w:tc><w:tcPr><w:tcW w:w="0" w:type="auto"/></w:tcPr>${content}</w:tc>`; }).join('')}</w:tr>`; });
+    out.push(`<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/><w:tblBorders><w:top w:val="single" w:sz="4"/><w:left w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/><w:right w:val="single" w:sz="4"/><w:insideH w:val="single" w:sz="4"/><w:insideV w:val="single" w:sz="4"/></w:tblBorders></w:tblPr>${trs.join('')}</w:tbl><w:p/>`);
+  };
+  walk(root, {});
+  return out.join('');
+}
+function docxBuild(bodyXml, title) {
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${W}><w:body>${bodyXml}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="851" w:bottom="1134" w:left="1701" w:header="709" w:footer="709" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman" w:eastAsia="Times New Roman"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:lang w:val="ru-RU"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>`;
+  const docRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const core = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${xmlEsc(title || 'Документ')}</dc:title><dc:creator>CRM Адвоката</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${new Date().toISOString()}</dcterms:created></cp:coreProperties>`;
+  return zipStore([{ name: '[Content_Types].xml', data: contentTypes }, { name: '_rels/.rels', data: rels }, { name: 'word/document.xml', data: document }, { name: 'word/_rels/document.xml.rels', data: docRels }, { name: 'word/styles.xml', data: styles }, { name: 'docProps/core.xml', data: core }]);
+}
 function docToWord() {
-  const blob = new Blob([docWordHTML()], { type: 'application/msword' });
+  const el = document.getElementById('doc-edit'); if (!el) return;
+  let bytes;
+  try { bytes = docxBuild(htmlToOoxml(el) + `<w:p><w:r><w:rPr><w:sz w:val="16"/><w:color w:val="999999"/></w:rPr><w:t xml:space="preserve">Сформировано в CRM Адвоката · ${LIC.ok ? `лицензия: ${LIC.name}${LIC.reg ? ' (' + LIC.reg + ')' : ''}` : 'демоверсия'}</w:t></w:r></w:p>`, DOC_CTX.title); }
+  catch (e) { console.warn('docx', e); const blob = new Blob([docWordHTML()], { type: 'application/msword' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = (DOC_CTX.title || 'Документ').replace(/[\/\\:*?"<>|]/g, '_') + '.doc'; a.click(); toast('Сохранено как .doc (резервный формат)'); return; }
+  const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = (DOC_CTX.title||'Документ').replace(/[\/\\:*?"<>|]/g,'_') + '.doc';
+  a.download = (DOC_CTX.title||'Документ').replace(/[\/\\:*?"<>|]/g,'_') + '.docx';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
-  toast('Документ Word сохранён — откройте для редактирования');
+  toast('Документ Word (.docx) сохранён');
 }
 function docPrint() {
   const w = window.open('', '_blank');
@@ -13412,8 +13690,11 @@ async function openPoaForm(id, presetClientId, backType) {
   const curName = (clientsAll.find(c => c.id === curId) || {}).name || p.clientName || '';
   const cases = await getAll('cases');
   cpxRegister('p-case', cpxCaseItems(cases));
+  if (backType === 'case' && !p.caseNum) { const cc = cases.find(x => x.id === ((window.CRM_UPGRADE && CRM_UPGRADE.selectedCaseId) || '')); if (cc) p.caseNum = cc.number; } // v264: из карточки дела — дело подставляется
   const curCase = cpxLabelFor(cases, p.caseNum);
-  window._poaBack = backType === 'client' ? { type:'client', id:curId || presetClientId || '' } : { type:'registry', id:'' };
+  window._poaBack = backType === 'client' ? { type:'client', id:curId || presetClientId || '' }
+    : backType === 'case' ? { type:'case', id: (window.CRM_UPGRADE && CRM_UPGRADE.selectedCaseId) || '' } // v264: вернуться в дело
+    : { type:'registry', id:'' };
   showSheet(`
     <h3>${id ? 'Изменить доверенность' : 'Новая доверенность'}</h3>
     <div class="field" style="position:relative"><label>Доверитель <span class="req">*</span></label>
@@ -13443,7 +13724,8 @@ async function openPoaForm(id, presetClientId, backType) {
 }
 function poaBack() {
   const back = window._poaBack || { type:'registry' };
-  if (back.type === 'client' && back.id) viewClient(back.id);
+  if (back.type === 'case' && back.id) viewCase(back.id, 0); // v264
+  else if (back.type === 'client' && back.id) viewClient(back.id);
   else openPoaRegistry();
 }
 async function savePoa(id) {
@@ -13693,6 +13975,55 @@ function notifDlStage(d) {
   return null;
 }
 
+// ═══════ v263: БУДИЛЬНИКИ ANDROID ═══════
+// В приложении-обёртке (CRM_Android 1.2+) есть мост AndroidApp.scheduleReminders(json): CRM отдаёт список
+// напоминаний на 30 дней вперёд, приложение регистрирует их в планировщике Android. Уведомления приходят,
+// даже когда программа закрыта, и переживают перезагрузку телефона. В браузере мост отсутствует — работает
+// прежняя проверка при запуске (notifCheck).
+const alarmsSupported = () => typeof AndroidApp !== 'undefined' && typeof AndroidApp.scheduleReminders === 'function';
+const notifLead = () => { const v = lsJSON('crm_notif_lead', null); return v && Array.isArray(v.h) ? v : { h: [1440, 120], d: [10080, 4320, 1440, 0] }; }; // минуты: заседания — за сутки и за 2 часа; сроки — 7, 3, 1 день и в день срока
+function notifLeadSave(v) { localStorage.setItem('crm_notif_lead', JSON.stringify(v)); bumpSettings(); }
+// список напоминаний: [{ id, at, title, text }]; at — время срабатывания (мс)
+async function alarmsBuild(nowTs) {
+  const now = nowTs || Date.now(), horizon = now + 30 * 864e5, out = [];
+  const lead = notifLead();
+  const at = (dateISO, timeStr, minutesBefore) => { const t = /^(\d{1,2}):(\d{2})/.exec(timeStr || ''); const d = parseLocalDate(dateISO); if (!d || isNaN(d)) return null; d.setHours(t ? +t[1] : 9, t ? +t[2] : 0, 0, 0); return d.getTime() - minutesBefore * 60000; };
+  const push = (id, ts, title, text) => { if (ts === null || ts <= now + 60000 || ts > horizon) return; out.push({ id, at: ts, title, text }); };
+  const cases = await getAll('cases');
+  (await getAll('hearings')).forEach(h => {
+    if (!h.date || !isPlanned(h)) return;
+    const cl = clientByCase(h.caseNum) || '', place = [h.court, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', ');
+    lead.h.forEach(m => push('h:' + h.id + ':' + m, at(h.date, h.time, m), m >= 1440 ? `Заседание завтра${h.time ? ' в ' + h.time : ''}` : `Заседание через ${Math.round(m / 60)} ч${h.time ? ' (' + h.time + ')' : ''}`, [h.caseNum, cl, place].filter(Boolean).join(' · ')));
+  });
+  cases.forEach(c => {
+    if (c.archived || c.status === 'Завершено' || c.stage === 'Завершено') return;
+    (c.deadlines || []).forEach(dl => {
+      if (dl.done || !dl.date) return;
+      lead.d.forEach(m => { const ts = at(dl.date, '09:00', m); const days = Math.round(m / 1440);
+        push('d:' + c.id + ':' + dl.date + ':' + (dl.title || '').slice(0, 20) + ':' + m, ts, days > 0 ? `Через ${days} дн. истекает срок: ${dl.title || 'срок'}` : `Срок сегодня: ${dl.title || 'срок'}`, [c.number, c.client, dl.confirmedAt ? '' : 'дата не подтверждена'].filter(Boolean).join(' · ')); });
+    });
+  });
+  (await getAll('tasks')).forEach(t => {
+    if (t.done || !t.due) return;
+    push('t:' + t.id, at(t.due, t.time || '09:00', 0), 'Задача: ' + (t.title || 'без названия'), [t.caseNum, t.note].filter(Boolean).join(' · '));
+  });
+  (await getAll('meetings')).forEach(mt => {
+    if (!mt.date) return;
+    push('m:' + mt.id, at(mt.date, mt.time, 120), 'Приём через 2 ч' + (mt.time ? ' (' + mt.time + ')' : ''), [mt.with, mt.place].filter(Boolean).join(' · '));
+  });
+  out.sort((a, b) => a.at - b.at);
+  return out.slice(0, 400); // ограничение планировщика Android
+}
+let _alarmsTimer = null;
+async function alarmsSync(silent) {
+  if (!alarmsSupported()) { if (!silent) toast('Будильники доступны в приложении для Android', true); return 0; }
+  const list = await alarmsBuild();
+  try { AndroidApp.scheduleReminders(JSON.stringify(list)); } catch (e) { if (!silent) toast('Не удалось передать напоминания приложению', true); return 0; }
+  localStorage.setItem('crm_alarms_at', String(Date.now()));
+  if (!silent) toast(`Напоминаний запланировано: ${list.length}`);
+  return list.length;
+}
+function alarmsTouch() { if (!alarmsSupported()) return; clearTimeout(_alarmsTimer); _alarmsTimer = setTimeout(() => alarmsSync(true).catch(() => {}), 6000); }
 function openNotifSheet() {
   const supported = 'Notification' in window;
   const perm = supported ? Notification.permission : 'unsupported';
@@ -13700,6 +14031,18 @@ function openNotifSheet() {
   showSheet(`
     <h3>🔔 Напоминания</h3>
     <div class="sheet-sub">Уведомления о заседаниях и сроках на телефоне</div>
+    ${alarmsSupported() ? `<div class="card" style="margin-bottom:10px;border-left:3px solid var(--green)"><!-- v263 -->
+      <div class="title">⏰ Будильники приложения — работают при закрытой программе</div>
+      <div class="meta" style="margin:4px 0 8px">Напоминания регистрируются в Android и приходят, даже если CRM не открыта; переживают перезагрузку телефона. Список обновляется при каждом запуске и после изменения заседаний и сроков.${(() => { const t = Number(localStorage.getItem('crm_alarms_at') || 0); return t ? ` Последнее обновление: ${new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}.` : ''; })()}</div>
+      <div class="field-row">
+        <div class="field"><label>Заседание — предупредить за</label><select id="nt-lead-h" onchange="notifLeadSave({h:JSON.parse(this.value),d:notifLead().d});alarmsSync(false)">
+          ${[[[1440,120],'сутки и 2 часа'],[[1440],'сутки'],[[2880,1440,120],'2 суток, сутки и 2 часа'],[[120],'2 часа']].map(([v,l])=>`<option value='${JSON.stringify(v)}' ${JSON.stringify(notifLead().h)===JSON.stringify(v)?'selected':''}>${l}</option>`).join('')}</select></div>
+        <div class="field"><label>Срок — предупредить за</label><select id="nt-lead-d" onchange="notifLeadSave({h:notifLead().h,d:JSON.parse(this.value)});alarmsSync(false)">
+          ${[[[10080,4320,1440,0],'7, 3, 1 день и в день срока'],[[4320,1440,0],'3, 1 день и в день срока'],[[1440,0],'день и в день срока'],[[0],'только в день срока']].map(([v,l])=>`<option value='${JSON.stringify(v)}' ${JSON.stringify(notifLead().d)===JSON.stringify(v)?'selected':''}>${l}</option>`).join('')}</select></div>
+      </div>
+      <button class="v-mini-btn" onclick="alarmsSync(false)">↻ Обновить будильники сейчас</button>
+      <div class="meta" style="margin-top:6px">Если уведомления приходят с опозданием — исключите приложение из экономии батареи в настройках телефона.</div>
+    </div>` : ''}
 
     <div class="card" style="margin-bottom:10px;border-left:3px solid ${on?'var(--green)':'var(--orange)'}">
       <div class="title" style="margin-bottom:4px">${on?'● Напоминания включены':'○ Напоминания выключены'}</div>
@@ -13904,6 +14247,7 @@ openMoreSheet = function() {
     tile('v184-more-check','🔎','Контрагент','openCounterpartySheet()') +
     tile('v182-more-import','⇪','Импорт от ИИ','openAiImport()') +
     tile('v177-more-cor','✉','Корреспонденция',"nav('mail')") +
+    tile('v255-more-settings','⚙️','Настройки','openSettingsSheet()') +
     tile('v177-more-docs','▤','Документы','openDocumentCenter()') +
     tile('v177-more-mon','◎','Мониторинг','openMonitorCenter()') +
     tile('v177-more-flow','✓','Процессы','openWorkflowCenter()') +
@@ -15707,6 +16051,7 @@ function crmHelpAttach(name,key){var o=window[name];if(typeof o!=='function')ret
   setTimeout(() => { bookPoll(true).catch(() => {}); if (Date.now() - (bookCfg().lastPub || 0) > 6 * 3600e3) bookPublish(true).catch(() => {}); }, 4000); // v245: заявки и обновление окон
   // Напоминания о заседаниях/сроках (если включены) — после загрузки данных
   setTimeout(() => notifCheck().catch(()=>{}), 1500);
+  setTimeout(() => alarmsSync(true).catch(()=>{}), 2500); // v263: перепланировать будильники приложения
   // v218: запуск сразу в инбокс — ярлык PWA (?inbox=1) или закладка (#inbox); адрес очищается, чтобы обновление страницы не открывало инбокс снова
   if (/[?&]inbox=1/.test(location.search) || location.hash === '#inbox') {
     try { history.replaceState(null, '', location.pathname); } catch (e) {}
