@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v269</title>
+<title>CRM Адвоката v270</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1237,7 +1237,8 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '269'; // v269: корень архива и шаблон имени папки дела — путь подставляется сам при создании дела; кнопка «Создать папку» в привязке; мост настольного приложения (открыть файл и папку в системе)
+const APP_VER = '270'; // v270: понятные сообщения вместо «Failed to fetch» при обращении к облачной функции коллектора; ответы без JSON (403/404 от Облака) распознаются
+// v269 → // v269: корень архива и шаблон имени папки дела — путь подставляется сам при создании дела; кнопка «Создать папку» в привязке; мост настольного приложения (открыть файл и папку в системе)
 // v268 → // v268: снимки базы на личном сервере — еженедельно автоматически, хранятся 8 последних, восстановление из любого; синхронизация не заменяет резервную копию
 // v267 → // v267: онлайн-копия документа на личном сервере — файл шифруется на устройстве паролем синхронизации и открывается с любого устройства; скан к доверенности
 // v266 → // v266: поле «Номер дела в суде» вместо «№ дела в суде / № уголовного дела»; при подтягивании карточки номер дела и УИД предлагаются к замене, если отличаются от указанного
@@ -14833,10 +14834,25 @@ async function crmCollectorCall(body, timeoutMs) {
     const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, secret: cfg.secret }), signal: ctrl.signal, cache: 'no-store' });
     const j = await r.json().catch(() => null);
+    if (!j) return { http: r.status, err: crmCollectorHttpHint(r.status) }; // v270: ответ не от коллектора (страница ошибки Облака)
     return { http: r.status, j };
   } catch (e) {
-    return { err: e && e.name === 'AbortError' ? 'нет ответа (таймаут)' : (e.message || 'сбой сети') };
+    return { err: e && e.name === 'AbortError' ? 'нет ответа за отведённое время — сайт суда отвечает медленно, повторите позже' : crmCollectorNetHint(e) };
   } finally { clearTimeout(timer); }
+}
+// v270: расшифровка сетевых ошибок для человека
+function crmCollectorHttpHint(code) {
+  if (code === 403) return 'функция коллектора не публичная или адрес чужой (403). Консоль → collector-sud → «Обзор» → включить «Публичная функция»';
+  if (code === 404) return 'по адресу нет функции (404) — проверьте «Ссылку для вызова» в Мониторинге → Сбор в облаке';
+  if (code === 502 || code === 504) return 'функция коллектора упала или не успела ответить (' + code + ') — журнал в консоли: collector-sud → «Логи»';
+  return 'функция ответила не так, как ожидалось (HTTP ' + code + ')';
+}
+function crmCollectorNetHint(e) {
+  const m = String((e && e.message) || '');
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'нет интернета';
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(m))
+    return 'функция коллектора недоступна: проверьте адрес в Мониторинге → «Сбор в облаке», что функция публичная, и выключите VPN, если он включён. Проверка: откройте адрес функции с «?action=status&secret=…» в браузере';
+  return m || 'сбой сети';
 }
 async function crmCollectorSendLinks() {
   const pack = await crmCollectorPack();
