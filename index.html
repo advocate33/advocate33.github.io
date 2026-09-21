@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https:; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v271</title>
+<title>CRM Адвоката v273</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1237,7 +1237,9 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '271'; // v271: «Внести в заседания» создаёт заседание напрямую (не переносит другое); перенос по данным суда — только заседания той же инстанции, с судом; «(регистрация лиц)» больше не считается ложным заседанием при уборке; автоприменение при запуске
+const APP_VER = '273'; // v273: мастер развёртывания сервера в облаке пользователя одной кнопкой (приложение для компьютера 1.1): сервисный аккаунт, ключ, бакет, функции сервера и коллектора с автообновлением, шлюз, таймер — и запись настроек в CRM
+// v272 → // v272: канал обновлений — «что нового» после обновления (dist/version.json рядом с программой), проверка версии личного сервера и подсказка об автообновлении
+// v271 → // v271: «Внести в заседания» создаёт заседание напрямую (не переносит другое); перенос по данным суда — только заседания той же инстанции, с судом; «(регистрация лиц)» больше не считается ложным заседанием при уборке; автоприменение при запуске
 // v270 → // v270: понятные сообщения вместо «Failed to fetch» при обращении к облачной функции коллектора; ответы без JSON (403/404 от Облака) распознаются
 // v269 → // v269: корень архива и шаблон имени папки дела — путь подставляется сам при создании дела; кнопка «Создать папку» в привязке; мост настольного приложения (открыть файл и папку в системе)
 // v268 → // v268: снимки базы на личном сервере — еженедельно автоматически, хранятся 8 последних, восстановление из любого; синхронизация не заменяет резервную копию
@@ -5138,6 +5140,12 @@ function openSyncSheet() {
     </div>
 
     <div class="sheet-sub" style="margin-top:4px">При загрузке для каждой записи берётся более свежая версия — повторная загрузка старого файла не затрёт ваши новые изменения.</div>
+
+    <div class="card" style="margin-top:10px;cursor:pointer;border-left:3px solid var(--green)" onclick="openYcDeploySheet()"><!-- v273 -->
+      <div class="row1"><div style="flex:1"><div class="title" style="font-size:14.5px">🚀 Свой сервер одной кнопкой</div>
+      <div class="meta">Мастер создаёт личный сервер и коллектор судов в вашем Яндекс Облаке — без консоли и инструкций${ycSupported() ? '' : ' (работает в приложении для компьютера)'}</div></div>
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></div>
+    </div>
 
     <div class="card" style="margin-top:10px;cursor:pointer;border-left:3px solid var(--accent)" onclick="openSnapSheet()"><!-- v268 -->
       <div class="row1"><div style="flex:1"><div class="title" style="font-size:14.5px">🗄 Снимки базы на сервере ${snapOn()?'<span style="color:var(--green);font-size:12px">● еженедельно</span>':''}</div>
@@ -10004,7 +10012,8 @@ async function srvPing() {
   const j = await srvCall('ping');
   if (j && j.ok) {
     const rdy = j.ready || {};
-    toast(`Связь есть ✓ Почта: ${rdy.pochta ? 'настроена' : 'нет'} · Хранилище: ${rdy.storage ? 'настроено' : 'нет'}`);
+    toast(`Связь есть ✓ Сервер v${j.ver || '?'}${j.loader ? ' (' + (j.loader.updateUrl === 'задан' ? 'автообновление' + (j.loader.pin ? ', закреплён ' + j.loader.pin : '') : 'без автообновления') + ')' : ''} · Почта: ${rdy.pochta ? 'настроена' : 'нет'} · Хранилище: ${rdy.storage ? 'настроено' : 'нет'}`);
+    UPD.srvVer = Number(j.ver) || 0; UPD.loader = j.loader || null; localStorage.setItem('crm_srv_ver', String(UPD.srvVer)); // v272
   } else toast(j && j.error === 'auth' ? 'Неверный секретный код' : 'Нет связи: ' + ((j && j.error) || 'проверьте URL'), true);
 }
 
@@ -10847,6 +10856,226 @@ async function saveBookSettings() {
   if (c.enabled && !c.publicId) c.publicId = bookNewId();
   bookCfgSave(c);
   if (c.enabled) { const j = await bookPublish(false); if (j && j.ok) openBookSettings(); } else { toast('Онлайн-запись выключена (страница остаётся, но окон не будет)'); closeSheet(); }
+}
+// ═══════ v273: МАСТЕР РАЗВЁРТЫВАНИЯ СЕРВЕРА В ОБЛАКЕ ПОЛЬЗОВАТЕЛЯ ═══════
+// Работает в приложении для компьютера: запросы к API Яндекс Облака идут через мост CRMDesktop.ycHttp
+// (из браузера их не пустит CORS). OAuth- и IAM-токены живут только в памяти, пока открыт мастер.
+// Всё создаётся в облаке ПОЛЬЗОВАТЕЛЯ: сервисный аккаунт, статический ключ, бакет, функции сервера и
+// коллектора (с загрузчиками автообновления из папки раздачи), шлюз для ленты календаря, таймер коллектора.
+const YC = {
+  iamToken: 'https://iam.api.cloud.yandex.net/iam/v1/tokens',
+  clouds: 'https://resource-manager.api.cloud.yandex.net/resource-manager/v1/clouds',
+  folders: 'https://resource-manager.api.cloud.yandex.net/resource-manager/v1/folders',
+  sa: 'https://iam.api.cloud.yandex.net/iam/v1/serviceAccounts',
+  keys: 'https://iam.api.cloud.yandex.net/iam/aws-compatibility/v1/accessKeys',
+  buckets: 'https://storage.api.cloud.yandex.net/storage/v1/buckets',
+  fns: 'https://serverless-functions.api.cloud.yandex.net/functions/v1/functions',
+  versions: 'https://serverless-functions.api.cloud.yandex.net/functions/v1/versions',
+  gws: 'https://serverless-apigateway.api.cloud.yandex.net/apigateways/v1/apigateways',
+  triggers: 'https://serverless-triggers.api.cloud.yandex.net/triggers/v1/triggers',
+  op: 'https://operation.api.cloud.yandex.net/operations/',
+  oauthLink: 'https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb' // публичный клиент Яндекс Облака (как у yc CLI)
+};
+const ycSupported = () => !!(desktopApp() && typeof desktopApp().ycHttp === 'function');
+const ycSleep = ms => new Promise(r => setTimeout(r, ms));
+async function ycApi(method, url, token, body) {
+  const r = await desktopApp().ycHttp(method, url, token || null, body === undefined ? null : JSON.stringify(body));
+  let j = null; try { j = r.body ? JSON.parse(r.body) : {}; } catch (e) { j = { raw: r.body }; }
+  if (r.status >= 400) { const e = new Error((j && (j.message || (j.error && j.error.message))) || ('HTTP ' + r.status)); e.status = r.status; e.body = j; throw e; }
+  return j;
+}
+async function ycOp(op, token, what) { // ждать завершения операции
+  let o = op;
+  for (let i = 0; i < 90 && !(o && o.done); i++) { await ycSleep(i < 5 ? 1000 : 2000); o = await ycApi('GET', YC.op + op.id, token); }
+  if (!o || !o.done) throw new Error((what || 'операция') + ': не завершилась за 3 минуты');
+  if (o.error) throw new Error((what || 'операция') + ': ' + (o.error.message || JSON.stringify(o.error)));
+  return o;
+}
+const ycRand = n => Array.from(crypto.getRandomValues(new Uint8Array(n))).map(b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+const b64u8 = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+async function ycList(url, key, token) { const j = await ycApi('GET', url, token); return j[key] || []; }
+async function ycDeploy(o, log) {
+  log = log || (() => {});
+  const res = {};
+  // 1. токен доступа к Облаку
+  log('Вход в Яндекс Облако…');
+  const iam = (await ycApi('POST', YC.iamToken, null, { yandexPassportOauthToken: o.oauth })).iamToken;
+  if (!iam) throw new Error('не удалось получить IAM-токен — проверьте OAuth-токен');
+  // 2. каталог
+  let folderId = o.folderId;
+  if (!folderId) {
+    const ex = (await ycList(YC.folders + '?cloudId=' + encodeURIComponent(o.cloudId), 'folders', iam)).find(f => f.name === (o.folderName || 'crm'));
+    if (ex) folderId = ex.id;
+    else { log('Создаю каталог «' + (o.folderName || 'crm') + '»…'); const op = await ycOp(await ycApi('POST', YC.folders, iam, { cloudId: o.cloudId, name: o.folderName || 'crm', description: 'CRM Адвоката' }), iam, 'каталог'); folderId = op.response.id; }
+  }
+  res.folderId = folderId;
+  // 3. сервисный аккаунт
+  log('Сервисный аккаунт crm-server…');
+  let sa = (await ycList(YC.sa + '?folderId=' + folderId, 'serviceAccounts', iam)).find(x => x.name === 'crm-server');
+  if (!sa) sa = (await ycOp(await ycApi('POST', YC.sa, iam, { folderId, name: 'crm-server', description: 'CRM Адвоката: сервер и коллектор' }), iam, 'сервисный аккаунт')).response;
+  res.saId = sa.id;
+  log('Права сервисного аккаунта…');
+  for (const roles of [['storage.editor'], ['functions.functionInvoker', 'serverless.functions.invoker']]) {
+    let done = false, lastErr = null;
+    for (const roleId of roles) { try { await ycOp(await ycApi('POST', YC.folders + '/' + folderId + ':updateAccessBindings', iam, { accessBindingDeltas: [{ action: 'ADD', accessBinding: { roleId, subject: { id: sa.id, type: 'serviceAccount' } } }] }), iam, 'права ' + roleId); done = true; break; } catch (e) { lastErr = e; if (/already exists|уже/i.test(e.message)) { done = true; break; } } }
+    if (!done) throw lastErr;
+  }
+  // 4. статический ключ для бакета
+  log('Ключ доступа к хранилищу…');
+  const key = await ycApi('POST', YC.keys, iam, { serviceAccountId: sa.id, description: 'CRM Адвоката: сервер' });
+  res.s3KeyId = key.accessKey && key.accessKey.keyId; const s3Secret = key.secret;
+  if (!res.s3KeyId || !s3Secret) throw new Error('ключ доступа не выдан');
+  // 5. бакет
+  log('Бакет ' + o.bucket + '…');
+  const hasBucket = (await ycList(YC.buckets + '?folderId=' + folderId, 'buckets', iam)).some(b => b.name === o.bucket);
+  if (!hasBucket) {
+    try { await ycOp(await ycApi('POST', YC.buckets, iam, { name: o.bucket, folderId, defaultStorageClass: 'STANDARD', maxSize: '5368709120', anonymousAccessFlags: { read: false, list: false, configRead: false } }), iam, 'бакет'); }
+    catch (e) { if (/exist|занят/i.test(e.message)) throw new Error('имя бакета «' + o.bucket + '» уже занято в Облаке — придумайте другое'); throw e; }
+    try { await ycOp(await ycApi('PATCH', YC.buckets + '/' + o.bucket, iam, { updateMask: 'versioning', versioning: 'VERSIONING_ENABLED' }), iam, 'версионирование'); } catch (e) { log('Версионирование бакета не включилось (' + e.message + ') — можно включить позже в консоли'); }
+  }
+  res.bucket = o.bucket;
+  // 6. код функций из папки раздачи
+  log('Код сервера и коллектора из папки обновлений…');
+  const dist = o.distBase.replace(/\/+$/, '');
+  const getText = async f => { const r = await fetch(dist + '/' + f, { cache: 'no-store' }); if (!r.ok) throw new Error('нет файла ' + f + ' в папке обновлений (HTTP ' + r.status + ')'); return r.text(); };
+  const bridgeZip = b64u8(zipStore([{ name: 'index.js', data: await getText('loader-bridge-index.js') }, { name: 'server.js', data: await getText('server.js') }]));
+  const secret = ycRand(28); res.secret = secret;
+  // 7. функция личного сервера
+  const fnOf = async (name, desc) => { let f = (await ycList(YC.fns + '?folderId=' + folderId, 'functions', iam)).find(x => x.name === name); if (!f) f = (await ycOp(await ycApi('POST', YC.fns, iam, { folderId, name, description: desc }), iam, 'функция ' + name)).response; return f; };
+  log('Функция личного сервера…');
+  const bridge = await fnOf('crm-bridge', 'CRM Адвоката: личный сервер'); res.bridgeId = bridge.id;
+  await ycOp(await ycApi('POST', YC.versions, iam, { functionId: bridge.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: { memory: '268435456' }, executionTimeout: '300s', serviceAccountId: sa.id, content: bridgeZip,
+    environment: { SECRET: secret, BUCKET: o.bucket, S3_KEY_ID: res.s3KeyId, S3_SECRET: s3Secret, FOLDER_ID: folderId, UPDATE_URL: dist } }), iam, 'версия сервера');
+  await ycOp(await ycApi('POST', YC.fns + '/' + bridge.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к серверу');
+  res.bridgeUrl = 'https://functions.yandexcloud.net/' + bridge.id;
+  // 8. шлюз (лента календаря)
+  if (o.withGateway) {
+    log('Шлюз для ленты календаря…');
+    const spec = ['openapi: 3.0.0', 'info:', '  title: CRM Адвоката — личный сервер', '  version: 1.0.0', 'paths:', '  /bridge:', '    x-yc-apigateway-any-method:', '      x-yc-apigateway-integration:', '        type: cloud_functions', '        function_id: ' + bridge.id, '        service_account_id: ' + sa.id,
+      '  /cal/{secret}:', '    get:', '      parameters:', '        - name: secret', '          in: path', '          required: true', '          schema:', '            type: string', '      x-yc-apigateway-integration:', '        type: object_storage', '        bucket: ' + o.bucket, "        object: 'cal-{secret}.ics'", '        service_account_id: ' + sa.id].join('\n');
+    let gw = (await ycList(YC.gws + '?folderId=' + folderId, 'apiGateways', iam)).find(x => x.name === 'crm-gw');
+    if (!gw) gw = (await ycOp(await ycApi('POST', YC.gws, iam, { folderId, name: 'crm-gw', description: 'CRM Адвоката', openapiSpec: spec }), iam, 'шлюз')).response;
+    if (gw && gw.domain) { res.gatewayDomain = gw.domain; res.bridgeUrl = 'https://' + gw.domain + '/bridge'; res.calUrl = 'https://' + gw.domain + '/cal/' + secret; }
+  }
+  // 9. коллектор судов
+  if (o.withCollector) {
+    log('Функция коллектора судов…');
+    const colZip = b64u8(zipStore([{ name: 'index.js', data: await getText('loader-collector-index.js') }, { name: 'collector-sud.mjs', data: await getText('collector-sud.mjs') }]));
+    const colSecret = ycRand(28); res.collectorSecret = colSecret;
+    const col = await fnOf('collector-sud', 'CRM Адвоката: коллектор судов'); res.collectorId = col.id;
+    await ycOp(await ycApi('POST', YC.versions, iam, { functionId: col.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: { memory: '268435456' }, executionTimeout: '600s', serviceAccountId: sa.id, content: colZip,
+      environment: { SECRET: colSecret, BRIDGE_URL: res.bridgeUrl, BRIDGE_SECRET: secret, BUCKET: o.bucket, NODE_TLS_REJECT_UNAUTHORIZED: '0', PARALLEL: '3', UPDATE_URL: dist } }), iam, 'версия коллектора');
+    await ycOp(await ycApi('POST', YC.fns + '/' + col.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к коллектору');
+    res.collectorUrl = 'https://functions.yandexcloud.net/' + col.id;
+    if (o.withTimer) {
+      log('Таймер коллектора (07:30 и 15:30 по Москве)…');
+      const has = (await ycList(YC.triggers + '?folderId=' + folderId, 'triggers', iam)).some(t => t.name === 'collector-timer');
+      if (!has) await ycOp(await ycApi('POST', YC.triggers, iam, { folderId, name: 'collector-timer', description: 'CRM Адвоката: сбор с сайтов судов', rule: { timer: { cronExpression: '30 4,12 ? * * *', invokeFunctionWithRetry: { functionId: col.id, functionTag: '$latest', serviceAccountId: sa.id } } } }), iam, 'таймер');
+    }
+  }
+  log('Готово.');
+  return res;
+}
+// записать результат в настройки CRM и проверить связь
+async function ycApplyResult(res) {
+  SRV.url = res.bridgeUrl; SRV.secret = res.secret;
+  if (res.collectorUrl) { localStorage.setItem('crm_collector_url', res.collectorUrl); localStorage.setItem('crm_collector_secret', res.collectorSecret); }
+  bumpSettings?.();
+  let ok = false; for (let i = 0; i < 6 && !ok; i++) { const j = await srvCall('ping').catch(() => null); ok = !!(j && j.ok); if (!ok) await ycSleep(3000); }
+  if (ok && res.collectorUrl) { try { await crmCollectorSendLinks(); } catch (e) {} }
+  return ok;
+}
+let _ycSess = { iam: null, clouds: [], folders: [] };
+function openYcDeploySheet() {
+  if (!ycSupported()) {
+    showSheet(`<h3>🚀 Свой сервер одной кнопкой</h3><div class="sheet-sub">Мастер создаёт личный сервер и коллектор судов в вашем Яндекс Облаке за несколько минут — без консоли и инструкций. Работает в приложении «CRM Адвоката» для компьютера (версия 1.1 и новее): из браузера к API Облака обращаться нельзя.</div><div class="v-storage-note">Скачайте и установите приложение для компьютера, откройте в нём CRM и вернитесь сюда: Настройки → Синхронизация → «Свой сервер одной кнопкой».</div><button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`); return;
+  }
+  const bucketSuggest = 'crm-' + ycRand(8);
+  showSheet(`<h3>🚀 Свой сервер одной кнопкой</h3>
+    <div class="sheet-sub">Всё создаётся в <b>вашем</b> Яндекс Облаке: личный сервер (синхронизация, лента календаря, почта, онлайн-запись, снимки базы) и коллектор судов с таймером. Данные остаются у вас; обновления приходят из общей папки раздачи.</div>
+    <div class="v-storage-note">Что нужно заранее: аккаунт в Яндекс Облаке с привязанной картой (платёжный аккаунт) — без него функции не запускаются. Расходы при обычной работе — в пределах бесплатных лимитов и рублей в месяц за хранение.</div>
+    <div class="field"><label>1. OAuth-токен Яндекс Облака</label>
+      <div class="meta" style="margin-bottom:6px">Откройте <a href="${YC.oauthLink}" target="_blank" rel="noopener">страницу получения токена</a>, войдите в аккаунт, где создано облако, и скопируйте строку вида y0_… Токен используется только сейчас и нигде не сохраняется.</div>
+      <input id="yc-oauth" type="password" autocomplete="off" placeholder="y0_…"></div>
+    <button class="btn-ghost" onclick="ycLoadClouds()">Подключиться к Облаку</button>
+    <div id="yc-where" style="margin-top:8px"></div>
+    <div class="field" style="margin-top:8px"><label>3. Имя бакета (латиница, цифры, дефис)</label><input id="yc-bucket" value="${bucketSuggest}"></div>
+    <label style="display:flex;gap:8px;margin:6px 0;font-size:14px"><input type="checkbox" id="yc-gw" checked> Шлюз для ленты календаря</label>
+    <label style="display:flex;gap:8px;margin:6px 0;font-size:14px"><input type="checkbox" id="yc-col" checked> Коллектор судов</label>
+    <label style="display:flex;gap:8px;margin:6px 0 10px;font-size:14px"><input type="checkbox" id="yc-timer" checked> Сбор по расписанию (07:30 и 15:30)</label>
+    <button class="btn-primary" id="yc-go" onclick="ycRun()">Развернуть</button>
+    <div id="yc-log" style="margin-top:10px;font-size:13px;line-height:1.5"></div>
+    <button class="btn-ghost" onclick="closeSheet()">Закрыть</button>`);
+}
+async function ycLoadClouds() {
+  const tok = fval('yc-oauth').trim(); const where = document.getElementById('yc-where');
+  if (!tok) { toast('Вставьте OAuth-токен', true); return; }
+  where.innerHTML = '<div class="meta">Подключаюсь…</div>';
+  try {
+    _ycSess.iam = (await ycApi('POST', YC.iamToken, null, { yandexPassportOauthToken: tok })).iamToken;
+    _ycSess.clouds = await ycList(YC.clouds, 'clouds', _ycSess.iam);
+    if (!_ycSess.clouds.length) { where.innerHTML = '<div class="v-storage-note" style="border-left-color:var(--orange)">В аккаунте нет облаков. Зайдите в console.cloud.yandex.ru — облако создаётся при первом входе.</div>'; return; }
+    const cloudId = _ycSess.clouds[0].id;
+    _ycSess.folders = await ycList(YC.folders + '?cloudId=' + cloudId, 'folders', _ycSess.iam);
+    where.innerHTML = `<div class="field"><label>2. Облако и каталог</label>
+      <select id="yc-cloud" onchange="ycLoadFolders(this.value)">${_ycSess.clouds.map(c => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')}</select>
+      <select id="yc-folder" style="margin-top:6px">${_ycSess.folders.map(f => `<option value="${esc(f.id)}" ${f.name === 'crm' ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}<option value="">＋ новый каталог «crm»</option></select></div>`;
+  } catch (e) { where.innerHTML = `<div class="v-storage-note" style="border-left-color:var(--red)">Не удалось подключиться: ${esc(e.message)}</div>`; }
+}
+async function ycLoadFolders(cloudId) {
+  _ycSess.folders = await ycList(YC.folders + '?cloudId=' + cloudId, 'folders', _ycSess.iam).catch(() => []);
+  const sel = document.getElementById('yc-folder'); if (sel) sel.innerHTML = _ycSess.folders.map(f => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join('') + '<option value="">＋ новый каталог «crm»</option>';
+}
+async function ycRun() {
+  const oauth = fval('yc-oauth').trim(), bucket = fval('yc-bucket').trim().toLowerCase();
+  const cloudId = document.getElementById('yc-cloud')?.value, folderId = document.getElementById('yc-folder')?.value || '';
+  if (!oauth || !cloudId) { toast('Сначала подключитесь к Облаку', true); return; }
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) { toast('Имя бакета: 3–63 символа, латиница в нижнем регистре, цифры, дефис', true); return; }
+  const btn = document.getElementById('yc-go'); if (btn) btn.disabled = true;
+  const logEl = document.getElementById('yc-log'); const log = t => { if (logEl) logEl.innerHTML += `<div>• ${esc(t)}</div>`; };
+  try {
+    const res = await ycDeploy({ oauth, cloudId, folderId, folderName: 'crm', bucket, withGateway: document.getElementById('yc-gw').checked, withCollector: document.getElementById('yc-col').checked, withTimer: document.getElementById('yc-timer').checked, distBase: new URL('./dist', location.href).href }, log);
+    log('Записываю настройки в CRM и проверяю связь…');
+    const ok = await ycApplyResult(res);
+    logEl.innerHTML += `<div class="card" style="margin-top:8px;border-left:3px solid var(--green)"><div class="title">${ok ? '✅ Сервер работает' : '⚠ Сервер создан, но пока не отвечает — повторите «Проверить связь» через минуту'}</div>
+      <div class="meta" style="margin-top:6px;word-break:break-all">Адрес сервера: ${esc(res.bridgeUrl)}${res.calUrl ? '<br>Лента календаря: ' + esc(res.calUrl) : ''}${res.collectorUrl ? '<br>Коллектор: ' + esc(res.collectorUrl) : ''}</div>
+      <div class="meta" style="margin-top:6px">Секреты уже записаны в CRM. Чтобы подключить второе устройство, задайте на нём тот же адрес, секрет сервера и пароль синхронизации — секрет виден в листе «Личный сервер».</div></div>`;
+    toast(ok ? 'Сервер развёрнут и подключён' : 'Сервер развёрнут');
+  } catch (e) { log('Ошибка: ' + e.message); logEl.innerHTML += `<div class="v-storage-note" style="border-left-color:var(--red);margin-top:6px">Развёртывание остановилось. Можно исправить причину и нажать «Развернуть» снова — уже созданное будет найдено и использовано повторно.</div>`; }
+  finally { if (btn) btn.disabled = false; }
+}
+// ═══════ v272: КАНАЛ ОБНОВЛЕНИЙ ═══════
+// Программа, сервер и коллектор обновляются из одной папки dist рядом с index.html (публичный бакет автора):
+//   dist/version.json — { crm, server, collector, notes:[…], serverSha256, collectorSha256, hashes:{…} }
+// CRM сообщает «что нового» после обновления и предупреждает, если личный сервер старее нужного.
+const SERVER_MIN = 176;
+let UPD = { man: null, srvVer: 0, loader: null };
+async function updCheck() {
+  try { const r = await fetch('./dist/version.json', { cache: 'no-store' }); if (r.ok) UPD.man = await r.json(); } catch (e) {}
+  const seen = localStorage.getItem('crm_seen_ver') || '';
+  if (seen && seen !== APP_VER) localStorage.setItem('crm_upd_notes_for', APP_VER); // показать «что нового» на обзоре
+  localStorage.setItem('crm_seen_ver', APP_VER);
+  if (SRV.url && SRV.secret) { try { const j = await srvCall('ping'); if (j && j.ok) { UPD.srvVer = Number(j.ver) || 0; UPD.loader = j.loader || null; localStorage.setItem('crm_srv_ver', String(UPD.srvVer)); } } catch (e) {} }
+  if (typeof renderDashboard === 'function') renderDashboard();
+}
+function updCardsHtml() {
+  const out = [];
+  const man = UPD.man;
+  if (localStorage.getItem('crm_upd_notes_for') === APP_VER) {
+    const notes = man && Array.isArray(man.notes) ? man.notes.slice(0, 6) : [];
+    out.push(`<div class="card" style="border-left:3px solid var(--green);margin-top:10px"><div class="row1"><div style="flex:1"><div class="title">✨ CRM обновлена до версии ${esc(APP_VER)}</div>${notes.length ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:13px">${notes.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` : '<div class="meta">Изменения — в журнале проекта.</div>'}</div><button class="v-mini-btn" onclick="localStorage.removeItem('crm_upd_notes_for');renderDashboard()">Понятно</button></div></div>`);
+  }
+  if (man && man.crm && Number(man.crm) > Number(APP_VER)) out.push(`<div class="card" style="border-left:3px solid var(--accent);margin-top:10px"><div class="title">⬇ Доступна версия ${esc(String(man.crm))}</div><div class="meta">Закройте и откройте программу — обновление подтянется само.</div></div>`);
+  const sv = UPD.srvVer || Number(localStorage.getItem('crm_srv_ver') || 0);
+  if (sv && sv < SERVER_MIN) {
+    const auto = UPD.loader && UPD.loader.updateUrl === 'задан';
+    out.push(`<div class="card" style="border-left:3px solid var(--orange);margin-top:10px"><div class="title">⚙ Личный сервер устарел: версия ${sv}, нужна ${SERVER_MIN} или новее</div><div class="meta">${auto ? 'Автообновление включено — сервер обновится сам в течение 10 минут. Если не обновился, посмотрите логи функции.' : 'Замените код функции личного сервера или включите автообновление: загрузчик index.js и переменная UPDATE_URL (инструкция «Обновления»).'}</div></div>`);
+  }
+  return out.join('');
+}
+async function updRenderDashboard() {
+  const host = document.getElementById('v272-upd') || (() => { const a = document.createElement('div'); a.id = 'v272-upd'; document.getElementById('v163-cor-alerts')?.insertAdjacentElement('beforebegin', a); return a; })();
+  if (host) host.innerHTML = updCardsHtml();
 }
 // ═══════ v269: КОРЕНЬ АРХИВА И ШАБЛОН ПАПКИ ДЕЛА ═══════
 // Путь к папке дела складывается из корня (например, D:\\Яндекс.Диск\\Дела) и шаблона имени.
@@ -15872,7 +16101,7 @@ function crmCollectorAutoSend(obj, force) { // v244: force — отправит�
   }, 4000);
 }
 async function crmCorRenderDashboard(){const host=document.getElementById('v163-cor-alerts')||(()=>{const a=document.createElement('div');a.id='v163-cor-alerts';document.getElementById('v161-next-actions')?.insertAdjacentElement('afterend',a);return a;})();if(!host)return;const rows=(await getAll('mail')).filter(x=>x.needsAction&&(!mailIsPostal(x)||true)&&(!x.responseDue||(daysUntil(x.responseDue)??99)<=30));host.innerHTML=rows.length?`<div class="card" onclick="nav('mail');setMailChip('action')" style="cursor:pointer;border-left:3px solid var(--sig-amber);margin-top:10px"><div class="row1"><div><div class="title">✉ Корреспонденция требует внимания</div><div class="meta">${rows.length} ${plural(rows.length,'письмо','письма','писем')} ждут действия или ответа</div></div><span class="badge b-wait"><span class="dot"></span>${rows.length}</span></div></div>`:'';}
-CRM_UPGRADE.v162RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v162RenderDashboard();await crmCorRenderDashboard();await crmFlowActRender().catch(()=>{});await bookRenderDashboard().catch(()=>{});return r;};
+CRM_UPGRADE.v162RenderDashboard=renderDashboard;renderDashboard=async function(){const r=await CRM_UPGRADE.v162RenderDashboard();await crmCorRenderDashboard();await crmFlowActRender().catch(()=>{});await bookRenderDashboard().catch(()=>{});await updRenderDashboard().catch(()=>{});return r;};
 
 
 // CRM Адвоката v164 — локальный центр документов, версии, теги и полнотекстовый поиск.
@@ -16343,6 +16572,7 @@ function crmHelpAttach(name,key){var o=window[name];if(typeof o!=='function')ret
   setTimeout(() => alarmsSync(true).catch(()=>{}), 2500); // v263: перепланировать будильники приложения
   setTimeout(() => snapAuto().catch(()=>{}), 9000); // v268: недельный снимок базы на сервере
   setTimeout(() => { if (crmMonAutoOn()) crmMonAutoApply(null).catch(()=>{}); }, 5000); // v271: применить накопившееся (возврат заседаний из движения, досвязывание) при каждом запуске
+  setTimeout(() => updCheck().catch(()=>{}), 3500); // v272: что нового, версия сервера
   // v218: запуск сразу в инбокс — ярлык PWA (?inbox=1) или закладка (#inbox); адрес очищается, чтобы обновление страницы не открывало инбокс снова
   if (/[?&]inbox=1/.test(location.search) || location.hash === '#inbox') {
     try { history.replaceState(null, '', location.pathname); } catch (e) {}
