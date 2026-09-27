@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.yandexcloud.net https://*.yandex.net https://*.yandex.ru https://oauth.yandex.ru https://suggestions.dadata.ru https://api.telegram.org https://api.anthropic.com https://openrouter.ai https://api.openai.com; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v301</title>
+<title>CRM Адвоката v302</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1261,7 +1261,8 @@
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '301'; // v301: по разбору Gemini — версия правил сроков (RULES_VER) и пересчёт устаревших автосроков с «было → стало»; подсказка «апелляция пропущена — выборочная кассация» по УПК; предел импорта на телефоне 120 МБ; ИИ: дополнительные слова для обезличивания и предупреждение при пустом списке участников; iOS Safari — просьба добавить на экран «Домой»
+const APP_VER = '302'; // v302: ключ разработчика — четвёртое поле ключа «dev» (или «devices=N») снимает лимит двух устройств; лимит приходит с лицензионного сервера (per-key)
+// v301 → // v301: по разбору Gemini — версия правил сроков (RULES_VER) и пересчёт устаревших автосроков с «было → стало»; подсказка «апелляция пропущена — выборочная кассация» по УПК; предел импорта на телефоне 120 МБ; ИИ: дополнительные слова для обезличивания и предупреждение при пустом списке участников; iOS Safari — просьба добавить на экран «Домой»
 // v300 → // v300: по визуальному предложению — блок «Сейчас» в начале обзора (ближайшее заседание и до трёх важных действий, одно главное действие) и «Следующий шаг» в шапке карточки дела с одной главной кнопкой
 // v299 → // v299: по повторному аудиту — импорт и синхронизация видят отказ записи (putRaw ждёт транзакцию, метка слияния не сдвигается при сбое); финансы: итог пересчитывается после слияния, у платежей свои метки времени, надгробия по максимуму; «вернуть моё» восстанавливает точное значение и тип; правило кассации по УПК исправлено (сплошная — только после апелляции; выборочная без срока), предложение пересчёта для старых дел; смена PIN с другого устройства — перенос секретов прежним PIN; реестр удалений сливается по максимуму и применяется сразу; учёт времени после заседания; повтор без дублей; черновик сбрасывается при смене формы; ввод сохраняется при возврате «←»; мониторинг: разница времени > 3 ч — новое заседание; предупреждение о вложениях не теряется; панель справа (порядок CSS), долг по каноническому id, просрочка в таблице, контраст
 // v298 → // v298: единая строка состояния в шапке для личного сервера и Яндекс Диска — сохранено на устройстве / ждёт отправки / отправлено / получено / ошибка с причиной
@@ -14013,6 +14014,7 @@ async function demoAllow(store) {
   return false;
 }
 const DEVICE_LIMIT = 2; // ПК + смартфон
+const licLimit = () => (LIC && LIC.limit) || Number(localStorage.getItem('crm_lic_limit') || 0) || DEVICE_LIMIT; // v302: лимит из ключа/сервера
 let LIC = { ok:false, name:'', reg:'', until:'' };
 
 // ── Монотонные часы: защита срочных лицензий от перевода даты назад ──
@@ -14089,9 +14091,11 @@ async function licVerify(keyStr) {
     const pub = await crypto.subtle.importKey('jwk', LIC_PUB, { name:'ECDSA', namedCurve:'P-256' }, false, ['verify']);
     const ok = await crypto.subtle.verify({ name:'ECDSA', hash:'SHA-256' }, pub, sig, payload);
     if (!ok) return null;
-    const [name, reg, until] = new TextDecoder().decode(payload).split('|');
-    if (until && until !== 'бессрочно' && until < clockTodayISO()) return { expired:true, name, reg, until };
-    return { ok:true, name: name||'', reg: reg||'', until: until||'' };
+    const [name, reg, until, flags] = new TextDecoder().decode(payload).split('|'); // v302: четвёртое поле — признаки (dev, devices=N); старые ключи без него
+    const fl = String(flags || ''); const dev = /(^|,)dev(,|$)/.test(fl); const mDev = /devices=(\d+)/.exec(fl);
+    const limit = dev ? 50 : (mDev ? Math.max(1, Number(mDev[1])) : DEVICE_LIMIT);
+    if (until && until !== 'бессрочно' && until < clockTodayISO()) return { expired:true, name, reg, until, dev, limit };
+    return { ok:true, name: name||'', reg: reg||'', until: until||'', dev, limit };
   } catch(e) { return null; }
 }
 
@@ -14160,10 +14164,11 @@ async function licActivate() {
     localStorage.removeItem('crm_license');
     if (j && j.ok) {
       localStorage.setItem('crm_license', key); bumpSecrets('crm_license'); localStorage.removeItem('crm_lic_block'); localStorage.setItem('crm_lic_checked_at', String(Date.now()));
+      if (j.limit) localStorage.setItem('crm_lic_limit', String(j.limit)); // v302
       await licDevicesSave((j.devices || []).map(d => ({ id: d.id, name: d.name, keyId: '', at: d.at || Date.now() })));
       LIC = v; toast('Лицензия активирована — спасибо за покупку!'); openLicenseSheet(); renderDashboard(); return;
     }
-    if (j && j.status === 'device_limit') { toast(`Ключ уже активен на ${j.limit || DEVICE_LIMIT} устройствах — отвяжите одно`, true); showDeviceLimitSheet((j.devices || []).map(d => ({ id: d.id, name: d.name, at: d.at || Date.now() })), key, true); return; }
+    if (j && j.status === 'device_limit') { toast(`Ключ уже активен на ${j.limit || licLimit()} устройствах — отвяжите одно`, true); showDeviceLimitSheet((j.devices || []).map(d => ({ id: d.id, name: d.name, at: d.at || Date.now() })), key, true); return; }
     if (j && (j.status === 'revoked' || j.status === 'expired')) { toast('Активация отклонена: ' + licBlockText({ status: j.status, reason: j.reason }), true); return; }
     if (j && j.error) { toast('Сервер лицензий: ' + j.error, true); return; }
     toast('Сервер лицензий не отвечает — активирую локально, проверка пройдёт при следующем подключении');
@@ -14177,9 +14182,9 @@ async function licActivate() {
   devices = devices.filter(d => d.keyId === keyId);
   const already = devices.find(d => d.id === myId);
   if (!already) {
-    if (devices.length >= DEVICE_LIMIT) {
+    if (devices.length >= (v.limit || DEVICE_LIMIT)) {
       const names = devices.map(d=>d.name).join(', ');
-      toast(`Ключ уже активен на ${DEVICE_LIMIT} устройствах: ${names}. Освободите одно в его настройках.`, true);
+      toast(`Ключ уже активен на ${v.limit || DEVICE_LIMIT} устройствах: ${names}. Освободите одно в его настройках.`, true);
       // Показываем список с возможностью отвязать
       showDeviceLimitSheet(devices, key);
       return;
@@ -14199,7 +14204,7 @@ function showDeviceLimitSheet(devices, key, viaServer) { // v275: viaServer — 
   _licPendingKey = key || '';
   showSheet(`
     <h3>📵 Лимит устройств исчерпан</h3>
-    <div class="sheet-sub">Лицензия рассчитана на ${DEVICE_LIMIT} устройства (например, компьютер и смартфон). Чтобы активировать здесь — отвяжите одно из них.</div>
+    <div class="sheet-sub">Лицензия рассчитана на ${licLimit()} устройства (например, компьютер и смартфон). Чтобы активировать здесь — отвяжите одно из них.</div>
     ${devices.map(d=>`
       <div class="card" style="margin-bottom:8px">
         <div class="row1"><div style="flex:1">
@@ -14252,7 +14257,7 @@ function openLicenseSheet() {
         </div>
       </div>
       <div id="lic-devices"></div>
-      <div class="sheet-sub">Лицензия персональная, привязана к вашему имени (оно в формируемых документах) и работает на ${DEVICE_LIMIT} устройствах — обычно компьютер и смартфон.${licServerUrl()?` Подтверждена сервером лицензий${localStorage.getItem('crm_lic_checked_at')?' '+new Date(Number(localStorage.getItem('crm_lic_checked_at'))).toLocaleDateString('ru-RU'):''}.`:''}</div>
+      <div class="sheet-sub">Лицензия персональная, привязана к вашему имени (оно в формируемых документах) и работает на ${licLimit()} устройствах${LIC.dev ? ' (ключ разработчика)' : ' — обычно компьютер и смартфон'}.${licServerUrl()?` Подтверждена сервером лицензий${localStorage.getItem('crm_lic_checked_at')?' '+new Date(Number(localStorage.getItem('crm_lic_checked_at'))).toLocaleDateString('ru-RU'):''}.`:''}</div>
       <div class="meta" style="margin-top:6px;opacity:.8">${esc(appCopyright())}</div><!-- v275 -->
       <div class="meta" style="margin-top:4px"><a href="#" onclick="openEulaSheet(false);return false">Лицензионное соглашение</a>${(()=>{const a=lsJSON('crm_eula',null);return a?' · принято '+new Date(a.at).toLocaleDateString('ru-RU')+', редакция '+esc(a.ver):'';})()}</div><!-- v284 -->
       <button class="btn-ghost" onclick="licDeactivate()" style="color:var(--red)">Удалить лицензию с этого устройства</button>
@@ -14282,7 +14287,7 @@ async function renderLicDevices() {
   const myId = deviceId();
   const devices = (await licDevicesGet()).filter(d=>d.keyId===keyId);
   if (!devices.length) return;
-  el.innerHTML = `<div class="sect-title">Устройства (${devices.length} из ${DEVICE_LIMIT})</div>` +
+  el.innerHTML = `<div class="sect-title">Устройства (${devices.length} из ${licLimit()})</div>` +
     devices.map(d=>`<div class="card" style="margin-bottom:8px">
       <div class="row1"><div style="flex:1">
         <div class="title" style="font-size:13.5px">${esc(d.name)}${d.id===myId?' <span style="color:var(--green);font-size:11px">● это устройство</span>':''}</div>
