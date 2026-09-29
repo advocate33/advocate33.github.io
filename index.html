@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.yandexcloud.net https://*.yandex.net https://*.yandex.ru https://oauth.yandex.ru https://suggestions.dadata.ru https://api.telegram.org https://api.anthropic.com https://openrouter.ai https://api.openai.com; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v310</title>
+<title>CRM Адвоката v311</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1276,7 +1276,10 @@ body { overflow-x: hidden; overflow-x: clip; } /* v310: только body и cli
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '310'; // v310: вернулась прокрутка страниц на телефоне — «страховка» v309 (overflow-x на html и body) делала body контейнером прокрутки, а overscroll-behavior:none на body обрывал прокрутку; теперь overflow-x:clip только на body — body не становится контейнером
+const APP_VER = '311';
+// v311: две печати лицензий — пропуска, заверенные прежней печатью (aDv-4ZF…) и новой (-lK5v1…), действуют оба;
+// service worker v146 — стартовой в кэше становится только программа, next/ и old/ не обслуживаются, чужие кэши не удаляются
+// v310 → // v310: вернулась прокрутка страниц на телефоне — «страховка» v309 (overflow-x на html и body) делала body контейнером прокрутки, а overscroll-behavior:none на body обрывал прокрутку; теперь overflow-x:clip только на body — body не становится контейнером
 // v309 → // v309: на телефоне страница больше не расползается вширь (чипы направлений в корреспонденции переносятся; страховка overflow-x на body) — из-за этого сдвигались «+» и листы
 // v308 → // v308: боковая панель на компьютере — убран дубль «Центр писем» (вёл на тот же экран, что «Корресп.»), добавлены Настройки, Справочники, Синхронизация, Инструкция (после v304 они были только в «Ещё» на телефоне)
 // v307 → // v307: блок «Сейчас» под контролем пользователя — каждую строку можно скрыть, просроченный срок — «Выполнено» или «Открыть», прошедшие заседания без результата — только за 14 дней и с кнопкой «Считать разобранными», сам блок можно свернуть на день
@@ -14043,6 +14046,8 @@ function openDadataSheet() {
 // лицензию без закрытого ключа автора математически невозможно.
 // ════════════════════════════════════════════════════════════
 const LIC_PUB = {"key_ops":["verify"],"ext":true,"kty":"EC","x":"aDv-4ZFOw6bm4ZvA2qk0T3aqmzh31v31p3Rl4cicfqk","y":"nzqvX0ZuvtxYxqIHDjobiwKO_ROG2T9nokevY9pft5c","crv":"P-256"};
+// v311: список печатей — прежняя (закрытый ключ утерян, выданные ею пропуска действуют) и новая (с 28.09.2026)
+const LIC_PUBS = [LIC_PUB, {"key_ops":["verify"],"ext":true,"kty":"EC","x":"-lK5v1TDEboKEfT_TTBHOQ5yYTS9qtwz57QtqfcCuKI","y":"c7_WqZizMzYlDky2B-rYrkjNm8cyLxGRIwktt7gRxoM","crv":"P-256"}];
 // ── ДЕМОРЕЖИМ: помесячные лимиты создания ──
 // Без лицензии в каждом разделе можно создавать до DEMO_MONTH_LIMIT новых
 // записей в календарный месяц. Просмотр/редактирование — без ограничений.
@@ -14139,8 +14144,13 @@ async function licVerify(keyStr) {
     const parts = String(keyStr||'').trim().split('.');
     if (parts.length !== 2) return null;
     const payload = _b64uDec(parts[0]), sig = _b64uDec(parts[1]);
-    const pub = await crypto.subtle.importKey('jwk', LIC_PUB, { name:'ECDSA', namedCurve:'P-256' }, false, ['verify']);
-    const ok = await crypto.subtle.verify({ name:'ECDSA', hash:'SHA-256' }, pub, sig, payload);
+    // v311: пропуск подлинный, если его заверила любая из известных печатей
+    const pubs = (typeof LIC_PUBS !== 'undefined' && Array.isArray(LIC_PUBS)) ? LIC_PUBS : [LIC_PUB];
+    let ok = false;
+    for (const jwk of pubs) {
+      const pub = await crypto.subtle.importKey('jwk', jwk, { name:'ECDSA', namedCurve:'P-256' }, false, ['verify']);
+      if (await crypto.subtle.verify({ name:'ECDSA', hash:'SHA-256' }, pub, sig, payload)) { ok = true; break; }
+    }
     if (!ok) return null;
     const [name, reg, until, flags] = new TextDecoder().decode(payload).split('|'); // v302: четвёртое поле — признаки (dev, devices=N); старые ключи без него
     const fl = String(flags || ''); const dev = /(^|,)dev(,|$)/.test(fl); const mDev = /devices=(\d+)/.exec(fl);

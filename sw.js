@@ -11,12 +11,18 @@
    • Остальные запросы (шрифты и пр.): кэш-первым, обновление в фоне.
 
    При выходе новой версии приложения поднимите число в CACHE.
+
+   v146 (CRM v311): стартовой страницей в кэше становится только сама программа (BASE, BASE+index.html),
+   а не любая открытая страница сайта (eula.html, страницы подписи); папки next/ и old/ не обслуживаются
+   (у них свой service worker); при активации удаляются только свои кэши (crm-advocate-v…), чужие не трогаются.
 */
-const CACHE = 'crm-advocate-v145';
+const CACHE = 'crm-advocate-v146';
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
 const BASE = new URL('./', self.location).pathname;
 const START_URLS = [BASE, BASE + 'index.html'];
+const OWN_PREFIX = 'crm-advocate-v';
+const FOREIGN_DIRS = [BASE + 'next/', BASE + 'old/'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
@@ -35,7 +41,7 @@ self.addEventListener('message', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+    await Promise.all(keys.filter((k) => k !== CACHE && k.startsWith(OWN_PREFIX)).map((k) => caches.delete(k)));
     if (self.registration.navigationPreload) {
       try { await self.registration.navigationPreload.disable(); } catch (e) {}
     }
@@ -59,6 +65,8 @@ self.addEventListener('fetch', (e) => {
 
   const url = new URL(req.url);
   const sameOrigin = url.origin === self.location.origin;
+  if (sameOrigin && FOREIGN_DIRS.some((d) => url.pathname.startsWith(d))) return;
+  const isStartPage = sameOrigin && (url.pathname === BASE || url.pathname === BASE + 'index.html');
 
   const isNavigation =
     req.mode === 'navigate' ||
@@ -68,13 +76,17 @@ self.addEventListener('fetch', (e) => {
     e.respondWith((async () => {
       try {
         const resp = await fetch(req);
-        if (resp && resp.ok) {
+        if (resp && resp.ok && isStartPage) {
           const c = await caches.open(CACHE);
           c.put(BASE, resp.clone()).catch(() => {});
           c.put(BASE + 'index.html', resp.clone()).catch(() => {});
         }
         return resp;
       } catch (err) {
+        if (!isStartPage && sameOrigin) {
+          const own = await caches.match(req);
+          if (own) return own;
+        }
         const cached = await cachedStart();
         if (cached) return cached;
         return new Response(
