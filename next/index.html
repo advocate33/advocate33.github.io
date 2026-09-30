@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="30.09.2026 23:03 · 0d9c9e2">
+<meta name="build" content="30.09.2026 23:27 · af4c3a9">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -4568,8 +4568,11 @@ function formModelFinance(v, prev, ctx) {
     pending: billType === 'success' ? (prev ? p.pending !== false : true) : false, comment: String(v.comment || '').trim(), createdAt: v.createdAt || p.createdAt || todayISO(), dueDate: v.dueDate || '',
     nextDue: billType === 'retainer' ? (p.nextDue || addMonthsLocalISO(v.createdAt || p.createdAt || todayISO(), 1)) : '', payments: Array.isArray(p.payments) ? p.payments : undefined, plan: p.plan };
   if (billType !== 'hourly') { delete obj.rate; delete obj.hours; } if (billType !== 'success') { delete obj.successBase; delete obj.successPct; }
+  // замечание пользователя 30.09.2026: оплата при выставлении — сразу в форме счёта, без отдельного захода в карточку
+  const paidNow = num(v.paidNow);
+  if (paidNow > 0 && !obj.pending) { if (!Array.isArray(obj.payments)) { const old = Number(p.paid || 0); obj.payments = old > 0 ? [{ id: uid('ПЛ'), at: p.paidAt || p.createdAt || obj.createdAt, sum: old, method: '', note: 'до журнала' }] : []; } obj.payments.push({ id: uid('ПЛ'), at: obj.createdAt, sum: r2(paidNow), method: PAY_METHODS[v.payMethod] !== undefined ? v.payMethod : '', note: prev ? '' : 'при выставлении', createdAt: Date.now(), updatedAt: Date.now() }); }
   if (Array.isArray(obj.payments) && obj.payments.length) finRecalc(obj); else { obj.paid = Number(p.paid || 0); obj.status = obj.paid <= 0 ? 'Не оплачено' : (obj.paid >= amount ? 'Оплачено' : 'Частично оплачено'); }
-  return { obj };
+  return { obj, paidNow: paidNow > 0 && !obj.pending ? r2(paidNow) : 0 };
 }
 async function openFinanceForm(id, presetCaseNum) {
   const prev = id ? await getOne('finance', id) : null; if (id && !prev) { toast('Счёт не найден', true); return; }
@@ -4584,6 +4587,8 @@ async function openFinanceForm(id, presetCaseNum) {
     <div class="field fn-hourly"><span>Ставка, ₽/час</span><input id="fn-rate" value="${esc(f.rate || '')}" inputmode="decimal" autocomplete="off"></div><div class="field fn-hourly"><span>Часов</span><input id="fn-hours" value="${esc(f.hours || '')}" inputmode="decimal" autocomplete="off"></div>
     <div class="field fn-success"><span>Сумма выигрыша, ₽</span><input id="fn-successBase" value="${esc(f.successBase || '')}" inputmode="decimal" autocomplete="off"></div><div class="field fn-success"><span>Процент, %</span><input id="fn-successPct" value="${esc(f.successPct || '')}" inputmode="decimal" autocomplete="off"></div>
     ${fInput('fn-createdAt', 'Выставлен', f.createdAt, 'type="date"')}${fInput('fn-dueDate', 'Срок оплаты', f.dueDate, 'type="date"')}
+    <div class="field fn-fixed fn-hourly fn-retainer"><span>Внесено сразу, ₽</span><div class="inn-row"><input id="fn-paidNow" value="" inputmode="decimal" autocomplete="off" placeholder="если оплатили при выставлении"><button type="button" class="button small-btn" onclick="finPaidNowAll()">Вся сумма</button></div></div>
+    <div class="field fn-fixed fn-hourly fn-retainer"><span>Способ оплаты</span><select id="fn-payMethod">${[['cash', 'Наличные'], ['bank', 'Безнал'], ['card', 'Карта / СБП'], ['', 'Не указан']].map(([k, t]) => `<option value="${k}"${k === (localStorage.getItem('crm_pay_method') || 'cash') ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
     <div class="info-box fn-success" style="grid-column:1/-1">Гонорар успеха — условный: не считается долгом, пока дело не выиграно. В карточке счёта будет кнопка «Дело выиграно — выставить».</div>
     <div class="info-box fn-retainer" style="grid-column:1/-1">Абонентская плата: из карточки счёта создаётся счёт за следующий месяц одной кнопкой.</div>
     ${fText('fn-comment', 'Примечание', f.comment, 2)}
@@ -4596,12 +4601,15 @@ async function openFinanceForm(id, presetCaseNum) {
 }
 async function saveFinanceForm(id) {
   const prev = id ? await getOne('finance', id) : null;
-  const v = {}; ['billType', 'caseNum', 'client', 'service', 'amount', 'rate', 'hours', 'successBase', 'successPct', 'createdAt', 'dueDate', 'comment'].forEach(k => { v[k] = fv('fn-' + k); });
+  const v = {}; ['billType', 'caseNum', 'client', 'service', 'amount', 'rate', 'hours', 'successBase', 'successPct', 'createdAt', 'dueDate', 'comment', 'paidNow', 'payMethod'].forEach(k => { v[k] = fv('fn-' + k); });
   const r = formModelFinance(v, prev, { clients: await getAll('clients'), cases: await getAll('cases') }); if (r.error) { fErr(r.error); return; }
   await comboRememberAll(document.getElementById('sheetContent'));
   try { await put('finance', r.obj); if (r.obj.caseNum && CASES_BY_NUM[r.obj.caseNum]) { const c = CASES_BY_NUM[r.obj.caseNum]; addCaseHistoryEvent(c, 'finance', '', 'Финансы: ' + (r.obj.service || 'счёт') + ' ' + fmtMoney(r.obj.amount), 'form'); await put('cases', c); } } catch (e) { logErr('form:finance', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
-  toast(id ? 'Счёт сохранён' : 'Счёт выставлен'); closeSheet(); await nav(UI.screen); openFinanceSheet(r.obj.id);
+  if (r.paidNow && fv('fn-payMethod')) localStorage.setItem('crm_pay_method', fv('fn-payMethod'));
+  toast((id ? 'Счёт сохранён' : 'Счёт выставлен') + (r.paidNow ? ' · оплата ' + fmtMoney(r.paidNow) + ' записана' + (r.obj.status === 'Оплачено' ? ', счёт оплачен полностью' : '') : '')); closeSheet(); await nav(UI.screen); openFinanceSheet(r.obj.id);
 }
+// «Вся сумма» — подставить в «Внесено сразу» сумму счёта по текущему типу расчёта
+function finPaidNowAll() { const t = fv('fn-billType'), num = s => Number(String(s || '').replace(/\s/g, '').replace(',', '.')) || 0; const sum = t === 'hourly' ? Math.round(num(fv('fn-rate')) * num(fv('fn-hours'))) : num(fv('fn-amount')); const el = document.getElementById('fn-paidNow'); if (el) el.value = sum ? String(sum) : ''; if (!sum) toast('Сначала укажите сумму счёта', true); }
 // ── карточка счёта ──
 async function openFinanceSheet(id, mode) {
   const f = await getOne('finance', id); if (!f) { toast('Счёт не найден', true); return; }
