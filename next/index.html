@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="30.09.2026 14:58 · 5eb1731">
+<meta name="build" content="30.09.2026 16:15 · ae43ae5">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -277,6 +277,13 @@ button.stat:hover{border-color:var(--accent)}
 button.imp-main{text-align:left;width:100%;cursor:pointer;color:inherit;padding:0;border-radius:var(--r-sm)}
 button.imp-main:hover .task-title{color:var(--accent)}
 .imp-main>.task-title,.imp-main>.task-sub{display:block}.imp-main>.task-badges{display:flex}
+/* строка-справочник с поиском и добавлением (ui/combo.js) */
+.combo-box{position:relative}.combo-box input{padding-right:40px}
+.combo-toggle{position:absolute;right:2px;top:50%;transform:translateY(-50%);width:36px;height:36px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-muted);border-radius:var(--r-sm);background:transparent}
+.combo-list{margin-top:4px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface);box-shadow:var(--shadow);max-height:240px;overflow-y:auto}
+.combo-item{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;padding:8px 12px;text-align:left;color:inherit;font-size:.9375rem;background:transparent;border-bottom:1px solid var(--line)}
+.combo-item:last-child{border-bottom:0}.combo-item:hover,.combo-item.active{background:var(--surface2)}.combo-item.combo-add{color:var(--accent);font-weight:600}
+.combo-empty{padding:10px 12px;font-size:.875rem;color:var(--text-muted)}
 /* этап 2б: паспорт срока */
 .dl-date{font-size:1.8rem;font-weight:650;margin:6px 0 8px;font-variant-numeric:tabular-nums}.dl-date.overdue{color:var(--bad)}.dl-date.done{color:var(--text-muted);text-decoration:line-through}
 .list-rows>div>span:last-child{overflow-wrap:anywhere}
@@ -2108,6 +2115,7 @@ async function dataInit() {
     if (h && (h.status === 'Запланировано' || h.status === 'Перенесено')) { h.status = 'Назначено'; await put('hearings', h); }
   }
   await loadRefs(); // сначала загружаем пользовательские справочники, потом мигрируем их
+  nextRefsClean(); // новая версия: категории дел v310 по умолчанию (= стадии) считаются пустым списком (ui/combo.js)
   // Миграция: виды дел КАС и КоАП
   {
     const needKinds = ['КАС', 'КоАП'];
@@ -2781,10 +2789,10 @@ async function openCaseForm(id, full) {
     ${wide(fInput('cf-number', 'Номер дела *', c.number, 'placeholder="Д-1/2026" autocomplete="off"'))}
     ${wide(fInput('cf-client', 'Доверитель *', c.client, 'placeholder="ФИО или наименование" autocomplete="off"', clients.map(x => x.name).filter(Boolean)))}
     ${fText('cf-subject', 'Предмет спора', c.subject, 2)}
-    ${fSelect('cf-kind', 'Вид', c.kind, refList('caseKind'), true)}${fSelect('cf-category', 'Категория', c.category, refList('caseCategory'), true)}
+    ${fSelect('cf-kind', 'Вид', c.kind, refList('caseKind'), true)}${fCombo('cf-category', 'Категория', c.category, 'caseCategory')}
     ${fSelect('cf-stage', 'Стадия', c.stage, CASE_STAGES_NEXT.filter(s => s !== 'Завершено'), true)}${fSelect('cf-status', 'Статус', c.status || 'Новое', refList('caseStatus'))}
-    ${fInput('cf-court', 'Суд', c.court, 'autocomplete="off"', refList('courts'))}${fInput('cf-courtNo', '№ дела в суде', c.courtNo, 'autocomplete="off"')}
-    ${fInput('cf-judge', 'Судья', c.judge, 'autocomplete="off"', refList('judges'))}${fInput('cf-opponent', 'Противная сторона', (opp && opp.name) || c.opponent, 'autocomplete="off"')}
+    ${fCombo('cf-court', 'Суд', c.court, 'courts')}${fInput('cf-courtNo', '№ дела в суде', c.courtNo, 'autocomplete="off"')}
+    ${fCombo('cf-judge', 'Судья', c.judge, 'judges')}${fInput('cf-opponent', 'Противная сторона', (opp && opp.name) || c.opponent, 'autocomplete="off"')}
     ${fInput('cf-nextAction', 'Следующее действие', c.nextAction, 'autocomplete="off"')}${fInput('cf-nextActionDue', 'Срок действия', c.nextActionDue, 'type="date"')}
     ${full ? CASE_MAIN_EXTRA.map(f => caseFormField(f, c[f[0]], refs)).join('') : ''}
     ${fText('cf-comment', 'Примечание', c.comment, 3)}
@@ -2822,6 +2830,8 @@ async function saveCaseForm(id) {
   const prev = id ? await getOne('cases', id) : null;
   const v = {}; ['number', 'client', 'subject', 'kind', 'category', 'stage', 'status', 'court', 'courtNo', 'judge', 'opponent', 'nextAction', 'nextActionDue', 'comment'].forEach(k => { v[k] = fv('cf-' + k); });
   const r = formModelCase(v, prev, { clients: await getAll('clients'), cases: await getAll('cases') }); if (r.error) { fErr(r.error); return; }
+  // введённое в строках-справочниках (категория, суд, судья, орган, роль) запоминается; поля вкладок другого вида дела — нет
+  { const tabs = new Set(caseTabsFor(r.obj.kind || '').map(t => t.id)); await comboRememberAll(document.getElementById('sheetContent'), inp => { const pane = inp.closest('[id^="cx-pane-"]'); return !pane || tabs.has(pane.id.slice(8)); }); }
   // полная форма: поля показанных вкладок — поверх записи (имена полей — как в v312); поля скрытых вкладок не трогаются
   if (document.getElementById('cx-tabs')) { const ex = caseFormValues(k => fv('cx-' + k), caseTabsFor(r.obj.kind || '')); for (const k of Object.keys(ex)) { const val = ex[k]; if (k === 'amount' || k === 'recovered' || /^ip(Sum|Collected|Fee)$/.test(k)) r.obj[k] = val === '' ? '' : Number(String(val).replace(',', '.')) || 0; else if (k === 'labels') r.obj[k] = String(val).split(',').map(s => s.trim()).filter(Boolean); else r.obj[k] = val; } }
   try {
@@ -2867,8 +2877,8 @@ async function openHearingForm(id, presetCaseNum) {
   const body = `<div class="form-grid">
     ${fSelect('hf-caseNum', 'Дело', h.caseNum, cases.map(c => [c.number, [c.number, c.client].filter(Boolean).join(' · ')]), true)}
     ${fInput('hf-date', 'Дата *', h.date, 'type="date"')}${fInput('hf-time', 'Время', h.time, 'type="time"')}
-    ${fInput('hf-court', 'Суд', h.court, 'autocomplete="off"', refList('courts'))}${fInput('hf-room', 'Зал', h.room, 'autocomplete="off"')}
-    ${fInput('hf-judge', 'Судья', h.judge, 'autocomplete="off"', refList('judges'))}${fSelect('hf-status', 'Статус', h.status, HEARING_STATUSES)}
+    ${fCombo('hf-court', 'Суд', h.court, 'courts')}${fInput('hf-room', 'Зал', h.room, 'autocomplete="off"')}
+    ${fCombo('hf-judge', 'Судья', h.judge, 'judges')}${fSelect('hf-status', 'Статус', h.status, HEARING_STATUSES)}
     ${fText('hf-result', 'Результат (для проведённого)', h.result, 2)}${fText('hf-comment', 'Примечание', h.comment, 2)}
   </div><div class="info-box warning" id="hf-busy" hidden></div>${id && h.status !== 'Проведено' && h.status !== 'Отменено' && h.date && h.date <= todayISO() ? `<div class="actions" style="margin-top:14px">${btn('После заседания: состоялось / отложено / отменено', `openAfterHearing('${jsq(id)}')`, '', 'gavel')}</div>` : ''}${fSaveBar(`saveHearingForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('hearings', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка заседания' : 'Новое заседание', body, UI.cur ? true : undefined);
@@ -2878,6 +2888,7 @@ async function saveHearingForm(id) {
   const prev = id ? await getOne('hearings', id) : null;
   const v = {}; ['caseNum', 'date', 'time', 'court', 'room', 'judge', 'status', 'result', 'comment'].forEach(k => { v[k] = fv('hf-' + k); });
   const r = formModelHearing(v, prev); if (r.error) { fErr(r.error); return; }
+  await comboRememberAll(document.getElementById('sheetContent'));
   // проведённое и отменённое заседание времени не занимает — для них занятость не проверяется
   if (r.obj.status === 'Назначено' && await formBusy('hearing', r.obj, 'hf-busy', id)) return;
   try { await put('hearings', r.obj); const c = CASES_BY_NUM[r.obj.caseNum]; if (c) addCaseHistoryEvent(c, id ? 'hearing_upd' : 'hearing', '', (id ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(r.obj.date) + (r.obj.time ? ' ' + r.obj.time : '') + (r.obj.status !== 'Назначено' ? ' · ' + r.obj.status : ''), 'auto'); }
@@ -2958,6 +2969,91 @@ function formAfterSave(caseNum) {
   const back = UI.stack.length ? UI.stack[UI.stack.length - 1] : null;
   const c = caseNum && CASES_BY_NUM[caseNum];
   closeSheet(); nav(UI.screen).then(() => { if (back && c && String(back.title).startsWith(String(c.number))) openCaseSheet(c.id); });
+}
+
+// ▼▼▼ ui/combo.js
+// ═══ ui/combo.js — строка с поиском по справочнику и добавлением из формы (замечание пользователя 30.09.2026) ═══
+// Замечание: категории дел по умолчанию в v310 повторяли стадии; при наполненных справочниках в выпадающем списке
+// тяжело найти суд, судью, орган, роль. Решение: поле — обычная строка; при вводе показываются подходящие значения
+// справочника (сначала начинающиеся с введённого, затем содержащие); если такого значения нет — строка «Добавить … в
+// справочник»; при сохранении формы новое значение запоминается в справочнике (saveRef v310). Список категорий дел
+// в новой версии пустой — пользователь наполняет его сам (nextRefsClean).
+// Чистые функции для тестов: comboFilter, comboHasExact, refRememberModel, nextRefsCleanModel.
+const COMBO_EXTRA = {};
+const COMBO_LIMIT = 30;
+const refName = x => (x && typeof x === 'object') ? String(x.name || '') : String(x == null ? '' : x);
+function comboNorm(s) { return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim(); }
+// подсказки: сначала начинающиеся с введённого, затем содержащие; без повторов (регистр и «ё» не различаются)
+function comboFilter(list, q, limit) {
+  const n = comboNorm(q), seen = new Set(), out = [];
+  const add = v => { const k = comboNorm(v); if (!k || seen.has(k)) return; seen.add(k); out.push(v); };
+  if (!n) list.forEach(add); else { list.filter(v => comboNorm(v).startsWith(n)).forEach(add); list.filter(v => comboNorm(v).includes(n)).forEach(add); }
+  return out.slice(0, limit || COMBO_LIMIT);
+}
+function comboHasExact(list, v) { const n = comboNorm(v); return !!n && list.some(x => comboNorm(refName(x)) === n); }
+// новое значение для справочника: null — пусто или уже есть; иначе прежний список (как хранится) плюс строка
+function refRememberModel(list, v) { const s = String(v || '').replace(/\s+/g, ' ').trim(); if (!s || comboHasExact(list || [], s)) return null; return [...(list || []), s]; }
+// категории v310 по умолчанию = список стадий → в новой версии такой список считается пустым; свой список пользователя не трогается
+const LEGACY_CATEGORIES = ['Досудебное урегулирование', 'Первая инстанция', 'Апелляция', 'Кассация', 'Надзор', 'Исполнительное производство', 'Консультация'];
+function nextRefsCleanModel(list) { const l = Array.isArray(list) ? list : []; const legacy = new Set(LEGACY_CATEGORIES.map(comboNorm)); return l.length && l.every(x => legacy.has(comboNorm(refName(x)))) ? [] : l; }
+function nextRefsClean() { if (typeof REF === 'object' && REF) REF.caseCategory = nextRefsCleanModel(REF.caseCategory); }
+if (typeof DEFAULT_REF === 'object' && DEFAULT_REF) DEFAULT_REF.caseCategory = [];
+if (typeof REF === 'object' && REF) nextRefsClean();
+
+// поле формы: id, подпись, значение, ключ справочника (REF), дополнительные подсказки (например, роли по кодексу)
+function fCombo(id, label, val, refKey, extra) {
+  COMBO_EXTRA[id] = (extra || []).map(refName).filter(Boolean);
+  return `<label class="field combo"><span>${esc(label)}</span><div class="combo-box"><input id="${id}" value="${esc(val == null ? '' : val)}" autocomplete="off" spellcheck="false" data-combo="1" data-ref="${esc(refKey)}"><button type="button" class="combo-toggle" tabindex="-1" aria-label="Показать список" data-for="${id}">${icon('chevron-down', 'icon-sm')}</button></div><div class="combo-list" id="${id}-menu" hidden></div></label>`;
+}
+function comboAll(input) { return [...new Set([...(COMBO_EXTRA[input.id] || []), ...refList(input.dataset.ref)])]; }
+function comboMenu(input) { return document.getElementById(input.id + '-menu'); }
+function comboRender(input) {
+  const menu = comboMenu(input); if (!menu) return;
+  const all = comboAll(input), q = String(input.value || '').replace(/\s+/g, ' ').trim(), items = comboFilter(all, q);
+  const addRow = q && !comboHasExact(all, q) ? `<button type="button" class="combo-item combo-add" data-v="${esc(q)}">${icon('plus', 'icon-sm')}<span>Добавить «${esc(q)}» в справочник</span></button>` : '';
+  const empty = !addRow && !items.length ? `<div class="combo-empty">Справочник пуст — введите значение, при сохранении оно запомнится</div>` : '';
+  // строка «Добавить» — после найденных: Enter без выбора берёт первое совпадение, а не создаёт запись
+  menu.innerHTML = items.map(v => `<button type="button" class="combo-item" data-v="${esc(v)}"><span>${esc(v)}</span></button>`).join('') + addRow + empty;
+  menu.hidden = false;
+}
+function comboClose(input) { const menu = comboMenu(input); if (menu) { menu.hidden = true; menu.innerHTML = ''; } }
+function comboCloseAll(except) { document.querySelectorAll('.combo-list:not([hidden])').forEach(m => { const inp = document.getElementById(m.id.replace(/-menu$/, '')); if (inp !== except) { m.hidden = true; m.innerHTML = ''; } }); }
+function comboPick(input, v) { input.value = v; comboClose(input); input.dispatchEvent(new Event('change', { bubbles: true })); }
+function comboMove(input, dir) {
+  const menu = comboMenu(input); if (!menu || menu.hidden) { comboRender(input); return; }
+  const items = [...menu.querySelectorAll('.combo-item')]; if (!items.length) return;
+  const cur = items.findIndex(x => x.classList.contains('active')); let i = cur + dir; if (i < 0) i = items.length - 1; if (i >= items.length) i = 0;
+  items.forEach(x => x.classList.remove('active')); items[i].classList.add('active'); items[i].scrollIntoView({ block: 'nearest' });
+}
+// запомнить введённое в справочниках: все строки-справочники внутри root (allow отсеивает поля скрытых вкладок другого вида дела)
+async function comboRememberAll(root, allow) {
+  let n = 0;
+  for (const inp of (root || document).querySelectorAll('input[data-combo]')) {
+    if (allow && !allow(inp)) continue;
+    const key = inp.dataset.ref; if (!key || !REF || !Array.isArray(REF[key])) continue;
+    const next = refRememberModel(REF[key], inp.value); if (!next) continue;
+    try { await saveRef(key, next); n++; } catch (e) { logErr('refs:remember', e); }
+  }
+  return n;
+}
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) comboRender(t); });
+  document.addEventListener('focusin', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { comboCloseAll(t); comboRender(t); } });
+  document.addEventListener('click', e => {
+    const t = e.target, item = t.closest && t.closest('.combo-item');
+    if (item) { const input = item.closest('.combo').querySelector('input[data-combo]'); comboPick(input, item.dataset.v || ''); return; }
+    const tg = t.closest && t.closest('.combo-toggle');
+    if (tg) { const input = document.getElementById(tg.dataset.for); if (!input) return; const m = comboMenu(input); if (m && !m.hidden) comboClose(input); else { comboCloseAll(input); comboRender(input); input.focus(); } return; }
+    if (!(t.closest && t.closest('.combo'))) comboCloseAll(null);
+  });
+  document.addEventListener('keydown', e => {
+    const t = e.target; if (!(t && t.matches && t.matches('input[data-combo]'))) return;
+    const m = comboMenu(t);
+    if (e.key === 'ArrowDown') { e.preventDefault(); comboMove(t, 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); comboMove(t, -1); }
+    else if (e.key === 'Escape' && m && !m.hidden) { e.preventDefault(); comboClose(t); }
+    else if (e.key === 'Enter' && m && !m.hidden) { e.preventDefault(); const a = m.querySelector('.combo-item.active') || m.querySelector('.combo-item'); if (a) comboPick(t, a.dataset.v || ''); else comboClose(t); }
+  });
 }
 
 // ▼▼▼ ui/caseform.js
@@ -3087,10 +3183,13 @@ function caseFormValues(read, tabs) { const v = {}; for (const t of tabs) for (c
 function caseFormField(f, val, refs, tabId) {
   const [id, label, type = 'text', a, b] = f, opts = b || (Array.isArray(a) || typeof a === 'string' ? null : a) || {}, list = Array.isArray(a) ? a : (typeof a === 'string' ? (refs[a] || []) : null);
   const el = 'cx-' + (tabId || 'main') + '-' + id, w = h => (opts.wide ? wide(h) : h);
+  // строка-справочник: список из REF по ключу (суд, орган, судья) или роли по кодексу плюс справочник — с поиском и добавлением
+  if (type === 'select' && typeof a === 'string') return w(fCombo(el, label, val, a, refs[a] || []));
   if (type === 'select') return w(fSelect(el, label, val, list || [], true));
   if (type === 'area') return fText(el, label, val, 3);
   const attrs = type === 'date' ? 'type="date"' : type === 'number' ? 'type="number" inputmode="decimal" step="0.01"' : type === 'url' ? 'type="url" inputmode="url" autocomplete="off" spellcheck="false"' : 'autocomplete="off"';
-  return w(fInput(el, label, val, attrs, opts.list ? (refs[opts.list] || []) : null));
+  if (opts.list) return w(fCombo(el, label, val, opts.list, []));
+  return w(fInput(el, label, val, attrs, null));
 }
 
 // ▼▼▼ ui/deadlines.js
