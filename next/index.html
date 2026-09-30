@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="30.09.2026 16:15 · ae43ae5">
+<meta name="build" content="30.09.2026 16:48 · 3c15f15">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -284,6 +284,7 @@ button.imp-main:hover .task-title{color:var(--accent)}
 .combo-item{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;padding:8px 12px;text-align:left;color:inherit;font-size:.9375rem;background:transparent;border-bottom:1px solid var(--line)}
 .combo-item:last-child{border-bottom:0}.combo-item:hover,.combo-item.active{background:var(--surface2)}.combo-item.combo-add{color:var(--accent);font-weight:600}
 .combo-empty{padding:10px 12px;font-size:.875rem;color:var(--text-muted)}
+.inn-row{display:flex;gap:6px}.inn-row input{flex:1;min-width:0}.inn-row .button{flex:none}
 /* этап 2б: паспорт срока */
 .dl-date{font-size:1.8rem;font-weight:650;margin:6px 0 8px;font-variant-numeric:tabular-nums}.dl-date.overdue{color:var(--bad)}.dl-date.done{color:var(--text-muted);text-decoration:line-through}
 .list-rows>div>span:last-child{overflow-wrap:anywhere}
@@ -2291,6 +2292,87 @@ function showConflictsSheet() {
     : emptyState('check-check', 'Коллизий нет', 'Сюда попадают записи, которые менялись и здесь, и на другом устройстве.')), true);
 }
 
+// ▼▼▼ sync/dadata.js
+// ═══ sync/dadata.js — реквизиты по ИНН и подсказки адресов (DaData), как в v312 (поручение пользователя 30.09.2026) ═══
+// Правило 4 раздела 1: внешний адресат только по явному действию — «Найти по ИНН» нажимает пользователь, адресные
+// подсказки запрашиваются только при вводе в поле адреса и только при сохранённом ключе. Ключ — в защищённом хранилище
+// (crm_dadata_token, SECRET_KEYS_PROTECTED v310), в чат и журнал не попадает. Запрос идёт из браузера напрямую в DaData
+// (CSP connect-src). Чистые функции для тестов: innValid, partyToFields, partyStatusText, addrSuggestModel.
+const DADATA_URL = 'https://suggestions.dadata.ru/suggestions/api/4_1/rs/';
+const DADATA = {
+  get token() { return localStorage.getItem('crm_dadata_token') || ''; },
+  set token(v) { v ? localStorage.setItem('crm_dadata_token', v) : localStorage.removeItem('crm_dadata_token'); if (typeof bumpSecrets === 'function') bumpSecrets('crm_dadata_token'); }
+};
+function innDigits(s) { return String(s || '').replace(/\D/g, ''); }
+// ИНН: 10 цифр — организация, 12 — физлицо / ИП
+function innValid(s) { const d = innDigits(s); return d.length === 10 || d.length === 12; }
+function partyStatusText(status) { return status === 'LIQUIDATED' ? 'ликвидирована' : status === 'LIQUIDATING' ? 'в стадии ликвидации' : status === 'BANKRUPT' ? 'банкрот' : status === 'REORGANIZING' ? 'реорганизуется' : ''; }
+// ответ findById/party → поля формы; type: LEGAL — юрлицо, INDIVIDUAL — ИП (в системном списке типов — физическое лицо)
+function partyToFields(s) {
+  if (!s) return null; const d = s.data || {}, a = d.address || {};
+  return { name: s.value || '', addr: a.unrestricted_value || a.value || '', zip: (a.data && a.data.postal_code) || '', ogrn: d.ogrn || '', kpp: d.kpp || '', inn: d.inn || '',
+    type: d.type === 'LEGAL' ? 'Юридическое лицо' : d.type === 'INDIVIDUAL' ? 'Физическое лицо' : '', head: (d.management && d.management.name) || '', status: (d.state && d.state.status) || '', statusText: partyStatusText(d.state && d.state.status) };
+}
+function addrSuggestModel(list) { return (Array.isArray(list) ? list : []).filter(s => s && s.value).map(s => ({ value: s.value, zip: (s.data && s.data.postal_code) || '' })); }
+async function dadataPost(path, body) {
+  const r = await fetch(DADATA_URL + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'Authorization': 'Token ' + DADATA.token }, body: JSON.stringify(body) });
+  if (r.status === 401 || r.status === 403) throw new Error('auth');
+  if (!r.ok) throw new Error('api');
+  return (await r.json()).suggestions || [];
+}
+async function dadataParty(inn) { return (await dadataPost('findById/party', { query: innDigits(inn), count: 1 }))[0] || null; }
+async function dadataAddress(q) { return dadataPost('suggest/address', { query: String(q), count: 6 }); }
+const dadataErrText = e => e && e.message === 'auth' ? 'Ключ DaData не подошёл — проверьте его в Настройках' : 'Нет связи с DaData';
+const DADATA_NO_KEY = 'Сначала укажите ключ DaData: Настройки → Реквизиты по ИНН и адреса';
+// «Найти по ИНН»: prefix — cf-client | cf-opp; поля: <prefix>Inn, имя (cf-client / cf-opponent), <prefix>Addr, <prefix>Zip, <prefix>Ogrn, <prefix>Kpp
+const INN_TARGETS = { 'cf-client': { name: 'cf-client', type: 'cf-clientType' }, 'cf-opp': { name: 'cf-opponent' } };
+async function innLookup(prefix) {
+  const t = INN_TARGETS[prefix] || { name: prefix }, get = id => document.getElementById(id), inn = (get(prefix + 'Inn') || {}).value || '';
+  if (!innValid(inn)) { toast('ИНН — 10 цифр (организация) или 12 (ИП, физлицо)', true); return; }
+  if (!DADATA.token) { toast(DADATA_NO_KEY, true); return; }
+  toast('Ищу в ЕГРЮЛ / ЕГРИП…');
+  try {
+    const f = partyToFields(await dadataParty(inn)); if (!f) { toast('Не найдено — проверьте ИНН', true); return; }
+    const set = (id, v) => { const el = get(id); if (el && v) { el.value = v; el.dispatchEvent(new Event('change', { bubbles: true })); } };
+    set(t.name, f.name); set(prefix + 'Addr', f.addr); set(prefix + 'Zip', f.zip); set(prefix + 'Ogrn', f.ogrn); set(prefix + 'Kpp', f.kpp); if (t.type) set(t.type, f.type);
+    if (f.statusText) toast('Внимание: организация ' + f.statusText + (prefix === 'cf-opp' ? ' — проверьте правопреемника' : ''), true);
+    else toast('Реквизиты заполнены' + (f.ogrn ? ' · ОГРН ' + f.ogrn : '') + (f.head ? ' · руководитель: ' + f.head : ''));
+  } catch (e) { logErr('dadata:party', e); toast(dadataErrText(e), true); }
+}
+// поле адреса с подсказками: обычная строка; список появляется только при сохранённом ключе (без ключа — молча обычное поле)
+function fAddr(id, label, val, zipId) {
+  return `<label class="field combo wide"><span>${esc(label)}</span><div class="combo-box"><input id="${id}" value="${esc(val == null ? '' : val)}" autocomplete="off" spellcheck="false" data-addr="1"${zipId ? ` data-zip-for="${zipId}"` : ''} placeholder="${DADATA.token ? 'начните вводить — появятся подсказки' : ''}"></div><div class="combo-list" id="${id}-menu" hidden></div></label>`;
+}
+let ADDR_TIMER = 0, ADDR_LAST = '';
+function addrSuggest(input) {
+  const menu = document.getElementById(input.id + '-menu'), q = String(input.value || '').trim(); if (!menu) return;
+  if (!DADATA.token || q.length < 3) { menu.hidden = true; menu.innerHTML = ''; return; }
+  clearTimeout(ADDR_TIMER);
+  ADDR_TIMER = setTimeout(async () => {
+    if (q === ADDR_LAST) return; ADDR_LAST = q;
+    try {
+      const items = addrSuggestModel(await dadataAddress(q));
+      if (!items.length || input.value.trim() !== q) { menu.hidden = true; menu.innerHTML = ''; return; }
+      menu.innerHTML = items.map(s => `<button type="button" class="combo-item" data-v="${esc(s.value)}" data-zip="${esc(s.zip)}"><span>${esc(s.value)}${s.zip ? ` <span class="muted">${esc(s.zip)}</span>` : ''}</span></button>`).join('');
+      menu.hidden = false;
+    } catch (e) { logErr('dadata:address', e); menu.hidden = true; menu.innerHTML = ''; }
+  }, 220);
+}
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-addr]')) addrSuggest(t); });
+}
+// лист настроек: ключ DaData
+function openDadataSheet() {
+  const has = !!DADATA.token;
+  openSheet('Реквизиты по ИНН и адреса', `
+    <div class="status-line ${has ? 'good' : ''}" id="dd-state">${has ? 'Ключ сохранён — «Найти по ИНН» и подсказки адресов работают' : 'Ключ не задан — поля ИНН и адреса работают как обычные строки'}</div>
+    <p>Программа заполняет наименование, адрес, ОГРН и КПП из ЕГРЮЛ / ЕГРИП по ИНН и подсказывает адреса при вводе. Данные запрашиваются у сервиса DaData только когда вы нажимаете «Найти по ИНН» или вводите адрес; ничего другого сервису не передаётся.</p>
+    <div class="info-box">Как подключить, один раз: 1) зарегистрируйтесь на dadata.ru (бесплатный тариф — 10 000 запросов в день); 2) в личном кабинете скопируйте API-ключ; 3) вставьте его ниже и нажмите «Сохранить». Ключ хранится только на этом устройстве, в защищённом виде.</div>
+    <div class="form-grid">${wide(fInput('dd-token', 'API-ключ DaData', DADATA.token, 'type="password" autocomplete="off" spellcheck="false"'))}</div>
+    <div class="form-actions"><button type="button" class="button primary" onclick="dadataSaveKey()">${icon('check')}Сохранить</button>${has ? `<button type="button" class="button danger push-right" onclick="dadataSaveKey(true)">${icon('x')}Удалить ключ</button>` : ''}</div>`, true);
+}
+function dadataSaveKey(drop) { DADATA.token = drop ? '' : fv('dd-token'); toast(DADATA.token ? 'Ключ сохранён' : 'Ключ удалён'); sheetBack(); if (typeof openSettingsSheet === 'function') openSettingsSheet('replace'); }
+
 // ▼▼▼ ui/icons.js
 // ═══ ui/icons.js — линейные иконки (этап 1б) ═══
 // Контуры из Lucide 1.17.0 — © Lucide Contributors, лицензия ISC (разрешено использование, копирование, изменение
@@ -2401,7 +2483,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openDadataSheet()', 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -2584,7 +2666,8 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Размер текста</p>${choice(UI_FONT_SIZES.map(f => [f[0], f[2]]), size, 'setFontSize')}
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     <div class="section-label">Данные</div>
-    <div class="list-rows"><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button></div>
+    <div class="list-rows"><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+      <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button></div>
     <div class="section-label">О программе</div>
     <div class="list-rows">
       <div><span>Версия</span><span class="muted">${esc(APP_VER)} · база ${esc(db ? db.name : '—')}, версия ${esc(db ? db.version : '—')}</span></div>
@@ -2736,9 +2819,15 @@ function formModelCase(v, prev, ctx) {
   obj.participants = Array.isArray(prev && prev.participants) ? prev.participants.map(p => ({ ...p })) : [];
   const oppIdx = obj.participants.findIndex(p => p && !String(p.role || '').startsWith('Доверитель') && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
   const opp = String(v.opponent || '').trim();
-  if (opp) { if (oppIdx >= 0) obj.participants[oppIdx].name = opp; else obj.participants.push({ name: opp, role: 'Ответчик' }); obj.opponent = opp; }
+  // реквизиты противной стороны (ИНН, адрес, ОГРН, КПП — как участник v312): пустое поле формы прежнее значение не стирает
+  const oppReq = {}; [['oppInn', 'inn'], ['oppAddr', 'addr'], ['oppOgrn', 'ogrn'], ['oppKpp', 'kpp']].forEach(([f, k]) => { const val = String(v[f] || '').trim(); if (val) oppReq[k] = k === 'inn' ? val.replace(/\D/g, '') : val; });
+  if (opp) { if (oppIdx >= 0) Object.assign(obj.participants[oppIdx], { name: opp }, oppReq); else obj.participants.push({ name: opp, role: 'Ответчик', ...oppReq }); obj.opponent = opp; }
   else { if (oppIdx >= 0 && !obj.participants[oppIdx].inn && !obj.participants[oppIdx].phone) obj.participants.splice(oppIdx, 1); obj.opponent = ''; }
-  return { obj, newClient };
+  // реквизиты доверителя пишутся в его запись в реестре (ИНН, адрес, индекс, тип); clientUpd — запись для put('clients'), если что-то изменилось
+  let clientUpd = null;
+  { const upd = {}; [['clientInn', 'inn'], ['clientAddr', 'addr'], ['clientZip', 'zip'], ['clientType', 'type']].forEach(([f, k]) => { const val = String(v[f] || '').trim(); if (val && val !== String(clientRec[k] || '')) upd[k] = k === 'inn' ? val.replace(/\D/g, '') : val; });
+    if (Object.keys(upd).length) { if (newClient) Object.assign(newClient, upd); else clientUpd = { ...clientRec, ...upd, updatedAt: Date.now() }; } }
+  return { obj, newClient, clientUpd };
 }
 function formModelTask(v, prev) {
   const title = String(v.title || '').trim(); if (!title) return { error: 'Укажите название задачи' };
@@ -2783,16 +2872,25 @@ async function openCaseForm(id, full) {
   const c = prev || {}, clients = await getAll('clients');
   if (full === undefined) full = id ? localStorage.getItem(CASE_FORM_BRIEF_KEY) === '0' : false;
   const opp = (c.participants || []).find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
+  const cl = clients.find(x => x && (x.id === c.clientId || x.name === c.client)) || {};
+  // подсказки для противной стороны — участники всех дел и реестр; при выборе известного лица его реквизиты подставляются
+  FORM_PARTIES = {}; for (const x of (await getAll('cases'))) for (const p of (x.participants || [])) if (p && p.name && !FORM_PARTIES[p.name]) FORM_PARTIES[p.name] = { inn: p.inn || '', addr: p.addr || '', ogrn: p.ogrn || '', kpp: p.kpp || '' };
+  FORM_CLIENTS = {}; for (const x of clients) if (x && x.name && !x._deleted) FORM_CLIENTS[x.name] = x;
+  const oppNames = [...new Set([...Object.keys(FORM_PARTIES), ...Object.keys(FORM_CLIENTS)])];
   // роли доверителя: свои для кодекса (CASE_ROLES_BY_CODE) + справочник; текущая роль всегда в списке
   const refs = { clientRole: [...new Set([...(CASE_ROLES_BY_CODE[caseCodeOf(c.kind || '')] || []), ...Object.values(CASE_ROLES_BY_CODE).flat(), ...refList('clientRole'), ...(c.clientRole ? [c.clientRole] : [])])], courts: refList('courts'), agencies: refList('agencies') };
   const main = `<div class="form-grid" id="cx-pane-main">
     ${wide(fInput('cf-number', 'Номер дела *', c.number, 'placeholder="Д-1/2026" autocomplete="off"'))}
-    ${wide(fInput('cf-client', 'Доверитель *', c.client, 'placeholder="ФИО или наименование" autocomplete="off"', clients.map(x => x.name).filter(Boolean)))}
+    ${wide(fCombo('cf-client', 'Доверитель *', c.client, '', clients.filter(x => x && !x._deleted).map(x => x.name)))}
+    ${fInnRow('cf-client', 'ИНН доверителя', cl.inn)}${fInput('cf-clientZip', 'Индекс', cl.zip, 'autocomplete="off" inputmode="numeric"')}
+    ${fAddr('cf-clientAddr', 'Адрес доверителя', cl.addr, 'cf-clientZip')}${fSelect('cf-clientType', 'Тип доверителя', cl.type || 'Физическое лицо', refList('clientType'))}
     ${fText('cf-subject', 'Предмет спора', c.subject, 2)}
     ${fSelect('cf-kind', 'Вид', c.kind, refList('caseKind'), true)}${fCombo('cf-category', 'Категория', c.category, 'caseCategory')}
     ${fSelect('cf-stage', 'Стадия', c.stage, CASE_STAGES_NEXT.filter(s => s !== 'Завершено'), true)}${fSelect('cf-status', 'Статус', c.status || 'Новое', refList('caseStatus'))}
     ${fCombo('cf-court', 'Суд', c.court, 'courts')}${fInput('cf-courtNo', '№ дела в суде', c.courtNo, 'autocomplete="off"')}
-    ${fCombo('cf-judge', 'Судья', c.judge, 'judges')}${fInput('cf-opponent', 'Противная сторона', (opp && opp.name) || c.opponent, 'autocomplete="off"')}
+    ${fCombo('cf-judge', 'Судья', c.judge, 'judges')}${fCombo('cf-opponent', 'Противная сторона', (opp && opp.name) || c.opponent, '', oppNames)}
+    ${fInnRow('cf-opp', 'ИНН противной стороны', opp && opp.inn)}${fInput('cf-oppOgrn', 'ОГРН', opp && opp.ogrn, 'autocomplete="off" inputmode="numeric"')}
+    ${fAddr('cf-oppAddr', 'Адрес противной стороны', opp && opp.addr)}${fInput('cf-oppKpp', 'КПП', opp && opp.kpp, 'autocomplete="off" inputmode="numeric"')}
     ${fInput('cf-nextAction', 'Следующее действие', c.nextAction, 'autocomplete="off"')}${fInput('cf-nextActionDue', 'Срок действия', c.nextActionDue, 'type="date"')}
     ${full ? CASE_MAIN_EXTRA.map(f => caseFormField(f, c[f[0]], refs)).join('') : ''}
     ${fText('cf-comment', 'Примечание', c.comment, 3)}
@@ -2805,7 +2903,18 @@ async function openCaseForm(id, full) {
   const modeBtn = `<div class="actions" style="margin-bottom:10px">${btn(full ? 'Кратко' : 'Все поля', `caseFormMode('${jsq(id || '')}', ${full ? 'false' : 'true'})`, 'small-btn', full ? 'chevron-up' : 'chevron-down')}${full ? `<span class="small muted">Вкладки зависят от вида дела</span>` : ''}</div>`;
   const body = modeBtn + tabBar + main + panes + fSaveBar(`saveCaseForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('cases', '${jsq(id)}')` : '');
   openSheet(id ? 'Правка дела' : 'Новое дело', body, id ? true : 'panel');
+  partyPrefillBind();
   if (full) { const k = document.getElementById('cf-kind'); if (k) k.onchange = () => caseTabsRefresh(); caseTabsRefresh(); const kb = document.getElementById('cx-koap-koapBodyKind'); if (kb) { kb.onchange = () => caseKoapHint(); caseKoapHint(); } }
+}
+// ИНН с кнопкой «По ИНН» (sync/dadata.js)
+function fInnRow(prefix, label, val) { return `<label class="field"><span>${esc(label)}</span><div class="inn-row"><input id="${prefix}Inn" value="${esc(val || '')}" autocomplete="off" inputmode="numeric" placeholder="10 или 12 цифр"><button type="button" class="button small-btn" onclick="innLookup('${prefix}')">${icon('search', 'icon-sm')}По ИНН</button></div></label>`; }
+// выбор известного доверителя или противной стороны из подсказок подставляет его реквизиты в пустые поля
+let FORM_PARTIES = {}, FORM_CLIENTS = {};
+function partyPrefillModel(rec, cur) { const out = {}; if (!rec) return out; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) if (rec[k] && !String(cur[k] || '').trim()) out[k] = rec[k]; return out; }
+function partyPrefillBind() {
+  const bind = (id, prefix, src) => { const el = document.getElementById(id); if (!el) return; el.addEventListener('change', () => { const rec = src()[el.value.trim()]; const get = k => document.getElementById(prefix + k[0].toUpperCase() + k.slice(1)); const cur = {}; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) cur[k] = (get(k) || {}).value || '';
+    const fill = partyPrefillModel(rec, cur); for (const k of Object.keys(fill)) { const f = get(k); if (f) f.value = fill[k]; } }); };
+  bind('cf-client', 'cf-client', () => FORM_CLIENTS); bind('cf-opponent', 'cf-opp', () => FORM_PARTIES);
 }
 function caseFormMode(id, full) { localStorage.setItem(CASE_FORM_BRIEF_KEY, full ? '0' : '1'); caseFormReopen(id, full); }
 // перерисовать форму, не теряя введённое: значения переносятся по id полей; лист под формой (карточка) остаётся в стеке
@@ -2828,7 +2937,7 @@ function caseTabPick(tab) {
 function caseKoapHint() { const box = document.getElementById('cx-koap-hint'); if (!box) return; const k = fv('cx-koap-koapBodyKind'); const h = KOAP_APPEAL_HINT[k]; box.textContent = (h ? 'Обжалование: ' + h + '. ' : '') + KOAP_APPEAL_TERM; }
 async function saveCaseForm(id) {
   const prev = id ? await getOne('cases', id) : null;
-  const v = {}; ['number', 'client', 'subject', 'kind', 'category', 'stage', 'status', 'court', 'courtNo', 'judge', 'opponent', 'nextAction', 'nextActionDue', 'comment'].forEach(k => { v[k] = fv('cf-' + k); });
+  const v = {}; ['number', 'client', 'clientInn', 'clientAddr', 'clientZip', 'clientType', 'subject', 'kind', 'category', 'stage', 'status', 'court', 'courtNo', 'judge', 'opponent', 'oppInn', 'oppAddr', 'oppOgrn', 'oppKpp', 'nextAction', 'nextActionDue', 'comment'].forEach(k => { v[k] = fv('cf-' + k); });
   const r = formModelCase(v, prev, { clients: await getAll('clients'), cases: await getAll('cases') }); if (r.error) { fErr(r.error); return; }
   // введённое в строках-справочниках (категория, суд, судья, орган, роль) запоминается; поля вкладок другого вида дела — нет
   { const tabs = new Set(caseTabsFor(r.obj.kind || '').map(t => t.id)); await comboRememberAll(document.getElementById('sheetContent'), inp => { const pane = inp.closest('[id^="cx-pane-"]'); return !pane || tabs.has(pane.id.slice(8)); }); }
@@ -2836,6 +2945,7 @@ async function saveCaseForm(id) {
   if (document.getElementById('cx-tabs')) { const ex = caseFormValues(k => fv('cx-' + k), caseTabsFor(r.obj.kind || '')); for (const k of Object.keys(ex)) { const val = ex[k]; if (k === 'amount' || k === 'recovered' || /^ip(Sum|Collected|Fee)$/.test(k)) r.obj[k] = val === '' ? '' : Number(String(val).replace(',', '.')) || 0; else if (k === 'labels') r.obj[k] = String(val).split(',').map(s => s.trim()).filter(Boolean); else r.obj[k] = val; } }
   try {
     if (r.newClient) await put('clients', r.newClient);
+    if (r.clientUpd) await put('clients', r.clientUpd);
     addCaseHistoryEvent(r.obj, 'status', (prev && prev.status) || '', r.obj.status || '', id ? 'form' : 'created');
     addCaseHistoryEvent(r.obj, 'stage', (prev && prev.stage) || '', r.obj.stage || '', id ? 'form' : 'created');
     const msgs = typeof caseActDeadlinesApply === 'function' ? caseActDeadlinesApply(r.obj, prev) : [];
@@ -3030,6 +3140,7 @@ async function comboRememberAll(root, allow) {
   let n = 0;
   for (const inp of (root || document).querySelectorAll('input[data-combo]')) {
     if (allow && !allow(inp)) continue;
+    // без ключа — подсказки без справочника (доверитель, противная сторона)
     const key = inp.dataset.ref; if (!key || !REF || !Array.isArray(REF[key])) continue;
     const next = refRememberModel(REF[key], inp.value); if (!next) continue;
     try { await saveRef(key, next); n++; } catch (e) { logErr('refs:remember', e); }
@@ -3041,7 +3152,7 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
   document.addEventListener('focusin', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { comboCloseAll(t); comboRender(t); } });
   document.addEventListener('click', e => {
     const t = e.target, item = t.closest && t.closest('.combo-item');
-    if (item) { const input = item.closest('.combo').querySelector('input[data-combo]'); comboPick(input, item.dataset.v || ''); return; }
+    if (item) { const input = item.closest('.combo').querySelector('input[data-combo],input[data-addr]'); if (item.dataset.zip && input.dataset.zipFor) { const z = document.getElementById(input.dataset.zipFor); if (z) z.value = item.dataset.zip; } comboPick(input, item.dataset.v || ''); return; }
     const tg = t.closest && t.closest('.combo-toggle');
     if (tg) { const input = document.getElementById(tg.dataset.for); if (!input) return; const m = comboMenu(input); if (m && !m.hidden) comboClose(input); else { comboCloseAll(input); comboRender(input); input.focus(); } return; }
     if (!(t.closest && t.closest('.combo'))) comboCloseAll(null);
@@ -3731,6 +3842,7 @@ async function openCaseSheet(id) {
   const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents']) d[st] = await getAll(st);
   const m = caseCardModel(c, d, new Date());
   const row = (k, v) => v ? `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>` : '';
+  const oppP = m.participants.find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
   const sec = (title, html, count) => html ? `<div class="section-label">${esc(title)}${count !== undefined ? ' · ' + count : ''}</div>${html}` : '';
   const steps = `<ol class="stage-track" aria-label="Стадия">${CASE_STAGES_NEXT.map((s, i) => `<li class="${i < m.stageIdx ? 'past' : i === m.stageIdx ? 'cur' : ''}"><span>${esc(s)}</span></li>`).join('')}</ol>`;
   const body = `
@@ -3739,11 +3851,11 @@ async function openCaseSheet(id) {
     ${c.subject ? `<p style="margin-top:12px">${esc(c.subject)}</p>` : ''}
     ${steps}
     ${c.nextAction ? `<div class="info-box${m.nextOverdue ? ' warning' : ''}"><b>Следующее действие:</b> ${esc(c.nextAction)}${c.nextActionDue ? ' — ' + esc(m.nextWhen) + ', ' + esc(fmtDate(c.nextActionDue)) : ''}</div>` : ''}
-    ${sec('Суд и стороны', `<div class="list-rows">${row('Суд', c.court)}${row('№ в суде', c.courtNo)}${row('УИД', c.caseUid)}${row('Судья', c.judge)}${row('Противная сторона', c.opponent)}${row('Роль доверителя', c.clientRole || c.role)}${row('Сумма', c.amount ? fmtMoney(c.amount) : '')}${row('Соглашение', [c.agreementNo, c.agreementDate ? fmtDate(c.agreementDate) : ''].filter(Boolean).join(' от '))}</div>`)}
+    ${sec('Суд и стороны', `<div class="list-rows">${row('Суд', c.court)}${row('№ в суде', c.courtNo)}${row('УИД', c.caseUid)}${row('Судья', c.judge)}${row('Противная сторона', [c.opponent, oppP && oppP.inn ? 'ИНН ' + oppP.inn : '', oppP && oppP.ogrn ? 'ОГРН ' + oppP.ogrn : ''].filter(Boolean).join(' · '))}${row('Адрес противной стороны', oppP && oppP.addr)}${row('Роль доверителя', c.clientRole || c.role)}${row('Сумма', c.amount ? fmtMoney(c.amount) : '')}${row('Соглашение', [c.agreementNo, c.agreementDate ? fmtDate(c.agreementDate) : ''].filter(Boolean).join(' от '))}</div>`)}
     ${c.kind === 'Уголовное' ? sec('Уголовное дело', `<div class="list-rows">${row('Кто ведёт расследование', c.crimAgencyKind)}${row('Орган', c.agency)}${row('Форма расследования', c.crimForm)}${row('Следователь / дознаватель', c.crimInvestigator)}${row('№ у органа', c.crimAgencyNum)}${row('Возбуждено', c.crimStartDate ? fmtDate(c.crimStartDate) : '')}${row('Статья УК', c.crimArticle)}${row('Стадия расследования', c.crimStage)}${row('Обвинение', c.crimChargeDate ? fmtDate(c.crimChargeDate) + (c.crimCharge ? ' · ' + c.crimCharge : '') : c.crimCharge)}${row('Мера пресечения', [c.crimMeasure, c.crimMeasureUntil ? 'до ' + fmtDate(c.crimMeasureUntil) : ''].filter(Boolean).join(' · '))}${row('В суде', [c.crimCourtStage, c.crimVerdictDate ? 'приговор ' + fmtDate(c.crimVerdictDate) : '', c.crimVerdict].filter(Boolean).join(' · '))}</div>`) : ''}
     ${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}
     ${(c.i1FilingDate || c.i1DecisionDate || c.i1Result || c.apFilingDate || c.apCourt || c.courtApp || c.csFilingDate || c.courtCass || c.fsspNo || c.ipStatus) ? sec('Инстанции', `<div class="list-rows">${row('Первая инстанция', [c.i1FilingDate ? 'подано ' + fmtDate(c.i1FilingDate) : '', c.i1DecisionDate ? 'решение ' + fmtDate(c.i1DecisionDate) : '', c.i1Result].filter(Boolean).join(' · '))}${row('Апелляция', [c.apCourt || c.courtApp, c.courtNoApp ? '№ ' + c.courtNoApp : '', c.apFilingDate ? 'жалоба ' + fmtDate(c.apFilingDate) : '', c.apDecisionDate ? 'определение ' + fmtDate(c.apDecisionDate) : '', c.apResult].filter(Boolean).join(' · '))}${row('Кассация', [c.courtCass, c.courtNoCass ? '№ ' + c.courtNoCass : '', c.csFilingDate ? 'жалоба ' + fmtDate(c.csFilingDate) : '', c.csDecisionDate ? 'определение ' + fmtDate(c.csDecisionDate) : '', c.csResult].filter(Boolean).join(' · '))}${row('Исполнение', [c.fsspNo ? 'ИП № ' + c.fsspNo : '', c.ipOsp, c.ipStatus].filter(Boolean).join(' · '))}</div>`) : ''}
-    ${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}
+    ${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.inn ? 'ИНН ' + p.inn : '', p.addr].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}
     ${sec('Сроки', m.deadlines.length ? `<div class="list-rows">${m.deadlines.map(x => `<button type="button" class="list-btn" onclick="openDeadlineSheet('${jsq(c.id)}', '${jsq(x.key)}')"><span>${esc(x.title || 'Срок')}${x.unconfirmed ? ' ' + badge('требует проверки', 'warn') : ''}</span><span class="${x.state === 'overdue' ? 'task-when overdue' : 'muted'}">${esc(fmtDate(x.date))}${x.state === 'done' ? ' · выполнен' : x.when ? ' · ' + esc(x.when) : ''}</span></button>`).join('')}</div>` : '<p class="small muted">Сроков нет.</p>', m.deadlines.length)}
     ${sec('Заседания', m.hearings.length ? `<div class="list-rows">${m.hearings.slice(0, 12).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span>${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}${h.room ? ' · зал ' + esc(h.room) : ''}</span><span>${badge(h.status || 'Назначено', h.status === 'Проведено' ? 'good' : h.status === 'Отменено' ? '' : h.status === 'Дата прошла' ? 'warn' : 'accent')}</span></button>`).join('')}</div>` : '<p class="small muted">Заседаний нет.</p>', m.hearings.length)}
     ${sec('Задачи', m.tasks.length ? `<div class="list-rows">${m.tasks.slice(0, 12).map(t => `<button type="button" class="list-btn" onclick="openTaskForm('${jsq(t.id)}')"><span class="${t.done ? 'muted' : ''}">${esc(t.title || 'Задача')}</span><span class="muted">${t.done ? 'выполнена' : (t.due ? esc(fmtDate(t.due)) : '')}</span></button>`).join('')}</div>` : '<p class="small muted">Задач нет.</p>', m.tasks.length)}
