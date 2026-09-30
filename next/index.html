@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="30.09.2026 16:48 · 3c15f15">
+<meta name="build" content="30.09.2026 17:31 · 4b5b616">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -285,6 +285,7 @@ button.imp-main:hover .task-title{color:var(--accent)}
 .combo-item:last-child{border-bottom:0}.combo-item:hover,.combo-item.active{background:var(--surface2)}.combo-item.combo-add{color:var(--accent);font-weight:600}
 .combo-empty{padding:10px 12px;font-size:.875rem;color:var(--text-muted)}
 .inn-row{display:flex;gap:6px}.inn-row input{flex:1;min-width:0}.inn-row .button{flex:none}
+.mail-row>span:first-child{display:flex;flex-direction:column;min-width:0}.mail-row .mail-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex:none}
 /* этап 2б: паспорт срока */
 .dl-date{font-size:1.8rem;font-weight:650;margin:6px 0 8px;font-variant-numeric:tabular-nums}.dl-date.overdue{color:var(--bad)}.dl-date.done{color:var(--text-muted);text-decoration:line-through}
 .list-rows>div>span:last-child{overflow-wrap:anywhere}
@@ -2147,7 +2148,8 @@ async function licInit() {}                          // 4 — лицензия
 // Решение 28.09.2026: на этапе 1 новая версия только ЧИТАЕТ базу с сервера. Запись включается на этапе 2 — после того
 // как перенесённые тесты слияния пройдут на собранном файле и перед первой записью будет снята копия базы с сервера.
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'blobget', 'bloblist'];
+// track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'blobget', 'bloblist', 'track'];
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
@@ -2373,6 +2375,108 @@ function openDadataSheet() {
 }
 function dadataSaveKey(drop) { DADATA.token = drop ? '' : fv('dd-token'); toast(DADATA.token ? 'Ключ сохранён' : 'Ключ удалён'); sheetBack(); if (typeof openSettingsSheet === 'function') openSettingsSheet('replace'); }
 
+// ▼▼▼ sync/pochta.js
+// ═══ sync/pochta.js — отслеживание отправлений Почты России (этап 3, часть 1; поручение пользователя 30.09.2026) ═══
+// Логика v312 (v225): запись хранилища mail — канал (channel), трек-номер (barcode), направление (dir), тема, от кого,
+// кому, даты, «требует действия», история операций (history) и текущий статус (status, statusAt). Запрос к Почте идёт
+// через личный сервер (действие track сервера v177: SOAP tracking.russianpost.ru, логин и пароль API — в параметрах
+// функции crm-bridge, в программу не вводятся). Вручённые отправления повторно не запрашиваются — дневной лимит
+// бесплатного доступа к API Почты около 100 запросов. Чистые функции для тестов: mailStatusKind, mailIsDelivered,
+// barcodeNorm, barcodeValid, mailTrackPlan, mailApplyTrack, mailTrackSummary, formModelMail, pochtaStateModel.
+const MAIL_CHANNELS = ['Почта России', 'Email', 'Судебная система', 'Курьер', 'Лично', 'Другое'];
+const MAIL_DIRS = [['out', 'Исходящее'], ['in', 'Входящее (адресовано вам)']];
+const MAIL_MANUAL_STATUSES = ['Принято в отделении', 'В пути', 'Прибыло в место вручения', 'Вручено адресату', 'Возврат отправителю'];
+const mailIsPostal = m => !!m && (!m.channel || m.channel === 'Почта России');
+// вид статуса для цвета и фильтров: action — требует действия, done — обработано (непочтовые); delivered, problem, transit, new — почтовые
+function mailStatusKind(m) {
+  if (!mailIsPostal(m)) return m.needsAction ? 'action' : 'done';
+  const s = (m.status || '') + ' ' + ((m.history || []).map(h => h.oper).join(' '));
+  if (/Вручение|Получено адресатом|Вручено/i.test(m.status || '')) return 'delivered';
+  if (/Неудачная|Возврат|Уничтожен|Утрачен|Истек срок/i.test(s)) return 'problem';
+  if (m.status) return 'transit';
+  return 'new';
+}
+const MAIL_KIND_META = { action: ['Требует действия', 'warn'], done: ['Обработано', 'good'], delivered: ['Вручено', 'good'], problem: ['Проблемное', 'bad'], transit: ['В пути', 'accent'], new: ['Без статуса', ''] };
+// финальный статус — вручено адресату или отправителю (возврат); такие треки больше не запрашиваем. [а-яё] вместо \w (урок 42)
+function mailIsDelivered(m) { if (!mailIsPostal(m)) return true; return /вручен[а-яё]*\s+(адресату|отправителю)/i.test(String((m && m.status) || '')); }
+function barcodeNorm(s) { return String(s || '').replace(/\s/g, '').toUpperCase(); }
+// внутреннее РПО — 14 цифр; международное — 2 буквы, 9 цифр, 2 буквы (RA123456789RU)
+function barcodeValid(s) { const b = barcodeNorm(s); return /^\d{14}$/.test(b) || /^[A-Z]{2}\d{9}[A-Z]{2}$/.test(b); }
+// что запрашивать: только почтовые, с трек-номером, не вручённые; не более 30 за раз (лимит сервера v177)
+function mailTrackPlan(list, only) {
+  const postal = (list || []).filter(m => m && !m._deleted && mailIsPostal(m) && m.barcode && (!only || only.includes(m.id)));
+  const toTrack = postal.filter(m => !mailIsDelivered(m)).slice(0, 30);
+  return { toTrack, skipped: postal.length - toTrack.length, total: postal.length };
+}
+// ответ сервера по одному треку → запись: история и последний статус; пустой ответ ничего не меняет
+function mailApplyTrack(m, res) { if (!Array.isArray(res) || !res.length) return false; const last = res[res.length - 1]; m.history = res; m.status = last.oper || ''; m.statusAt = last.date || ''; return true; }
+function mailTrackSummary(updated, errors, skipped) {
+  const errKeys = Object.keys(errors || {}), skipNote = skipped ? ` · вручённых пропущено: ${skipped}` : '';
+  if (updated && !errKeys.length) return { text: `Обновлено отправлений: ${updated}${skipNote}`, warn: false };
+  if (updated || errKeys.length) return { text: `Обновлено: ${updated}${errKeys.length ? ` · ошибок: ${errKeys.length} (${String(errors[errKeys[0]] || '').slice(0, 60)})` : ''}${skipNote}`, warn: errKeys.length > 0 };
+  return { text: `Новых данных нет${skipNote} — проверьте трек-номера`, warn: false };
+}
+// форма → запись (правила v312): почтовому нужен трек-номер, остальным — тема; смена трек-номера сбрасывает историю
+function formModelMail(v, prev) {
+  const channel = MAIL_CHANNELS.includes(v.channel) ? v.channel : 'Почта России', postal = channel === 'Почта России';
+  const barcode = postal ? barcodeNorm(v.barcode) : '', title = String(v.title || '').trim();
+  if (postal && !barcode) return { error: 'Введите трек-номер или выберите другой канал' };
+  if (postal && !barcodeValid(barcode)) return { error: 'Трек-номер — 14 цифр (например 80107204381310) или вида RA123456789RU' };
+  if (!postal && !title) return { error: 'Укажите тему письма' };
+  if (v.date && !/^\d{4}-\d{2}-\d{2}$/.test(v.date)) return { error: 'Дата письма — из поля даты' };
+  if (v.responseDue && !/^\d{4}-\d{2}-\d{2}$/.test(v.responseDue)) return { error: 'Срок ответа — из поля даты' };
+  const p = prev || {}, same = p.barcode === barcode;
+  return { obj: { ...p, id: p.id || uid('П'), barcode, channel, title, dir: v.dir === 'in' ? 'in' : 'out', from: String(v.from || '').trim(), to: String(v.to || '').trim(),
+    date: v.date || '', responseDue: v.responseDue || '', needsAction: !!v.needsAction, body: String(v.body || '').trim(), caseNum: v.caseNum || '', caseId: v.caseId || '',
+    processedAt: p.processedAt || '', status: same ? (p.status || '') : '', statusAt: same ? (p.statusAt || '') : '', history: same ? (p.history || []) : [], createdAt: p.createdAt || Date.now() } };
+}
+// ── состояние отслеживания: сервер подключён? параметры Почты на сервере заданы? ──
+const POCHTA_READY_KEY = 'crm_next_pochta_ready';
+function pochtaStateModel(srvUrl, checked, ready) {
+  if (!srvUrl) return { code: 'nosrv', text: 'Личный сервер не подключён — отслеживание работает через него. Сначала Синхронизация → «Подключить сервер»' };
+  if (!checked) return { code: 'unknown', text: 'Сервер подключён, готовность Почты ещё не проверялась — нажмите «Проверить»' };
+  if (ready === '1') return { code: 'ok', text: 'Готово: сервер знает логин и пароль API Почты, статусы обновляются по кнопке' };
+  return { code: 'nokeys', text: 'На сервере не заданы POCHTA_LOGIN и POCHTA_PASS — выполните шаги 1 и 2 ниже, затем «Проверить»' };
+}
+async function pochtaCheck() {
+  if (!SRV.url) { toast('Сначала подключите личный сервер: Синхронизация', true); return null; }
+  toast('Проверяю сервер…');
+  const p = await srvCall('ping');
+  if (!p || !p.ok) { toast('Сервер не ответил: ' + nextSrvError(p), true); return null; }
+  const ready = !!(p.ready && p.ready.pochta);
+  localStorage.setItem(POCHTA_READY_KEY, ready ? '1' : '0');
+  toast(ready ? 'Почта России подключена на сервере' : 'Сервер отвечает, но параметры Почты не заданы', !ready);
+  openPochtaSheet('replace'); return ready;
+}
+function openPochtaSheet(mode) {
+  const st = pochtaStateModel(SRV.url, localStorage.getItem(POCHTA_READY_KEY) !== null, localStorage.getItem(POCHTA_READY_KEY));
+  openSheet('Почта России — отслеживание', `
+    <div class="status-line ${st.code === 'ok' ? 'good' : ''}" id="pochta-state">${esc(st.text)}</div>
+    <p>Программа сама узнаёт, где находится письмо с трек-номером: принято, в пути, прибыло, вручено, возврат. Запрос идёт с вашего личного сервера в Яндекс Облаке к службе отслеживания Почты России; логин и пароль от API Почты хранятся только там и в программу не вводятся. Обновление — по кнопке «Обновить статусы» на экране «Переписка»; вручённые письма повторно не запрашиваются, чтобы не тратить дневной лимит (около 100 запросов в день на бесплатном доступе).</p>
+    <div class="section-label">Как подключить, один раз</div>
+    <div class="info-box"><b>Шаг 1. Получить доступ к API отслеживания.</b> Откройте tracking.pochta.ru, войдите или зарегистрируйтесь (обычная учётная запись Почты России), затем в разделе «Доступ к API» нажмите «Получить доступ» и заполните заявку. Почта пришлёт на электронную почту <b>логин и пароль API</b> — это отдельная пара, не пароль от личного кабинета. Обычно ответ приходит в течение рабочего дня.</div>
+    <div class="info-box"><b>Шаг 2. Записать логин и пароль на личный сервер.</b> В Яндекс Облаке откройте функцию <b>crm-bridge</b> → вкладка «Редактор» → внизу «Переменные окружения» → добавьте две переменные: <b>POCHTA_LOGIN</b> (логин API) и <b>POCHTA_PASS</b> (пароль API) → «Создать версию». Остальные переменные не меняйте. Это те же настройки, что были у прежней программы: если вы уже задавали их раньше, шаг пропускается.</div>
+    <div class="info-box"><b>Шаг 3. Проверить.</b> Нажмите «Проверить» ниже: программа спросит сервер, видит ли он логин и пароль. Если всё в порядке, строка вверху станет зелёной. Затем на экране «Переписка» добавьте отправление с трек-номером и нажмите «Обновить статусы».</div>
+    <div class="info-box">Если статусы не приходят: проверьте, что трек-номер введён без пробелов (14 цифр), что заявка на доступ к API одобрена (письмо от Почты), и что переменные записаны без лишних пробелов. Статус всегда можно посмотреть и вручную на pochta.ru — ссылка есть в карточке отправления, а статус можно отметить одним нажатием.</div>
+    <div class="form-actions">${btn('Проверить', 'pochtaCheck()', 'primary', 'refresh-cw')}${btn('Синхронизация', 'openSyncSheet()', '', 'refresh-cw')}${btn('Переписка', "closeSheet(); nav('correspondence')", '', 'mail')}</div>`, mode || true);
+}
+// ── обновление статусов через сервер ──
+async function mailRefresh(only) {
+  const all = await getAll('mail');
+  const plan = mailTrackPlan(all, only);
+  if (!plan.total) { toast(only ? 'У отправления нет трек-номера' : 'Сначала добавьте отправление с трек-номером', true); return null; }
+  if (!SRV.url) { toast('Подключите личный сервер: Настройки → «Почта России — отслеживание»', true); return null; }
+  if (!plan.toTrack.length) { toast(`Все отправления уже вручены (${plan.skipped}) — запросы к Почте не расходуем`); return { updated: 0, skipped: plan.skipped }; }
+  toast('Запрашиваю Почту России…');
+  const j = await srvCall('track', { barcodes: plan.toTrack.map(m => m.barcode) });
+  if (!j || !j.ok) { const e = String((j && j.error) || ''); toast(!j ? 'Нет связи с личным сервером' : e === 'auth' ? 'Неверный секретный код сервера' : /POCHTA/.test(e) ? 'На сервере не заданы логин и пароль API Почты — Настройки → «Почта России — отслеживание»' : 'Сервер: ' + (e || 'ошибка'), true); if (j && /POCHTA/.test(e)) localStorage.setItem(POCHTA_READY_KEY, '0'); return null; }
+  localStorage.setItem(POCHTA_READY_KEY, '1');
+  let updated = 0;
+  for (const m of plan.toTrack) { if (mailApplyTrack(m, (j.results || {})[m.barcode])) { try { await put('mail', m); updated++; } catch (e) { logErr('mail:track:put', e); } } }
+  const s = mailTrackSummary(updated, j.errors, plan.skipped); toast(s.text, s.warn);
+  return { updated, errors: j.errors || {}, skipped: plan.skipped };
+}
+
 // ▼▼▼ ui/icons.js
 // ═══ ui/icons.js — линейные иконки (этап 1б) ═══
 // Контуры из Lucide 1.17.0 — © Lucide Contributors, лицензия ISC (разрешено использование, копирование, изменение
@@ -2458,7 +2562,7 @@ const NAV_GROUPS = [
     { id: 'tasks', title: 'Задачи и сроки', icon: 'list-checks', stage: '2', store: 'tasks', what: 'задачи, процессуальные сроки с паспортом срока' },
     { id: 'documents', title: 'Документы', icon: 'files', stage: '3', store: 'documents', what: 'документы, версии и шаблоны' },
     { id: 'finance', title: 'Финансы', icon: 'wallet', stage: '3', store: 'finance', what: 'счета, платежи, расходы, депозиты' },
-    { id: 'correspondence', title: 'Переписка', icon: 'mail', stage: '3', store: 'correspondence', what: 'входящая и исходящая переписка, почтовые отправления' },
+    { id: 'correspondence', title: 'Переписка', icon: 'mail', store: 'mail' },
     { id: 'monitoring', title: 'Суды и мониторинг', icon: 'landmark', stage: '4', store: 'monitorEvents', what: 'события судов по вашим делам' },
     { id: 'reports', title: 'Отчёты', icon: 'chart-column', stage: '5', what: 'отчёты по делам, времени и оплате' },
   ] },
@@ -2483,13 +2587,13 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openDadataSheet()', 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openDadataSheet()', 'openPochtaSheet()', 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
   phoneWidths: [360, 390, 412], desktopWidth: 1280, phoneTheme: 'dark', desktopTheme: 'light',
   sidebarAlign: 'top', minTouch: 44, seedFile: 'ui_seed_next.js', readyExpr: 'window.NEXT_READY', lsPrefix: NEXT_NS.ls,
-  variants: [{ name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
+  variants: [{ name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
     { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }],
 };
 
@@ -2667,7 +2771,8 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     <div class="section-label">Данные</div>
     <div class="list-rows"><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
-      <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button></div>
+      <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
+      <button type="button" class="list-btn" onclick="openPochtaSheet()"><span>Почта России — отслеживание</span><span class="muted">${!SRV.url ? 'сервер не подключён' : localStorage.getItem(POCHTA_READY_KEY) === '1' ? 'подключено' : localStorage.getItem(POCHTA_READY_KEY) === '0' ? 'на сервере нет параметров' : 'не проверено'}</span></button></div>
     <div class="section-label">О программе</div>
     <div class="list-rows">
       <div><span>Версия</span><span class="muted">${esc(APP_VER)} · база ${esc(db ? db.name : '—')}, версия ${esc(db ? db.version : '—')}</span></div>
@@ -3797,6 +3902,8 @@ function caseCardModel(c, d, now) {
   const mine = x => x && (x.caseId ? x.caseId === c.id : x.caseNum === c.number);
   const hearings = (d.hearings || []).filter(mine).sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.time || '').localeCompare(a.time || ''));
   const tasks = (d.tasks || []).filter(mine).sort((a, b) => (!!a.done - !!b.done) || (a.due || '9999').localeCompare(b.due || '9999'));
+  // отправления по делу (этап 3): свежие сверху
+  const mail = (d.mail || []).filter(x => mine(x) && !x._deleted).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const meetings = (d.meetings || []).filter(mine).sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.time || '').localeCompare(a.time || '')); // этап 2б
   const finance = (d.finance || []).filter(mine);
   const paidOf = f => Array.isArray(f.payments) && f.payments.length ? f.payments.reduce((a, p) => a + Number(p.sum || 0), 0) : Number(f.paid || 0);
@@ -3806,7 +3913,7 @@ function caseCardModel(c, d, now) {
     .sort((a, b) => (a.state === 'done') - (b.state === 'done') || a.date.localeCompare(b.date));
   const docs = (d.documents || []).filter(mine).length;
   const nextK = c.nextActionDue ? todayDayDiff(c.nextActionDue, today) : null;
-  return { c, hearings, tasks, meetings, fin, deadlines, docs, participants: Array.isArray(c.participants) ? c.participants : [],
+  return { c, hearings, tasks, meetings, fin, deadlines, docs, mail, participants: Array.isArray(c.participants) ? c.participants : [],
     nextOverdue: nextK !== null && nextK < 0 && c.status !== 'Завершено', nextWhen: nextK === null ? '' : todayDayLabel(c.nextActionDue, today),
     stageIdx: CASE_STAGES_NEXT.indexOf(c.status === 'Завершено' ? 'Завершено' : c.stage) };
 }
@@ -3839,14 +3946,14 @@ SCREENS.cases = async function () {
 // ── карточка дела (только чтение): лист на телефоне, панель справа от 1200 px ──
 async function openCaseSheet(id) {
   const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
-  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents']) d[st] = await getAll(st);
+  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents', 'mail']) d[st] = await getAll(st);
   const m = caseCardModel(c, d, new Date());
   const row = (k, v) => v ? `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>` : '';
   const oppP = m.participants.find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
   const sec = (title, html, count) => html ? `<div class="section-label">${esc(title)}${count !== undefined ? ' · ' + count : ''}</div>${html}` : '';
   const steps = `<ol class="stage-track" aria-label="Стадия">${CASE_STAGES_NEXT.map((s, i) => `<li class="${i < m.stageIdx ? 'past' : i === m.stageIdx ? 'cur' : ''}"><span>${esc(s)}</span></li>`).join('')}</ol>`;
   const body = `
-    <div class="actions" style="margin-bottom:12px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Заседание', `openHearingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'calendar-plus')}${btn('Задача', `openTaskForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${btn('Встреча', `openMeetingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'handshake')}${btn('Срок', `openDeadlineAdd('${jsq(c.id)}')`, 'small-btn', 'clock-3')}</div>
+    <div class="actions" style="margin-bottom:12px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Заседание', `openHearingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'calendar-plus')}${btn('Задача', `openTaskForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${btn('Встреча', `openMeetingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'handshake')}${btn('Срок', `openDeadlineAdd('${jsq(c.id)}')`, 'small-btn', 'clock-3')}${btn('Отправление', `openMailForm('', '${jsq(c.number || '')}')`, 'small-btn', 'mail')}</div>
     <div class="task-badges">${badge(c.status || 'Без статуса', c.status === 'Завершено' ? 'good' : c.status === 'Ожидание' ? 'warn' : 'accent')}${c.kind ? badge(c.kind) : ''}${c.category ? badge(c.category) : ''}${c.archived ? badge('Архив') : ''}</div>
     ${c.subject ? `<p style="margin-top:12px">${esc(c.subject)}</p>` : ''}
     ${steps}
@@ -3860,6 +3967,7 @@ async function openCaseSheet(id) {
     ${sec('Заседания', m.hearings.length ? `<div class="list-rows">${m.hearings.slice(0, 12).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span>${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}${h.room ? ' · зал ' + esc(h.room) : ''}</span><span>${badge(h.status || 'Назначено', h.status === 'Проведено' ? 'good' : h.status === 'Отменено' ? '' : h.status === 'Дата прошла' ? 'warn' : 'accent')}</span></button>`).join('')}</div>` : '<p class="small muted">Заседаний нет.</p>', m.hearings.length)}
     ${sec('Задачи', m.tasks.length ? `<div class="list-rows">${m.tasks.slice(0, 12).map(t => `<button type="button" class="list-btn" onclick="openTaskForm('${jsq(t.id)}')"><span class="${t.done ? 'muted' : ''}">${esc(t.title || 'Задача')}</span><span class="muted">${t.done ? 'выполнена' : (t.due ? esc(fmtDate(t.due)) : '')}</span></button>`).join('')}</div>` : '<p class="small muted">Задач нет.</p>', m.tasks.length)}
     ${sec('Встречи', m.meetings.length ? `<div class="list-rows">${m.meetings.slice(0, 12).map(x => `<button type="button" class="list-btn" onclick="openMeetingForm('${jsq(x.id)}')"><span>${esc(fmtDate(x.date))}${x.time ? ' ' + esc(x.time) : ''} · ${esc(x.with || 'без участника')}</span><span class="muted">${esc(x.place || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Встреч нет.</p>', m.meetings.length)}
+    ${m.mail.length ? sec('Переписка', `<div class="list-rows">${m.mail.slice(0, 12).map(x => { const k = mailStatusKind(x), mt = MAIL_KIND_META[k]; return `<button type="button" class="list-btn" onclick="openMailSheet('${jsq(x.id)}')"><span>${esc(x.title || x.barcode || 'Отправление')}</span><span class="muted">${esc([x.dir === 'in' ? 'вх.' : 'исх.', x.date ? fmtDate(x.date) : ''].filter(Boolean).join(' · '))} ${badge(mailIsPostal(x) ? (x.status || mt[0]) : mt[0], mt[1])}</span></button>`; }).join('')}</div>`, m.mail.length) : ''}
     ${sec('Финансы', `<div class="list-rows">${row('Начислено', m.fin.amount ? fmtMoney(m.fin.amount) : '')}${row('Оплачено', m.fin.paid ? fmtMoney(m.fin.paid) : '')}${row('Остаток', m.fin.debt ? fmtMoney(m.fin.debt) : (m.fin.amount ? '0 ₽' : ''))}${row('Ожидается', m.fin.pending ? fmtMoney(m.fin.pending) : '')}${row('Документов', m.docs ? String(m.docs) : '')}</div>`)}
     ${c.comment ? sec('Примечание', `<p class="small">${esc(c.comment)}</p>`) : ''}
     <div class="info-box">Записи хранятся на этом устройстве; на сервер новая версия пока не пишет (этап 2). Сроки, документы, финансы — следующие шаги.</div>`;
@@ -3951,6 +4059,97 @@ SCREENS.calendar = async function () {
   const sub = m.view === 'month' ? `${m.month.total} ${plural(m.month.total, 'событие', 'события', 'событий')} в месяце` : m.view === 'week' ? `${m.week.total} ${plural(m.week.total, 'событие', 'события', 'событий')} на неделе` : `${m.list.upcomingTotal} предстоящих`;
   return pageHead('Календарь', sub, btn('Заседание', 'openHearingForm()', 'primary', 'calendar-plus') + btn('Встреча', 'openMeetingForm()', '', 'handshake')) + `<div class="toolbar"><div class="view-switch cal-switch">${views}</div></div>` + body;
 };
+
+// ▼▼▼ screens/mail.js
+// ═══ screens/mail.js — экран «Переписка»: письма и почтовые отправления (этап 3, часть 1) ═══
+// Список с фильтрами v312 (требует действия / текущие / проблемные / вручено / все; входящие и исходящие), форма
+// отправления, карточка с движением по данным Почты, ручная отметка статуса, «Обработано», задача по письму.
+// Правила и запросы — sync/pochta.js. Чистые функции для тестов: mailListModel.
+const MAIL_VIEW_KEY = 'crm_mailview';
+const MAIL_CHIPS = [['action', 'Требует действия'], ['active', 'Текущие'], ['problem', 'Проблемные'], ['delivered', 'Вручено'], ['all', 'Все']];
+function mailPrefs() { try { const p = JSON.parse(localStorage.getItem(MAIL_VIEW_KEY) || '{}'); return { chip: MAIL_CHIPS.some(c => c[0] === p.chip) ? p.chip : 'active', dir: ['in', 'out'].includes(p.dir) ? p.dir : 'all' }; } catch (e) { return { chip: 'active', dir: 'all' }; } }
+function mailSet(k, v) { const p = mailPrefs(); p[k] = v; localStorage.setItem(MAIL_VIEW_KEY, JSON.stringify(p)); nav('correspondence'); }
+// список: счётчики по видам статуса и строки по выбранному фильтру; свежие сверху
+function mailListModel(list, p) {
+  const all = (list || []).filter(m => m && !m._deleted).sort((a, b) => (b._upd || b.createdAt || 0) - (a._upd || a.createdAt || 0));
+  const counts = { all: all.length, delivered: 0, problem: 0, transit: 0, new: 0, action: 0, done: 0 };
+  all.forEach(m => { counts[mailStatusKind(m)]++; if (mailIsPostal(m) && m.needsAction) counts.action++; });
+  counts.active = counts.transit + counts.problem + counts.new + counts.action;
+  const rows = all.filter(m => {
+    if (p.dir !== 'all' && (m.dir || 'out') !== p.dir) return false;
+    const k = mailStatusKind(m);
+    if (p.chip === 'active') return k !== 'delivered' && k !== 'done';
+    if (p.chip === 'action') return !!m.needsAction || k === 'action';
+    return p.chip === 'all' || k === p.chip;
+  }).map(m => { const k = mailStatusKind(m); return { m, kind: k, label: MAIL_KIND_META[k][0], cls: MAIL_KIND_META[k][1], title: m.title || m.barcode || 'Без темы', status: mailIsPostal(m) ? (m.status || MAIL_KIND_META[k][0]) : m.channel }; });
+  return { counts, rows };
+}
+SCREENS.correspondence = async function () {
+  const p = mailPrefs(), m = mailListModel(await getAll('mail'), p); await refreshCasesCache();
+  const chips = MAIL_CHIPS.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.chip === k}" onclick="mailSet('chip','${k}')">${esc(t)} <span class="chip-n">${m.counts[k] || 0}</span></button>`).join('');
+  const dirs = [['all', 'Все направления'], ['in', 'Входящие'], ['out', 'Исходящие']].map(([k, t]) => `<button type="button" class="button small-btn" aria-pressed="${p.dir === k}" onclick="mailSet('dir','${k}')">${esc(t)}</button>`).join('');
+  const ready = localStorage.getItem(POCHTA_READY_KEY);
+  const hint = !SRV.url ? `<div class="info-box">Статусы Почты России обновляются через личный сервер. Как подключить — Настройки → «Почта России — отслеживание». Пока статус можно отмечать вручную в карточке отправления.</div>` : ready === '0' ? `<div class="info-box warning">На сервере не заданы логин и пароль API Почты — Настройки → «Почта России — отслеживание».</div>` : '';
+  const rows = m.rows.map(r => { const c = r.m.caseNum ? CASES_BY_NUM[r.m.caseNum] : null; return `<button type="button" class="list-btn mail-row" onclick="openMailSheet('${jsq(r.m.id)}')"><span><span class="task-title">${esc(r.title)}</span><span class="task-sub">${esc([r.m.dir === 'in' ? 'входящее' : 'исходящее', mailIsPostal(r.m) ? r.m.barcode : r.m.channel, c ? [c.number, c.client].filter(Boolean).join(' · ') : ''].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status, r.cls)}${r.m.needsAction && mailIsPostal(r.m) ? badge('требует действия', 'warn') : ''}${r.m.statusAt ? `<span class="muted small">${esc(String(r.m.statusAt).slice(0, 10).split('-').reverse().join('.'))}</span>` : ''}</span></button>`; }).join('');
+  return pageHead('Переписка', `${m.counts.all} ${plural(m.counts.all, 'запись', 'записи', 'записей')}`, btn('Отправление', 'openMailForm()', 'primary', 'plus') + btn('Обновить статусы', 'mailRefreshAll()', '', 'refresh-cw')) +
+    `<div class="chips" style="margin-bottom:10px">${chips}</div><div class="choice" style="margin-bottom:12px">${dirs}</div>${hint}
+    <section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('mail', m.counts.all ? 'По этому фильтру записей нет' : 'Писем и отправлений пока нет', m.counts.all ? (p.chip === 'active' && m.counts.delivered ? `Все отправления вручены — ${m.counts.delivered} во вкладке «Вручено»` : 'Выберите другой фильтр') : 'Добавьте отправление с трек-номером Почты России или письмо по другому каналу', btn('Отправление', 'openMailForm()', 'primary', 'plus'))}</section>`;
+};
+async function mailRefreshAll() { const r = await mailRefresh(); if (r) nav('correspondence'); }
+// ── форма ──
+async function openMailForm(id, presetCaseNum) {
+  const prev = id ? await getOne('mail', id) : null; if (id && !prev) { toast('Запись не найдена', true); return; }
+  const m = prev || { channel: 'Почта России', dir: 'out', date: todayISO(), needsAction: true, caseNum: presetCaseNum || '' };
+  const cases = (await getAll('cases')).filter(c => !c._deleted && !c.archived && c.status !== 'Завершено').sort((a, b) => String(a.number).localeCompare(String(b.number), 'ru', { numeric: true }));
+  const body = `<div class="form-grid">
+    ${fSelect('ml-channel', 'Канал', m.channel || 'Почта России', MAIL_CHANNELS)}${fSelect('ml-dir', 'Направление', m.dir || 'out', MAIL_DIRS)}
+    ${wide(fInput('ml-barcode', 'Трек-номер Почты России *', m.barcode, 'autocomplete="off" inputmode="numeric" placeholder="14 цифр, например 80107204381310"'))}
+    ${wide(fInput('ml-title', 'Тема / описание', m.title, 'autocomplete="off" placeholder="Претензия в ООО «…»"'))}
+    ${fInput('ml-from', 'От кого', m.from, 'autocomplete="off"')}${fInput('ml-to', 'Кому', m.to, 'autocomplete="off"')}
+    ${fInput('ml-date', 'Дата письма', m.date, 'type="date"')}${fInput('ml-responseDue', 'Ответить / действовать до', m.responseDue, 'type="date"')}
+    ${fSelect('ml-caseNum', 'Дело', m.caseNum, cases.map(c => [c.number, [c.number, c.client].filter(Boolean).join(' · ')]), true)}
+    <label class="check"><input type="checkbox" id="ml-needsAction"${m.needsAction ? ' checked' : ''}><span>Требует действия (ответить, обработать)</span></label>
+    ${fText('ml-body', 'Содержание / заметка', m.body, 3)}
+    <div class="info-box" style="grid-column:1/-1" id="ml-hint">Статус отправления Почты России подтянется по кнопке «Обновить статусы» на экране «Переписка», если подключено отслеживание (Настройки → «Почта России — отслеживание»).</div>
+  </div>${fSaveBar(`saveMailForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('mail', '${jsq(id)}')` : '')}`;
+  openSheet(id ? 'Правка отправления' : 'Новое отправление', body, UI.cur ? true : undefined);
+  const ch = document.getElementById('ml-channel'); if (ch) { ch.onchange = mailChannelChanged; mailChannelChanged(); }
+}
+// трек-номер нужен только Почте России; для остальных каналов поле скрыто
+function mailChannelChanged() { const postal = fv('ml-channel') === 'Почта России'; const bc = document.getElementById('ml-barcode'); if (bc) bc.closest('.field').hidden = !postal; const h = document.getElementById('ml-hint'); if (h) h.hidden = !postal; }
+async function saveMailForm(id) {
+  const prev = id ? await getOne('mail', id) : null;
+  const v = {}; ['channel', 'dir', 'barcode', 'title', 'from', 'to', 'date', 'responseDue', 'caseNum', 'body'].forEach(k => { v[k] = fv('ml-' + k); }); v.needsAction = !!(document.getElementById('ml-needsAction') || {}).checked;
+  const c = v.caseNum ? CASES_BY_NUM[v.caseNum] : null; v.caseId = c ? c.id : '';
+  const r = formModelMail(v, prev); if (r.error) { fErr(r.error); return; }
+  try { await put('mail', r.obj); } catch (e) { logErr('form:mail', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  toast(id ? 'Отправление сохранено' : 'Отправление добавлено'); closeSheet(); await nav(UI.screen); openMailSheet(r.obj.id);
+}
+// ── карточка ──
+async function openMailSheet(id, mode) {
+  const m = await getOne('mail', id); if (!m) { toast('Запись не найдена', true); return; }
+  await refreshCasesCache(); const c = m.caseNum ? CASES_BY_NUM[m.caseNum] : null, k = mailStatusKind(m), meta = MAIL_KIND_META[k], postal = mailIsPostal(m);
+  const row = (a, b) => b ? `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>` : '';
+  const hist = (m.history || []).slice().reverse();
+  const body = `<div class="task-badges">${badge(postal ? (m.status || meta[0]) : meta[0], meta[1])}${badge(m.dir === 'in' ? 'входящее' : 'исходящее')}${m.needsAction ? badge('требует действия', 'warn') : ''}${badge(m.channel || 'Почта России')}</div>
+    <div class="list-rows">${row('Трек-номер', postal ? m.barcode : '')}${row('Дата письма', m.date ? fmtDate(m.date) : '')}${row('От кого', m.from)}${row('Кому', m.to)}${row('Ответить до', m.responseDue ? fmtDate(m.responseDue) : '')}${row('Статус получен', m.statusAt)}${row('Заметка', m.body)}
+      ${c ? `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(c.id)}')"><span class="muted">Дело</span><span>${esc([c.number, c.client].filter(Boolean).join(' · '))}</span></button>` : ''}</div>
+    ${postal ? `<div class="section-label">Движение отправления</div>${hist.length ? `<div class="list-rows">${hist.map(h => `<div><span class="muted">${esc(h.date || '')}</span><span>${esc(h.oper || '')}${h.place ? `<br><span class="muted small">${esc(h.place)}</span>` : ''}</span></div>`).join('')}</div>` : `<p class="small muted">История ещё не загружена: нажмите «Обновить статус» — при подключённом отслеживании программа спросит Почту России.</p>`}
+    <div class="section-label">Отметить статус вручную</div><p class="small muted">Если отслеживание не подключено: посмотрите статус на pochta.ru и отметьте его здесь.</p>
+    <div class="chips" style="margin-bottom:12px">${MAIL_MANUAL_STATUSES.map(s => `<button type="button" class="chip" aria-pressed="${m.status === s}" onclick="mailSetStatus('${jsq(m.id)}','${jsq(s)}')">${esc(s)}</button>`).join('')}</div>` : ''}
+    <div class="form-actions">${m.needsAction ? btn('Обработано', `mailMarkProcessed('${jsq(m.id)}')`, 'primary', 'check') : ''}${btn('Задача по письму', `mailTaskFrom('${jsq(m.id)}')`, 'small-btn', 'plus')}${postal ? btn('Обновить статус', `mailRefreshOne('${jsq(m.id)}')`, 'small-btn', 'refresh-cw') : ''}${postal ? `<a class="button small-btn" href="https://www.pochta.ru/tracking#${encodeURIComponent(m.barcode)}" target="_blank" rel="noopener">${icon('arrow-right')}Открыть на pochta.ru</a>` : ''}${btn('Изменить', `openMailForm('${jsq(m.id)}')`, 'small-btn', 'pencil')}<button type="button" class="button danger push-right" onclick="openDeleteSheet('mail', '${jsq(m.id)}')">${icon('trash-2')}Удалить</button></div>`;
+  openSheet(m.title || m.barcode || 'Отправление', body, mode || (UI.cur ? true : undefined));
+}
+async function mailSave(id, mutate, msg) { const m = await getOne('mail', id); if (!m) { toast('Запись не найдена', true); return null; } mutate(m); try { await put('mail', m); } catch (e) { logErr('mail:save', e); toast('Не удалось сохранить', true); return null; } if (msg) toast(msg); return m; }
+async function mailSetStatus(id, s) { if (await mailSave(id, m => { m.status = s; m.statusAt = todayISO(); }, 'Статус отмечен: ' + s)) { await nav(UI.screen); openMailSheet(id); } }
+async function mailMarkProcessed(id) { if (await mailSave(id, m => { m.needsAction = false; m.processedAt = Date.now(); }, 'Отмечено обработанным')) { await nav(UI.screen); openMailSheet(id); } }
+async function mailTaskFrom(id) {
+  const m = await getOne('mail', id); if (!m) return; const c = m.caseNum ? CASES_BY_NUM[m.caseNum] : null;
+  try { await put('tasks', { id: uid('З'), title: `Письмо: ${m.title || m.barcode}`, due: m.responseDue || todayISO(), done: false, priority: 'Средний', caseId: c ? c.id : '', caseNum: m.caseNum || '', createdAt: Date.now(), mailId: m.id }); } catch (e) { logErr('mail:task', e); toast('Не удалось создать задачу', true); return; }
+  if (!m.needsAction) await mailSave(id, x => { x.needsAction = true; }, null);
+  toast('Задача создана'); await nav(UI.screen); openMailSheet(id);
+}
+async function mailRefreshOne(id) { const r = await mailRefresh([id]); if (r) { await nav(UI.screen); openMailSheet(id); } }
 
 // ▼▼▼ next/boot.js
 // ═══ next/boot.js — запуск новой версии ═══
