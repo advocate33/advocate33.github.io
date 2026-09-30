@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.yandexcloud.net https://*.yandex.net https://*.yandex.ru https://oauth.yandex.ru https://suggestions.dadata.ru https://api.telegram.org https://api.anthropic.com https://openrouter.ai https://api.openai.com; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v311</title>
+<title>CRM Адвоката v312</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1276,7 +1276,10 @@ body { overflow-x: hidden; overflow-x: clip; } /* v310: только body и cli
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '311';
+const APP_VER = '312';
+// v312: прошедшее заседание без результата — статус «Дата прошла» (раньше — авто-«Проведено» с меткой autoDone);
+// «Проведено» ставится только человеком (карточка, окно «После заседания», форма) или по данным сайта суда
+// v311 →
 // v311: две печати лицензий — пропуска, заверенные прежней печатью (aDv-4ZF…) и новой (-lK5v1…), действуют оба;
 // service worker v146 — стартовой в кэше становится только программа, next/ и old/ не обслуживаются, чужие кэши не удаляются
 // v310 → // v310: вернулась прокрутка страниц на телефоне — «страховка» v309 (overflow-x на html и body) делала body контейнером прокрутки, а overscroll-behavior:none на body обрывал прокрутку; теперь overflow-x:clip только на body — body не становится контейнером
@@ -2032,7 +2035,8 @@ async function ensurePersistentStorage() {
 
 // Кэш дел по номеру — для подстановки доверителя/судьи/должностного лица там, где хранится только номер дела
 // Заседание считается назначенным, если оно не проведено (учёт старых статусов)
-const isPlanned = h => h && h.status !== 'Проведено' && h.status !== 'Отменено';
+// v312: «Дата прошла» — дата заседания прошла, результат не записан; статус ставит программа, снимает человек
+const isPlanned = h => h && h.status !== 'Проведено' && h.status !== 'Отменено' && h.status !== 'Дата прошла';
 
 // ── Визуальные помощники ──
 const AVA_COLORS = ['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#ef4444','#84cc16'];
@@ -2369,7 +2373,7 @@ function kindTagClass(kind) {
 }
 function statusBadge(s) {
   const map = {'Новое':'b-new','В работе':'b-work','Ожидание':'b-wait','Завершено':'b-done',
-    'Назначено':'b-new','Запланировано':'b-new','Проведено':'b-done','Отменено':'b-red','Перенесено':'b-wait',
+    'Назначено':'b-new','Запланировано':'b-new','Проведено':'b-done','Отменено':'b-red','Перенесено':'b-wait','Дата прошла':'b-wait',
     'Оплачено':'b-work','Частично оплачено':'b-wait','Не оплачено':'b-red'};
   return `<span class="badge ${map[s]||'b-done'}"><span class="dot"></span>${esc(s||'—')}</span>`;
 }
@@ -2721,7 +2725,7 @@ function caseNextStepHtml(c, hs) {
   const today = todayISO(); const dls = (c.deadlines || []).filter(d => !d.done && d.date);
   const over = dls.filter(d => d.date < today).sort((a, b) => a.date.localeCompare(b.date))[0];
   const unconf = dls.filter(d => d.autoKey && !d.confirmedAt && d.date >= today).sort((a, b) => a.date.localeCompare(b.date))[0];
-  const past = (hs || []).filter(h => h.status === 'Проведено' && h.autoDone && !h.result).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const past = (hs || []).filter(h => h.status === 'Дата прошла').sort((a, b) => b.date.localeCompare(a.date))[0]; // v312
   let text, btn, fn, tone = 'var(--accent)';
   if (over) { text = `Просрочен срок: ${over.title || 'срок'} — ${fmtDate(over.date)}`; btn = 'Открыть сроки'; fn = `vcTab(1)`; tone = 'var(--red)'; }
   else if (past) { text = `Заседание ${fmtDate(past.date)} прошло — результат не указан`; btn = 'Записать результат'; fn = `openAfterHearing('${jsq(past.id)}')`; tone = 'var(--orange)'; }
@@ -2751,7 +2755,7 @@ async function nowBlockRender(cases, hearings, tasks) {
   const push = it => { if (!hidden[it.key]) items.push(it); };
   dl.slice(0, 3).forEach(({ k, c, d }) => push({ key: 'd:' + c.id + ':' + (d.id || d.title), text: `${k < 0 ? '⚠ Просрочен ' + (-k) + ' дн.' : k === 0 ? 'Сегодня' : 'Завтра'}: ${d.title || 'срок'} · ${c.number || ''}${!d.confirmedAt && d.autoKey && k >= 0 ? ' · не подтверждён' : ''}`,
     btn: k < 0 ? 'Выполнено' : (!d.confirmedAt && d.autoKey ? 'Подтвердить' : 'Открыть'), fn: k < 0 ? `nowDeadlineDone('${jsq(c.id)}','${jsq(d.id || '')}','${jsq(d.title || '')}')` : `viewCase('${jsq(c.id)}',1)`, btn2: k < 0 ? 'Открыть' : '', fn2: `viewCase('${jsq(c.id)}',1)`, red: k < 0 }));
-  if (typeof _pastNoResult !== 'undefined' && _pastNoResult.length) { const h = _pastNoResult[0]; push({ key: 'h:' + h.id, text: `Заседание ${fmtDate(h.date)} · ${h.caseNum || ''}: результат не указан${_pastNoResult.length > 1 ? ' (ещё ' + (_pastNoResult.length - 1) + ')' : ''}`, btn: 'Уточнить', fn: `openAfterHearing('${jsq(h.id)}')`, btn2: _pastNoResult.length > 1 ? 'Все разобраны' : '', fn2: 'pastNoResultDismissAll()' }); }
+  if (typeof _pastNoResult !== 'undefined' && _pastNoResult.length) { const h = _pastNoResult[0]; push({ key: 'h:' + h.id, text: `Заседание ${fmtDate(h.date)} · ${h.caseNum || ''}: результат не указан${_pastNoResult.length > 1 ? ' (ещё ' + (_pastNoResult.length - 1) + ')' : ''}`, btn: 'Уточнить', fn: `openAfterHearing('${jsq(h.id)}')`, btn2: _pastNoResult.length > 1 ? 'Все проведены' : '', fn2: 'pastNoResultDismissAll()' }); }
   const tk = tasks.filter(t => !t.done && t.due && t.due <= today).sort((a, b) => a.due.localeCompare(b.due))[0];
   if (tk && items.length < 3) push({ key: 't:' + tk.id, text: `${tk.due < today ? 'Просрочена задача' : 'Задача на сегодня'}: ${tk.title || ''}${tk.caseNum ? ' · ' + tk.caseNum : ''}`, btn: 'Задачи', fn: "nav('tasks')", red: tk.due < today });
   const list = items.slice(0, 3);
@@ -2863,7 +2867,7 @@ async function renderDashboard() {
         const nowMin = now.getHours() * 60 + now.getMinutes();
         const before = evs.length;
         evs = evs.filter(e => {
-          if (e.status === 'Проведено' || e.status === 'Отменено') return false; // закрытые — сразу
+          if (e.status === 'Проведено' || e.status === 'Отменено' || e.status === 'Дата прошла') return false; // закрытые — сразу (v312: и «Дата прошла»)
           const m = /^(\d{2}):(\d{2})/.exec(e.time || '');
           if (!m) return true; // без времени (задачи, сроки, ДР) — актуально весь день
           return Number(m[1]) * 60 + Number(m[2]) + 60 > nowMin; // час люфта: идущее заседание не прячем
@@ -3236,7 +3240,7 @@ async function calEventsByDate() {
   const map = {};
   const push = (date, ev) => { if (!date) return; const k = String(date).slice(0,10); (map[k] = map[k] || []).push(ev); };
   const hearings = await getAll('hearings');
-  hearings.forEach(h => push(h.date, { type:'hearing', color: h.status==='Проведено' ? 'var(--text-faint)' : '#4F46E5',
+  hearings.forEach(h => push(h.date, { type:'hearing', color: h.status==='Проведено' ? 'var(--text-faint)' : h.status==='Дата прошла' ? 'var(--orange)' : '#4F46E5', // v312
     time: h.time||'', title: '⚖️ ' + (clientByCase(h.caseNum) || caseLabel(h.caseNum) || 'Заседание'), sub: [h.court, hearingPerson(h)].filter(Boolean).join(' · '), status: h.status||'', note: h.comment ? String(h.comment).trim() : '', id: h.id, act:`viewHearing('${h.id}')` }));
   const leads = await getAll('leads');
   leads.forEach(l => {
@@ -9454,14 +9458,15 @@ async function viewHearing(id) {
       ${(()=>{ if(!c) return ''; const sc=caseStageCourt(c); const line=secretaryLine(sc.secretary,sc.secretaryPhone,sc.cabinet,c.id); return line?`<div class="detail-row"><span class="k">Секретарь</span><span class="v">${line}</span></div>`:''; })()}
       ${h.room?`<div class="detail-row"><span class="k">Зал</span><span class="v">${esc(h.room)}</span></div>`:''}
       ${c&&c.official?`<div class="detail-row"><span class="k">Долж. лицо</span><span class="v">${esc(c.official)}</span></div>`:''}
-      <div class="detail-row"><span class="k">Статус</span><span class="v">${esc(h.status)}</span></div>
+      <div class="detail-row"><span class="k">Статус</span><span class="v">${h.status === 'Дата прошла' ? 'Дата прошла — результат не указан' : esc(h.status)}</span></div>
       <div class="detail-row"><span class="k">Участие</span><span class="v">${h.attended===true?'✅ участвовал(а) лично':'➖ без личного участия'}</span></div>
       ${h.result?`<div class="detail-row"><span class="k">Результат</span><span class="v">${esc(h.result)}</span></div>`:''}
     </div>
     ${h.comment?`<div class="card" style="border-left:3px solid var(--sig-amber);margin-bottom:10px"><div class="meta" style="margin-bottom:4px">💬 Комментарий к заседанию</div><div style="font-size:14px;white-space:pre-wrap">${esc(h.comment)}</div></div>`:''}
     ${(()=>{ /* v206: итог заседания одним нажатием. Предстоящее — все действия; проведённое без результата — только итоговые; с результатом — ничего лишнего */
       const upcoming = h.status !== 'Проведено', needResult = upcoming || !h.result;
-      return (upcoming ? `<button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}', true)">✅ Проведено, участвовал(а) лично</button>
+      return (h.status === 'Дата прошла' ? `<button class="btn-ghost" onclick="openAfterHearing('${jsq(h.id)}')">⚖️ После заседания: состоялось / отложено / отменено</button>` : '')
+        + (upcoming ? `<button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}', true)">✅ Проведено, участвовал(а) лично</button>
     <button class="btn-ghost" onclick="hearingMarkDone('${jsq(h.id)}')">✅ Проведено</button>` : '')
         + (needResult ? `<button class="btn-ghost" onclick="hearingNext('${jsq(h.id)}')">✅ Проведено + следующее заседание</button>
     <button class="btn-ghost" onclick="hearingDecision('${jsq(h.id)}')">⚖️ Вынесено решение</button>` : ''); })()}
@@ -9479,7 +9484,7 @@ async function hearingMarkDone(id, attended) { // v207: attended === true — о
     const h = (await getAll('hearings')).find(x => x.id === id);
     if (!h) return;
     if (h.status === 'Проведено') { toast('Заседание уже отмечено проведённым'); return; }
-    h.status = 'Проведено';
+    h.status = 'Проведено'; delete h.autoDone; // v312
     if (attended === true) h.attended = true;
     await put('hearings', h);
     if (h.caseNum) { try { await crmCaseLogByNum(h.caseNum, 'hearing_upd', 'Заседание проведено: ' + fmtDate(h.date) + (attended === true ? ' (участие лично)' : '')); } catch (e) { if (typeof logErr === "function") logErr("", e); } }
@@ -11833,7 +11838,7 @@ function updCardsHtml() {
   { const ua = navigator.userAgent || ''; const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1); const standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
     if (ios && !standalone && !localStorage.getItem('crm_ios_home_hide')) out.push(`<div class="card" style="border-left:3px solid var(--orange);margin-top:10px"><div class="row1"><div style="flex:1"><div class="title">📲 Добавьте программу на экран «Домой»</div><div class="meta">Safari удаляет данные сайтов, которыми не пользовались 7 дней. Установленная на экран «Домой» программа этому не подвержена. Поделиться → «На экран Домой». И включите синхронизацию с сервером — это резерв в любом случае.</div></div><button class="v-mini-btn" onclick="localStorage.setItem('crm_ios_home_hide','1');renderDashboard()">Понятно</button></div></div>`); } // v301
   if (_rulesReview && _rulesReview.length) out.push(`<div class="card" style="border-left:3px solid var(--accent);margin-top:10px"><div class="row1"><div style="flex:1"><div class="title">⏱ Правила сроков обновлены: есть что пересчитать</div><div class="meta">У ${_rulesReview.length} дел есть акты, для которых по текущим правилам полагается срок, а в деле его нет. Подтверждённые сроки не меняются.</div></div><button class="v-mini-btn" onclick="localStorage.setItem('crm_rules_review_hide','${APP_VER}');renderDashboard()">Скрыть</button></div>${_rulesReview.slice(0, 5).map(r => `<div class="row1" style="margin-top:6px"><div class="meta" style="flex:1">${esc(r.c.number || '')} · ${esc(cap1(actLabel(r.c.kind, r.act)))} от ${esc(fmtDate(r.base))}: ${esc([...r.missing.map(m => 'добавить «' + m.title + '»'), ...(r.changed || []).map(ch => '«' + ch.title + '»: было ' + fmtDate(ch.from) + ' → станет ' + fmtDate(ch.to))].join('; '))}</div><button class="v-mini-btn" onclick="rulesReviewApply('${jsq(r.c.id)}','${jsq(r.act)}')">${r.missing.length ? 'Добавить' : 'Пересчитать'}</button></div>`).join('')}</div>`); // v299/v301
-  if (_pastNoResult && _pastNoResult.length) out.push(`<div class="card" style="border-left:3px solid var(--orange);margin-top:10px"><div class="title">⚖️ Прошедшие заседания без результата: ${_pastNoResult.length}</div><div class="row1"><div class="meta" style="flex:1">Отмечены «Проведено» по дате — уточните: состоялось, отложено или отменено.</div><button class="v-mini-btn" onclick="pastNoResultDismissAll()">Считать разобранными</button></div>${_pastNoResult.slice(0, 5).map(h => `<div class="row1" style="margin-top:6px"><div class="meta" style="flex:1">${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''} · ${esc(h.caseNum || '')}${h.court ? ' · ' + esc(h.court) : ''}</div><button class="v-mini-btn" onclick="openAfterHearing('${jsq(h.id)}')">Уточнить</button></div>`).join('')}</div>`); // v294
+  if (_pastNoResult && _pastNoResult.length) out.push(`<div class="card" style="border-left:3px solid var(--orange);margin-top:10px"><div class="title">⚖️ Прошедшие заседания без результата: ${_pastNoResult.length}</div><div class="row1"><div class="meta" style="flex:1">Дата прошла, результат не указан — уточните: состоялось, отложено или отменено.</div><button class="v-mini-btn" onclick="pastNoResultDismissAll()">Считать все проведёнными</button></div>${_pastNoResult.slice(0, 5).map(h => `<div class="row1" style="margin-top:6px"><div class="meta" style="flex:1">${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''} · ${esc(h.caseNum || '')}${h.court ? ' · ' + esc(h.court) : ''}</div><button class="v-mini-btn" onclick="openAfterHearing('${jsq(h.id)}')">Уточнить</button></div>`).join('')}</div>`); // v294
   const lb = licBlockInfo(); if (lb && lb.status && localStorage.getItem('crm_license')) out.push(`<div class="card" style="border-left:3px solid var(--red);margin-top:10px"><div class="title">🔑 Полная версия отключена</div><div class="meta">${esc(licBlockText(lb))}. Настройки → Лицензия.</div></div>`); // v275
   if (LIC.badOrigin) out.push(`<div class="card" style="border-left:3px solid var(--orange);margin-top:10px"><div class="title">🔑 Программа открыта не с официального адреса</div><div class="meta">Работает деморежим. Откройте программу по адресу, полученному от автора.</div></div>`);
   const sv = UPD.srvVer || Number(localStorage.getItem('crm_srv_ver') || 0);
@@ -11891,10 +11896,13 @@ async function rulesReviewApply(caseId, act) {
   toast(msgs.length ? msgs.join('; ').slice(0, 200) : 'Сроки добавлены'); renderDashboard();
 }
 let _rulesReview = [];
-let _pastNoResult = []; // v294: заседания, отмеченные проведёнными по дате, без результата (30 дней)
-async function pastNoResultLoad() { const lim = todayISO(); const from = localISO(new Date(Date.now() - 14 * 864e5)); const seen = localStorage.getItem('crm_pastnoresult_seen') || ''; // v307: 14 дней; всё до отметки «Считать разобранными» не показывается
-  _pastNoResult = (await getAll('hearings')).filter(h => h.autoDone && !h.result && h.status === 'Проведено' && h.date < lim && h.date >= from && h.date > seen).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 50); }
-function pastNoResultDismissAll() { localStorage.setItem('crm_pastnoresult_seen', todayISO()); _pastNoResult = []; renderDashboard(); toast('Прошедшие заседания без результата больше не напоминаются — новые появятся снова'); }
+let _pastNoResult = []; // v294: заседания, дата которых прошла, без результата; v312 — по статусу «Дата прошла»
+async function pastNoResultLoad() { const lim = todayISO(); const from = localISO(new Date(Date.now() - 14 * 864e5)); const seen = localStorage.getItem('crm_pastnoresult_seen') || ''; // v307: 14 дней; всё до отметки «Считать все проведёнными» не показывается
+  _pastNoResult = (await getAll('hearings')).filter(h => h.status === 'Дата прошла' && !h.result && h.date < lim && h.date >= from && h.date > seen).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 50); }
+// v312: «Считать все проведёнными» — всем прошедшим заседаниям со статусом «Дата прошла» ставится «Проведено» (без результата), напоминание снимается
+async function pastNoResultDismissAll() { const today = todayISO(); let n = 0;
+  for (const h of await getAll('hearings')) if (h.status === 'Дата прошла' && h.date < today) { h.status = 'Проведено'; delete h.autoDone; h.afterAt = Date.now(); await put('hearings', h); n++; }
+  localStorage.setItem('crm_pastnoresult_seen', today); _pastNoResult = []; renderDashboard(); toast(n ? `Заседаний отмечено проведёнными: ${n}` : 'Прошедших заседаний без результата нет'); }
 async function updRenderDashboard() {
   try { await pastNoResultLoad(); } catch (e) { logErr('pastNoResult', e); }
   try { _rulesReview = localStorage.getItem('crm_rules_review_hide') === APP_VER ? [] : await rulesReviewFind(); } catch (e) { logErr('rulesReview', e); _rulesReview = []; } // v299
@@ -12397,12 +12405,17 @@ function actLabel(kind, act) {
 const cap1 = t => t.charAt(0).toUpperCase() + t.slice(1);
 // v220: накладка заседаний. Возвращает текст предупреждения или '' . В одном суде — зазор 60 минут;
 // в разных — сумма «времени в пути» до каждого из реквизитов судов (по умолчанию 60 минут на суд). Заседание без времени — не проверяется.
-// v243: прошедшие заседания, которым статус не выставили вручную, — «Проведено» (дата прошла). Отменённые не трогаются.
+// v243: прошедшие заседания, которым статус не выставили вручную, отмечаются при старте. Отменённые не трогаются.
+// v312: ставится «Дата прошла», а не «Проведено»; прежние авто-«Проведено» без результата (метка autoDone) переносятся в «Дата прошла»,
+// кроме тех, что были закрыты кнопкой «Считать разобранными» (дата не позже отметки crm_pastnoresult_seen).
 async function hearingsAutoDone() {
   const today = todayISO(), hs = await getAll('hearings'); let n = 0;
+  const seen = (typeof localStorage !== 'undefined' && localStorage.getItem('crm_pastnoresult_seen')) || '';
   for (const h of hs) {
-    if (!h.date || h.date >= today || h.status === 'Проведено' || h.status === 'Отменено') continue;
-    h.status = 'Проведено'; h.autoDone = Date.now(); await put('hearings', h); n++;
+    if (!h.date || h.date >= today) continue;
+    if (h.status === 'Проведено' && h.autoDone && !h.result && h.date > seen) { h.status = 'Дата прошла'; await put('hearings', h); n++; continue; }
+    if (h.status === 'Проведено' || h.status === 'Отменено' || h.status === 'Дата прошла') continue;
+    h.status = 'Дата прошла'; h.autoDone = Date.now(); await put('hearings', h); n++;
   }
   if (n) { if (typeof icsTouch === 'function') icsTouch(); }
   return n;
@@ -12418,7 +12431,7 @@ function busyClash(kind, item, hearings, meetings, found) {
   const travel = name => { const i = courtInfoGet(name); const v = i && Number(i.travel); return v > 0 ? v : 60; };
   const dur = m => Number(m && m.duration) > 0 ? Number(m.duration) : SLOT_MIN;
   const rows = [];
-  (hearings || []).forEach(o => { if (o.id !== item.id && o.date === item.date && o.status !== 'Отменено' && o.status !== 'Проведено') rows.push({ kind: 'hearing', o }); });
+  (hearings || []).forEach(o => { if (o.id !== item.id && o.date === item.date && o.status !== 'Отменено' && o.status !== 'Проведено' && o.status !== 'Дата прошла') rows.push({ kind: 'hearing', o }); });
   (meetings || []).forEach(o => { if (o.id !== item.id && o.date === item.date) rows.push({ kind: 'meeting', o }); });
   for (const r of rows) {
     const t1 = toMin(r.o.time); if (t1 === null) continue;
@@ -17549,7 +17562,7 @@ function crmHelpAttach(name,key){var o=window[name];if(typeof o!=='function')ret
   renderDashboard();
   navBadgeRefresh();
   await mailMigrateCorrespondence(); // v225
-  try { const n = await hearingsAutoDone(); if (n) console.log('заседаний отмечено проведёнными автоматически: ' + n); } catch (e) { if (typeof logErr === "function") logErr("", e); } // v243
+  try { const n = await hearingsAutoDone(); if (n) console.log('заседаний со статусом «Дата прошла»: ' + n); } catch (e) { if (typeof logErr === "function") logErr("", e); } // v243
   setTimeout(() => { bookPoll(true).catch(() => {}); if (Date.now() - (bookCfg().lastPub || 0) > 6 * 3600e3) bookPublish(true).catch(() => {}); }, 4000); // v245: заявки и обновление окон
   // Напоминания о заседаниях/сроках (если включены) — после загрузки данных
   setTimeout(() => notifCheck().catch(()=>{}), 1500);
