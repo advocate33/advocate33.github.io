@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 01:25 · c7c9177">
+<meta name="build" content="02.10.2026 01:58 · dcef651">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -5249,9 +5249,14 @@ function monCollectorHint(j) {
 }
 // «Проверить доставку» (коллектор 3.15, действие bridgecheck): коллектор сам спрашивает личный сервер своим кодом; программа
 // присылает SHA-256 своего кода сервера — сами коды не передаются. Ответ переводится в слова: что не так и где исправить.
+// Жалоба пользователя 02.10.2026: «Серверный сбор: unknown_action». Так отвечает не коллектор, а личный сервер crm-bridge —
+// значит, в поле «Адрес функции коллектора» вписан адрес сервера. Программа говорит это прямо и запрос не шлёт.
+const MON_COL_BRIDGE_MSG = 'по адресу из поля «Адрес функции коллектора» отвечает личный сервер crm-bridge, а не коллектор. В это поле нужен адрес функции collector-sud: Яндекс Облако → collector-sud → «Обзор» → «Ссылка для вызова». Адрес сервера crm-bridge вписывается не сюда, а в переменную BRIDGE_URL самой функции collector-sud.';
+function monColIsBridge(colUrl, srvUrl) { const n = u => String(u || '').trim().replace(/[/]+$/, '').toLowerCase(); return !!n(colUrl) && n(colUrl) === n(srvUrl); }
 function monBridgeCheckText(j, srvUrl, http) {
   const norm = u => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
   if (!j) return { ok: false, lines: ['Коллектор не ответил на проверку' + (http ? ' (HTTP ' + http + ')' : '') + '.'] };
+  if (j.error === 'unknown_action' && http === 200) return { ok: false, lines: ['Проверить нельзя: ' + MON_COL_BRIDGE_MSG] };
   if (j.error === 'unknown_action') return { ok: false, lines: ['Функция коллектора ещё прежней версии и не умеет проверять доставку. Версия 3.15 подтягивается сама в течение 10–15 минут после публикации — повторите позже.'] };
   if (j.error === 'forbidden') return { ok: false, lines: ['Секрет коллектора не подошёл — сверьте поле «Секрет коллектора» с переменной SECRET функции collector-sud.'] };
   const lines = [], p = j.ping || {};
@@ -5270,6 +5275,7 @@ async function monBridgeCheck() {
   const box = document.getElementById('col-bridge'), cfg = crmCollectorSrvCfg();
   if (!cfg.url || !cfg.secret) { toast('Сначала укажите адрес и секрет функции коллектора', true); return null; }
   if (!SRV.url || !SRV.secret) { toast('Сначала подключите личный сервер в листе «Синхронизация»', true); return null; }
+  if (monColIsBridge(cfg.url, SRV.url)) { if (box) { box.hidden = false; box.className = 'info-box warning'; box.textContent = 'Проверить нельзя: ' + MON_COL_BRIDGE_MSG; } toast('В поле адреса коллектора вписан адрес личного сервера', true); return null; }
   toast('Проверяю доставку: коллектор спрашивает личный сервер…');
   const hash = await crmMonHash(SRV.secret);
   const r = await crmCollectorCall({ action: 'bridgecheck', hash }, 30000); if (!r) return null;
@@ -5444,10 +5450,11 @@ function monitorCollectorSave() { localStorage.setItem('crm_collector_url', fv('
 async function monitorCollectorStatus(manual) {
   const el = document.getElementById('col-srv-status'), cfg = crmCollectorSrvCfg();
   if (!cfg.url || !cfg.secret) { if (el) el.textContent = 'Серверный сбор: укажите адрес и секрет функции.'; return null; }
+  if (monColIsBridge(cfg.url, SRV.url)) { if (el) el.textContent = 'Серверный сбор: ' + MON_COL_BRIDGE_MSG; monCollectorHintRender(null); if (manual) toast('В поле адреса коллектора вписан адрес личного сервера', true); return null; }
   if (manual) toast('Запрашиваю состояние сбора…');
   const r = await crmCollectorCall({ action: 'status' }); if (!r) return null;
   // 403 (forbidden) — неверный секрет, 404 — неверный адрес: подсказка словами (crmCollectorHttpHint v270), а не код
-  const bad = r.err || (r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте переменную SECRET функции collector-sud и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
+  const bad = r.err || (r.j && r.j.error === 'unknown_action' ? MON_COL_BRIDGE_MSG : r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте переменную SECRET функции collector-sud и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
   if (el) el.textContent = bad ? 'Серверный сбор: ' + bad : crmCollectorStatusLine(r.j);
   monCollectorHintRender(bad ? null : r.j);
   if (manual) toast(bad ? 'Коллектор: ' + bad : 'Коллектор ответил', !!bad);
