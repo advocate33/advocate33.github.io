@@ -13,7 +13,7 @@
 
    При выходе новой версии приложения поднимите число в CACHE.
 */
-const CACHE = 'crm-next-v30'; // новая версия: свой кэш, область /next/
+const CACHE = 'crm-next-v31'; // новая версия: свой кэш, область /next/
 const CACHE_PREFIX = 'crm-next-v'; // удаляем только СВОИ старые кэши — кэши прежней версии на том же сайте не трогаем
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
@@ -23,7 +23,9 @@ const START_URLS = [BASE, BASE + 'index.html'];
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     const c = await caches.open(CACHE);
-    await Promise.allSettled(START_URLS.map((u) => c.add(new Request(u, { cache: 'reload' }))));
+    // Стартовая страница обязана лечь в кэш: иначе установка считается неудачной и остаётся прежний sw (аудит 02.10.2026)
+    await c.add(new Request(BASE, { cache: 'reload' }));
+    await c.add(new Request(BASE + 'index.html', { cache: 'reload' })).catch(() => {});
     // Новая версия НЕ активируется сама — ждёт подтверждения из приложения
     // (баннер «Доступна новая версия»), чтобы не перезагружать экран посреди работы.
   })());
@@ -70,7 +72,8 @@ self.addEventListener('fetch', (e) => {
     e.respondWith((async () => {
       try {
         const resp = await fetch(req);
-        if (resp && resp.ok) {
+        // Стартовой в кэше становится только сама программа (урок 39): другая страница в /next/ её не подменит
+        if (resp && resp.ok && sameOrigin && (url.pathname === BASE || url.pathname === BASE + 'index.html')) {
           const c = await caches.open(CACHE);
           c.put(BASE, resp.clone()).catch(() => {});
           c.put(BASE + 'index.html', resp.clone()).catch(() => {});
