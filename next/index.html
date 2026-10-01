@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="01.10.2026 13:21 · 1da0ca7">
+<meta name="build" content="01.10.2026 22:29 · e6d31c2">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -2490,18 +2490,25 @@ async function mailRefresh(only) {
 
 // ▼▼▼ sync/monitor.js
 // ═══ sync/monitor.js — мониторинг судов (этап 4, часть 1): логика v312 (v165–v299) перенесена из прежней программы ═══
-// Источник — функции crmMon*/crmFlow*/crmCollector* из crm_v312.html (вырезаны tools-скриптом extract_mon3.py по именам,
-// перенос построчный). Изменено ровно три места: сроки считает nextActDeadlines (правило пользователя 30.09.2026) вместо
-// caseActDeadlinesApply (2 раза) и карточка дела открывается openCaseSheet вместо viewCase (2 раза). Ниже — заглушки для
-// функций прежнего интерфейса, которые логика дёргает после записи: обновление экранов делает nav().
+// Источник — функции crmMon*/crmFlow*/crmCollector* из crm_v312.html (вырезаны скриптом по именам, перенос построчный).
+// Изменено три вида мест: сроки считает nextActDeadlines (правило пользователя 30.09.2026) вместо caseActDeadlinesApply
+// (2 раза); карточка дела открывается openCaseSheet вместо viewCase (2 раза); системное confirm() в отмене применения убрано
+// (2 раза) — подтверждение спрашивает лист новой версии. Ниже — заглушки функций прежнего интерфейса, которые логика вызывает
+// после записи: в новой версии экраны перерисовывает nav().
 // Данные: хранилище monitorEvents (id, source, externalId, eventType hearing|caseflow|notice|casecard, title, date, courtNo,
 // caseUid, crmNumber, court, raw, hash, caseId, caseNum, status new|flow|applied|ignored, actApplied/actSkip, receivedAt).
 // Привязка к делу (crmMonBind): УИД → номер CRM от коллектора → номер в суде (единственное совпадение). Автоприменение
 // (crmMonAutoApply): заседания создаются/переносятся/дополняются, даты актов записываются в пустые поля дела, сроки считаются.
 // Получение событий — только по кнопке: srvCall('eventsget') личного сервера (коллектор кладёт их туда по таймеру).
 function navBadgeRefresh() {}
+// прежний интерфейс перерисовывал свои экраны сам; часть вызовов в v312 без проверки typeof — заглушки обязательны (урок 57)
+function renderCases() {}
+function renderCalendar() {}
+function icsTouch() {}
+function alarmsTouch() {}
+function bookRepublishSoon() {}
 function renderDashboard() { if (typeof UI === 'object' && UI.ready && UI.screen === 'today') nav('today'); }
-function openMonitorCenter() { nav('monitoring'); }
+function openMonitorCenter() { if (typeof UI === 'object' && UI.ready && UI.screen === 'monitoring') nav('monitoring'); }
 function crmFlowActRender() { if (typeof UI === 'object' && UI.ready) nav(UI.screen); }
 async function crmCollectorStatus(manual) { if (typeof monitorCollectorStatus === 'function') return monitorCollectorStatus(manual); }
 // ── далее — построчно из v312 ──
@@ -2646,11 +2653,11 @@ async function crmMonUndoHearing(hid) {
   const h = (await getAll('hearings')).find(x => x.id === hid); if (!h) return;
   const ev = h.monitorEventId ? (await getAll('monitorEvents')).find(x => x.id === h.monitorEventId) : null;
   if (h.movedFrom && h.movedFrom.date) {
-    if (!confirm(`Вернуть заседание ${h.caseNum || ''} на ${fmtDate(h.movedFrom.date)}${h.movedFrom.time ? ' ' + h.movedFrom.time : ''}?`)) return;
+    /* подтверждение — листом новой версии (monEventUndoAsk) */
     h.date = h.movedFrom.date; h.time = h.movedFrom.time; h.room = h.movedFrom.room; delete h.movedFrom; delete h.monitorEventId; delete h.courtSync; await put('hearings', h);
     if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание возвращено на ${fmtDate(h.date)} — отмена автоприменения данных суда`);
   } else {
-    if (!confirm(`Удалить заседание ${h.caseNum || ''} ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''}, созданное по данным суда?`)) return;
+    /* подтверждение — листом новой версии (monEventUndoAsk) */
     await del('hearings', h.id);
     if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание ${fmtDate(h.date)} удалено — отмена автоприменения данных суда`);
   }
@@ -5191,6 +5198,17 @@ function monitorSettingsState(srvUrl, col, autoOn) {
   out.push(autoOn ? 'Данные суда применяются автоматически (заседания и даты актов), спорное — остаётся на разбор.' : 'Автоприменение выключено — каждое событие разбирается вручную.');
   return { lines: out, ready: !!srvUrl && !!(col && col.url && col.secret) };
 }
+// что означает ошибка в ответе коллектора — словами и с действием (снимок пользователя 01.10.2026: «отправка на /bridge: сервер ответил: auth»)
+function monCollectorHint(j) {
+  const e = String((j && j.error) || '');
+  if (/auth/i.test(e)) return 'Коллектор собрал события, но личный сервер их не принял: секретный код в переменной BRIDGE_SECRET функции collector-sud не совпадает с секретным кодом сервера crm-bridge. Яндекс Облако → collector-sud → Редактор → Переменные окружения → BRIDGE_SECRET: впишите тот же код, что в листе «Синхронизация» → «Создать версию» → здесь «Собрать сейчас». Пока это не исправлено, новые события в программу не приходят.';
+  if (/BRIDGE_URL|BRIDGE_SECRET/.test(e)) return 'У функции collector-sud не заданы переменные BRIDGE_URL (адрес crm-bridge) и BRIDGE_SECRET (его секретный код) — добавьте их в Яндекс Облаке и создайте версию.';
+  if (/HTTP 403/.test(e)) return 'Личный сервер недоступен коллектору (403): функция crm-bridge должна быть публичной — Яндекс Облако → crm-bridge → «Обзор» → «Публичная функция».';
+  if (/HTTP 404/.test(e)) return 'Коллектор стучится по неверному адресу сервера (404): проверьте BRIDGE_URL в переменных функции collector-sud.';
+  if (j && j.failedCount && !e) return 'Часть ссылок не обработана (ошибок: ' + j.failedCount + ') — обычно сайт суда не ответил; повторится при следующем сборе.';
+  return '';
+}
+function monCollectorHintRender(j) { const box = document.getElementById('col-srv-hint'); if (!box) return; const h = monCollectorHint(j); box.textContent = h; box.hidden = !h; }
 // получить события с личного сервера (коллектор кладёт их туда): только по кнопке
 async function monitorPull() {
   if (!SRV.url) { toast('Подключите личный сервер: Настройки → «Мониторинг судов» или Синхронизация', true); return null; }
@@ -5213,7 +5231,7 @@ SCREENS.monitoring = async function () {
   const chips = MON_FILTERS.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.f === k}" onclick="monSet('f','${k}')">${esc(t)} <span class="chip-n">${m.counts[k] || 0}</span></button>`).join('');
   const col = crmCollectorSrvCfg(), st = monitorSettingsState(SRV.url, col, crmMonAutoOn());
   const hint = st.ready ? '' : `<div class="info-box">${esc(st.lines[0])} ${esc(st.lines[1])} Как настроить — Настройки → «Мониторинг судов».</div>`;
-  const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done"><button type="button" class="button small-btn primary" onclick="crmFlowActApply('${jsq(o.e.id)}')">${icon('check', 'icon-sm')}Записать</button><button type="button" class="button small-btn" onclick="crmFlowActSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
+  const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done"><button type="button" class="button small-btn primary" onclick="monOfferApply('${jsq(o.e.id)}')">${icon('check', 'icon-sm')}Записать</button><button type="button" class="button small-btn" onclick="monOfferSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
   const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openMonitorEventSheet('${jsq(r.e.id)}')"><span><span class="task-title">${esc(r.e.title || 'Событие')}</span><span class="task-sub">${esc([r.type, r.e.date ? fmtDate(r.e.date) : '', r.e.court, r.e.courtNo ? '№ ' + r.e.courtNo : '', r.bound ? 'дело ' + r.bound : '', r.problem].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status[0], r.status[1])}${r.problem && r.e.status === 'new' ? badge('нужен разбор', 'bad') : ''}</span></button>`).join('');
   return pageHead('Суды и мониторинг', m.last ? 'последнее получение ' + new Date(m.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'события с сайтов судов', btn('Получить события', 'monitorPull()', 'primary', 'cloud-download') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
     hint + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел и кладёт события на ваш сервер; кнопка «Получить события» забирает их сюда. Как настроить — Настройки → «Мониторинг судов».', btn('Получить события', 'monitorPull()', 'primary', 'cloud-download'))}</section>`;
@@ -5228,7 +5246,7 @@ async function openMonitorEventSheet(id, mode) {
     <div class="list-rows">${row('Дата', e.date ? fmtDate(e.date) + (bits && bits.time ? ' ' + bits.time : '') : '')}${row('Суд', e.court)}${row('№ в суде', e.courtNo)}${row('УИД', e.caseUid)}${row('Источник', e.source)}${row('Инстанция', parts.st)}${row('Результат', parts.res)}${row('Основание', parts.base)}${bits && bits.room ? row('Зал', bits.room) : ''}${row('Получено', e.receivedAt ? new Date(e.receivedAt).toLocaleString('ru-RU') : '')}
       ${c ? `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(c.id)}')"><span class="muted">Дело</span><span>${esc([c.number, c.client].filter(Boolean).join(' · '))}</span></button>` : ''}</div>
     ${e.status !== 'applied' ? `<div class="section-label">${c ? 'Другое дело' : 'Привязать к делу'}</div><div class="form-grid">${fSelect('mon-case', 'Дело', e.caseId || '', cases.map(x => [x.id, [x.number, x.client].filter(Boolean).join(' · ')]), true)}</div>
-    <div class="form-actions">${e.eventType === 'hearing' || (e.date && /заседани|слушани|беседа/i.test(e.title || '')) ? btn('Внести заседание', `monEventHearing('${jsq(e.id)}')`, 'primary small-btn', 'calendar-plus') : ''}${act && act !== 'inForce' ? btn('Записать дату акта', `monEventAct('${jsq(e.id)}')`, 'primary small-btn', 'check') : ''}${btn('Привязать к делу', `monEventBind('${jsq(e.id)}')`, 'small-btn', 'briefcase-business')}${btn('Черновик срока', `monEventDeadline('${jsq(e.id)}')`, 'small-btn', 'clock-3')}${e.status !== 'ignored' ? `<button type="button" class="button push-right" onclick="monEventIgnore('${jsq(e.id)}')">${icon('x')}Не применять</button>` : btn('Вернуть в новые', `monEventRestore('${jsq(e.id)}')`, '', 'rotate-ccw')}</div>` : `<div class="info-box">Событие применено${e.appliedAction === 'hearing' ? ' — заседание записано в дело' : e.appliedAction === 'card' ? ' — карточка дела дополнена' : ''}.${e.appliedRecordId && e.appliedAction === 'hearing' ? ` <button type="button" class="text-button" onclick="monEventUndo('${jsq(e.appliedRecordId)}')">Отменить применение</button>` : ''}</div>`}
+    <div class="form-actions">${e.eventType === 'hearing' || (e.date && /заседани|слушани|беседа/i.test(e.title || '')) ? btn('Внести заседание', `monEventHearing('${jsq(e.id)}')`, 'primary small-btn', 'calendar-plus') : ''}${act && act !== 'inForce' ? btn('Записать дату акта', `monEventAct('${jsq(e.id)}')`, 'primary small-btn', 'check') : ''}${btn('Привязать к делу', `monEventBind('${jsq(e.id)}')`, 'small-btn', 'briefcase-business')}${btn('Черновик срока', `monEventDeadline('${jsq(e.id)}')`, 'small-btn', 'clock-3')}${e.status !== 'ignored' ? `<button type="button" class="button push-right" onclick="monEventIgnore('${jsq(e.id)}')">${icon('x')}Не применять</button>` : btn('Вернуть в новые', `monEventRestore('${jsq(e.id)}')`, '', 'rotate-ccw')}</div>` : `<div class="info-box">Событие применено${e.appliedAction === 'hearing' ? ' — заседание записано в дело' : e.appliedAction === 'card' ? ' — карточка дела дополнена' : ''}.${e.appliedRecordId && e.appliedAction === 'hearing' ? ` <button type="button" class="text-button" onclick="monEventUndoAsk('${jsq(e.appliedRecordId)}')">Отменить применение</button>` : ''}</div>`}
     ${e.raw && !/^\s*\{/.test(e.raw) ? `<details><summary class="small muted">Текст события</summary><p class="small">${esc(String(e.raw).slice(0, 1500))}</p></details>` : ''}`;
   openSheet(e.title || 'Событие суда', body, mode || (UI.cur ? true : undefined));
 }
@@ -5240,7 +5258,17 @@ async function monEventAct(id) { const e = await getOne('monitorEvents', id); if
 async function monEventDeadline(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; openDeadlineForm(c.id, '', { baseEv: e.title || '', baseDate: e.date || '', src: 'Мониторинг: ' + (e.source || ''), title: crmDlAppealMatch(e.title) ? 'Апелляционная жалоба' : '', kind: 'procedural', monitorEventId: e.eventType !== 'caseflow' ? e.id : '' }); }
 async function monEventIgnore(id) { const e = await getOne('monitorEvents', id); if (!e) return; if (e.status === 'applied') { toast('Применённое событие нельзя пометить пропущенным', true); return; } e.status = 'ignored'; e.reviewedAt = Date.now(); await put('monitorEvents', e); toast('Событие оставлено без применения'); monEventReopen(id); }
 async function monEventRestore(id) { const e = await getOne('monitorEvents', id); if (!e) return; e.status = e.caseId && e.eventType === 'caseflow' ? 'flow' : 'new'; delete e.autoSkip; await put('monitorEvents', e); toast('Событие снова в разборе'); monEventReopen(id); }
-async function monEventUndo(hid) { await crmMonUndoHearing(hid); await refreshCasesCache(); nav(UI.screen); }
+// предложения дат актов: после записи или пропуска экран перерисовывается (в v312 это делал прежний интерфейс)
+async function monOfferApply(id) { await crmFlowActApply(id); await refreshCasesCache(); nav(UI.screen); }
+async function monOfferSkip(id) { await crmFlowActSkip(id); nav(UI.screen); }
+// отмена применения заседания: подтверждение листом (вместо системного confirm v312), затем crmMonUndoHearing
+async function monEventUndoAsk(hid) {
+  const h = await getOne('hearings', hid); if (!h) { toast('Заседание уже удалено'); return; }
+  const moved = h.movedFrom && h.movedFrom.date;
+  openSheet('Отменить применение', `<p>${moved ? `Заседание по делу ${esc(h.caseNum || '')} вернётся на ${esc(fmtDate(h.movedFrom.date))}${h.movedFrom.time ? ' ' + esc(h.movedFrom.time) : ''} — туда, где оно стояло до переноса по данным суда.` : `Заседание по делу ${esc(h.caseNum || '')} ${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}, созданное по данным суда, будет удалено в корзину.`} Событие суда получит отметку «не применять».</p>
+    <div class="form-actions"><button type="button" class="button danger" id="mon-undo-go" onclick="monEventUndo('${jsq(hid)}')">${icon('rotate-ccw')}Отменить применение</button><button type="button" class="button" onclick="sheetBack()">Не отменять</button></div>`, true);
+}
+async function monEventUndo(hid) { await crmMonUndoHearing(hid); await refreshCasesCache(); closeSheet(); nav(UI.screen); }
 // ── карточка дела: лента «данные суда» и невнесённые заседания ──
 function monitorCaseFlowHtml(c, events, hearings) {
   const miss = crmCaseFlowMissing(c, events, hearings);
@@ -5264,6 +5292,7 @@ function openMonitorSettingsSheet(mode) {
     <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Затем «Отправить список дел» ниже; при добавлении новых дел повторяйте.</div>
     <div class="form-actions">${btn('Отправить список дел', 'crmCollectorSendLinks()', '', 'arrow-right')}${btn('Собрать сейчас', 'monitorCollectorRun()', '', 'cloud-download')}</div>
     <div class="status-line" id="col-srv-status">${col.url && col.secret ? 'Серверный сбор: нажмите «Проверить»' : 'Серверный сбор: укажите адрес и секрет функции.'}</div>
+    <div class="info-box warning" id="col-srv-hint" hidden></div>
     <div class="section-label">Как применяются данные</div>
     <label class="check"><input type="checkbox" id="mon-auto"${auto ? ' checked' : ''} onchange="localStorage.setItem('crm_mon_auto', this.checked ? '1' : '0'); toast(this.checked ? 'Данные суда применяются автоматически' : 'Автоприменение выключено — события разбираются вручную')"><span>Применять данные суда автоматически: заседания создаются, переносятся и дополняются; дата акта записывается, если поле в деле пустое. Спорное — на разбор.</span></label>
     <div class="info-box">Если события не приходят: проверьте, что «Собрать сейчас» отвечает без ошибки (403 — неверный секрет, 404 — неверный адрес), что у дел указаны ссылки, и что список дел отправлен. Запрос к сайтам судов идёт из Облака, не с вашего устройства.</div>`, mode || true);
@@ -5277,6 +5306,7 @@ async function monitorCollectorStatus(manual) {
   // 403 (forbidden) — неверный секрет, 404 — неверный адрес: подсказка словами (crmCollectorHttpHint v270), а не код
   const bad = r.err || (r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте COLLECTOR_SECRET функции и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
   if (el) el.textContent = bad ? 'Серверный сбор: ' + bad : crmCollectorStatusLine(r.j);
+  monCollectorHintRender(bad ? null : r.j);
   if (manual) toast(bad ? 'Коллектор: ' + bad : 'Коллектор ответил', !!bad);
   return r;
 }
@@ -5285,7 +5315,7 @@ async function monitorCollectorRun() {
   toast('Сбор запущен — это может занять несколько минут');
   const r = await crmCollectorCall({ action: 'collect' }, 590000); if (!r) return;
   if (r.err) { toast('Сбой запуска сбора: ' + r.err, true); monitorCollectorStatus(false); return; }
-  const j = r.j; if (j && ('ok' in j)) { if (el) el.textContent = crmCollectorStatusLine(j); toast(j.ok ? `Сбор завершён: событий ${j.events ?? 0}, новых ${j.added ?? 0}` : 'Сбор завершился с ошибкой: ' + (j.error || ''), !j.ok); if (j.ok && (j.added || j.updated)) await monitorPull(); } else toast('Ответ функции не распознан (HTTP ' + r.http + ')', true);
+  const j = r.j; if (j && ('ok' in j)) { if (el) el.textContent = crmCollectorStatusLine(j); monCollectorHintRender(j); toast(j.ok ? `Сбор завершён: событий ${j.events ?? 0}, новых ${j.added ?? 0}` : 'Сбор завершился с ошибкой: ' + (j.error || ''), !j.ok); if (j.ok && (j.added || j.updated)) await monitorPull(); } else toast('Ответ функции не распознан (HTTP ' + r.http + ')', true);
 }
 
 // ▼▼▼ next/boot.js
