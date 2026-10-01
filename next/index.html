@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 01:58 · dcef651">
+<meta name="build" content="02.10.2026 02:28 · 41de289">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -2153,6 +2153,46 @@ function fsyncTouch() {}                             // 4 — файл синх�
 async function pushCloud() {}                        // 4 — Яндекс.Диск
 async function licInit() {}                          // 4 — лицензия
 
+// ▼▼▼ next/fixes.js
+// ═══ next/fixes.js — исправления перенесённого кода v312 (аудит 02.10.2026) ═══
+// Модули data/* перенесены из v312 дословно и сверяются с ней, поэтому исправления их дефектов живут здесь: функция
+// объявляется заново (в одном скрипте действует последнее объявление) либо оборачивается. Те же правки в прежнюю
+// программу — отдельным выпуском по решению пользователя.
+
+// 1. Ошибка чтения базы не выдаётся за пустую таблицу. В v312 getAllRaw при ошибке возвращал [] — слияние и копия приняли
+//    бы это за «записей нет». Теперь getAllRaw отказывает: слияние, копия, приём событий суда прерываются с ошибкой.
+//    Экраны читают через getAll: показывают пусто, но говорят об ошибке и пишут её в журнал.
+const DB_READ_ERR = {};
+function getAllRaw(store) {
+  return new Promise((res, rej) => {
+    let r; try { r = tx(store).getAll(); } catch (e) { rej(e); return; }
+    r.onsuccess = () => res(r.result || []);
+    r.onerror = () => rej(r.error || new Error('не удалось прочитать раздел базы «' + store + '»'));
+  });
+}
+function dbReadFailed(store, e) {
+  logErr('db:read:' + store, e);
+  const first = !Object.keys(DB_READ_ERR).length; DB_READ_ERR[store] = Date.now();
+  if (first && typeof toast === 'function') toast('Не удалось прочитать часть базы на этом устройстве. Записи не удалены. Закройте программу и откройте снова; если повторится — Настройки → «Журнал ошибок»', true);
+}
+async function getAll(store) {
+  try { return (await getAllRaw(store)).filter(r => !r || !r._deleted); } catch (e) { dbReadFailed(store, e); return []; }
+}
+
+// 2. Слияние дел: метка изменения поля (_ch) — наибольшая из двух версий. В v312 метки складывались как
+//    Object.assign({}, старшая, новая): поле бралось из старшей записи (её правка позже), а метка оставалась от новой —
+//    заниженная; на следующем слиянии более ранняя правка третьей копии могла победить.
+const mergeCaseRecordsV312 = mergeCaseRecords;
+mergeCaseRecords = function (cur, rec, base, events) {
+  const m = mergeCaseRecordsV312(cur, rec, base, events);
+  if (cur && rec && cur._ch && rec._ch) {
+    const ch = {};
+    for (const k of new Set([...Object.keys(cur._ch), ...Object.keys(rec._ch)])) ch[k] = Math.max(Number(cur._ch[k]) || 0, Number(rec._ch[k]) || 0);
+    m._ch = ch;
+  }
+  return m;
+};
+
 // ▼▼▼ next/guard.js
 // ═══ next/guard.js — запрет записи на личный сервер из новой версии ═══
 // Решение 28.09.2026: на этапе 1 новая версия только ЧИТАЕТ базу с сервера. Запись включается на этапе 2 — после того
@@ -3375,11 +3415,15 @@ function formModelCase(v, prev, ctx) {
   const opp = String(v.opponent || '').trim();
   // реквизиты противной стороны (ИНН, адрес, ОГРН, КПП — как участник v312): пустое поле формы прежнее значение не стирает
   const oppReq = {}; [['oppInn', 'inn'], ['oppAddr', 'addr'], ['oppOgrn', 'ogrn'], ['oppKpp', 'kpp']].forEach(([f, k]) => { const val = String(v[f] || '').trim(); if (val) oppReq[k] = k === 'inn' ? val.replace(/\D/g, '') : val; });
+  // противная сторона заменена другим лицом — реквизиты и контакты прежнего не остаются под новым именем
+  if (opp && oppIdx >= 0 && norm(obj.participants[oppIdx].name) !== norm(opp)) ['inn', 'addr', 'ogrn', 'kpp', 'zip', 'phone', 'email'].forEach(k => { delete obj.participants[oppIdx][k]; });
   if (opp) { if (oppIdx >= 0) Object.assign(obj.participants[oppIdx], { name: opp }, oppReq); else obj.participants.push({ name: opp, role: 'Ответчик', ...oppReq }); obj.opponent = opp; }
   else { if (oppIdx >= 0 && !obj.participants[oppIdx].inn && !obj.participants[oppIdx].phone) obj.participants.splice(oppIdx, 1); obj.opponent = ''; }
   // реквизиты доверителя пишутся в его запись в реестре (ИНН, адрес, индекс, тип); clientUpd — запись для put('clients'), если что-то изменилось
   let clientUpd = null;
-  { const upd = {}; [['clientInn', 'inn'], ['clientAddr', 'addr'], ['clientZip', 'zip'], ['clientType', 'type']].forEach(([f, k]) => { const val = String(v[f] || '').trim(); if (val && val !== String(clientRec[k] || '')) upd[k] = k === 'inn' ? val.replace(/\D/g, '') : val; });
+  // страховка: доверитель дела сменён, а в поле осталось значение прежнего — в карточку нового оно не пишется
+  const prevClient = prev ? (ctx.clients || []).find(c => c && !c._deleted && (prev.clientId ? c.id === prev.clientId : norm(c.name) === norm(prev.client))) || null : null;
+  { const upd = {}; [['clientInn', 'inn'], ['clientAddr', 'addr'], ['clientZip', 'zip'], ['clientType', 'type']].forEach(([f, k]) => { const val = String(v[f] || '').trim(); if (k !== 'type' && prevClient && prevClient.id !== clientRec.id && val && val === String(prevClient[k] || '').trim()) return; if (val && val !== String(clientRec[k] || '')) upd[k] = k === 'inn' ? val.replace(/\D/g, '') : val; });
     if (Object.keys(upd).length) { if (newClient) Object.assign(newClient, upd); else clientUpd = { ...clientRec, ...upd, updatedAt: Date.now() }; } }
   return { obj, newClient, clientUpd };
 }
@@ -3465,10 +3509,21 @@ async function openCaseForm(id, full) {
 function fInnRow(prefix, label, val) { return `<label class="field"><span>${esc(label)}</span><div class="inn-row"><input id="${prefix}Inn" value="${esc(val || '')}" autocomplete="off" inputmode="numeric" placeholder="10 или 12 цифр"><button type="button" class="button small-btn" onclick="innLookup('${prefix}')">${icon('search', 'icon-sm')}По ИНН</button></div></label>`; }
 // выбор известного доверителя или противной стороны из подсказок подставляет его реквизиты в пустые поля
 let FORM_PARTIES = {}, FORM_CLIENTS = {};
-function partyPrefillModel(rec, cur) { const out = {}; if (!rec) return out; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) if (rec[k] && !String(cur[k] || '').trim()) out[k] = rec[k]; return out; }
+// Смена лица в форме дела (аудит 02.10.2026: реквизиты прежнего доверителя записывались в карточку нового).
+// Правило: выбран известный человек — его реквизиты заменяют то, что стояло в полях; у выбранного значения нет, а в поле
+// осталось значение прежнего лица — поле очищается; то, что пользователь ввёл сам, не трогается.
+function partyPrefillModel(rec, cur, prevRec) {
+  const out = {};
+  for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) {
+    const v = String((cur && cur[k]) || '').trim();
+    if (rec && rec[k]) { if (String(rec[k]).trim() !== v) out[k] = rec[k]; }
+    else if (k !== 'type' && prevRec && prevRec[k] && v && v === String(prevRec[k]).trim()) out[k] = '';
+  }
+  return out;
+}
 function partyPrefillBind() {
-  const bind = (id, prefix, src) => { const el = document.getElementById(id); if (!el) return; el.addEventListener('change', () => { const rec = src()[el.value.trim()]; const get = k => document.getElementById(prefix + k[0].toUpperCase() + k.slice(1)); const cur = {}; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) cur[k] = (get(k) || {}).value || '';
-    const fill = partyPrefillModel(rec, cur); for (const k of Object.keys(fill)) { const f = get(k); if (f) f.value = fill[k]; } }); };
+  const bind = (id, prefix, src) => { const el = document.getElementById(id); if (!el) return; let prevName = el.value.trim(); el.addEventListener('change', () => { const rec = src()[el.value.trim()], prevRec = src()[prevName]; prevName = el.value.trim(); const get = k => document.getElementById(prefix + k[0].toUpperCase() + k.slice(1)); const cur = {}; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) cur[k] = (get(k) || {}).value || '';
+    const fill = partyPrefillModel(rec, cur, prevRec === rec ? null : prevRec); for (const k of Object.keys(fill)) { const f = get(k); if (f) f.value = fill[k]; } }); };
   bind('cf-client', 'cf-client', () => FORM_CLIENTS); bind('cf-opponent', 'cf-opp', () => FORM_PARTIES);
 }
 function caseFormMode(id, full) { localStorage.setItem(CASE_FORM_BRIEF_KEY, full ? '0' : '1'); caseFormReopen(id, full); }
@@ -5171,7 +5226,16 @@ async function savePayForm(finId, payId) {
   try { await put('finance', r.obj); } catch (e) { logErr('finance:pay', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(`Платёж ${fmtMoney(Number(String(fv('py-sum')).replace(/\s/g, '').replace(',', '.')) || 0)} записан` + (r.obj.status === 'Оплачено' ? ' · счёт оплачен полностью' : '')); finReopen(finId);
 }
-async function payRemove(finId, payId) { if (await finSave(finId, f => { if (!Array.isArray(f.payments)) return false; f.payments = f.payments.filter(x => x.id !== payId); if (Array.isArray(f.plan)) f.plan.forEach(pl => { if (pl.payId === payId) { pl.paid = false; pl.paidAt = ''; delete pl.payId; } }); finRecalc(f); }, 'Платёж удалён')) finReopen(finId); }
+// Удаление платежа — с надгробием _delItems.payments[id] = время (v294): иначе при слиянии со старой копией платёж вернётся
+// и изменит задолженность (аудит 02.10.2026). Отметка в рассрочке снимается, итог пересчитывается.
+function payRemoveModel(f, payId, now) {
+  if (!f || !Array.isArray(f.payments) || !f.payments.some(x => x && x.id === payId)) return false;
+  f.payments = f.payments.filter(x => x.id !== payId);
+  f._delItems = Object.assign({}, f._delItems, { payments: Object.assign({}, f._delItems && f._delItems.payments, { [payId]: now }) });
+  if (Array.isArray(f.plan)) f.plan.forEach(pl => { if (pl.payId === payId) { pl.paid = false; pl.paidAt = ''; delete pl.payId; } });
+  finRecalc(f); return true;
+}
+async function payRemove(finId, payId) { if (await finSave(finId, f => payRemoveModel(f, payId, Date.now()), 'Платёж удалён')) finReopen(finId); }
 // ── рассрочка: формой, а не prompt (улучшение против v312); остаток делится поровну, копейки — в последний платёж ──
 function planBuild(total, n, startISO) { n = Math.max(2, Math.min(36, Number(n) || 0)); const cents = Math.round(Number(total || 0) * 100), base = Math.floor(cents / n), out = []; for (let i = 0; i < n; i++) out.push({ due: addMonthsLocalISO(startISO, i), amount: (i === n - 1 ? cents - base * (n - 1) : base) / 100, paid: false }); return out; }
 async function openPlanForm(finId) {
