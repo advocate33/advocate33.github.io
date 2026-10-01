@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="01.10.2026 22:29 · e6d31c2">
+<meta name="build" content="02.10.2026 00:15 · 21dad7c">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -5201,12 +5201,43 @@ function monitorSettingsState(srvUrl, col, autoOn) {
 // что означает ошибка в ответе коллектора — словами и с действием (снимок пользователя 01.10.2026: «отправка на /bridge: сервер ответил: auth»)
 function monCollectorHint(j) {
   const e = String((j && j.error) || '');
-  if (/auth/i.test(e)) return 'Коллектор собрал события, но личный сервер их не принял: секретный код в переменной BRIDGE_SECRET функции collector-sud не совпадает с секретным кодом сервера crm-bridge. Яндекс Облако → collector-sud → Редактор → Переменные окружения → BRIDGE_SECRET: впишите тот же код, что в листе «Синхронизация» → «Создать версию» → здесь «Собрать сейчас». Пока это не исправлено, новые события в программу не приходят.';
+  if (/auth/i.test(e)) return 'Коллектор собрал события, но личный сервер их не принял: секретный код в переменной BRIDGE_SECRET функции collector-sud не совпадает с секретным кодом сервера crm-bridge. Яндекс Облако → collector-sud → Редактор → Переменные окружения → BRIDGE_SECRET: впишите тот же код, что в листе «Синхронизация» → «Создать версию» → здесь «Собрать сейчас». Пока это не исправлено, новые события в программу не приходят. Кнопка «Проверить доставку на сервер» ниже покажет, что именно не совпадает: адрес или код (лишний пробел в конце кода тоже даёт такую ошибку).';
   if (/BRIDGE_URL|BRIDGE_SECRET/.test(e)) return 'У функции collector-sud не заданы переменные BRIDGE_URL (адрес crm-bridge) и BRIDGE_SECRET (его секретный код) — добавьте их в Яндекс Облаке и создайте версию.';
   if (/HTTP 403/.test(e)) return 'Личный сервер недоступен коллектору (403): функция crm-bridge должна быть публичной — Яндекс Облако → crm-bridge → «Обзор» → «Публичная функция».';
   if (/HTTP 404/.test(e)) return 'Коллектор стучится по неверному адресу сервера (404): проверьте BRIDGE_URL в переменных функции collector-sud.';
   if (j && j.failedCount && !e) return 'Часть ссылок не обработана (ошибок: ' + j.failedCount + ') — обычно сайт суда не ответил; повторится при следующем сборе.';
   return '';
+}
+// «Проверить доставку» (коллектор 3.15, действие bridgecheck): коллектор сам спрашивает личный сервер своим кодом; программа
+// присылает SHA-256 своего кода сервера — сами коды не передаются. Ответ переводится в слова: что не так и где исправить.
+function monBridgeCheckText(j, srvUrl, http) {
+  const norm = u => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
+  if (!j) return { ok: false, lines: ['Коллектор не ответил на проверку' + (http ? ' (HTTP ' + http + ')' : '') + '.'] };
+  if (j.error === 'unknown_action') return { ok: false, lines: ['Функция коллектора ещё прежней версии и не умеет проверять доставку. Версия 3.15 подтягивается сама в течение 10–15 минут после публикации — повторите позже.'] };
+  if (j.error === 'forbidden') return { ok: false, lines: ['Секрет коллектора не подошёл — сверьте поле «Секрет коллектора» с переменной SECRET функции collector-sud.'] };
+  const lines = [], p = j.ping || {};
+  lines.push('Коллектор версии ' + (j.collectorVer || '?') + ' отправляет события на адрес: ' + (j.bridgeUrl || 'не задан') + '.');
+  const sameUrl = !!srvUrl && norm(j.bridgeUrl) === norm(srvUrl);
+  if (j.bridgeUrl && srvUrl && !sameUrl) lines.push('Это НЕ тот сервер, к которому подключена программа (' + srvUrl + '). Исправьте переменную BRIDGE_URL функции collector-sud на адрес из листа «Синхронизация».');
+  if (!j.secretSet) lines.push('Переменная BRIDGE_SECRET у функции collector-sud пустая — впишите в неё секретный код личного сервера.');
+  else if (j.sameAsProgram === false) lines.push('Код в переменной BRIDGE_SECRET (длина ' + j.secretLen + ' знаков) отличается от кода сервера, который введён в программе. Впишите в BRIDGE_SECRET тот же код, что в листе «Синхронизация», и нажмите «Создать версию».');
+  else if (j.sameAsProgram === true) lines.push('Код в BRIDGE_SECRET совпадает с кодом сервера в программе.');
+  if (j.secretHadSpaces || j.urlHadSpaces) lines.push('В переменных коллектора были лишние пробелы или перенос строки по краям — коллектор 3.15 их отбрасывает сам.');
+  if (p.ok) lines.push('Личный сервер принял код коллектора' + (p.serverVer ? ' (сервер версии ' + p.serverVer + ')' : '') + ' — доставка работает. Нажмите «Собрать сейчас», затем «Получить события».');
+  else lines.push('Личный сервер не принял коллектор: ' + (p.error === 'auth' ? 'код не подошёл (auth).' : (p.error || 'нет ответа') + (p.http ? ' · HTTP ' + p.http : '') + '.'));
+  return { ok: !!p.ok && (sameUrl || !srvUrl), lines };
+}
+async function monBridgeCheck() {
+  const box = document.getElementById('col-bridge'), cfg = crmCollectorSrvCfg();
+  if (!cfg.url || !cfg.secret) { toast('Сначала укажите адрес и секрет функции коллектора', true); return null; }
+  if (!SRV.url || !SRV.secret) { toast('Сначала подключите личный сервер в листе «Синхронизация»', true); return null; }
+  toast('Проверяю доставку: коллектор спрашивает личный сервер…');
+  const hash = await crmMonHash(SRV.secret);
+  const r = await crmCollectorCall({ action: 'bridgecheck', hash }, 30000); if (!r) return null;
+  const t = r.err ? { ok: false, lines: ['Коллектор не ответил: ' + r.err] } : monBridgeCheckText(r.j, SRV.url, r.http);
+  if (box) { box.hidden = false; box.className = 'info-box' + (t.ok ? '' : ' warning'); box.innerHTML = t.lines.map(l => `<div>${esc(l)}</div>`).join(''); }
+  toast(t.ok ? 'Доставка на личный сервер работает' : 'Доставка не работает — причина в листе', !t.ok);
+  return t;
 }
 function monCollectorHintRender(j) { const box = document.getElementById('col-srv-hint'); if (!box) return; const h = monCollectorHint(j); box.textContent = h; box.hidden = !h; }
 // получить события с личного сервера (коллектор кладёт их туда): только по кнопке
@@ -5293,6 +5324,8 @@ function openMonitorSettingsSheet(mode) {
     <div class="form-actions">${btn('Отправить список дел', 'crmCollectorSendLinks()', '', 'arrow-right')}${btn('Собрать сейчас', 'monitorCollectorRun()', '', 'cloud-download')}</div>
     <div class="status-line" id="col-srv-status">${col.url && col.secret ? 'Серверный сбор: нажмите «Проверить»' : 'Серверный сбор: укажите адрес и секрет функции.'}</div>
     <div class="info-box warning" id="col-srv-hint" hidden></div>
+    <div class="form-actions" style="margin-top:8px">${btn('Проверить доставку на сервер', 'monBridgeCheck()', '', 'shield-check')}</div>
+    <div class="info-box" id="col-bridge" hidden></div>
     <div class="section-label">Как применяются данные</div>
     <label class="check"><input type="checkbox" id="mon-auto"${auto ? ' checked' : ''} onchange="localStorage.setItem('crm_mon_auto', this.checked ? '1' : '0'); toast(this.checked ? 'Данные суда применяются автоматически' : 'Автоприменение выключено — события разбираются вручную')"><span>Применять данные суда автоматически: заседания создаются, переносятся и дополняются; дата акта записывается, если поле в деле пустое. Спорное — на разбор.</span></label>
     <div class="info-box">Если события не приходят: проверьте, что «Собрать сейчас» отвечает без ошибки (403 — неверный секрет, 404 — неверный адрес), что у дел указаны ссылки, и что список дел отправлен. Запрос к сайтам судов идёт из Облака, не с вашего устройства.</div>`, mode || true);
