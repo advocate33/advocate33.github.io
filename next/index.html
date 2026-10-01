@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="01.10.2026 00:24 · 032110b">
+<meta name="build" content="01.10.2026 13:21 · 1da0ca7">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -2159,7 +2159,8 @@ async function licInit() {}                          // 4 — лицензия
 // как перенесённые тесты слияния пройдут на собранном файле и перед первой записью будет снята копия базы с сервера.
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'blobget', 'bloblist', 'track'];
+// eventsget — события судов с сервера (этап 4): чтение
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'blobget', 'bloblist', 'track', 'eventsget'];
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
@@ -2487,6 +2488,403 @@ async function mailRefresh(only) {
   return { updated, errors: j.errors || {}, skipped: plan.skipped };
 }
 
+// ▼▼▼ sync/monitor.js
+// ═══ sync/monitor.js — мониторинг судов (этап 4, часть 1): логика v312 (v165–v299) перенесена из прежней программы ═══
+// Источник — функции crmMon*/crmFlow*/crmCollector* из crm_v312.html (вырезаны tools-скриптом extract_mon3.py по именам,
+// перенос построчный). Изменено ровно три места: сроки считает nextActDeadlines (правило пользователя 30.09.2026) вместо
+// caseActDeadlinesApply (2 раза) и карточка дела открывается openCaseSheet вместо viewCase (2 раза). Ниже — заглушки для
+// функций прежнего интерфейса, которые логика дёргает после записи: обновление экранов делает nav().
+// Данные: хранилище monitorEvents (id, source, externalId, eventType hearing|caseflow|notice|casecard, title, date, courtNo,
+// caseUid, crmNumber, court, raw, hash, caseId, caseNum, status new|flow|applied|ignored, actApplied/actSkip, receivedAt).
+// Привязка к делу (crmMonBind): УИД → номер CRM от коллектора → номер в суде (единственное совпадение). Автоприменение
+// (crmMonAutoApply): заседания создаются/переносятся/дополняются, даты актов записываются в пустые поля дела, сроки считаются.
+// Получение событий — только по кнопке: srvCall('eventsget') личного сервера (коллектор кладёт их туда по таймеру).
+function navBadgeRefresh() {}
+function renderDashboard() { if (typeof UI === 'object' && UI.ready && UI.screen === 'today') nav('today'); }
+function openMonitorCenter() { nav('monitoring'); }
+function crmFlowActRender() { if (typeof UI === 'object' && UI.ready) nav(UI.screen); }
+async function crmCollectorStatus(manual) { if (typeof monitorCollectorStatus === 'function') return monitorCollectorStatus(manual); }
+// ── далее — построчно из v312 ──
+function crmMonNorm(v){return String(v||'').toLowerCase().replace(/[\s–—-]+/g,'').replace(/[«»"']/g,'');}
+async function crmMonHash(text){const b=new TextEncoder().encode(String(text||'')),h=await crypto.subtle.digest('SHA-256',b);return Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');}
+function crmMonIsoDate(v){const s=String(v||'').trim();let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return `${m[1]}-${m[2]}-${m[3]}`;m=s.match(/(\d{1,2})[.\/]([0-1]?\d)[.\/](\d{4})/);return m?`${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`:'';}
+function crmMonField(o,names){for(const n of names){if(o?.[n]!==undefined&&o[n]!==null)return o[n];}return'';}
+async function crmMonNormalizeRows(rows,source){
+  const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const crmNumber=String(crmMonField(raw,['crmNumber','crm_number'])).trim();const evCourt=String(crmMonField(raw,['court','суд'])).trim();/* v253: суд страницы */
+    /* v238: порядок привязки — 1) УИД дела (если у дела он записан), 2) номер дела CRM от коллектора, 3) номер в суде (единственное совпадение; при нескольких — предпочесть дело с номером CRM, иначе неоднозначно).
+       Если у события есть УИД, а дело по номеру имеет другой УИД — конфликт: ссылка в деле ведёт на чужое дело, не привязываем. */
+    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,ambiguous,uidConflict,raw:raw.raw||rawText,hash,caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:(type==='caseflow'&&match)?'flow':'new',receivedAt:Date.now()});}return out;
+}
+function crmMonBind(cases,e){
+  const nz=crmMonNorm,uidE=nz(e.caseUid),numE=nz(e.crmNumber),noE=nz(e.courtNo);
+  if(uidE){const byUid=cases.filter(c=>nz(c.caseUid)===uidE);if(byUid.length)return{match:byUid[0],ambiguous:false,uidConflict:false};}
+  const byCrm=numE?cases.find(c=>nz(c.number)===numE):null;
+  if(byCrm){if(uidE&&nz(byCrm.caseUid)&&nz(byCrm.caseUid)!==uidE)return{match:null,ambiguous:false,uidConflict:true};return{match:byCrm,ambiguous:false,uidConflict:false};}
+  if(!noE)return{match:null,ambiguous:false,uidConflict:false};
+  const byNo=cases.filter(c=>[c.courtNo,c.number,c.courtNoApp,c.courtNoCass].some(v=>v&&nz(v)===noE));
+  const fit=byNo.filter(c=>!(uidE&&nz(c.caseUid)&&nz(c.caseUid)!==uidE));/* дела с другим УИД не подходят */
+  if(fit.length===1)return{match:fit[0],ambiguous:false,uidConflict:false};
+  if(fit.length>1)return{match:null,ambiguous:true,uidConflict:false};
+  return{match:null,ambiguous:false,uidConflict:byNo.length>0&&!!uidE};
+}
+async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.source+'|'+x.externalId,x])),added=[];let updated=0;for(const x of rows){if(hashes.has(x.hash))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.source+'|'+x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);added.push(x);}
+  { /* v238: УИД с сайта суда запоминается в деле при первой привязке по номеру — дальше привязка идёт по УИД */
+    const learn=new Map();added.forEach(x=>{if(x.caseId&&x.caseUid&&!learn.has(x.caseId))learn.set(x.caseId,x.caseUid);});
+    if(learn.size){const cs=await getAll('cases');for(const [cid,u] of learn){const c=cs.find(y=>y.id===cid);if(c&&!c.caseUid){c.caseUid=u;await put('cases',c);await crmCaseLogByNum(c.number,'flow','УИД дела записан по данным суда: '+u);}}}
+  }
+  { /* v239: карточки дел с сайта суда при плановом сборе — заполняем пустые поля дела */
+    const cards=added.filter(x=>x.eventType==='casecard'&&x.caseId);
+    if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null;try{card=JSON.parse(x.raw||'{}').card;}catch (e) { if (typeof logErr === "function") logErr("", e); }if(!card)continue;const res=crmCaseApplyCard(c,card);if(res.done.length){addCaseHistoryEvent(c,'courtCard','',res.done.join('; '),'monitor');await put('cases',c);await crmCaseLogByNum(c.number,'flow','С сайта суда: '+res.done.join('; '));}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
+  }
+  const okAny=added.length||updated;if(!opts.quiet)toast(okAny?`Добавлено событий: ${added.length}${updated?`, обновлено: ${updated}`:''}`:'Новых событий нет — дубликаты пропущены',!okAny);if(okAny&&crmMonAutoOn()){try{await crmMonAutoApply(null);}catch(e){console.warn('auto-apply',e);}}if(!opts.quiet){openMonitorCenter();renderDashboard();}}
+const crmMonAutoOn = () => localStorage.getItem('crm_mon_auto') !== '0';
+function crmMonStageOf(e) {
+  const raw = String(e && e.raw || '');
+  try { const j = JSON.parse(raw); if (j && j.st) return String(j.st); } catch (x) {} /* v285: не JSON — штатно */
+  const m = raw.match(/·\s*(Первая инстанция|Апелляция|Кассация|Надзор)/); if (m) return m[1];
+  const t = String(e && e.title || ''); return /апелляц/i.test(t) ? 'Апелляция' : /кассац/i.test(t) ? 'Кассация' : '';
+}
+function crmMonCourtFor(c, stage, e) { // v253: e — событие; если у дела нет суда этой инстанции, берётся суд страницы и записывается в дело
+  const evCourt = e && e.court ? String(e.court) : '';
+  const f = stage === 'Апелляция' ? ['courtApp', 'judgeApp'] : (stage === 'Кассация' || stage === 'Надзор') ? ['courtCass', 'judgeCass'] : stage === 'Первая инстанция' ? ['court', 'judge'] : null;
+  if (!f) { const sc = caseStageCourt(c); return { court: sc.court || evCourt, judge: sc.judge }; }
+  if (!c[f[0]] && evCourt) { c[f[0]] = evCourt; c._courtFilled = f[0]; }
+  return { court: c[f[0]] || evCourt, judge: c[f[1]] || '' };
+}
+const RE_ROOM_TEXT = /^(судебн\S*\s+)?зал|^каб(инет|\.)?\b|^кабинет|^помещени/i;
+const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен|вынесен\S* (определени|постановлени)|определени\S* о (подготовке|назначении|принятии|возбуждении|оставлении|возврат)|назначени\S* дела к/i; // v249
+const crmMonEventHead = e => String(e && e.title || '').replace(/\([^)]*\)/g, ' ').split(/\s\d{2}\.\d{2}\.\d{4}|\s—\s|:\s+/)[0].trim();
+const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(crmMonEventHead(e));
+async function crmMonRestoreHearings() {
+  const evs = await getAll('monitorEvents'); let n = 0;
+  for (const e of evs) {
+    if (e.eventType !== 'caseflow' || !e.date) continue;
+    let isJson = false; try { JSON.parse(e.raw || ''); isJson = true; } catch (x) {} /* v285: не JSON — штатно */
+    if (isJson) continue; // настоящие строки движения приходят с JSON в raw
+    if (!/заседани|слушани|беседа/i.test(crmMonEventHead(e)) || crmMonIsFakeHearing(e)) continue;
+    e.eventType = 'hearing'; e.status = 'new'; delete e.autoSkip; await put('monitorEvents', e); n++;
+  }
+  return n;
+}
+function crmDecodeEntities(t) { const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raquo: '»', rarr: '→', larr: '←', ndash: '–', mdash: '—', hellip: '…', apos: "'" }; return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
+function crmMonHearingBits(e) {
+  const txt = String(e.title || '') + ' ' + String(e.raw || '');
+  const time = (txt.match(/(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?!\d)/) || []).slice(1).filter(Boolean).map((v, i) => i === 0 ? String(v).padStart(2, '0') : v).join(':');
+  const room = crmRoomFrom(txt) || (txt.match(/каб(?:инет)?\.?\s*№?\s*([0-9]{1,4}[А-Яа-я]?)/i) || [])[1] || '';
+  let res = (String(e.title || '').split(/\s—\s|:\s+/)[1] || '').replace(/^Каб\.?\s*№?\s*\d+\S*$/i, '').trim(); // «: » — результат прошедшего; «09:00» не делится (нет пробела после двоеточия)
+  let room2 = room; if (RE_ROOM_TEXT.test(res)) { if (!room2) room2 = res.replace(/^судебн\S*\s+/i, ''); res = ''; } // v253
+  return { time, room: room2, result: res };
+}
+async function crmMonAutoApply(rows) {
+  const today = todayISO();
+  if (!rows) { try { await crmMonRestoreHearings(); } catch (e) { if (typeof logErr === "function") logErr("", e); } try { await crmMonBindOrphans(); } catch (e) { if (typeof logErr === "function") logErr("", e); } } // v265: вернуть заседания из движения и привязать события без дела
+  const all = await getAll('monitorEvents');
+  const cand = (rows || all).filter(e => !e._deleted && e.caseId && e.status !== 'applied' && e.status !== 'ignored' && !e.autoSkip);
+  if (!cand.length) return { hearings: 0, moved: 0, updated: 0, acts: 0 };
+  const cases = await getAll('cases'), hearings = await getAll('hearings');
+  const byCase = id => hearings.filter(h => h.caseId === id || (!h.caseId && h.caseNum && cases.find(c => c.id === id)?.number === h.caseNum)); // v299: номер не перебивает чужой caseId
+  const courtDates = {}; all.forEach(e => { if (e.eventType === 'hearing' && e.caseId && e.date >= today) (courtDates[e.caseId] = courtDates[e.caseId] || new Set()).add(e.date); });
+  const n = { hearings: 0, moved: 0, updated: 0, acts: 0 };
+  const touchedCases = new Map();
+  const caseOf = id => { if (!touchedCases.has(id)) { const c = cases.find(x => x.id === id); if (c) touchedCases.set(id, c); } return touchedCases.get(id); };
+  for (const e of cand) {
+    const c = caseOf(e.caseId); if (!c || c.archived) continue;
+    if (e.eventType === 'hearing' && e.date) {
+      if (crmMonIsFakeHearing(e)) { e.status = 'flow'; e.eventType = 'caseflow'; await put('monitorEvents', e); continue; } // v240: это движение дела, не заседание
+      const b = crmMonHearingBits(e), list = byCase(c.id).filter(h => h.status !== 'Отменено');
+      const scE = crmMonCourtFor(c, crmMonStageOf(e), e), sameDay = list.filter(x => x.date === e.date); // v294: сначала точное совпадение по времени и суду
+      const sameCourt = sameDay.filter(x => !x.court || !scE.court || crmMonNorm(x.court) === crmMonNorm(scE.court));
+      const tmin = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+      const near = x => { const a = tmin(x.time), c2 = tmin(b.time); return a === null || c2 === null || Math.abs(a - c2) <= 180; }; // v299: разница больше 3 часов — другое событие
+      let h = (sameCourt.length === 1 && near(sameCourt[0])) ? sameCourt[0] : (sameCourt.find(x => b.time && x.time === b.time) || null), how = '';
+      if (h) {
+        const ch = [];
+        if (b.time && b.time !== h.time && h.status !== 'Проведено') { ch.push('время ' + (h.time || '—') + ' → ' + b.time); h.time = b.time; }
+        if (b.room && b.room !== h.room) { ch.push('зал ' + (h.room || '—') + ' → ' + b.room); h.room = b.room; }
+        { const sc2 = crmMonCourtFor(c, crmMonStageOf(e), e); if (sc2.court && sc2.court !== h.court) { ch.push('суд ' + (h.court || '—') + ' → ' + sc2.court); h.court = sc2.court; if (sc2.judge && !e.judge) h.judge = sc2.judge; } if (h.result && RE_ROOM_TEXT.test(h.result)) { if (!h.room) h.room = h.result.replace(/^судебн\S*\s+/i, ''); h.result = ''; ch.push('итог «' + b.result + '» — это место, перенесено в зал'); } } // v246/v253
+        if (e.judge && !h.judge) { ch.push('судья ' + e.judge); h.judge = e.judge; }
+        if (b.result && !h.result && e.date < today) { ch.push('результат: ' + b.result); h.result = b.result; }
+        if (e.date < today && h.status !== 'Проведено' && h.status !== 'Отменено') { ch.push('статус: проведено'); h.status = 'Проведено'; } // v243
+        if (!ch.length) { e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); e.autoApplied = true; await put('monitorEvents', e); continue; }
+        how = 'дополнено по данным суда: ' + ch.join(', '); n.updated++;
+      } else if (e.date >= today) {
+        const scM = crmMonCourtFor(c, crmMonStageOf(e), e); // v271: переносить можно только заседание той же инстанции (тот же суд)
+        const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date) && (!x.court || !scM.court || crmMonNorm(x.court) === crmMonNorm(scM.court)));
+        if (free.length === 1) { h = free[0]; how = `перенесено по данным суда: ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} → ${fmtDate(e.date)}${b.time ? ' ' + b.time : ''}`; h.movedFrom = { date: h.date, time: h.time || '', room: h.room || '' }; h.date = e.date; if (b.time) h.time = b.time; if (b.room) h.room = b.room; if (e.judge) h.judge = e.judge; if (scM.court && !h.court) h.court = scM.court; if (crmMonStageOf(e) && !h.stage) h.stage = crmMonStageOf(e); n.moved++; }
+        else { const sc = crmMonCourtFor(c, crmMonStageOf(e), e); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } // v246/v253: суд по инстанции события, при пустом — с самой страницы
+      } else {
+        const sc = crmMonCourtFor(c, crmMonStageOf(e), e); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Проведено', result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now() }; hearings.push(h); how = 'прошедшее заседание записано по данным суда'; n.hearings++;
+      }
+      h.monitorEventId = h.monitorEventId || e.id; h.courtSync = Date.now();
+      await put('hearings', h);
+      if (c._courtFilled) { const f0 = c._courtFilled; delete c._courtFilled; const cf = (await getAll('cases')).find(x => x.id === c.id); if (cf && !cf[f0]) { cf[f0] = c[f0]; addCaseHistoryEvent(cf, f0, '', c[f0], 'monitor'); await put('cases', cf); await crmCaseLogByNum(c.number, 'flow', 'Суд инстанции записан со страницы суда: ' + c[f0]); } } // v253
+      await crmCaseLogByNum(c.number, 'hearing_upd', `Заседание ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} — ${how}`);
+      e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); e.autoApplied = true; await put('monitorEvents', e);
+      if (typeof icsTouch === 'function') icsTouch();
+    } else if (e.eventType === 'caseflow' || e.eventType === 'notice') {
+      const act = crmMonActOf(e); // v234: и уведомления о публикации
+      if (!act || act === 'inForce' || e.actApplied || e.actSkip) continue;
+      const f = flowActFieldFor(c, act); if (!f) continue;
+      { const cf = (await getAll('cases')).find(x => x.id === c.id); if (cf) { Object.assign(c, cf); touchedCases.set(c.id, c); } } // v251: свежая копия — дело могли править во время сбора
+      if (c[f[0]]) { if (c[f[0]] === e.date) { e.actApplied = Date.now(); await put('monitorEvents', e); } continue; } // заполнено: совпадает — учтено; иначе конфликт, остаётся предложение
+      const prev = JSON.parse(JSON.stringify(c));
+      c[f[0]] = e.date; addCaseHistoryEvent(c, f[0], '', e.date, 'monitor');
+      if (act === 'noMotion' && !c.i1FixDueDate) c.i1FixDueDate = crmFixDueFrom(e);
+      const msgs = nextActDeadlines(c, prev); { const m = caseFixDueApply(c, prev); if (m) msgs.push(m); }
+      if (act === 'noMotion' && !c.i1FixDueDate) { c.deadlines = Array.isArray(c.deadlines) ? c.deadlines : []; if (!c.deadlines.some(d => d.autoKey === 'act:noMotion:ask' && !d.done)) { c.deadlines.push({ id: uid('СР'), title: 'Уточнить срок устранения недостатков (иск оставлен без движения)', date: addDaysLocalISO(e.date, 2), note: 'срок указан в определении суда — впишите в дело поле «Срок устранения недостатков»', done: false, kind: 'control', baseEv: 'Определение от ' + fmtDate(e.date), baseDate: e.date, norm: 'ст. 136 ГПК РФ', src: 'Судебный акт', autoKey: 'act:noMotion:ask', confirmedAt: '', confirmedDate: '' }); msgs.push('Уточнить срок устранения недостатков'); } }
+      if (msgs.length) addCaseHistoryEvent(c, 'deadline', '', msgs.join(' | '), 'monitor');
+      await put('cases', c); await crmCaseLogByNum(c.number, 'deadline', `${f[1]}: ${fmtDate(e.date)} — записано по данным суда${msgs.length ? '; ' + msgs.join(' | ') : ''}`);
+      e.actApplied = Date.now(); e.autoApplied = true; await put('monitorEvents', e); n.acts++;
+    }
+  }
+  const tot = n.hearings + n.moved + n.updated + n.acts;
+  if (tot) toast(`По данным суда: заседаний создано ${n.hearings}, перенесено ${n.moved}, дополнено ${n.updated}, дат актов ${n.acts} — подробности в журналах дел`);
+  if (typeof renderCalendar === 'function') renderCalendar(); if (typeof renderCases === 'function') renderCases(); navBadgeRefresh();
+  return n;
+}
+async function crmMonUndoHearing(hid) {
+  const h = (await getAll('hearings')).find(x => x.id === hid); if (!h) return;
+  const ev = h.monitorEventId ? (await getAll('monitorEvents')).find(x => x.id === h.monitorEventId) : null;
+  if (h.movedFrom && h.movedFrom.date) {
+    if (!confirm(`Вернуть заседание ${h.caseNum || ''} на ${fmtDate(h.movedFrom.date)}${h.movedFrom.time ? ' ' + h.movedFrom.time : ''}?`)) return;
+    h.date = h.movedFrom.date; h.time = h.movedFrom.time; h.room = h.movedFrom.room; delete h.movedFrom; delete h.monitorEventId; delete h.courtSync; await put('hearings', h);
+    if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание возвращено на ${fmtDate(h.date)} — отмена автоприменения данных суда`);
+  } else {
+    if (!confirm(`Удалить заседание ${h.caseNum || ''} ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''}, созданное по данным суда?`)) return;
+    await del('hearings', h.id);
+    if (h.caseNum) await crmCaseLogByNum(h.caseNum, 'hearing_upd', `Заседание ${fmtDate(h.date)} удалено — отмена автоприменения данных суда`);
+  }
+  if (ev) { ev.autoSkip = Date.now(); ev.status = 'ignored'; await put('monitorEvents', ev); }
+  toast('Отменено'); if (typeof icsTouch === 'function') icsTouch(); renderCalendar(); renderCases(); renderDashboard(); openMonitorCenter();
+}
+async function crmMonBindOrphans() {
+  const evs = await getAll('monitorEvents'), cases = await getAll('cases'); let n = 0;
+  for (const e of evs) {
+    if (e._deleted || e.caseId || e.status === 'ignored' || e.uidConflict) continue;
+    if (!e.caseUid && !e.crmNumber && !e.courtNo) continue;
+    const m = crmMonBind(cases, { caseUid: e.caseUid, crmNumber: e.crmNumber, courtNo: e.courtNo });
+    if (!m.match) continue;
+    e.caseId = m.match.id; e.caseNum = m.match.number; e.matchScore = 100; if (e.status === 'new' && e.eventType === 'caseflow') e.status = 'flow';
+    await put('monitorEvents', e); n++;
+  }
+  return n;
+}
+function crmMonActOf(e) {
+  let act = ''; try { act = String(JSON.parse(e.raw || '{}').act || ''); } catch (x) { if (typeof logErr === "function") logErr("", x); }
+  if (act) return act;
+  const t = String(e.title || '').toLowerCase(); let st = ''; try { st = String(JSON.parse(e.raw || '{}').st || ''); } catch (x) { if (typeof logErr === "function") logErr("", x); }
+  if (e.eventType !== 'caseflow' && e.eventType !== 'notice') return '';
+  if (/мотивированн\S* (решени|приговор)|в окончательной форме/.test(t)) return 'fullDecision';
+  if (/без движени/.test(t)) return 'noMotion';
+  if (/принят\S* к производству|принят\S* к рассмотрению|возбужден\S* производств/.test(t)) return 'accepted';
+  if (/апелляц/i.test(st)) return /(вынесен\S* (апелляционн\S* )?(определени|постановлени)|оставлен\S* без изменени|отменен|изменен)/.test(t) ? 'appeal' : '';
+  if (/кассац/i.test(st)) return /(вынесен\S* (определени|постановлени)|оставлен\S* без изменени|отменен|изменен)/.test(t) ? 'cass' : '';
+  if (e.eventType === 'notice' && /опубликован/.test(t) && /(решени|приговор|постановлени|определени|судебн\S* акт)/.test(t)) return 'published';
+  if (/(вынесен\S* решени|решение вынесен|решение по делу|вынесен\S* приговор|производство прекращен|без рассмотрения|заочн\S* решени)/.test(t)) return 'decision';
+  return '';
+}
+const FLOW_ACT_FIELD = { decision: ['i1DecisionDate', 'Дата решения'], fullDecision: ['i1DecisionFullDate', 'Мотивированное решение изготовлено'], appeal: ['apDecisionDate', 'Дата апелляционного определения'], cass: ['csDecisionDate', 'Дата кассационного определения'],
+  accepted: ['i1AcceptedDate', 'Принят к производству'], noMotion: ['i1NoMotionDate', 'Оставлен без движения'], published: ['i1PublishedDate', 'Текст решения опубликован'] }; // v234
+function flowActFieldFor(c, act) { // для уголовного и КоАП решение — свои поля
+  if (act === 'decision' && c.kind === 'Уголовное') return ['crimVerdictDate', 'Дата приговора'];
+  if (act === 'decision' && c.kind === 'КоАП') return ['koapDate', 'Дата постановления'];
+  return FLOW_ACT_FIELD[act] || null;
+}
+function crmFixDueFrom(e) { const m = /(?:до|срок[^\d]{0,20})\s*(\d{1,2})\.(\d{1,2})\.(\d{4})/i.exec(String(e.title || '') + ' ' + String(e.raw || '')); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; }
+function caseFixDueApply(obj, prev) { // при сохранении дела / автоприменении: срок «Устранить недостатки» по i1FixDueDate; при принятии к производству — исполнен
+  obj.deadlines = Array.isArray(obj.deadlines) ? obj.deadlines : [];
+  const ex = obj.deadlines.find(d => d.autoKey === 'act:noMotion:fix');
+  if (obj.i1FixDueDate && obj.i1FixDueDate !== (prev && prev.i1FixDueDate)) {
+    if (ex && !ex.confirmedAt && !ex.done) Object.assign(ex, { date: obj.i1FixDueDate, calcDate: obj.i1FixDueDate, baseEv: 'Определение об оставлении без движения' + (obj.i1NoMotionDate ? ' от ' + fmtDate(obj.i1NoMotionDate) : ''), baseDate: obj.i1NoMotionDate || '' });
+    else if (!ex) obj.deadlines.push({ id: uid('СР'), title: 'Устранить недостатки иска (оставлен без движения)', date: obj.i1FixDueDate, note: 'срок из определения — проверьте и подтвердите', done: false, kind: 'procedural', baseEv: 'Определение об оставлении без движения' + (obj.i1NoMotionDate ? ' от ' + fmtDate(obj.i1NoMotionDate) : ''), baseDate: obj.i1NoMotionDate || '', norm: 'ст. 136 ГПК РФ / ст. 128 АПК РФ — срок, установленный судьёй; не устранены — иск возвращается', calcDate: obj.i1FixDueDate, src: 'Судебный акт', autoKey: 'act:noMotion:fix', confirmedAt: '', confirmedDate: '' });
+    obj.deadlines.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    return 'Устранить недостатки — до ' + fmtDate(obj.i1FixDueDate);
+  }
+  if (obj.i1AcceptedDate && obj.i1AcceptedDate !== (prev && prev.i1AcceptedDate) && ex && !ex.done && obj.i1NoMotionDate && obj.i1AcceptedDate >= obj.i1NoMotionDate) { ex.done = true; ex.note = ((ex.note || '') + ' · иск принят к производству ' + fmtDate(obj.i1AcceptedDate)).replace(/^ · /, ''); return 'Недостатки устранены — иск принят к производству'; }
+  return '';
+}
+function crmRoomFrom(txt) {
+  // \b в JS не работает с кириллицей — граница задаётся явно
+  return (String(txt || '').match(/(?:^|[^0-9A-Za-zА-Яа-яЁё])зал[аеу]?[\s.№:]*([0-9]{1,4}[А-Яа-яA-Za-zЁё]?)/i) || [])[1] || '';
+}
+function caseStageCourt(c) {
+  const s = (c && c.stage) || '';
+  if (s === 'Кассация' || s === 'Надзор') return { court: c.courtCass || c.courtApp || c.court || '', judge: c.judgeCass || c.judgeApp || c.judge || '',
+    secretary: c.secretaryCass || '', secretaryPhone: c.secretaryPhoneCass || '', cabinet: c.cabinetCass || '' };
+  if (s === 'Апелляция') return { court: c.courtApp || c.court || '', judge: c.judgeApp || c.judge || '',
+    secretary: c.secretaryApp || '', secretaryPhone: c.secretaryPhoneApp || '', cabinet: c.cabinetApp || '' };
+  return { court: (c && c.court) || '', judge: (c && c.judge) || '',
+    secretary: (c && c.secretary) || '', secretaryPhone: (c && c.secretaryPhone) || '', cabinet: (c && c.cabinet) || '' };
+}
+function crmFlowMatches(c,e){if(!c||!e)return false;if(e.caseId)return e.caseId===c.id;const nz=crmMonNorm;if(e.caseUid&&nz(c.caseUid))return nz(e.caseUid)===nz(c.caseUid);/* v238: УИД решает, если он есть у обоих */if(e.uidConflict)return false;if(e.crmNumber)return nz(e.crmNumber)===nz(c.number);if(e.ambiguous)return false;if(e.caseUid&&nz(c.caseUid)&&nz(e.caseUid)===nz(c.caseUid))return true;const no=nz(e.courtNo);if(!no)return false;return [c.number,c.courtNo,c.courtNoApp,c.courtNoCass].some(v=>nz(v)&&nz(v)===no);}
+function crmFlowParts(e){let res='',base='',st='';try{const j=JSON.parse(e.raw||'');res=String(j.result||j['результат']||j.resolution||'').trim();base=String(j.basis||j['основание']||'').trim();st=String(j.st||'').trim();}catch (_) { if (typeof logErr === "function") logErr("", _); }return{res,base,st};}
+function crmCaseFlowMissing(c, monAll, caseHearings) {
+  const have = new Set((caseHearings || []).filter(h => h.status !== 'Отменено').map(h => h.date + '|' + ((h.time || '').slice(0, 5))));
+  const haveDate = new Set((caseHearings || []).filter(h => h.status !== 'Отменено').map(h => h.date));
+  const out = [];
+  for (const e of (monAll || [])) {
+    if (e._deleted || !e.date || !crmFlowMatches(c, e)) continue;
+    const head = crmMonEventHead(e);
+    const isHearing = e.eventType === 'hearing' || (/заседани|слушани|беседа/i.test(head) && !crmMonIsFakeHearing(e));
+    if (!isHearing) continue;
+    const b = crmMonHearingBits(e), key = e.date + '|' + (b.time || '');
+    if (have.has(key) || (!b.time && haveDate.has(e.date))) continue;
+    if (out.some(x => x.key === key)) continue;
+    out.push({ key, e, time: b.time, room: b.room });
+  }
+  return out.sort((a, b) => (a.e.date + (a.time || '')).localeCompare(b.e.date + (b.time || '')));
+}
+async function crmCaseFlowAdd(eventId, caseId) { // v271: внести заседание из события — всегда новое, без эвристики переноса и фильтров статусов
+  const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
+  const c = (await getAll('cases')).find(x => x.id === (caseId || e.caseId)); if (!c) { toast('Дело не найдено', true); return; }
+  const b = crmMonHearingBits(e), st = crmMonStageOf(e), sc = crmMonCourtFor(c, st, e);
+  const exists = (await getAll('hearings')).some(h => (h.caseId === c.id || h.caseNum === c.number) && h.date === e.date && (h.time || '') === (b.time || '') && h.status !== 'Отменено');
+  if (exists) { toast('Такое заседание уже есть в списке'); openCaseSheet(c.id); return; }
+  const past = e.date < todayISO();
+  const h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time || '', room: b.room || '', court: sc.court || '', judge: e.judge || sc.judge || '', stage: st || '',
+    status: past ? 'Проведено' : 'Назначено', result: past ? (b.result || '') : '', note: e.title || '', monitorEventId: e.id, courtSync: Date.now(), createdAt: Date.now() };
+  await put('hearings', h);
+  if (c._courtFilled) { const f0 = c._courtFilled; const cf = (await getAll('cases')).find(x => x.id === c.id); if (cf && !cf[f0]) { cf[f0] = c[f0]; addCaseHistoryEvent(cf, f0, '', c[f0], 'monitor'); await put('cases', cf); } }
+  e.eventType = 'hearing'; e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); delete e.autoSkip; e.caseId = c.id; e.caseNum = c.number; await put('monitorEvents', e);
+  await crmCaseLogByNum(c.number, 'hearing', `Заседание ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} внесено по данным суда${h.court ? ' · ' + h.court : ''}`);
+  if (typeof icsTouch === 'function') icsTouch(); if (typeof alarmsTouch === 'function') alarmsTouch(); if (typeof bookRepublishSoon === 'function') bookRepublishSoon();
+  toast(`Заседание ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} внесено`);
+  if (typeof renderCalendar === 'function') renderCalendar(); openCaseSheet(c.id);
+}
+function crmDlAppealMatch(title){return /мотивированн|окончательн\S*\s+форм/i.test(String(title||''));}
+function crmCaseApplyCard(c, card, sfx) { // v241: sfx '' — первая инстанция, 'App' — апелляция, 'Cass' — кассация
+  sfx = sfx || ''; const done = [], diff = [], ask = []; const lbl = sfx === 'App' ? ' (апелляция)' : sfx === 'Cass' ? ' (кассация)' : '';
+  const set = (field, val, label, offer) => { if (!val) return; if (!c[field]) { c[field] = val; done.push(label + ': ' + val); }
+    else if (crmMonNorm(c[field]) !== crmMonNorm(val)) { if (offer) ask.push({ field, val, label, was: c[field] }); else diff.push(label + ' — в деле «' + c[field] + '», на сайте «' + val + '»'); } }; // v266: номер и УИД можно заменить одним подтверждением
+  set('courtNo' + sfx, card.number, 'номер дела в суде' + lbl, true); set('caseUid', card.uid, 'УИД', true); set('judge' + sfx, card.judge, 'судья' + lbl); set('court' + sfx, card.court, 'суд' + lbl);
+  if (!sfx) { set('i1FilingDate', card.registered, 'дата поступления'); set('courtCategory', crmDecodeEntities(card.category), 'категория по классификатору суда'); }
+  const client = crmMonNorm(c.client || '');
+  c.participants = Array.isArray(c.participants) ? c.participants : [];
+  for (const p of (card.parties || [])) {
+    if (!p || !p.name || crmMonNorm(p.name) === client) continue;
+    if (c.participants.some(x => crmMonNorm(x.name) === crmMonNorm(p.name))) continue;
+    c.participants.push({ name: p.name, role: p.role || 'Иное лицо', inn: '', phone: '', email: '', note: 'с сайта суда' }); done.push('участник: ' + p.name + ' (' + (p.role || '') + ')');
+  }
+  return { done, diff, ask };
+}
+function crmFlowActOffers(cases, events) {
+  const out = [];
+  for (const e of events || []) {
+    if (e._deleted || (e.eventType !== 'caseflow' && e.eventType !== 'notice') || e.actSkip || e.actApplied) continue; // v234: уведомления о публикации тоже
+    const act = crmMonActOf(e); // v234
+    if (!act || act === 'inForce') continue;
+    const c = (cases || []).find(x => !x.archived && crmFlowMatches(x, e)); if (!c) continue;
+    const f = flowActFieldFor(c, act); if (!f) continue;
+    if (c[f[0]] === e.date) continue;
+    out.push({ e, c, act, field: f[0], label: f[1], current: c[f[0]] || '' });
+  }
+  return out;
+}
+async function crmFlowActApply(eventId) {
+  const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
+  const cases = await getAll('cases');
+  const o = crmFlowActOffers(cases, [e])[0]; if (!o) { toast('Предложение устарело', true); crmFlowActRender(); return; }
+  const c = cases.find(x => x.id === o.c.id), prev = JSON.parse(JSON.stringify(c));
+  c[o.field] = e.date;
+  if (o.act === 'noMotion' && !c.i1FixDueDate) c.i1FixDueDate = crmFixDueFrom(e); // v234
+  addCaseHistoryEvent(c, o.field, prev[o.field] || '', e.date, 'monitor');
+  const msgs = nextActDeadlines(c, prev); { const m = caseFixDueApply(c, prev); if (m) msgs.push(m); }
+  if (msgs.length) addCaseHistoryEvent(c, 'deadline', '', msgs.join(' | '), 'monitor');
+  await put('cases', c);
+  e.actApplied = Date.now(); await put('monitorEvents', e);
+  toast(`${o.label}: ${fmtDate(e.date)} записана в ${c.number}${msgs.length ? '. ' + msgs.join(' | ') + ' — проверьте и подтвердите' : ''}`);
+  renderDashboard(); renderCases(); navBadgeRefresh();
+}
+async function crmFlowActSkip(eventId) {
+  const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
+  e.actSkip = Date.now(); await put('monitorEvents', e); crmFlowActRender();
+}
+function crmMonRows(text,fileName){
+  const raw=String(text||'').trim();if(!raw)return[];if(/\.json$/i.test(fileName||'')||raw[0]==='['||raw[0]==='{'){try{const x=JSON.parse(raw),a=Array.isArray(x)?x:Array.isArray(x.events)?x.events:[x];return a;}catch (e) { if (typeof logErr === "function") logErr("", e); }}
+  if(/\.csv$/i.test(fileName||''))return crmMonCsv(raw);
+  return raw.split(/\n\s*\n+/).map(block=>{const date=(block.match(/\d{1,2}[.\/]\d{1,2}[.\/]\d{4}|\d{4}-\d{2}-\d{2}/)||[])[0]||'';const uid=(block.match(/\d{2}[A-ZА-Я]{2}\d{4}-\d{2}-\d{4}-\d+/i)||[])[0]||'';const no=(block.match(/[АA]\d{1,3}-\d{1,9}\/\d{2,4}|\d{1,3}-\d{1,9}\/\d{4}/i)||[])[0]||'';return{title:block.split(/\n/)[0].slice(0,180),date,courtNo:no,caseUid:uid,raw:block};});
+}
+function crmMonCsv(text){
+  const rows=[];let row=[],cell='',quote=false;for(let i=0;i<String(text).length;i++){const ch=text[i],next=text[i+1];if(ch==='"'&&quote&&next==='"'){cell+='"';i++;}else if(ch==='"')quote=!quote;else if(ch===','&&!quote){row.push(cell);cell='';}else if((ch==='\n'||ch==='\r')&&!quote){if(ch==='\r'&&next==='\n')i++;row.push(cell);if(row.some(x=>x.trim()))rows.push(row);row=[];cell='';}else cell+=ch;}row.push(cell);if(row.some(x=>x.trim()))rows.push(row);if(rows.length<2)return[];const head=rows[0].map(x=>x.trim().toLowerCase());return rows.slice(1).map(r=>Object.fromEntries(head.map((h,i)=>[h,r[i]||''])));
+}
+async function crmCaseLogByNum(caseNum, field, text) {
+  try {
+    if (!caseNum || !text) return;
+    const c = (await getAll('cases')).find(x => x.number === caseNum);
+    if (!c) return;
+    addCaseHistoryEvent(c, field, '', String(text).slice(0, 200), 'auto'); // v197: пишет в caseEvents, дело не трогаем
+  } catch (e) { if (typeof logErr === "function") logErr("", e); }
+}
+function crmCollectorSrvCfg() {
+  return { url: (localStorage.getItem('crm_collector_url') || '').trim().replace(/\/+$/, ''),
+    secret: (localStorage.getItem('crm_collector_secret') || '').trim() };
+}
+async function crmCollectorCall(body, timeoutMs) {
+  const cfg = crmCollectorSrvCfg();
+  if (!cfg.url || !cfg.secret) { toast('Укажите URL и секрет облачной функции', true); return null; }
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), timeoutMs || 30000);
+  try {
+    const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, secret: cfg.secret }), signal: ctrl.signal, cache: 'no-store' });
+    const j = await r.json().catch(() => null);
+    if (!j) return { http: r.status, err: crmCollectorHttpHint(r.status) }; // v270: ответ не от коллектора (страница ошибки Облака)
+    return { http: r.status, j };
+  } catch (e) {
+    return { err: e && e.name === 'AbortError' ? 'нет ответа за отведённое время — сайт суда отвечает медленно, повторите позже' : crmCollectorNetHint(e) };
+  } finally { clearTimeout(timer); }
+}
+function crmCollectorStatusLine(j) {
+  if (!j) return 'Серверный сбор: нет данных.';
+  if (j.empty) return 'Серверный сбор: ещё не запускался — отправьте список дел и нажмите «Собрать сейчас» или дождитесь таймера.';
+  if (j.error && !j.at) return 'Серверный сбор: ' + j.error;
+  let when = '—';
+  if (j.at) { const d = new Date(j.at); const p = n => String(n).padStart(2, '0');
+    when = `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
+  let out = `Серверный сбор: ${when} · событий ${j.events ?? 0} (новых ${j.added ?? 0}, обновлено ${j.updated ?? 0})`;
+  if (j.failedCount) out += ` · ошибок ${j.failedCount}`;
+  if (j.partial) out += ' · собран не весь список (увеличьте BUDGET_MS)';
+  if (j.error) out += ' · отправка на /bridge: ' + j.error;
+  return out;
+}
+function crmCollectorHttpHint(code) {
+  if (code === 403) return 'функция коллектора не публичная или адрес чужой (403). Консоль → collector-sud → «Обзор» → включить «Публичная функция»';
+  if (code === 404) return 'по адресу нет функции (404) — проверьте «Ссылку для вызова» в Мониторинге → Сбор в облаке';
+  if (code === 502 || code === 504) return 'функция коллектора упала или не успела ответить (' + code + ') — журнал в консоли: collector-sud → «Логи»';
+  return 'функция ответила не так, как ожидалось (HTTP ' + code + ')';
+}
+function crmCollectorNetHint(e) {
+  const m = String((e && e.message) || '');
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'нет интернета';
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(m))
+    return 'функция коллектора недоступна: проверьте адрес в Мониторинге → «Сбор в облаке», что функция публичная, и выключите VPN, если он включён. Проверка: откройте адрес функции с «?action=status&secret=…» в браузере';
+  return m || 'сбой сети';
+}
+async function crmCollectorPack() {
+  const all = await getAll('cases');
+  const cases = all.filter(c => !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено' && (c.link || c.linkApp || c.linkCass));
+  if (!cases.length) { toast('Нет незавершённых дел со ссылками на сайт суда', true); return null; }
+  const rows = cases.map(c => ({
+    number: c.number || '', uid: c.caseUid || '', stage: c.stage || '',
+    courtNo: c.courtNo || '', courtNoApp: c.courtNoApp || '', courtNoCass: c.courtNoCass || '',
+    links: [
+      c.link    ? { stage: 'Первая инстанция', courtNo: c.courtNo    || '', url: c.link }    : null,
+      c.linkApp ? { stage: 'Апелляция',        courtNo: c.courtNoApp || '', url: c.linkApp } : null,
+      c.linkCass? { stage: 'Кассация',         courtNo: c.courtNoCass|| '', url: c.linkCass }: null
+    ].filter(Boolean)
+  }));
+  return { format: 'crm-advokat-links', version: 1, exportedAt: new Date().toISOString(), cases: rows };
+}
+async function crmCollectorSendLinks() {
+  const pack = await crmCollectorPack();
+  if (!pack) return;
+  toast('Отправляю список дел на сервер…');
+  const r = await crmCollectorCall({ action: 'linksput', links: pack });
+  if (!r) return;
+  if (r.err) { toast('Не удалось связаться с функцией: ' + r.err, true); return; }
+  if (r.j && r.j.ok) { toast(`Список отправлен: дел ${r.j.cases}`); crmCollectorStatus(false); }
+  else toast('Функция ответила: ' + (r.j && r.j.error ? r.j.error : 'HTTP ' + r.http), true);
+}
+
 // ▼▼▼ ui/icons.js
 // ═══ ui/icons.js — линейные иконки (этап 1б) ═══
 // Контуры из Lucide 1.17.0 — © Lucide Contributors, лицензия ISC (разрешено использование, копирование, изменение
@@ -2575,7 +2973,7 @@ const NAV_GROUPS = [
     { id: 'tasks', title: 'Задачи и сроки', icon: 'list-checks', store: 'tasks' },
     { id: 'finance', title: 'Финансы', icon: 'wallet', store: 'finance' },
     { id: 'correspondence', title: 'Переписка', icon: 'mail', store: 'mail' },
-    { id: 'monitoring', title: 'Суды и мониторинг', icon: 'landmark', stage: '4', store: 'monitorEvents', what: 'события судов по вашим делам' },
+    { id: 'monitoring', title: 'Суды и мониторинг', icon: 'landmark', store: 'monitorEvents' },
     { id: 'reports', title: 'Отчёты', icon: 'chart-column', stage: '5', what: 'отчёты по делам, времени и оплате' },
   ] },
   { label: 'Инструменты', items: [
@@ -2603,13 +3001,13 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openDadataSheet()', 'openPochtaSheet()', 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
   phoneWidths: [360, 390, 412], desktopWidth: 1280, phoneTheme: 'dark', desktopTheme: 'light',
   sidebarAlign: 'top', minTouch: 44, seedFile: 'ui_seed_next.js', readyExpr: 'window.NEXT_READY', lsPrefix: NEXT_NS.ls,
-  variants: [{ name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
+  variants: [{ name: 'monitoring-all', screen: 'monitoring', js: "monSet('f','all')" }, { name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
     { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }],
 };
 
@@ -2790,6 +3188,7 @@ async function openSettingsSheet(sub) {
     <div class="list-rows"><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
+      <button type="button" class="list-btn" onclick="openMonitorSettingsSheet()"><span>Мониторинг судов</span><span class="muted">${!SRV.url ? 'сервер не подключён' : crmCollectorSrvCfg().url ? 'сбор в облаке настроен' : 'сбор в облаке не настроен'}</span></button>
       <button type="button" class="list-btn" onclick="openPochtaSheet()"><span>Почта России — отслеживание</span><span class="muted">${!SRV.url ? 'сервер не подключён' : localStorage.getItem(POCHTA_READY_KEY) === '1' ? 'подключено' : localStorage.getItem(POCHTA_READY_KEY) === '0' ? 'на сервере нет параметров' : 'не проверено'}</span></button></div>
     <div class="section-label">О программе</div>
     <div class="list-rows">
@@ -3917,7 +4316,9 @@ SCREENS.today = async function () {
 
   const hero = m.hero ? `<section class="upcoming-hero t-hero" aria-label="Ближайшее заседание"><div class="split"><small>${esc(m.hero.when)} · ближайшее заседание</small>${iconBtn('Скрыть карточку заседания на 7 дней', `todayHide('${jsq(m.hero.key)}')`, 'x')}</div>
       <div class="hero-time">${esc(m.hero.time || 'Время не указано')}</div><h2>${esc(m.hero.title)}</h2>${m.hero.subject ? `<p>${esc(m.hero.subject)}</p>` : ''}${m.hero.place ? `<p>${esc(m.hero.place)}</p>` : ''}${m.hero.when !== 'Сегодня' && m.hero.when !== 'Завтра' ? `<p>${esc(fmtDate(m.hero.date))}</p>` : ''}${m.hero.participation ? `<p>${esc(m.hero.participation)}</p>` : ''}${m.hero.prep ? `<div class="hero-prep${m.hero.prepDone ? ' done' : ''}">${icon(m.hero.prepDone ? 'check' : 'circle-alert', 'icon-sm')}<span>${m.hero.prepDone ? 'Подготовлено: ' : 'Подготовить: '}${esc(m.hero.prep)}</span></div>` : ''}<div class="actions" style="margin-top:10px">${btn(m.hero.prep && !m.hero.prepDone ? 'Подготовлено' : 'Открыть заседание', m.hero.prep && !m.hero.prepDone ? `todayPrepDone('${jsq(m.hero.id)}')` : `openHearingForm('${jsq(m.hero.id)}')`, 'small-btn hero-btn', m.hero.prep && !m.hero.prepDone ? 'check' : 'gavel')}</div></section>` : '';
-  out += `<div class="day-grid"><div class="stack">${reviewBox}${important}${next}</div><div class="stack">${hero}${schedule}</div></div>`;
+  let monNew = 0; try { monNew = (await getAll('monitorEvents')).filter(e => e && !e._deleted && e.status === 'new').length; } catch (e) { logErr('today:monitor', e); }
+  const monBox = monNew ? `<section class="panel"><div class="panel-title"><h2>События судов ${badge(String(monNew), 'warn')}</h2></div><div class="imp-row"><button type="button" class="imp-main" onclick="nav('monitoring')"><span class="task-title">Новых событий с сайтов судов: ${monNew}</span><span class="task-sub">Заседания и даты актов, которые не применились сами — нужен разбор</span></button></div></section>` : '';
+  out += `<div class="day-grid"><div class="stack">${reviewBox}${monBox}${important}${next}</div><div class="stack">${hero}${schedule}</div></div>`;
   return out;
 };
 
@@ -4049,7 +4450,7 @@ SCREENS.cases = async function () {
 // ── карточка дела (только чтение): лист на телефоне, панель справа от 1200 px ──
 async function openCaseSheet(id) {
   const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
-  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents', 'mail', 'expenses']) d[st] = await getAll(st);
+  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents', 'mail', 'expenses', 'monitorEvents']) d[st] = await getAll(st);
   const m = caseCardModel(c, d, new Date());
   // доверитель из реестра — телефон и способы связи (этап 3)
   const cl = (await getAll('clients')).find(x => x && (c.clientId ? x.id === c.clientId : clientKey(x.name) === clientKey(c.client))) || null;
@@ -4069,6 +4470,7 @@ async function openCaseSheet(id) {
     ${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}
     ${(c.i1FilingDate || c.i1DecisionDate || c.i1Result || c.apFilingDate || c.apCourt || c.courtApp || c.csFilingDate || c.courtCass || c.fsspNo || c.ipStatus) ? sec('Инстанции', `<div class="list-rows">${row('Первая инстанция', [c.i1FilingDate ? 'подано ' + fmtDate(c.i1FilingDate) : '', c.i1DecisionDate ? 'решение ' + fmtDate(c.i1DecisionDate) : '', c.i1Result].filter(Boolean).join(' · '))}${row('Апелляция', [c.apCourt || c.courtApp, c.courtNoApp ? '№ ' + c.courtNoApp : '', c.apFilingDate ? 'жалоба ' + fmtDate(c.apFilingDate) : '', c.apDecisionDate ? 'определение ' + fmtDate(c.apDecisionDate) : '', c.apResult].filter(Boolean).join(' · '))}${row('Кассация', [c.courtCass, c.courtNoCass ? '№ ' + c.courtNoCass : '', c.csFilingDate ? 'жалоба ' + fmtDate(c.csFilingDate) : '', c.csDecisionDate ? 'определение ' + fmtDate(c.csDecisionDate) : '', c.csResult].filter(Boolean).join(' · '))}${row('Исполнение', [c.fsspNo ? 'ИП № ' + c.fsspNo : '', c.ipOsp, c.ipStatus].filter(Boolean).join(' · '))}</div>`) : ''}
     ${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.inn ? 'ИНН ' + p.inn : '', p.addr].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}
+    ${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, d.monitorEvents, d.hearings) : ''}
     ${sec('Сроки', m.deadlines.length ? `<div class="list-rows">${m.deadlines.map(x => `<button type="button" class="list-btn" onclick="openDeadlineSheet('${jsq(c.id)}', '${jsq(x.key)}')"><span>${esc(x.title || 'Срок')}${x.unconfirmed ? ' ' + badge('требует проверки', 'warn') : ''}</span><span class="${x.state === 'overdue' ? 'task-when overdue' : 'muted'}">${esc(fmtDate(x.date))}${x.state === 'done' ? ' · выполнен' : x.when ? ' · ' + esc(x.when) : ''}</span></button>`).join('')}</div>` : '<p class="small muted">Сроков нет.</p>', m.deadlines.length)}
     ${sec('Заседания', m.hearings.length ? `<div class="list-rows">${m.hearings.slice(0, 12).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span>${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}${h.room ? ' · зал ' + esc(h.room) : ''}${h.participation ? `<br><span class="muted small">${esc(h.participation)}</span>` : ''}${h.prep ? `<br><span class="muted small">${h.prepDone ? '✓ ' : ''}подготовить: ${esc(h.prep)}</span>` : ''}</span><span>${badge(h.status || 'Назначено', h.status === 'Проведено' ? 'good' : h.status === 'Отменено' ? '' : h.status === 'Дата прошла' ? 'warn' : 'accent')}</span></button>`).join('')}</div>` : '<p class="small muted">Заседаний нет.</p>', m.hearings.length)}
     ${sec('Задачи', m.tasks.length ? `<div class="list-rows">${m.tasks.slice(0, 12).map(t => `<button type="button" class="list-btn" onclick="openTaskForm('${jsq(t.id)}')"><span class="${t.done ? 'muted' : ''}">${esc(t.title || 'Задача')}</span><span class="muted">${t.done ? 'выполнена' : (t.due ? esc(fmtDate(t.due)) : '')}</span></button>`).join('')}</div>` : '<p class="small muted">Задач нет.</p>', m.tasks.length)}
@@ -4759,6 +5161,131 @@ async function saveExpenseForm(id) {
   await comboRememberAll(document.getElementById('sheetContent'));
   try { await put('expenses', r.obj); } catch (e) { logErr('form:expense', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(id ? 'Расход сохранён' : 'Расход записан'); closeSheet(); if (UI.screen === 'finance') finSet('tab', 'expenses'); else nav(UI.screen);
+}
+
+// ▼▼▼ screens/monitoring.js
+// ═══ screens/monitoring.js — экран «Суды и мониторинг» (этап 4, часть 1) ═══
+// Логика — sync/monitor.js (v312). Здесь: получение событий с личного сервера по кнопке, список событий с фильтрами,
+// карточка события (привязка к делу, внести заседание, записать дату акта, черновик срока, не применять), предложения дат
+// актов, лента «данные суда» и невнесённые заседания в карточке дела, лист настройки «Мониторинг судов» с инструкцией.
+// Чистые функции для тестов: monitorModel, monitorSettingsState.
+const MON_VIEW_KEY = 'crm_monview';
+const MON_FILTERS = [['new', 'Новые'], ['applied', 'Применённые'], ['ignored', 'Не применены'], ['flow', 'Движение дела'], ['all', 'Все']];
+const MON_STATUS_META = { new: ['новое', 'warn'], applied: ['применено', 'good'], ignored: ['не применено', ''], flow: ['движение дела', 'accent'] };
+const MON_TYPE_LABEL = { hearing: 'заседание', caseflow: 'движение дела', notice: 'уведомление', casecard: 'карточка дела' };
+function monPrefs() { try { const p = JSON.parse(localStorage.getItem(MON_VIEW_KEY) || '{}'); return { f: MON_FILTERS.some(x => x[0] === p.f) ? p.f : 'new' }; } catch (e) { return { f: 'new' }; } }
+function monSet(k, v) { const p = monPrefs(); p[k] = v; localStorage.setItem(MON_VIEW_KEY, JSON.stringify(p)); nav('monitoring'); }
+function monitorModel(events, cases, p) {
+  const all = (events || []).filter(e => e && !e._deleted).sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
+  const counts = { all: all.length }; ['new', 'applied', 'ignored', 'flow'].forEach(s => { counts[s] = all.filter(e => e.status === s).length; });
+  const rows = all.filter(e => p.f === 'all' || e.status === p.f).map(e => ({ e, type: MON_TYPE_LABEL[e.eventType] || e.eventType || '', status: MON_STATUS_META[e.status] || [e.status || '', ''], bound: e.caseNum || '', problem: e.uidConflict ? 'УИД события не совпадает с УИД дела' : e.ambiguous ? 'подходит несколько дел — выберите вручную' : (!e.caseId && e.status === 'new' ? 'дело не найдено' : '') }));
+  const offers = typeof crmFlowActOffers === 'function' ? crmFlowActOffers(cases || [], all) : [];
+  const last = all.reduce((m, e) => Math.max(m, e.receivedAt || 0), 0);
+  return { rows, counts, offers, last };
+}
+// состояние настройки: сервер / коллектор в облаке / автоприменение
+function monitorSettingsState(srvUrl, col, autoOn) {
+  const out = [];
+  out.push(srvUrl ? 'Личный сервер подключён — события забираются с него по кнопке «Получить события».' : 'Личный сервер не подключён (Синхронизация → «Подключить сервер») — события брать неоткуда.');
+  out.push(col && col.url && col.secret ? 'Сбор в облаке настроен: адрес и секрет функции коллектора заданы.' : 'Сбор в облаке не настроен — укажите адрес и секрет функции коллектора ниже (шаг 2).');
+  out.push(autoOn ? 'Данные суда применяются автоматически (заседания и даты актов), спорное — остаётся на разбор.' : 'Автоприменение выключено — каждое событие разбирается вручную.');
+  return { lines: out, ready: !!srvUrl && !!(col && col.url && col.secret) };
+}
+// получить события с личного сервера (коллектор кладёт их туда): только по кнопке
+async function monitorPull() {
+  if (!SRV.url) { toast('Подключите личный сервер: Настройки → «Мониторинг судов» или Синхронизация', true); return null; }
+  toast('Запрашиваю события с сервера…');
+  const j = await srvCall('eventsget');
+  if (!j || !j.ok) { toast(!j ? 'Нет связи с личным сервером' : (j.error === 'auth' ? 'Неверный секретный код сервера' : 'Сервер: ' + (j.error || 'ошибка')), true); return null; }
+  const raw = Array.isArray(j.events) ? j.events : [];
+  if (!raw.length) { toast('На сервере пока нет событий — коллектор ещё не собирал или список дел не отправлен'); nav('monitoring'); return { added: 0, updated: 0 }; }
+  const rows = await crmMonNormalizeRows(raw, 'Личный сервер');
+  const before = (await getAllRaw('monitorEvents')).length;
+  await crmMonPersist(rows, { quiet: true });
+  const after = (await getAllRaw('monitorEvents')).length, added = after - before;
+  let n = null; if (crmMonAutoOn()) { try { n = await crmMonAutoApply(null); } catch (e) { logErr('monitor:auto', e); } }
+  await refreshCasesCache();
+  toast(added ? `Получено новых событий: ${added}` + (n && (n.hearings + n.updated + n.moved + n.acts) ? ` · применено: заседаний ${n.hearings + n.moved + n.updated}, дат актов ${n.acts}` : '') : 'Новых событий нет — всё уже получено');
+  nav('monitoring'); return { added, applied: n };
+}
+SCREENS.monitoring = async function () {
+  const p = monPrefs(), m = monitorModel(await getAll('monitorEvents'), await getAll('cases'), p); await refreshCasesCache();
+  const chips = MON_FILTERS.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.f === k}" onclick="monSet('f','${k}')">${esc(t)} <span class="chip-n">${m.counts[k] || 0}</span></button>`).join('');
+  const col = crmCollectorSrvCfg(), st = monitorSettingsState(SRV.url, col, crmMonAutoOn());
+  const hint = st.ready ? '' : `<div class="info-box">${esc(st.lines[0])} ${esc(st.lines[1])} Как настроить — Настройки → «Мониторинг судов».</div>`;
+  const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done"><button type="button" class="button small-btn primary" onclick="crmFlowActApply('${jsq(o.e.id)}')">${icon('check', 'icon-sm')}Записать</button><button type="button" class="button small-btn" onclick="crmFlowActSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
+  const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openMonitorEventSheet('${jsq(r.e.id)}')"><span><span class="task-title">${esc(r.e.title || 'Событие')}</span><span class="task-sub">${esc([r.type, r.e.date ? fmtDate(r.e.date) : '', r.e.court, r.e.courtNo ? '№ ' + r.e.courtNo : '', r.bound ? 'дело ' + r.bound : '', r.problem].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status[0], r.status[1])}${r.problem && r.e.status === 'new' ? badge('нужен разбор', 'bad') : ''}</span></button>`).join('');
+  return pageHead('Суды и мониторинг', m.last ? 'последнее получение ' + new Date(m.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'события с сайтов судов', btn('Получить события', 'monitorPull()', 'primary', 'cloud-download') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
+    hint + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел и кладёт события на ваш сервер; кнопка «Получить события» забирает их сюда. Как настроить — Настройки → «Мониторинг судов».', btn('Получить события', 'monitorPull()', 'primary', 'cloud-download'))}</section>`;
+};
+// ── карточка события ──
+async function openMonitorEventSheet(id, mode) {
+  const e = await getOne('monitorEvents', id); if (!e) { toast('Событие не найдено', true); return; }
+  await refreshCasesCache(); const cases = (await getAll('cases')).filter(c => !c.archived).sort((a, b) => String(a.number).localeCompare(String(b.number), 'ru', { numeric: true }));
+  const c = e.caseId ? await getOne('cases', e.caseId) : null, st = MON_STATUS_META[e.status] || [e.status || '', ''], act = typeof crmMonActOf === 'function' ? crmMonActOf(e) : '', bits = e.eventType === 'hearing' ? crmMonHearingBits(e) : null, parts = crmFlowParts(e);
+  const row = (k, v) => v ? `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>` : '';
+  const body = `<div class="task-badges">${badge(st[0], st[1])}${badge(MON_TYPE_LABEL[e.eventType] || e.eventType || 'событие')}${e.uidConflict ? badge('конфликт УИД', 'bad') : ''}${e.ambiguous ? badge('несколько дел', 'bad') : ''}${e.autoApplied ? badge('применено автоматически', 'good') : ''}</div>
+    <div class="list-rows">${row('Дата', e.date ? fmtDate(e.date) + (bits && bits.time ? ' ' + bits.time : '') : '')}${row('Суд', e.court)}${row('№ в суде', e.courtNo)}${row('УИД', e.caseUid)}${row('Источник', e.source)}${row('Инстанция', parts.st)}${row('Результат', parts.res)}${row('Основание', parts.base)}${bits && bits.room ? row('Зал', bits.room) : ''}${row('Получено', e.receivedAt ? new Date(e.receivedAt).toLocaleString('ru-RU') : '')}
+      ${c ? `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(c.id)}')"><span class="muted">Дело</span><span>${esc([c.number, c.client].filter(Boolean).join(' · '))}</span></button>` : ''}</div>
+    ${e.status !== 'applied' ? `<div class="section-label">${c ? 'Другое дело' : 'Привязать к делу'}</div><div class="form-grid">${fSelect('mon-case', 'Дело', e.caseId || '', cases.map(x => [x.id, [x.number, x.client].filter(Boolean).join(' · ')]), true)}</div>
+    <div class="form-actions">${e.eventType === 'hearing' || (e.date && /заседани|слушани|беседа/i.test(e.title || '')) ? btn('Внести заседание', `monEventHearing('${jsq(e.id)}')`, 'primary small-btn', 'calendar-plus') : ''}${act && act !== 'inForce' ? btn('Записать дату акта', `monEventAct('${jsq(e.id)}')`, 'primary small-btn', 'check') : ''}${btn('Привязать к делу', `monEventBind('${jsq(e.id)}')`, 'small-btn', 'briefcase-business')}${btn('Черновик срока', `monEventDeadline('${jsq(e.id)}')`, 'small-btn', 'clock-3')}${e.status !== 'ignored' ? `<button type="button" class="button push-right" onclick="monEventIgnore('${jsq(e.id)}')">${icon('x')}Не применять</button>` : btn('Вернуть в новые', `monEventRestore('${jsq(e.id)}')`, '', 'rotate-ccw')}</div>` : `<div class="info-box">Событие применено${e.appliedAction === 'hearing' ? ' — заседание записано в дело' : e.appliedAction === 'card' ? ' — карточка дела дополнена' : ''}.${e.appliedRecordId && e.appliedAction === 'hearing' ? ` <button type="button" class="text-button" onclick="monEventUndo('${jsq(e.appliedRecordId)}')">Отменить применение</button>` : ''}</div>`}
+    ${e.raw && !/^\s*\{/.test(e.raw) ? `<details><summary class="small muted">Текст события</summary><p class="small">${esc(String(e.raw).slice(0, 1500))}</p></details>` : ''}`;
+  openSheet(e.title || 'Событие суда', body, mode || (UI.cur ? true : undefined));
+}
+async function monEventReopen(id) { await nav(UI.screen); openMonitorEventSheet(id); }
+async function monCaseFromSheet(e) { const id = fv('mon-case') || e.caseId; const c = id ? await getOne('cases', id) : null; if (!c) toast('Сначала выберите дело', true); return c; }
+async function monEventBind(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; e.caseId = c.id; e.caseNum = c.number; e.uidConflict = false; e.ambiguous = false; if (e.status === 'new' && e.eventType === 'caseflow') e.status = 'flow'; e.reviewedAt = Date.now(); await put('monitorEvents', e); toast('Событие привязано к делу ' + c.number); monEventReopen(id); }
+async function monEventHearing(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; await crmCaseFlowAdd(id, c.id); }
+async function monEventAct(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; if (!e.caseId || e.caseId !== c.id) { e.caseId = c.id; e.caseNum = c.number; await put('monitorEvents', e); } await crmFlowActApply(id); }
+async function monEventDeadline(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; openDeadlineForm(c.id, '', { baseEv: e.title || '', baseDate: e.date || '', src: 'Мониторинг: ' + (e.source || ''), title: crmDlAppealMatch(e.title) ? 'Апелляционная жалоба' : '', kind: 'procedural', monitorEventId: e.eventType !== 'caseflow' ? e.id : '' }); }
+async function monEventIgnore(id) { const e = await getOne('monitorEvents', id); if (!e) return; if (e.status === 'applied') { toast('Применённое событие нельзя пометить пропущенным', true); return; } e.status = 'ignored'; e.reviewedAt = Date.now(); await put('monitorEvents', e); toast('Событие оставлено без применения'); monEventReopen(id); }
+async function monEventRestore(id) { const e = await getOne('monitorEvents', id); if (!e) return; e.status = e.caseId && e.eventType === 'caseflow' ? 'flow' : 'new'; delete e.autoSkip; await put('monitorEvents', e); toast('Событие снова в разборе'); monEventReopen(id); }
+async function monEventUndo(hid) { await crmMonUndoHearing(hid); await refreshCasesCache(); nav(UI.screen); }
+// ── карточка дела: лента «данные суда» и невнесённые заседания ──
+function monitorCaseFlowHtml(c, events, hearings) {
+  const miss = crmCaseFlowMissing(c, events, hearings);
+  const flow = (events || []).filter(e => !e._deleted && e.eventType !== 'hearing' && e.eventType !== 'casecard' && crmFlowMatches(c, e)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).slice(0, 12);
+  if (!miss.length && !flow.length) return '';
+  const missHtml = miss.length ? `<div class="info-box warning">Заседание с сайта суда не внесено в список (${miss.length})${miss.map(x => `<div class="contact-row" style="margin-top:8px"><span><b>${esc(fmtDate(x.e.date))}${x.time ? ' ' + esc(x.time) : ''}</b>${x.room ? ' · зал ' + esc(x.room) : ''}<br><span class="small muted">${esc(x.e.title || '')}</span></span><span class="contact-actions">${btn('Внести', `crmCaseFlowAdd('${jsq(x.e.id)}', '${jsq(c.id)}')`, 'small-btn primary', 'calendar-plus')}</span></div>`).join('')}</div>` : '';
+  const flowHtml = flow.length ? `<div class="list-rows">${flow.map(e => { const pt = crmFlowParts(e); return `<button type="button" class="list-btn" onclick="openMonitorEventSheet('${jsq(e.id)}')"><span class="muted">${esc(e.date ? fmtDate(e.date) : '—')}</span><span>${esc(e.title || '')}${pt.res ? `<br><span class="muted small">${esc(pt.res)}</span>` : ''}${e.actApplied ? ' ' + badge('дата записана', 'good') : ''}</span></button>`; }).join('')}</div>` : '';
+  return `<div class="section-label">Данные суда · ${miss.length + flow.length}</div>${missHtml}${flowHtml}`;
+}
+// ── настройка: лист «Мониторинг судов» с инструкцией ──
+function openMonitorSettingsSheet(mode) {
+  const col = crmCollectorSrvCfg(), auto = crmMonAutoOn(), st = monitorSettingsState(SRV.url, col, auto);
+  openSheet('Мониторинг судов', `
+    <div class="status-line ${st.ready ? 'good' : ''}" id="mon-state">${esc(st.lines.join(' '))}</div>
+    <p>Программа следит за делами на сайтах судов: функция-коллектор в вашем Яндекс Облаке по таймеру (утром и днём) обходит ссылки на дела, собирает назначенные заседания, результаты и движение дела, и кладёт их на ваш личный сервер. Кнопка «Получить события» на экране «Суды и мониторинг» забирает их в программу. Заседания и даты актов применяются к делам сами, когда нет сомнений; спорное остаётся на разбор. Данные судов — не истина: сроки всегда подтверждаете вы.</p>
+    <div class="section-label">Как подключить, один раз</div>
+    <div class="info-box"><b>Шаг 1. Личный сервер.</b> Он уже нужен для синхронизации: Синхронизация → «Подключить сервер» (адрес функции crm-bridge и секретный код). События коллектора хранятся на нём.</div>
+    <div class="info-box"><b>Шаг 2. Функция-коллектор в Яндекс Облаке.</b> Если вы разворачивали сервер мастером «Свой сервер одной кнопкой» в прежней программе, коллектор уже создан — адрес и секрет те же, что были в прежней программе (Настройки → Мониторинг → «Сбор в облаке»). Иначе: Яндекс Облако → Functions → создать функцию <b>collector-sud</b> из файла <b>Коллектор_судов/dist/collector-sud.mjs</b> (Node.js), переменные окружения: <b>BRIDGE_URL</b> (адрес crm-bridge), <b>BRIDGE_SECRET</b> (его секретный код), <b>COLLECTOR_SECRET</b> (придумайте — его вводите ниже); таймер-триггер два раза в день. Мастер, который делает это за вас, появится в новой версии на этом же этапе.</div>
+    <div class="form-grid">${wide(fInput('col-url', 'Адрес функции коллектора', col.url, 'type="url" autocomplete="off" placeholder="https://functions.yandexcloud.net/…"'))}${wide(fInput('col-secret', 'Секрет коллектора (COLLECTOR_SECRET)', col.secret, 'type="password" autocomplete="off"'))}</div>
+    <div class="form-actions" style="margin-top:8px">${btn('Сохранить', 'monitorCollectorSave()', 'primary', 'check')}${btn('Проверить', 'monitorCollectorStatus(true)', '', 'refresh-cw')}</div>
+    <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Затем «Отправить список дел» ниже; при добавлении новых дел повторяйте.</div>
+    <div class="form-actions">${btn('Отправить список дел', 'crmCollectorSendLinks()', '', 'arrow-right')}${btn('Собрать сейчас', 'monitorCollectorRun()', '', 'cloud-download')}</div>
+    <div class="status-line" id="col-srv-status">${col.url && col.secret ? 'Серверный сбор: нажмите «Проверить»' : 'Серверный сбор: укажите адрес и секрет функции.'}</div>
+    <div class="section-label">Как применяются данные</div>
+    <label class="check"><input type="checkbox" id="mon-auto"${auto ? ' checked' : ''} onchange="localStorage.setItem('crm_mon_auto', this.checked ? '1' : '0'); toast(this.checked ? 'Данные суда применяются автоматически' : 'Автоприменение выключено — события разбираются вручную')"><span>Применять данные суда автоматически: заседания создаются, переносятся и дополняются; дата акта записывается, если поле в деле пустое. Спорное — на разбор.</span></label>
+    <div class="info-box">Если события не приходят: проверьте, что «Собрать сейчас» отвечает без ошибки (403 — неверный секрет, 404 — неверный адрес), что у дел указаны ссылки, и что список дел отправлен. Запрос к сайтам судов идёт из Облака, не с вашего устройства.</div>`, mode || true);
+}
+function monitorCollectorSave() { localStorage.setItem('crm_collector_url', fv('col-url').trim().replace(/\/+$/, '')); localStorage.setItem('crm_collector_secret', fv('col-secret').trim()); if (typeof bumpSecrets === 'function') bumpSecrets('crm_collector_secret'); toast('Настройки сбора сохранены'); openMonitorSettingsSheet('replace'); }
+async function monitorCollectorStatus(manual) {
+  const el = document.getElementById('col-srv-status'), cfg = crmCollectorSrvCfg();
+  if (!cfg.url || !cfg.secret) { if (el) el.textContent = 'Серверный сбор: укажите адрес и секрет функции.'; return null; }
+  if (manual) toast('Запрашиваю состояние сбора…');
+  const r = await crmCollectorCall({ action: 'status' }); if (!r) return null;
+  // 403 (forbidden) — неверный секрет, 404 — неверный адрес: подсказка словами (crmCollectorHttpHint v270), а не код
+  const bad = r.err || (r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте COLLECTOR_SECRET функции и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
+  if (el) el.textContent = bad ? 'Серверный сбор: ' + bad : crmCollectorStatusLine(r.j);
+  if (manual) toast(bad ? 'Коллектор: ' + bad : 'Коллектор ответил', !!bad);
+  return r;
+}
+async function monitorCollectorRun() {
+  const el = document.getElementById('col-srv-status'); if (el) el.textContent = 'Серверный сбор: выполняется — до 8 минут, не закрывайте страницу…';
+  toast('Сбор запущен — это может занять несколько минут');
+  const r = await crmCollectorCall({ action: 'collect' }, 590000); if (!r) return;
+  if (r.err) { toast('Сбой запуска сбора: ' + r.err, true); monitorCollectorStatus(false); return; }
+  const j = r.j; if (j && ('ok' in j)) { if (el) el.textContent = crmCollectorStatusLine(j); toast(j.ok ? `Сбор завершён: событий ${j.events ?? 0}, новых ${j.added ?? 0}` : 'Сбор завершился с ошибкой: ' + (j.error || ''), !j.ok); if (j.ok && (j.added || j.updated)) await monitorPull(); } else toast('Ответ функции не распознан (HTTP ' + r.http + ')', true);
 }
 
 // ▼▼▼ next/boot.js
