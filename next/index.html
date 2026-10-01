@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 00:57 · 9d2fbd8">
+<meta name="build" content="02.10.2026 01:25 · c7c9177">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 2б)</title>
 <style>
@@ -5240,7 +5240,7 @@ function monitorSettingsState(srvUrl, col, autoOn) {
 // что означает ошибка в ответе коллектора — словами и с действием (снимок пользователя 01.10.2026: «отправка на /bridge: сервер ответил: auth»)
 function monCollectorHint(j) {
   const e = String((j && j.error) || '');
-  if (/auth/i.test(e)) return 'Коллектор собрал события, но личный сервер их не принял: секретный код в переменной BRIDGE_SECRET функции collector-sud не совпадает с секретным кодом сервера crm-bridge. Яндекс Облако → collector-sud → Редактор → Переменные окружения → BRIDGE_SECRET: впишите тот же код, что в листе «Синхронизация» → «Создать версию» → здесь «Собрать сейчас». Пока это не исправлено, новые события в программу не приходят. Кнопка «Проверить доставку на сервер» ниже покажет, что именно не совпадает: адрес или код (лишний пробел в конце кода тоже даёт такую ошибку).';
+  if (/auth/i.test(e)) return 'Коллектор собрал события, но личный сервер их не принял. Причин бывает две: коллектор шлёт события не на ваш сервер (переменная BRIDGE_URL) или код в переменной BRIDGE_SECRET не совпадает с кодом сервера. Нажмите «Проверить доставку на сервер» ниже — программа скажет, что из двух. Исправление: Яндекс Облако → collector-sud → Редактор → Переменные окружения: BRIDGE_URL — адрес сервера из листа «Синхронизация», BRIDGE_SECRET — секретный код оттуда же → «Создать версию» → здесь «Собрать сейчас». Пока это не исправлено, новые события в программу не приходят.';
   if (/BRIDGE_URL|BRIDGE_SECRET/.test(e)) return 'У функции collector-sud не заданы переменные BRIDGE_URL (адрес crm-bridge) и BRIDGE_SECRET (его секретный код) — добавьте их в Яндекс Облаке и создайте версию.';
   if (/HTTP 403/.test(e)) return 'Личный сервер недоступен коллектору (403): функция crm-bridge должна быть публичной — Яндекс Облако → crm-bridge → «Обзор» → «Публичная функция».';
   if (/HTTP 404/.test(e)) return 'Коллектор стучится по неверному адресу сервера (404): проверьте BRIDGE_URL в переменных функции collector-sud.';
@@ -5281,6 +5281,8 @@ async function monBridgeCheck() {
 // ═══ карточка дела с сайта суда (v239/v241/v266 прежней программы; замечание пользователя 02.10.2026: «не подтянулись ФИО судьи») ═══
 // Коллектор читает страницу дела по ссылке (действие collectone) и возвращает карточку: судья, суд, номер, УИД, дата поступления,
 // стороны. Пустые поля дела заполняются; заполненные не трогаются — расхождение показывается, номер и УИД заменяются только кнопкой.
+// Название суда на сайте часто длиннее («… Владимирской области»): если одно название целиком входит в другое — это один суд
+function courtNameSame(a, b) { const x = crmMonNorm(a), y = crmMonNorm(b); return !!x && !!y && (x.includes(y) || y.includes(x)); }
 const CASE_LINK_STAGES = [['link', 'Первая инстанция', '', 'courtNo'], ['linkApp', 'Апелляция', 'App', 'courtNoApp'], ['linkCass', 'Кассация', 'Cass', 'courtNoCass']];
 let CASE_CARD_ASK = null;
 function caseCardResultModel(r) {
@@ -5323,7 +5325,8 @@ async function caseFetchCard(caseId, opts) {
     const r = await crmCollectorCall({ action: 'collectone', url: c[f], courtNo: c[noField] || '', number: c.number, stage }, 45000);
     if (!r || !r.j) { errs.push(stage + ': ' + ((r && r.err) || 'нет ответа')); continue; }
     if (!r.j.ok) { errs.push(stage + ': ' + (r.j.error === 'forbidden' ? 'секрет коллектора не подошёл' : r.j.error === 'unknown_action' ? 'функция коллектора устарела и не умеет читать карточку' : (r.j.error || 'ошибка'))); continue; }
-    const res = crmCaseApplyCard(c, r.j.card || {}, sfx); done.push(...res.done); diff.push(...res.diff); ask.push(...(res.ask || []));
+    const res = crmCaseApplyCard(c, r.j.card || {}, sfx), sameCourt = courtNameSame(c['court' + sfx], (r.j.card || {}).court);
+    done.push(...res.done); diff.push(...res.diff.filter(t => !(sameCourt && (t.startsWith('суд —') || t.startsWith('суд ('))))); ask.push(...(res.ask || []));
     if (Array.isArray(r.j.events) && r.j.events.length) { const rows = await crmMonNormalizeRows(r.j.events, 'Коллектор судов'); await crmMonPersist(rows, { quiet: true }); evCount += r.j.events.length; }
   }
   if (done.length) {
@@ -5424,8 +5427,8 @@ function openMonitorSettingsSheet(mode) {
     <p>Программа следит за делами на сайтах судов: функция-коллектор в вашем Яндекс Облаке по таймеру (утром и днём) обходит ссылки на дела, собирает назначенные заседания, результаты и движение дела, и кладёт их на ваш личный сервер. Кнопка «Получить события» на экране «Суды и мониторинг» забирает их в программу. Заседания и даты актов применяются к делам сами, когда нет сомнений; спорное остаётся на разбор. Данные судов — не истина: сроки всегда подтверждаете вы.</p>
     <div class="section-label">Как подключить, один раз</div>
     <div class="info-box"><b>Шаг 1. Личный сервер.</b> Он уже нужен для синхронизации: Синхронизация → «Подключить сервер» (адрес функции crm-bridge и секретный код). События коллектора хранятся на нём.</div>
-    <div class="info-box"><b>Шаг 2. Функция-коллектор в Яндекс Облаке.</b> Если вы разворачивали сервер мастером «Свой сервер одной кнопкой» в прежней программе, коллектор уже создан — адрес и секрет те же, что были в прежней программе (Настройки → Мониторинг → «Сбор в облаке»). Иначе: Яндекс Облако → Functions → создать функцию <b>collector-sud</b> из файла <b>Коллектор_судов/dist/collector-sud.mjs</b> (Node.js), переменные окружения: <b>BRIDGE_URL</b> (адрес crm-bridge), <b>BRIDGE_SECRET</b> (его секретный код), <b>COLLECTOR_SECRET</b> (придумайте — его вводите ниже); таймер-триггер два раза в день. Мастер, который делает это за вас, появится в новой версии на этом же этапе.</div>
-    <div class="form-grid">${wide(fInput('col-url', 'Адрес функции коллектора', col.url, 'type="url" autocomplete="off" placeholder="https://functions.yandexcloud.net/…"'))}${wide(fInput('col-secret', 'Секрет коллектора (COLLECTOR_SECRET)', col.secret, 'type="password" autocomplete="off"'))}</div>
+    <div class="info-box"><b>Шаг 2. Функция-коллектор в Яндекс Облаке.</b> Если вы разворачивали сервер мастером «Свой сервер одной кнопкой» в прежней программе, коллектор уже создан — адрес и секрет те же, что были в прежней программе (Настройки → Мониторинг → «Сбор в облаке»). Иначе: Яндекс Облако → Functions → создать функцию <b>collector-sud</b> (Node.js) из файла <b>collector-sud.mjs</b> — он лежит на сайте программы в разделе dist; переменные окружения: <b>BRIDGE_URL</b> — адрес вашего сервера crm-bridge, точно как в листе «Синхронизация»; <b>BRIDGE_SECRET</b> — секретный код этого сервера; <b>SECRET</b> — секрет самого коллектора (придумайте — его вводите ниже); таймер-триггер два раза в день. Мастер, который делает это за вас, появится в новой версии на этом же этапе.</div>
+    <div class="form-grid">${wide(fInput('col-url', 'Адрес функции коллектора', col.url, 'type="url" autocomplete="off" placeholder="https://functions.yandexcloud.net/…"'))}${wide(fInput('col-secret', 'Секрет коллектора (переменная SECRET функции collector-sud)', col.secret, 'type="password" autocomplete="off"'))}</div>
     <div class="form-actions" style="margin-top:8px">${btn('Сохранить', 'monitorCollectorSave()', 'primary', 'check')}${btn('Проверить', 'monitorCollectorStatus(true)', '', 'refresh-cw')}</div>
     <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Затем «Отправить список дел» ниже; при добавлении новых дел повторяйте.</div>
     <div class="form-actions">${btn('Отправить список дел', 'crmCollectorSendLinks()', '', 'arrow-right')}${btn('Собрать сейчас', 'monitorCollectorRun()', '', 'cloud-download')}</div>
@@ -5444,7 +5447,7 @@ async function monitorCollectorStatus(manual) {
   if (manual) toast('Запрашиваю состояние сбора…');
   const r = await crmCollectorCall({ action: 'status' }); if (!r) return null;
   // 403 (forbidden) — неверный секрет, 404 — неверный адрес: подсказка словами (crmCollectorHttpHint v270), а не код
-  const bad = r.err || (r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте COLLECTOR_SECRET функции и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
+  const bad = r.err || (r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте переменную SECRET функции collector-sud и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
   if (el) el.textContent = bad ? 'Серверный сбор: ' + bad : crmCollectorStatusLine(r.j);
   monCollectorHintRender(bad ? null : r.j);
   if (manual) toast(bad ? 'Коллектор: ' + bad : 'Коллектор ответил', !!bad);
