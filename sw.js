@@ -16,7 +16,7 @@
    а не любая открытая страница сайта (eula.html, страницы подписи); папки next/ и old/ не обслуживаются
    (у них свой service worker); при активации удаляются только свои кэши (crm-advocate-v…), чужие не трогаются.
 */
-const CACHE = 'crm-advocate-v147';
+const CACHE = 'crm-advocate-v148';
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
 const BASE = new URL('./', self.location).pathname;
