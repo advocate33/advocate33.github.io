@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 17:23 · e865fc3">
+<meta name="build" content="02.10.2026 18:01 · d879801">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2016,19 +2016,35 @@ const SRV = {
   get secret() { return localStorage.getItem('crm_srv_secret') || ''; },
   set secret(v) { if (v) localStorage.setItem('crm_srv_secret', v); else localStorage.removeItem('crm_srv_secret'); bumpSecrets('crm_srv_secret'); }
 };
+// v313: текст облака — словами. Совет даётся только тогда, когда текст сам называет причину.
+function srvCloudError(msg) {
+  const m = String(msg || '').slice(0, 120);
+  if (/too large|larger than limits|entity/i.test(m)) return 'база больше, чем облако принимает за один запрос (' + m + ')';
+  if (/time|timed|deadline/i.test(m)) return 'облако прервало сервер по времени (' + m + ') — увеличьте таймаут функции crm-bridge до 60 секунд';
+  return 'облако прервало работу сервера: ' + m;
+}
 async function srvCall(action, payload) {
   if (!SRV.url) return null;
   const endpoint = safeExternalUrl(SRV.url);
   if (!endpoint || !endpoint.startsWith('https://')) return { ok:false, error:'invalid_url' };
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 20000);
+  // v313: запись базы может идти дольше — минута вместо 20 секунд
+  const timer = setTimeout(() => ctl.abort(), action === 'dbput' ? 60000 : 20000);
   try {
-    const r = await fetch(endpoint, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify(Object.assign({ secret: SRV.secret, action }, payload || {})),
+    const body = JSON.stringify(Object.assign({ secret: SRV.secret, action }, payload || {}));
+    const post = ctype => fetch(endpoint, {
+      method: 'POST', headers: { 'Content-Type': ctype }, body,
       cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal
     });
+    // v313: тело text/plain Яндекс Облако кодирует в base64 перед передачей функции — запрос больше 2,75 МБ отклоняется (413);
+    // application/json передаётся как есть — до 3,67 МБ. Так шлётся только запись базы: остальные запросы малы, и им не нужен
+    // предварительный запрос браузера. Не прошёл по сети (старый сервер не отвечает на OPTIONS) — повтор прежним способом.
+    let r;
+    if (action === 'dbput') { try { r = await post('application/json'); } catch (e) { if (e && e.name === 'AbortError') throw e; r = await post('text/plain;charset=utf-8'); } }
+    else r = await post('text/plain;charset=utf-8');
     const j = await r.json().catch(()=>null);
+    // v313: функцию прервало само облако (размер запроса, время, память) — в ответе нет поля error, есть errorMessage
+    if (j && typeof j === 'object' && j.ok === undefined && j.error === undefined && j.errorMessage) return { ok: false, error: srvCloudError(j.errorMessage) };
     return j && typeof j === 'object' ? j : { ok:false, error:r.ok?'bad_response':'http_'+r.status };
   } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'timeout' : 'network' }; }
   finally { clearTimeout(timer); }
