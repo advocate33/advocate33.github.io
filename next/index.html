@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 13:21 · 9237bee">
+<meta name="build" content="02.10.2026 13:56 · 554c382">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2319,6 +2319,100 @@ async function nextServerPull() {
   } catch (e) { logErr('pull', e); const msg = String((e && e.message) || e).slice(0, 80); srvdbNote('err', msg); return { ok: false, error: msg }; }
   finally { NEXT_SYNC.busy = false; syncStatusRender(); }
 }
+// ── Проверка слияния без записи (этап 4, часть 2б) ──
+// Перед включением записи на сервер пользователь видит на своей базе: что пришло бы с сервера на устройство, что ушло бы с
+// устройства на сервер, какие записи правились с обеих сторон и что программа выбрала бы. Ничего не записывается: с сервера
+// только dbget, на устройстве — только чтение (mergeIncoming в режиме dryRun, v297).
+const PREVIEW_TITLES = { cases: 'Дела', clients: 'Доверители', hearings: 'Заседания', tasks: 'Задачи', finance: 'Счета и платежи', documents: 'Документы', meetings: 'Встречи', mail: 'Переписка', leads: 'Обращения', expenses: 'Расходы', refs: 'Справочники', monitorEvents: 'События судов', caseEvents: 'Журнал изменений дел', time: 'Учёт времени', deposits: 'Депозиты', poa: 'Доверенности', templates: 'Шаблоны', orders: 'Ордера', files: 'Файлы', workflows: 'Процессы', workflowRuns: 'Запуски процессов', correspondence: 'Корреспонденция', docVersions: 'Версии документов', docBlobs: 'Файлы документов', aiSessions: 'Сеансы помощника' };
+// Чистая модель: local и remote — { раздел: [записи] }, base — время прошлого слияния. По каждому разделу:
+// dAdd / dUpd — новых и изменённых для устройства; sAdd / sUpd / sDel — новых, изменённых и удалённых для сервера;
+// both — правились с обеих сторон после прошлого слияния.
+function mergePreviewModel(local, remote, base) {
+  const out = { stores: [], toDevice: { add: 0, upd: 0 }, toServer: { add: 0, upd: 0, del: 0 }, both: 0, same: 0 };
+  const names = Object.keys(local || {}).concat(Object.keys(remote || {}).filter(k => !(k in (local || {}))));
+  for (const s of names) {
+    const L = ((local || {})[s] || []).filter(r => r && r.id != null), R = ((remote || {})[s] || []).filter(r => r && r.id != null);
+    const lm = new Map(L.map(r => [r.id, r])), rm = new Map(R.map(r => [r.id, r]));
+    const row = { store: s, title: PREVIEW_TITLES[s] || s, dAdd: 0, dUpd: 0, sAdd: 0, sUpd: 0, sDel: 0, both: 0, same: 0 };
+    for (const r of R) {
+      const c = lm.get(r.id);
+      if (!c) { if (!r._deleted) row.dAdd++; continue; }
+      const ct = c._upd || 0, rt = r._upd || 0;
+      if (ct === rt) { row.same++; continue; }
+      if (base && ct > base && rt > base) row.both++;
+      if (rt > ct) row.dUpd++; else if (c._deleted && !r._deleted) row.sDel++; else row.sUpd++;
+    }
+    for (const c of L) if (!rm.has(c.id) && !c._deleted) row.sAdd++;
+    out.toDevice.add += row.dAdd; out.toDevice.upd += row.dUpd; out.toServer.add += row.sAdd; out.toServer.upd += row.sUpd; out.toServer.del += row.sDel; out.both += row.both; out.same += row.same;
+    if (row.dAdd || row.dUpd || row.sAdd || row.sUpd || row.sDel || row.both) out.stores.push(row);
+  }
+  return out;
+}
+// Вывод словами: что означает сверка для пользователя
+function mergePreviewVerdict(m, conflicts) {
+  const toS = m.toServer.add + m.toServer.upd + m.toServer.del, toD = m.toDevice.add + m.toDevice.upd;
+  if (conflicts) return { kind: 'warn', text: 'Записей, которые правились и здесь, и на другом устройстве: ' + conflicts + '. Программа объединит их по полям — ниже видно, что она выбрала бы. Если выбор неверный, сообщите об этом до включения записи на сервер.' };
+  if (!toS && !toD) return { kind: 'ok', text: 'База на устройстве и база на сервере совпадают. Запись на сервер ничего бы не изменила.' };
+  if (!toS) return { kind: 'ok', text: 'На сервере есть данные новее, чем на устройстве: «Загрузить базу с сервера» их добавит. С устройства на сервер отправлять нечего.' };
+  return { kind: 'ok', text: 'На устройстве есть записи, которых нет на сервере или которые новее: ' + toS + '. При включённой записи они ушли бы на сервер. Спорных правок нет.' };
+}
+// Итог без имён и номеров дел — его можно переслать в чат
+function mergePreviewText(res, now) {
+  const m = res.model, d = new Date(now || Date.now()).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const lines = ['Проверка слияния ' + d + ' (сборка ' + (typeof BUILD_ID === 'string' ? BUILD_ID : '') + ')',
+    'С сервера на устройство: новых ' + m.toDevice.add + ', изменённых ' + m.toDevice.upd,
+    'С устройства на сервер: новых ' + m.toServer.add + ', изменённых ' + m.toServer.upd + ', удалённых ' + m.toServer.del,
+    'Правились с обеих сторон: ' + (res.conflictsTotal || 0) + '; совпадают: ' + m.same];
+  m.stores.forEach(r => lines.push(r.title + ': с сервера +' + r.dAdd + ' ~' + r.dUpd + '; на сервер +' + r.sAdd + ' ~' + r.sUpd + ' −' + r.sDel + (r.both ? '; с обеих сторон ' + r.both : '')));
+  return lines.join('\n');
+}
+let MERGE_PREVIEW_LAST = null;
+async function nextMergePreview() {
+  if (NEXT_SYNC.busy) return { ok: false, error: 'идёт загрузка — дождитесь её окончания' };
+  if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
+  if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
+  NEXT_SYNC.busy = true; syncStatusRender();
+  try {
+    const g = await srvCall('dbget');
+    if (!g || !g.ok) return { ok: false, error: nextSrvError(g) };
+    if (!g.exists || !g.data) return { ok: true, empty: true };
+    let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextSrvError({ error: 'decrypt' }) }; }
+    if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: nextSrvError({ error: 'format' }) };
+    const local = {}; for (const s of STORES) local[s] = await getAllRaw(s);
+    const model = mergePreviewModel(local, dump.data, Number(localStorage.getItem('crm_merge_base') || 0));
+    const dry = await mergeIncoming(JSON.parse(JSON.stringify(dump)), false, { dryRun: true });
+    return { ok: true, ver: Number(g.ver || 0), model, conflicts: (dry.conflictList || []).slice(0, 30), conflictsTotal: dry.conflicts || 0 };
+  } catch (e) { logErr('preview', e); return { ok: false, error: String((e && e.message) || e).slice(0, 120) }; }
+  finally { NEXT_SYNC.busy = false; syncStatusRender(); }
+}
+// Лист с итогом. res — готовый результат (для ui_check и повторного показа); без него — сверка с сервером.
+async function openMergePreviewSheet(res) {
+  if (!res) { toast('Сверяю базу на устройстве с базой на сервере…'); res = await nextMergePreview(); }
+  if (!res.ok) { toast('Проверка не выполнена: ' + res.error, true); return res; }
+  if (res.empty) { toast('На сервере базы ещё нет — сверять не с чем', true); return res; }
+  MERGE_PREVIEW_LAST = res; localStorage.setItem('crm_next_preview_at', String(Date.now()));
+  const m = res.model, v = mergePreviewVerdict(m, res.conflictsTotal || 0);
+  const rows = (pick, text) => { const list = m.stores.filter(pick); return list.length ? `<div class="list-rows">${list.map(r => `<div><span>${esc(r.title)}</span><span class="muted">${esc(text(r))}</span></div>`).join('')}</div>` : ''; };
+  const dev = rows(r => r.dAdd || r.dUpd, r => [r.dAdd ? 'новых ' + r.dAdd : '', r.dUpd ? 'изменённых ' + r.dUpd : ''].filter(Boolean).join(' · '));
+  const srv = rows(r => r.sAdd || r.sUpd || r.sDel, r => [r.sAdd ? 'новых ' + r.sAdd : '', r.sUpd ? 'изменённых ' + r.sUpd : '', r.sDel ? 'удалённых ' + r.sDel : ''].filter(Boolean).join(' · '));
+  const conf = (res.conflicts || []).map(c => `<div class="conflict"><div class="task-title">${esc(c.label || c.id || 'Запись')}</div>
+    <div class="task-sub">${esc(PREVIEW_TITLES[c.store] || c.store || '')} · программа выбрала бы: ${esc(c.kept || '')}</div>
+    ${(c.diff || []).slice(0, 12).map(d => `<div class="conflict-field small"><b>${esc(CONFLICT_FIELDS[d.field] || d.field)}</b><span class="muted">здесь: ${esc(d.here || '—')}</span><span class="muted">на сервере: ${esc(d.there || '—')}</span><span>итог: ${esc(d.kept || '—')}</span></div>`).join('')}</div>`).join('');
+  openSheet('Проверка слияния', `<div class="info-box">Ничего не записано — ни на устройство, ни на сервер. Это сверка базы на устройстве с базой на сервере${res.ver > 1e11 ? ' (на сервере — версия от ' + esc(new Date(res.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })) + ')' : ''}.</div>
+    <div class="info-box${v.kind === 'warn' ? ' warning' : ''}" id="mp-verdict">${esc(v.text)}</div>
+    <div class="section-label">С сервера на это устройство</div>${dev || '<p class="small muted">Новых данных на сервере нет.</p>'}
+    <div class="section-label">С этого устройства на сервер</div>${srv || '<p class="small muted">На сервере есть всё, что есть на устройстве.</p>'}
+    <p class="small muted">Совпадающих записей: ${m.same}. Запись на сервер в новой версии пока выключена.</p>
+    ${res.conflictsTotal ? `<div class="section-label">Правились с обеих сторон · ${res.conflictsTotal}</div>${conf}${res.conflictsTotal > (res.conflicts || []).length ? `<p class="small muted">Показаны первые ${(res.conflicts || []).length}.</p>` : ''}` : ''}
+    <div class="form-actions"><button type="button" class="button" id="mp-copy" onclick="mergePreviewCopy()">${icon('files', 'icon-sm')}Скопировать итог (только числа)</button></div>
+    <p class="small muted">В скопированном итоге нет ни имён, ни номеров дел — его можно переслать разработчику.</p>`, sheetIsOpen() ? true : undefined);
+  return res;
+}
+async function mergePreviewCopy() {
+  if (!MERGE_PREVIEW_LAST) return;
+  try { await navigator.clipboard.writeText(mergePreviewText(MERGE_PREVIEW_LAST)); toast('Итог скопирован — вставьте его в сообщение'); }
+  catch (e) { logErr('preview:copy', e); toast('Не удалось скопировать — перепишите числа с экрана', true); }
+}
 // Правки, сделанные в новой версии после последней загрузки: они хранятся на устройстве и на сервер не уходят
 const nextLocalChanges = () => !!SRVDB.lastPull && localStorage.getItem('crm_next_pull_rev') !== syncRevision();
 // Отключить сервер в новой версии: адрес, код, пароль и отметки удаляются; база на устройстве остаётся
@@ -3070,7 +3164,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -3323,6 +3417,9 @@ async function openSyncSheet(sub, msg) {
     <div class="form-actions"><button type="button" class="button ${checked ? 'primary' : ''}" id="sy-pull" onclick="syncPullNow()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('cloud-download')}Загрузить базу с сервера</button></div>
     ${SRVDB.lastPull && res ? `<div class="list-rows"><div><span>Последняя загрузка</span><span class="muted">${esc(new Date(SRVDB.lastPull).toLocaleString('ru-RU'))}</span></div>
       <div><span>Новых записей / обновлено</span><span class="muted num">${Number(res.added) || 0} / ${Number(res.updated) || 0}</span></div></div>` : ''}
+    ${step(3, 'Проверить слияние — без записи', !!localStorage.getItem('crm_next_preview_at'))}
+    <p class="small muted">${checked ? 'Программа сверит базу на устройстве с базой на сервере и покажет, что пришло бы с сервера и что ушло бы на сервер. Ничего не записывается. Этот шаг нужен перед включением записи на сервер.' : 'Станет доступно после шага 1.'}</p>
+    <div class="form-actions"><button type="button" class="button" id="sy-preview" onclick="openMergePreviewSheet()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('shield-check')}Проверить слияние</button></div>
     ${nextLocalChanges() ? `<div class="info-box">После загрузки вы вносили правки в новой версии. Они хранятся на этом устройстве; отправка на сервер пока выключена — включится после проверки слияния на вашей базе.</div>` : ''}
     ${nConf ? `<div class="form-actions">${btn('Журнал коллизий · ' + nConf, 'showConflictsSheet()', '', 'info')}</div>` : ''}
     <div class="section-label">Записей в базе новой версии</div><div class="list-rows">${rows}</div>
