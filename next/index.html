@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 18:01 · d879801">
+<meta name="build" content="02.10.2026 18:52 · 43ece63">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2254,6 +2254,22 @@ const NEXT_PUSH = { on: false };
     return srvCallV310(action, payload);
   };
 }
+// Чтение базы с сервера с запасом времени (снимок пользователя 02.10.2026, телефон: «сервер не ответил за 20 секунд»).
+// База ≈2,7 МБ: через мобильную сеть за 20 секунд общего предела srvCall она не успевает. Здесь — только чтение (dbget),
+// до 90 секунд; все прочие запросы идут через srvCall с прежним пределом.
+async function nextDbGet() {
+  if (!SRV.url) return null;
+  const endpoint = safeExternalUrl(SRV.url);
+  if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 90000);
+  try {
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ secret: SRV.secret, action: 'dbget' }), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const j = await r.json().catch(() => null);
+    if (j && typeof j === 'object' && j.ok === undefined && j.error === undefined && j.errorMessage) return { ok: false, error: srvCloudError(j.errorMessage) };
+    return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'база не загрузилась за 90 секунд — медленная связь, повторите' : 'network' }; }
+  finally { clearTimeout(timer); }
+}
 
 // ▼▼▼ sync/pull.js
 // ═══ sync/pull.js — чтение базы с личного сервера (этап 1г) ═══
@@ -2337,7 +2353,7 @@ async function nextServerPull() {
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
   try {
-    const g = await srvCall('dbget');
+    const g = await nextDbGet();
     if (!g || !g.ok) { const msg = nextSrvError(g); srvdbNote('err', msg); return { ok: false, error: msg }; }
     const r = await srvdbMergeSnapshot(g, true);
     if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
@@ -2403,7 +2419,7 @@ async function nextMergePreview() {
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
   try {
-    const g = await srvCall('dbget');
+    const g = await nextDbGet();
     if (!g || !g.ok) return { ok: false, error: nextSrvError(g) };
     if (!g.exists || !g.data) return { ok: true, empty: true };
     let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextSrvError({ error: 'decrypt' }) }; }
@@ -2521,7 +2537,7 @@ async function nextServerPush() {
   const fail = (step, msg) => { srvdbNote('err', msg); return { ok: false, step, error: msg }; };
   try {
     const takeIn = async () => { // шаг «получить и влить»
-      const g = await srvCall('dbget');
+      const g = await nextDbGet();
       if (!g || !g.ok) return { err: nextSrvError(g) };
       if (g.exists && g.data) { const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: 'не записано записей с сервера: ' + r.failed + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
       return { ver: 0, added: 0, updated: 0 };
