@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 22:29 · 8f60de8">
+<meta name="build" content="02.10.2026 22:59 · 9fd0b4f">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2455,7 +2455,9 @@ async function nextMergePreview() {
     const local = {}; for (const s of STORES) local[s] = await getAllRaw(s);
     const model = mergePreviewModel(local, dump.data, Number(localStorage.getItem('crm_merge_base') || 0));
     const dry = await mergeIncoming(JSON.parse(JSON.stringify(dump)), false, { dryRun: true });
-    return { ok: true, ver: Number(g.ver || 0), model, conflicts: (dry.conflictList || []).slice(0, 30), conflictsTotal: dry.conflicts || 0 };
+    // формат шифроконтейнера на сервере: 3 — сжатый (v314); нужен, чтобы предложить заменить несжатую базу сжатой
+    let srvFmt = 0; try { srvFmt = Number(JSON.parse(g.data).v || 1); } catch (e) { srvFmt = 0; }
+    return { ok: true, ver: Number(g.ver || 0), srvFmt, model, conflicts: (dry.conflictList || []).slice(0, 30), conflictsTotal: dry.conflicts || 0 };
   } catch (e) { logErr('preview', e); return { ok: false, error: String((e && e.message) || e).slice(0, 120) }; }
   finally { NEXT_SYNC.busy = false; syncStatusRender(); }
 }
@@ -2682,11 +2684,14 @@ async function openPushConfirm(res) {
   let size = res.size || null; if (!size) { try { size = await dbSizeNow(); } catch (e) { logErr('push:size', e); } }
   if (size && size.effective == null) dbSizeZip(size, null, false);
   if (size && !size.fits) { openSheet('Отправка на сервер', `<div class="info-box warning" id="push-toobig">База больше, чем принимает сервер: ${esc(mbText(size.effective))} из ${esc(mbText(size.limit))}${size.zipRequest == null ? '' : ', даже со сжатием'}. Отправка не начата. Что занимает место — в листе «Размер базы».</div><div class="form-actions"><button type="button" class="button" onclick="openDbSizeSheet()">Размер базы</button><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
+  // сжатие включено, а база на сервере ещё несжатая — отправка заменит её сжатой, даже когда новых данных нет
+  const recompress = !!(size && size.willZip && res.srvFmt && res.srvFmt < 3);
+  if (!res.empty && !toS && !recompress) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   const oldRisk = !!(size && size.needOld > oldVerOk());
-  if (!res.empty && !toS) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
       <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
       <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
+    ${recompress ? `<div class="info-box" id="push-recompress">База на сервере хранится без сжатия. Эта отправка заменит её сжатой: ${esc(mbText(size.zipRequest))} вместо ${esc(mbText(size.request))}.${toS ? '' : ' Новых данных для сервера при этом нет.'} Остальные устройства, получив сжатую базу, перейдут на сжатие сами.</div>` : ''}
     ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
     <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}После отправки прежняя программа получит эти изменения при своей следующей синхронизации. Прежний снимок базы сервер хранит в истории.</div>
     ${oldRisk ? `<div class="info-box warning" id="push-oldrisk">${size.willZip ? 'База уйдёт на сервер сжатой (' + esc(mbText(size.effective)) + '). Прежняя программа до версии 314 сжатую базу не прочтёт — её синхронизация остановится.' : 'После этой отправки база на сервере станет ' + esc(mbText(size.effective)) + '. Прежняя программа версии 312 получит её, но записать обратно не сможет: её предел — ' + esc(mbText(size.oldLimit)) + '.'} Отправляйте только после обновления прежней программы до версии ${size.needOld} на всех устройствах.
