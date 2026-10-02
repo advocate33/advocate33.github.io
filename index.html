@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://*.yandexcloud.net https://*.yandex.net https://*.yandex.ru https://oauth.yandex.ru https://suggestions.dadata.ru https://api.telegram.org https://api.anthropic.com https://openrouter.ai https://api.openai.com; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
-<title>CRM Адвоката v313</title>
+<title>CRM Адвоката v314</title>
 
 <!-- PWA manifest встроен через JS (data URI) для standalone-файла -->
 <link rel="manifest" id="manifest-placeholder">
@@ -1276,7 +1276,9 @@ body { overflow-x: hidden; overflow-x: clip; } /* v310: только body и cli
 // ════════════════════════════════════════════════════════════
 const DB_NAME = 'crm_advocate';
 const DB_VER = 23; // v203: + стор docBlobs (файлы версий документов отдельно от метаданных)
-const APP_VER = '313';
+const APP_VER = '314';
+// v314: сжатие базы перед шифрованием (формат 3): читаются форматы 1–3; сжатый пишется, когда сжатие включено
+// (встретилась сжатая база) или несжатая база уже не помещается в один запрос к серверу
 // v313: запись базы на личный сервер — запросом application/json (предел облака 3,67 МБ вместо 2,75 МБ); ответ облака,
 // прервавшего функцию, показывается его текстом, а не «сервер не ответил»
 // v312: прошедшее заседание без результата — статус «Дата прошла» (раньше — авто-«Проведено» с меткой autoDone);
@@ -9859,28 +9861,54 @@ async function deriveKey(pass, salt, iterations) {
     { name: 'PBKDF2', salt, iterations: rounds, hash: 'SHA-256' },
     km, { name: 'AES-GCM', length: 256 }, false, ['encrypt','decrypt']);
 }
+// v314: сжатие открытого текста базы (gzip) перед шифрованием — формат 3. Сжатие встроено в браузер (CompressionStream);
+// внешних библиотек нет. ENC_Z_KEY = '1' — сжатие включено на этом устройстве.
+const ENC_Z_KEY = 'crm_enc_v3';
+// открытого текста больше этого — несжатая база не пройдёт в один запрос к серверу (сервер принимает 3,5 млн знаков шифротекста)
+const ENC_Z_FORCE = 2400000;
+const encCanZip = () => typeof CompressionStream === 'function' && typeof DecompressionStream === 'function' && typeof Response === 'function' && typeof Blob === 'function';
+async function encZip(u8, unzip) {
+  const st = new Blob([u8]).stream().pipeThrough(unzip ? new DecompressionStream('gzip') : new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(st).arrayBuffer());
+}
+function encZipOn() { try { return localStorage.getItem(ENC_Z_KEY) === '1'; } catch (e) { return false; } }
+// сжимать ли эту запись: сжатие включено — или несжатая база уже не помещается (иначе синхронизация встала бы)
+function encWantZip(plainLen) { return encCanZip() && (encZipOn() || plainLen > ENC_Z_FORCE); }
 async function encryptDump(obj, pass) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv   = crypto.getRandomValues(new Uint8Array(12));
   const key  = await deriveKey(pass, salt, ENC_ITER_V2);
-  const aad  = _te.encode(`${ENC_FMT}|2|${ENC_ITER_V2}`);
-  const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv, additionalData:aad }, key, _te.encode(JSON.stringify(obj)));
-  return JSON.stringify({
-    _fmt: ENC_FMT, v: 2, alg: 'A256GCM', kdf: 'PBKDF2-SHA256', iter: ENC_ITER_V2,
+  let plain = _te.encode(JSON.stringify(obj));
+  const zip = encWantZip(plain.length), v = zip ? 3 : 2;
+  if (zip) plain = await encZip(plain, false);
+  const aad  = _te.encode(`${ENC_FMT}|${v}|${ENC_ITER_V2}`);
+  const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv, additionalData:aad }, key, plain);
+  const out = {
+    _fmt: ENC_FMT, v, alg: 'A256GCM', kdf: 'PBKDF2-SHA256', iter: ENC_ITER_V2,
     salt: bufToB64(salt), iv: bufToB64(iv), data: bufToB64(ct)
-  });
+  };
+  if (zip) out.z = 'gzip';
+  return JSON.stringify(out);
 }
 async function decryptDump(text, pass) {
   const p = JSON.parse(text);
   if (!p || p._fmt !== ENC_FMT) throw new Error('badformat');
   const ver = Number(p.v || 1);
-  if (ver !== 1 && ver !== 2) throw new Error('unsupported_version');
+  if (ver !== 1 && ver !== 2 && ver !== 3) throw new Error('unsupported_version');
+  // v314: формат 3 — сжатая база; браузер без встроенной распаковки её не прочтёт (сообщение — в местах вызова)
+  if (ver === 3 && p.z !== 'gzip') throw new Error('badformat');
+  if (ver === 3 && !encCanZip()) throw new Error('no_unzip');
   const rounds = ver === 1 ? ENC_ITER_V1 : Number(p.iter || ENC_ITER_V2);
-  if (ver === 2 && (p.alg !== 'A256GCM' || p.kdf !== 'PBKDF2-SHA256')) throw new Error('badformat');
+  if (ver >= 2 && (p.alg !== 'A256GCM' || p.kdf !== 'PBKDF2-SHA256')) throw new Error('badformat');
   const key = await deriveKey(pass, b64ToBuf(p.salt), rounds);
   const params = { name:'AES-GCM', iv:b64ToBuf(p.iv) };
-  if (ver === 2) params.additionalData = _te.encode(`${ENC_FMT}|2|${rounds}`);
-  const pt  = await crypto.subtle.decrypt(params, key, b64ToBuf(p.data));
+  if (ver >= 2) params.additionalData = _te.encode(`${ENC_FMT}|${ver}|${rounds}`);
+  let pt = new Uint8Array(await crypto.subtle.decrypt(params, key, b64ToBuf(p.data)));
+  if (ver === 3) {
+    pt = await encZip(pt, true);
+    // встретилась сжатая база — дальше это устройство тоже пишет сжатую (все устройства переходят сами)
+    try { localStorage.setItem(ENC_Z_KEY, '1'); } catch (e) { if (typeof logErr === 'function') logErr('enc:flag', e); }
+  }
   return JSON.parse(_td.decode(pt));
 }
 
@@ -10559,6 +10587,10 @@ async function srvdbMergeSnapshot(snapshot, silent) {
   let dump;
   try { dump = await decryptDump(snapshot.data, SRVDB.pass); }
   catch(e) {
+    // v314: причина по имени — база более нового формата, браузер без распаковки или пароль
+    const why = String(e && e.message || '');
+    if (why === 'unsupported_version') { if (!silent) toast('Сервер-синк: база записана более новой версией программы — обновите программу', true); return { ok:false, error:'база на сервере записана более новой версией программы — обновите программу' }; }
+    if (why === 'no_unzip') { if (!silent) toast('Сервер-синк: база сжата, а этот браузер не умеет её распаковывать — обновите браузер', true); return { ok:false, error:'база сжата, этот браузер не умеет её распаковывать — обновите браузер' }; }
     if (!silent) toast('Сервер-синк: не расшифровать — проверьте пароль шифрования', true);
     return { ok:false, error:'decrypt' };
   }
