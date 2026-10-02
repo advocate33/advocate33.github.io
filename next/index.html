@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 18:52 · 43ece63">
+<meta name="build" content="02.10.2026 22:29 · 8f60de8">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -580,28 +580,54 @@ async function deriveKey(pass, salt, iterations) {
     { name: 'PBKDF2', salt, iterations: rounds, hash: 'SHA-256' },
     km, { name: 'AES-GCM', length: 256 }, false, ['encrypt','decrypt']);
 }
+// v314: сжатие открытого текста базы (gzip) перед шифрованием — формат 3. Сжатие встроено в браузер (CompressionStream);
+// внешних библиотек нет. ENC_Z_KEY = '1' — сжатие включено на этом устройстве.
+const ENC_Z_KEY = 'crm_enc_v3';
+// открытого текста больше этого — несжатая база не пройдёт в один запрос к серверу (сервер принимает 3,5 млн знаков шифротекста)
+const ENC_Z_FORCE = 2400000;
+const encCanZip = () => typeof CompressionStream === 'function' && typeof DecompressionStream === 'function' && typeof Response === 'function' && typeof Blob === 'function';
+async function encZip(u8, unzip) {
+  const st = new Blob([u8]).stream().pipeThrough(unzip ? new DecompressionStream('gzip') : new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(st).arrayBuffer());
+}
+function encZipOn() { try { return localStorage.getItem(ENC_Z_KEY) === '1'; } catch (e) { return false; } }
+// сжимать ли эту запись: сжатие включено — или несжатая база уже не помещается (иначе синхронизация встала бы)
+function encWantZip(plainLen) { return encCanZip() && (encZipOn() || plainLen > ENC_Z_FORCE); }
 async function encryptDump(obj, pass) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv   = crypto.getRandomValues(new Uint8Array(12));
   const key  = await deriveKey(pass, salt, ENC_ITER_V2);
-  const aad  = _te.encode(`${ENC_FMT}|2|${ENC_ITER_V2}`);
-  const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv, additionalData:aad }, key, _te.encode(JSON.stringify(obj)));
-  return JSON.stringify({
-    _fmt: ENC_FMT, v: 2, alg: 'A256GCM', kdf: 'PBKDF2-SHA256', iter: ENC_ITER_V2,
+  let plain = _te.encode(JSON.stringify(obj));
+  const zip = encWantZip(plain.length), v = zip ? 3 : 2;
+  if (zip) plain = await encZip(plain, false);
+  const aad  = _te.encode(`${ENC_FMT}|${v}|${ENC_ITER_V2}`);
+  const ct   = await crypto.subtle.encrypt({ name:'AES-GCM', iv, additionalData:aad }, key, plain);
+  const out = {
+    _fmt: ENC_FMT, v, alg: 'A256GCM', kdf: 'PBKDF2-SHA256', iter: ENC_ITER_V2,
     salt: bufToB64(salt), iv: bufToB64(iv), data: bufToB64(ct)
-  });
+  };
+  if (zip) out.z = 'gzip';
+  return JSON.stringify(out);
 }
 async function decryptDump(text, pass) {
   const p = JSON.parse(text);
   if (!p || p._fmt !== ENC_FMT) throw new Error('badformat');
   const ver = Number(p.v || 1);
-  if (ver !== 1 && ver !== 2) throw new Error('unsupported_version');
+  if (ver !== 1 && ver !== 2 && ver !== 3) throw new Error('unsupported_version');
+  // v314: формат 3 — сжатая база; браузер без встроенной распаковки её не прочтёт (сообщение — в местах вызова)
+  if (ver === 3 && p.z !== 'gzip') throw new Error('badformat');
+  if (ver === 3 && !encCanZip()) throw new Error('no_unzip');
   const rounds = ver === 1 ? ENC_ITER_V1 : Number(p.iter || ENC_ITER_V2);
-  if (ver === 2 && (p.alg !== 'A256GCM' || p.kdf !== 'PBKDF2-SHA256')) throw new Error('badformat');
+  if (ver >= 2 && (p.alg !== 'A256GCM' || p.kdf !== 'PBKDF2-SHA256')) throw new Error('badformat');
   const key = await deriveKey(pass, b64ToBuf(p.salt), rounds);
   const params = { name:'AES-GCM', iv:b64ToBuf(p.iv) };
-  if (ver === 2) params.additionalData = _te.encode(`${ENC_FMT}|2|${rounds}`);
-  const pt  = await crypto.subtle.decrypt(params, key, b64ToBuf(p.data));
+  if (ver >= 2) params.additionalData = _te.encode(`${ENC_FMT}|${ver}|${rounds}`);
+  let pt = new Uint8Array(await crypto.subtle.decrypt(params, key, b64ToBuf(p.data)));
+  if (ver === 3) {
+    pt = await encZip(pt, true);
+    // встретилась сжатая база — дальше это устройство тоже пишет сжатую (все устройства переходят сами)
+    try { localStorage.setItem(ENC_Z_KEY, '1'); } catch (e) { if (typeof logErr === 'function') logErr('enc:flag', e); }
+  }
   return JSON.parse(_td.decode(pt));
 }
 
@@ -2294,6 +2320,8 @@ function nextSrvUrlCheck(url) {
   return '';
 }
 // Ответ сервера человеческими словами
+// почему база не открылась: формат новее программы, браузер без распаковки сжатой базы или пароль
+function nextDecryptWhy(e) { const w = String((e && e.message) || ''); return w === 'unsupported_version' ? 'база на сервере записана более новой версией программы — обновите страницу' : w === 'no_unzip' ? 'база сжата, а этот браузер не умеет её распаковывать — обновите браузер' : 'decrypt'; }
 function nextSrvError(j) {
   if (!j) return 'адрес сервера не указан';
   const e = String(j.error || '');
@@ -2334,7 +2362,7 @@ async function srvdbMergeSnapshot(snapshot, silent) {
   if (!snapshot || !snapshot.ok || !snapshot.exists || !snapshot.data) return { ok: true, empty: true, added: 0, updated: 0 };
   let dump;
   try { dump = await decryptDump(snapshot.data, SRVDB.pass); }
-  catch (e) { return { ok: false, error: 'decrypt' }; }
+  catch (e) { return { ok: false, error: nextDecryptWhy(e) }; }
   if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: 'format' };
   const merged = await mergeIncoming(dump, false);
   SRVDB.ver = Number(snapshot.ver || 0); SRVDB.lastAt = Date.now();
@@ -2422,7 +2450,7 @@ async function nextMergePreview() {
     const g = await nextDbGet();
     if (!g || !g.ok) return { ok: false, error: nextSrvError(g) };
     if (!g.exists || !g.data) return { ok: true, empty: true };
-    let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextSrvError({ error: 'decrypt' }) }; }
+    let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextSrvError({ error: nextDecryptWhy(e) }) }; }
     if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: nextSrvError({ error: 'format' }) };
     const local = {}; for (const s of STORES) local[s] = await getAllRaw(s);
     const model = mergePreviewModel(local, dump.data, Number(localStorage.getItem('crm_merge_base') || 0));
@@ -2582,11 +2610,30 @@ function dbSizeModel(data, settings) {
   const settingsBytes = settings ? utf8Len(JSON.stringify(settings)) : 0, plain = stores.reduce((a, s) => a + s.bytes, 0) + settingsBytes + 200;
   const request = Math.ceil(plain / 3) * 4 + 400; // base64 шифротекста плюс служебные поля запроса
   // limit — сколько шифротекста примет сервер от новой версии; oldLimit — сколько сможет отправить прежняя программа до 313
-  return { stores, settingsBytes, plain, request, limit: SRV_DATA_LIMIT, oldLimit: SRV_OLD_LIMIT, fits: request <= SRV_DATA_LIMIT, fitsOld: request <= SRV_OLD_LIMIT };
+  return { stores, settingsBytes, plain, request, effective: request, zipRequest: null, zipOn: false, willZip: false, needOld: request <= SRV_OLD_LIMIT ? 0 : 313, limit: SRV_DATA_LIMIT, oldLimit: SRV_OLD_LIMIT, fits: request <= SRV_DATA_LIMIT, fitsOld: request <= SRV_OLD_LIMIT };
 }
+// Сжатие (формат 3, общий модуль шифрования v314): zipBytes — размер сжатого открытого текста (null — браузер не умеет),
+// zipOn — сжатие включено на устройстве. Действующий размер запроса — сжатый, если сжатие включено или база без него
+// не помещается. needOld — какая версия прежней программы нужна на остальных устройствах, чтобы такая отправка их не
+// остановила: 314 — прочитать сжатую базу, 313 — записать обратно базу больше 2,74 МБ.
+function dbSizeZip(m, zipBytes, zipOn) {
+  m.zipRequest = zipBytes == null ? null : Math.ceil(zipBytes / 3) * 4 + 400; m.zipOn = !!zipOn;
+  m.willZip = m.zipRequest != null && (m.zipOn || m.plain > ENC_Z_FORCE);
+  m.effective = m.willZip ? m.zipRequest : m.request;
+  m.fits = m.effective <= SRV_DATA_LIMIT; m.fitsOld = m.effective <= SRV_OLD_LIMIT;
+  m.needOld = m.willZip ? 314 : (m.fitsOld ? 0 : 313);
+  return m;
+}
+async function dbSizeNow() {
+  const d = await collectAll(), m = dbSizeModel(d.data, d.settings);
+  let z = null; if (encCanZip()) { try { z = (await encZip(new TextEncoder().encode(JSON.stringify(d)), false)).length; } catch (e) { logErr('dbsize:zip', e); } }
+  return dbSizeZip(m, z, encZipOn());
+}
+const oldVerOk = () => Number(localStorage.getItem('crm_next_oldver') || (localStorage.getItem('crm_next_old313') === '1' ? 313 : 0));
 const mbText = b => (Math.round(b / 10485.76) / 100).toLocaleString('ru-RU') + ' МБ';
 function dbSizeText(m, now) {
   const lines = ['Размер базы ' + new Date(now || Date.now()).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' (сборка ' + (typeof BUILD_ID === 'string' ? BUILD_ID : '') + ')',
+    'Сжатие: ' + (m.zipOn ? 'включено' : 'выключено') + '; со сжатием запрос ' + (m.zipRequest == null ? 'не посчитан' : m.zipRequest + ' байт') + '; будет отправлено ' + m.effective + ' байт',
     'Запрос на сервер: ' + m.request + ' байт; предел новой версии ' + m.limit + ' (' + (m.fits ? 'помещается' : 'НЕ помещается') + '), предел прежней программы до 313 — ' + m.oldLimit + ' (' + (m.fitsOld ? 'помещается' : 'НЕ помещается') + '); открытый текст ' + m.plain + '; настройки ' + m.settingsBytes];
   m.stores.forEach(s => lines.push(s.title + ' [' + s.store + ']: записей ' + s.count + ', байт ' + s.bytes + '; поля: ' + s.fields.map(f => f.name + ' ' + f.bytes).join(', ')));
   return lines.join('\n');
@@ -2594,17 +2641,30 @@ function dbSizeText(m, now) {
 let DB_SIZE_LAST = null;
 // Лист «Размер базы». m — готовая модель (для ui_check); без неё — считается по базе устройства. Ничего не отправляет.
 async function openDbSizeSheet(m) {
-  if (!m) { toast('Считаю размер базы…'); try { const d = await collectAll(); m = dbSizeModel(d.data, d.settings); } catch (e) { logErr('dbsize', e); toast('Размер не посчитан: ' + String((e && e.message) || e).slice(0, 80), true); return null; } }
+  if (!m) { toast('Считаю размер базы…'); try { m = await dbSizeNow(); } catch (e) { logErr('dbsize', e); toast('Размер не посчитан: ' + String((e && e.message) || e).slice(0, 80), true); return null; } }
+  if (m.effective == null) dbSizeZip(m, null, false);
   DB_SIZE_LAST = m;
-  const pct = Math.round(m.request / m.limit * 100), pctOld = Math.round(m.request / m.oldLimit * 100);
+  const pct = n => Math.round(n / m.limit * 100);
   const rows = m.stores.slice(0, 12).map(s => `<div><span>${esc(s.title)}<br><span class="muted small">записей ${s.count}${s.fields.length ? ' · тяжёлые поля: ' + esc(s.fields.map(f => f.name + ' — ' + mbText(f.bytes)).join(', ')) : ''}</span></span><span class="muted num">${esc(mbText(s.bytes))}</span></div>`).join('');
-  openSheet('Размер базы', `<div class="info-box${m.fits ? '' : ' warning'}" id="dbsize-verdict">Новая версия: база ${m.fits ? 'помещается' : 'не помещается'} — ${esc(mbText(m.request))} из ${esc(mbText(m.limit))} (${pct} %).</div>
-    <div class="info-box${m.fitsOld ? (pctOld >= 90 ? ' warning' : '') : ' warning'}" id="dbsize-old">Прежняя программа до версии 313: ${m.fitsOld ? 'такая база помещается' : 'такую базу она отправить на сервер не сможет'} — ${esc(mbText(m.request))} из ${esc(mbText(m.oldLimit))} (${pctOld} %). У неё предел меньше: её запрос облако дополнительно упаковывает. С версии 313 предел тот же, что у новой.</div>
-    <p class="small muted">Пределы задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ.</p>
-    <div class="section-label">Что занимает место</div><div class="list-rows">${rows}</div>
+  const zipBox = m.zipRequest == null ? `<div class="info-box warning" id="dbsize-zip">Этот браузер не умеет сжимать базу — обновите браузер, чтобы пользоваться сжатием.</div>`
+    : m.zipOn ? `<div class="info-box" id="dbsize-zip">Сжатие базы включено: на сервер уходит ${esc(mbText(m.zipRequest))} вместо ${esc(mbText(m.request))} (${pct(m.zipRequest)} % предела).</div>`
+    : `<div class="info-box" id="dbsize-zip">Сжатие базы выключено. Со сжатием запрос был бы ${esc(mbText(m.zipRequest))} вместо ${esc(mbText(m.request))} — ${pct(m.zipRequest)} % предела${m.willZip ? '. База без сжатия уже не помещается, поэтому отправка пойдёт сжатой' : ''}.
+        <div style="margin-top:8px">Сжатую базу читает прежняя программа версии 314 и новее. Включайте, когда она обновлена на всех ваших устройствах: остальные устройства перейдут на сжатие сами, как только получат такую базу.</div>
+        <label class="check" style="margin-top:8px"><input type="checkbox" id="dbsize-zip-ok" onchange="document.getElementById('dbsize-zip-on').disabled = !this.checked"><span>Прежняя программа на всех моих устройствах — версии 314 или новее</span></label>
+        <div class="form-actions" style="margin-top:8px"><button type="button" class="button primary" id="dbsize-zip-on" disabled onclick="dbZipEnable()">${icon('check')}Включить сжатие базы</button></div></div>`;
+  openSheet('Размер базы', `<div class="info-box${m.fits ? '' : ' warning'}" id="dbsize-verdict">База ${m.fits ? 'помещается' : 'не помещается'} в один запрос к серверу: ${esc(mbText(m.effective))} из ${esc(mbText(m.limit))} (${pct(m.effective)} %)${m.willZip ? ', со сжатием' : ', без сжатия'}.</div>
+    ${zipBox}
+    <p class="small muted">Предел задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ. Прежняя программа до версии 313 могла отправить не больше ${esc(mbText(m.oldLimit))}.</p>
+    <div class="section-label">Что занимает место (до сжатия)</div><div class="list-rows">${rows}</div>
     <div class="form-actions"><button type="button" class="button" id="dbsize-copy" onclick="dbSizeCopy()">${icon('files', 'icon-sm')}Скопировать (только числа)</button></div>
-    <p class="small muted">В скопированном — названия разделов и полей и их размер. Имён, номеров дел и текстов там нет.</p>`, sheetIsOpen() ? true : undefined);
+    <p class="small muted">В скопированном — названия разделов и полей и их размер. Имён, номеров дел и текстов там нет.</p>`, sheetIsOpen() ? (UI.cur && UI.cur.title === 'Размер базы' ? 'replace' : true) : undefined);
   return m;
+}
+// Включить сжатие на этом устройстве: следующая отправка уйдёт сжатой, остальные устройства перейдут сами
+async function dbZipEnable() {
+  if (!(document.getElementById('dbsize-zip-ok') || {}).checked) return;
+  localStorage.setItem(ENC_Z_KEY, '1'); localStorage.setItem('crm_next_oldver', '314');
+  toast('Сжатие базы включено — следующая отправка на сервер уйдёт сжатой'); await openDbSizeSheet();
 }
 async function dbSizeCopy() {
   if (!DB_SIZE_LAST) return;
@@ -2619,22 +2679,23 @@ async function openPushConfirm(res) {
   const toS = m.toServer.add + m.toServer.upd + m.toServer.del, toD = m.toDevice.add + m.toDevice.upd, conf = res.conflictsTotal || 0;
   const first = !localStorage.getItem('crm_next_push_at');
   // размер: после отправки прежняя программа получит эту базу и должна суметь записать её обратно
-  let size = res.size || null; if (!size) { try { const d = await collectAll(); size = dbSizeModel(d.data, d.settings); } catch (e) { logErr('push:size', e); } }
-  if (size && !size.fits) { openSheet('Отправка на сервер', `<div class="info-box warning" id="push-toobig">База больше, чем принимает сервер: ${esc(mbText(size.request))} из ${esc(mbText(size.limit))}. Отправка не начата. Что занимает место — в листе «Размер базы».</div><div class="form-actions"><button type="button" class="button" onclick="openDbSizeSheet()">Размер базы</button><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
-  const oldRisk = !!(size && !size.fitsOld) && localStorage.getItem('crm_next_old313') !== '1';
+  let size = res.size || null; if (!size) { try { size = await dbSizeNow(); } catch (e) { logErr('push:size', e); } }
+  if (size && size.effective == null) dbSizeZip(size, null, false);
+  if (size && !size.fits) { openSheet('Отправка на сервер', `<div class="info-box warning" id="push-toobig">База больше, чем принимает сервер: ${esc(mbText(size.effective))} из ${esc(mbText(size.limit))}${size.zipRequest == null ? '' : ', даже со сжатием'}. Отправка не начата. Что занимает место — в листе «Размер базы».</div><div class="form-actions"><button type="button" class="button" onclick="openDbSizeSheet()">Размер базы</button><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
+  const oldRisk = !!(size && size.needOld > oldVerOk());
   if (!res.empty && !toS) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
       <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
       <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
     ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
     <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}После отправки прежняя программа получит эти изменения при своей следующей синхронизации. Прежний снимок базы сервер хранит в истории.</div>
-    ${oldRisk ? `<div class="info-box warning" id="push-oldrisk">После этой отправки база на сервере станет ${esc(mbText(size.request))}. Прежняя программа версии 312 получит её, но записать обратно не сможет: её предел — ${esc(mbText(size.oldLimit))}. Её синхронизация остановится на записи. Отправляйте только после обновления прежней программы до версии 313 на всех устройствах.
-      <label class="check" style="margin-top:8px"><input type="checkbox" id="push-old313" onchange="pushOldOk(this.checked)"><span>Прежняя программа на всех моих устройствах — версии 313 или новее</span></label></div>` : ''}
+    ${oldRisk ? `<div class="info-box warning" id="push-oldrisk">${size.willZip ? 'База уйдёт на сервер сжатой (' + esc(mbText(size.effective)) + '). Прежняя программа до версии 314 сжатую базу не прочтёт — её синхронизация остановится.' : 'После этой отправки база на сервере станет ' + esc(mbText(size.effective)) + '. Прежняя программа версии 312 получит её, но записать обратно не сможет: её предел — ' + esc(mbText(size.oldLimit)) + '.'} Отправляйте только после обновления прежней программы до версии ${size.needOld} на всех устройствах.
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="push-old313" onchange="pushOldOk(this.checked, ${size.needOld})"><span>Прежняя программа на всех моих устройствах — версии ${size.needOld} или новее</span></label></div>` : ''}
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
     <div class="form-actions"><button type="button" class="button primary" id="push-go"${oldRisk ? ' disabled' : ''} onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
   return res;
 }
-function pushOldOk(v) { if (v) localStorage.setItem('crm_next_old313', '1'); else localStorage.removeItem('crm_next_old313'); const b = document.getElementById('push-go'); if (b) b.disabled = !v; }
+function pushOldOk(v, ver) { if (v) localStorage.setItem('crm_next_oldver', String(ver || 313)); else { localStorage.removeItem('crm_next_oldver'); localStorage.removeItem('crm_next_old313'); } const b = document.getElementById('push-go'); if (b) b.disabled = !v; }
 async function pushNow() {
   const b = document.getElementById('push-go'); if (b) { if (b.disabled) return; b.disabled = true; }
   toast('Отправляю базу на сервер…');
@@ -3361,7 +3422,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
