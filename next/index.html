@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 16:50 · 61a946c">
+<meta name="build" content="02.10.2026 17:23 · e865fc3">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2279,7 +2279,7 @@ function nextSrvError(j) {
   const pm = String(j.errorMessage || j.message || j.errorType || '').trim();
   // второй снимок пользователя 02.10.2026: «Request Entity Too Large» — к ответу облака была приписана догадка про таймаут.
   // Совет даётся только тогда, когда текст облака сам называет причину; иначе — текст как есть, без догадок.
-  if (/too large|larger than limits|entity/i.test(pm)) return 'база больше, чем Яндекс Облако принимает за один запрос (3,5 МБ): «' + pm.slice(0, 100) + '». Таймаут тут ни при чём. Посмотрите «Размер базы» в листе «Синхронизация» — там видно, что занимает место';
+  if (/too large|larger than limits|entity/i.test(pm)) return 'база больше, чем Яндекс Облако принимает за один запрос: «' + pm.slice(0, 100) + '». Посмотрите «Размер базы» в листе «Синхронизация» — там видно, что занимает место и какой предел';
   if (/time|timed|таймаут|deadline/i.test(pm)) return 'облако прервало работу сервера по времени («' + pm.slice(0, 100) + '»): Яндекс Облако → crm-bridge → «Редактор» → «Таймаут» — поставьте 60 секунд, «Сохранить изменения», затем повторите';
   if (/memory|памят/i.test(pm)) return 'облаку не хватило памяти функции («' + pm.slice(0, 100) + '»): Яндекс Облако → crm-bridge → «Редактор» → «Память» — поставьте 256 МБ';
   return pm ? 'облако прервало работу сервера: «' + pm.slice(0, 140) + '»' : 'сервер прервал запрос, не назвав причину — пришлите строки с ошибкой из журнала функции crm-bridge (Яндекс Облако → crm-bridge → «Логи»)';
@@ -2481,6 +2481,22 @@ function showConflictsSheet() {
 // чтобы не затереть изменения других устройств; 2) собрать, зашифровать и отправить базу с номером версии, от которой шли
 // (baseVer); 3) сервер 178 при чужой записи между шагами отвечает «conflict» — один повтор «получить → влить → отправить».
 // Автоматической отправки нет. Запись разрешается сторожем (next/guard.js) только на время работы nextServerPush.
+// Запрос записи базы — как application/json. Измерено на сервере пользователя 02.10.2026: тело text/plain (так шлёт srvCall
+// прежней программы) облако перед передачей функции упаковывает в base64, и предел в 3 670 016 байт наступает уже при
+// 2,75 МБ; тело application/json передаётся как есть — проходит до 3,67 МБ. Браузер перед таким запросом спрашивает сервер
+// (OPTIONS) — сервер на это отвечает с версии 171. Запись — только пока идёт отправка по кнопке (NEXT_PUSH).
+async function nextSrvPost(action, payload, timeoutMs) {
+  if (!NEXT_PUSH.on) { logErr('next:guard', new Error('запись базы вне отправки по кнопке: ' + action)); return { ok: false, blocked: true, error: 'запись на сервер вне отправки по кнопке закрыта' }; }
+  const endpoint = safeExternalUrl(SRV.url);
+  if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), timeoutMs || 60000);
+  try {
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ secret: SRV.secret, action }, payload || {})), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const j = await r.json().catch(() => null);
+    return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'сервер не ответил за минуту' : 'network' }; }
+  finally { clearTimeout(timer); }
+}
 async function nextServerPush() {
   if (NEXT_SYNC.busy) return { ok: false, error: 'идёт обмен с сервером — дождитесь его окончания' };
   if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
@@ -2497,7 +2513,7 @@ async function nextServerPush() {
     const send = async baseVer => { // шаг «собрать, зашифровать, отправить»
       const revision = syncRevision(), enc = await encryptDump(await collectAll(), SRVDB.pass);
       NEXT_PUSH.on = true;
-      try { return { revision, bytes: enc.length, j: await srvCall('dbput', { data: enc, baseVer }) }; } finally { NEXT_PUSH.on = false; }
+      try { return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }) }; } finally { NEXT_PUSH.on = false; }
     };
     let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
     let sent = await send(got.ver), retried = false;
@@ -2516,7 +2532,10 @@ async function nextServerPush() {
 }
 // ── Размер базы для отправки (жалоба 02.10.2026: «Request Entity Too Large … limits (3670016)») ──
 // Облако принимает запрос не больше 3 670 016 байт; база уходит одним запросом: JSON → шифрование → base64 (×4/3).
-const SRV_REQ_LIMIT = 3670016, SRV_DATA_LIMIT = 3500000;
+// Пределы (измерены 02.10.2026 запросами к серверу пользователя): запрос application/json — 3 670 016 байт; сервер сам не
+// принимает шифротекст длиннее 3 500 000 знаков; прежняя программа до версии 313 шлёт text/plain — её запрос облако
+// упаковывает в base64, поэтому ей доступно 3 670 016 × 3/4 ≈ 2,75 МБ.
+const SRV_REQ_LIMIT = 3670016, SRV_DATA_LIMIT = 3500000, SRV_OLD_LIMIT = 2740000;
 const utf8Len = s => new TextEncoder().encode(String(s)).length;
 // Чистая модель: по разделам — число записей и байты JSON; по трём самым тяжёлым полям раздела — их байты. Значений нет.
 function dbSizeModel(data, settings) {
@@ -2530,12 +2549,13 @@ function dbSizeModel(data, settings) {
   stores.sort((a, b) => b.bytes - a.bytes);
   const settingsBytes = settings ? utf8Len(JSON.stringify(settings)) : 0, plain = stores.reduce((a, s) => a + s.bytes, 0) + settingsBytes + 200;
   const request = Math.ceil(plain / 3) * 4 + 400; // base64 шифротекста плюс служебные поля запроса
-  return { stores, settingsBytes, plain, request, limit: SRV_REQ_LIMIT, fits: request <= SRV_REQ_LIMIT && request - 400 <= SRV_DATA_LIMIT };
+  // limit — сколько шифротекста примет сервер от новой версии; oldLimit — сколько сможет отправить прежняя программа до 313
+  return { stores, settingsBytes, plain, request, limit: SRV_DATA_LIMIT, oldLimit: SRV_OLD_LIMIT, fits: request <= SRV_DATA_LIMIT, fitsOld: request <= SRV_OLD_LIMIT };
 }
 const mbText = b => (Math.round(b / 10485.76) / 100).toLocaleString('ru-RU') + ' МБ';
 function dbSizeText(m, now) {
   const lines = ['Размер базы ' + new Date(now || Date.now()).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' (сборка ' + (typeof BUILD_ID === 'string' ? BUILD_ID : '') + ')',
-    'Запрос на сервер: ' + m.request + ' байт из ' + m.limit + ' (' + (m.fits ? 'помещается' : 'НЕ помещается') + '); открытый текст ' + m.plain + '; настройки ' + m.settingsBytes];
+    'Запрос на сервер: ' + m.request + ' байт; предел новой версии ' + m.limit + ' (' + (m.fits ? 'помещается' : 'НЕ помещается') + '), предел прежней программы до 313 — ' + m.oldLimit + ' (' + (m.fitsOld ? 'помещается' : 'НЕ помещается') + '); открытый текст ' + m.plain + '; настройки ' + m.settingsBytes];
   m.stores.forEach(s => lines.push(s.title + ' [' + s.store + ']: записей ' + s.count + ', байт ' + s.bytes + '; поля: ' + s.fields.map(f => f.name + ' ' + f.bytes).join(', ')));
   return lines.join('\n');
 }
@@ -2544,9 +2564,11 @@ let DB_SIZE_LAST = null;
 async function openDbSizeSheet(m) {
   if (!m) { toast('Считаю размер базы…'); try { const d = await collectAll(); m = dbSizeModel(d.data, d.settings); } catch (e) { logErr('dbsize', e); toast('Размер не посчитан: ' + String((e && e.message) || e).slice(0, 80), true); return null; } }
   DB_SIZE_LAST = m;
-  const pct = Math.round(m.request / m.limit * 100);
+  const pct = Math.round(m.request / m.limit * 100), pctOld = Math.round(m.request / m.oldLimit * 100);
   const rows = m.stores.slice(0, 12).map(s => `<div><span>${esc(s.title)}<br><span class="muted small">записей ${s.count}${s.fields.length ? ' · тяжёлые поля: ' + esc(s.fields.map(f => f.name + ' — ' + mbText(f.bytes)).join(', ')) : ''}</span></span><span class="muted num">${esc(mbText(s.bytes))}</span></div>`).join('');
-  openSheet('Размер базы', `<div class="info-box${m.fits ? '' : ' warning'}" id="dbsize-verdict">${m.fits ? 'База помещается в один запрос к серверу' : 'База не помещается в один запрос к серверу'}: ${esc(mbText(m.request))} из ${esc(mbText(m.limit))} (${pct} %). Предел задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ. Он одинаков для прежней программы и для новой версии.</div>
+  openSheet('Размер базы', `<div class="info-box${m.fits ? '' : ' warning'}" id="dbsize-verdict">Новая версия: база ${m.fits ? 'помещается' : 'не помещается'} — ${esc(mbText(m.request))} из ${esc(mbText(m.limit))} (${pct} %).</div>
+    <div class="info-box${m.fitsOld ? (pctOld >= 90 ? ' warning' : '') : ' warning'}" id="dbsize-old">Прежняя программа до версии 313: ${m.fitsOld ? 'такая база помещается' : 'такую базу она отправить на сервер не сможет'} — ${esc(mbText(m.request))} из ${esc(mbText(m.oldLimit))} (${pctOld} %). У неё предел меньше: её запрос облако дополнительно упаковывает. С версии 313 предел тот же, что у новой.</div>
+    <p class="small muted">Пределы задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ.</p>
     <div class="section-label">Что занимает место</div><div class="list-rows">${rows}</div>
     <div class="form-actions"><button type="button" class="button" id="dbsize-copy" onclick="dbSizeCopy()">${icon('files', 'icon-sm')}Скопировать (только числа)</button></div>
     <p class="small muted">В скопированном — названия разделов и полей и их размер. Имён, номеров дел и текстов там нет.</p>`, sheetIsOpen() ? true : undefined);
@@ -2564,16 +2586,23 @@ async function openPushConfirm(res) {
   const m = res.empty ? { toServer: { add: 0, upd: 0, del: 0 }, toDevice: { add: 0, upd: 0 } } : res.model;
   const toS = m.toServer.add + m.toServer.upd + m.toServer.del, toD = m.toDevice.add + m.toDevice.upd, conf = res.conflictsTotal || 0;
   const first = !localStorage.getItem('crm_next_push_at');
+  // размер: после отправки прежняя программа получит эту базу и должна суметь записать её обратно
+  let size = res.size || null; if (!size) { try { const d = await collectAll(); size = dbSizeModel(d.data, d.settings); } catch (e) { logErr('push:size', e); } }
+  if (size && !size.fits) { openSheet('Отправка на сервер', `<div class="info-box warning" id="push-toobig">База больше, чем принимает сервер: ${esc(mbText(size.request))} из ${esc(mbText(size.limit))}. Отправка не начата. Что занимает место — в листе «Размер базы».</div><div class="form-actions"><button type="button" class="button" onclick="openDbSizeSheet()">Размер базы</button><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
+  const oldRisk = !!(size && !size.fitsOld) && localStorage.getItem('crm_next_old313') !== '1';
   if (!res.empty && !toS) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
       <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
       <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
     ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
     <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}После отправки прежняя программа получит эти изменения при своей следующей синхронизации. Прежний снимок базы сервер хранит в истории.</div>
+    ${oldRisk ? `<div class="info-box warning" id="push-oldrisk">После этой отправки база на сервере станет ${esc(mbText(size.request))}. Прежняя программа версии 312 получит её, но записать обратно не сможет: её предел — ${esc(mbText(size.oldLimit))}. Её синхронизация остановится на записи. Отправляйте только после обновления прежней программы до версии 313 на всех устройствах.
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="push-old313" onchange="pushOldOk(this.checked)"><span>Прежняя программа на всех моих устройствах — версии 313 или новее</span></label></div>` : ''}
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
-    <div class="form-actions"><button type="button" class="button primary" id="push-go" onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+    <div class="form-actions"><button type="button" class="button primary" id="push-go"${oldRisk ? ' disabled' : ''} onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
   return res;
 }
+function pushOldOk(v) { if (v) localStorage.setItem('crm_next_old313', '1'); else localStorage.removeItem('crm_next_old313'); const b = document.getElementById('push-go'); if (b) b.disabled = !v; }
 async function pushNow() {
   const b = document.getElementById('push-go'); if (b) { if (b.disabled) return; b.disabled = true; }
   toast('Отправляю базу на сервер…');
@@ -3300,7 +3329,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
