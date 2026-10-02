@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 22:59 · 9fd0b4f">
+<meta name="build" content="02.10.2026 23:33 · 870a0e5">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -357,6 +357,7 @@ button.agenda-row:hover{background:var(--surface2)}
   .month-layout{grid-template-columns:1fr;gap:14px}.day-cell{min-height:58px;padding:5px 2px;align-items:center;gap:3px}.day-event{display:none}.day-dots{display:flex}.cal-nav{padding:10px 8px}}
 @media(prefers-reduced-motion:no-preference){.panel{transition:border-color .15s}.button{transition:background .12s}}
 .l-short{display:none}
+.snap-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .imp-more-btn{display:none}
 .agenda-actions{display:flex;gap:8px;flex-wrap:wrap;padding:0 20px 14px 89px;border-bottom:1px solid var(--line)}
 .agenda-actions:last-child{border-bottom:0}
@@ -2283,13 +2284,13 @@ const NEXT_PUSH = { on: false };
 // Чтение базы с сервера с запасом времени (снимок пользователя 02.10.2026, телефон: «сервер не ответил за 20 секунд»).
 // База ≈2,7 МБ: через мобильную сеть за 20 секунд общего предела srvCall она не успевает. Здесь — только чтение (dbget),
 // до 90 секунд; все прочие запросы идут через srvCall с прежним пределом.
-async function nextDbGet() {
+async function nextDbGet(histVer) {
   if (!SRV.url) return null;
   const endpoint = safeExternalUrl(SRV.url);
   if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 90000);
   try {
-    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ secret: SRV.secret, action: 'dbget' }), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(histVer ? { secret: SRV.secret, action: 'dbhistget', ver: Number(histVer) } : { secret: SRV.secret, action: 'dbget' }), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
     const j = await r.json().catch(() => null);
     if (j && typeof j === 'object' && j.ok === undefined && j.error === undefined && j.errorMessage) return { ok: false, error: srvCloudError(j.errorMessage) };
     return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
@@ -2504,7 +2505,8 @@ function syncStatusModel(now) {
   const when = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return new Date(t).toDateString() === d.toDateString() ? p(d.getHours()) + ':' + p(d.getMinutes()) : p(d.getDate()) + '.' + p(d.getMonth() + 1); };
   if (NEXT_SYNC.busy) return { icon: 'refresh-cw', text: 'Загрузка…', cls: '', title: 'Идёт загрузка базы с сервера' };
   // успешная загрузка стирает прошлую ошибку (srvdbNote), поэтому ошибка, которая есть, — всегда последнее событие
-  if (err) return { icon: 'circle-alert', text: 'Ошибка сервера', cls: 'bad', title: 'Сервер: ' + err.msg };
+  // время ошибки — в самой строке: запомненную ошибку легко принять за новую (снимки пользователя 02.10.2026)
+  if (err) return { icon: 'circle-alert', text: 'Ошибка сервера', cls: 'bad', title: 'Сервер: ' + err.msg + (err.at ? ' (ошибка от ' + when(err.at) + '; исчезнет после удачного обмена)' : '') };
   if (pulled) return nextLocalChanges()
     ? { icon: 'cloud-download', text: 'С сервера ' + when(pulled), cls: 'warn', title: 'База загружена с сервера ' + when(pulled) + '. Правки, сделанные здесь после загрузки, хранятся на этом устройстве' }
     : { icon: 'cloud-download', text: 'С сервера ' + when(pulled), cls: 'good', title: 'База загружена с сервера ' + when(pulled) };
@@ -2718,10 +2720,116 @@ async function openSrvHistorySheet(res) {
   if (!res) { toast('Запрашиваю историю снимков…'); res = await srvCall('dbhistlist'); }
   if (!res || !res.ok) { toast(res && res.error === 'unknown_action' ? 'Сервер старой версии: история снимков есть с версии 178' : 'История не получена: ' + nextSrvError(res), true); return res; }
   const fmt = v => new Date(v).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const rows = (res.items || []).map((x, i) => `<div><span>${esc(fmt(x.ver))}${i === 0 ? ' · текущий' : ''}</span><span class="muted num">${esc((Math.round((x.bytes || 0) / 102.4) / 10).toLocaleString('ru-RU'))} КБ</span></div>`).join('');
+  const rows = (res.items || []).map((x, i) => `<div class="snap-row"><span>${esc(fmt(x.ver))}${i === 0 ? ' · текущий' : ''}<br><span class="muted small">${esc((Math.round((x.bytes || 0) / 102.4) / 10).toLocaleString('ru-RU'))} КБ</span></span><button type="button" class="button small-btn" id="snap-save-${i}" onclick="srvSnapshotSave(${Number(x.ver) || 0})">${icon('cloud-download', 'icon-sm')}Скачать</button></div>`).join('');
   openSheet('Снимки базы на сервере', (rows ? `<p class="small muted">Сервер хранит пять последних снимков и по одному за каждый из 14 последних дней с записями. Снимки зашифрованы паролем базы.</p><div class="list-rows">${rows}</div>` : emptyState('hard-drive', 'Снимков пока нет', 'Первый снимок появится после первой записи базы на сервер 178.')) +
-    `<div class="info-box">Возврат базы к выбранному снимку появится следующим выпуском. Сейчас этот список показывает, что запасные копии на сервере есть.</div>`, sheetIsOpen() ? true : undefined);
+    `<div class="info-box">«Скачать» сохраняет снимок файлом копии; пароль к нему — пароль шифрования синхронизации. Вернуться к снимку: в прежней программе — «Восстановить из файла»; в новой версии — «Копии базы» → «Загрузить из файла» (записи из снимка добавятся и обновят более старые, но правки, сделанные после снимка, не отменят).</div>`, sheetIsOpen() ? true : undefined);
   return res;
+}
+
+// ▼▼▼ sync/files.js
+// ═══ sync/files.js — копии базы в файл и обмен через файл (этап 4, часть 4) ═══
+// Файл копии — тот же зашифрованный контейнер, что уходит на сервер (core/crypto.js): его читает и прежняя программа
+// («Восстановить из файла»). Пароль копии задаёт пользователь и вводит его в листе — системных окон нет.
+// Загрузка из файла — всегда объединение с предпросмотром: записи добавляются и обновляются, ничего не стирается.
+// Секреты (коды, токены) из файла в новую версию не применяются.
+const BACKUP_MIN_PASS = 8;
+function backupPassCheck(p1, p2) {
+  if (String(p1 || '').length < BACKUP_MIN_PASS) return 'Пароль копии — не короче ' + BACKUP_MIN_PASS + ' знаков';
+  if (p2 !== undefined && p1 !== p2) return 'Пароли не совпадают';
+  return '';
+}
+// имя файла — латиницей (архивы и файлы для пользователя — без кириллицы)
+function backupFileName(kind, ts) { const d = new Date(ts || Date.now()), p = n => String(n).padStart(2, '0'); return 'CRM-' + (kind || 'kopiya') + '-' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.crm'; }
+// отдать файл браузеру; false — браузер не дал сохранить
+function fileSave(name, text) {
+  try {
+    const url = URL.createObjectURL(new Blob([text], { type: 'application/octet-stream' })), a = document.createElement('a');
+    a.href = url; a.download = name; a.style.display = 'none'; document.body.appendChild(a); a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 4000);
+    return true;
+  } catch (e) { logErr('file:save', e); return false; }
+}
+// что в файле и что изменится — без записи (mergeIncoming в режиме dryRun)
+async function backupPreviewModel(text, pass) {
+  let head; try { head = JSON.parse(text); } catch (e) { return { error: 'Это не файл копии CRM: его не удалось прочитать' }; }
+  let parsed = head, encrypted = false;
+  if (head && head._fmt === ENC_FMT) {
+    encrypted = true;
+    if (!pass) return { error: 'Файл зашифрован — введите пароль копии', needPass: true };
+    try { parsed = await decryptDump(text, pass); }
+    catch (e) { const w = nextDecryptWhy(e); return { error: w === 'decrypt' ? 'Пароль не подошёл или файл повреждён' : w.charAt(0).toUpperCase() + w.slice(1) }; }
+  }
+  const checked = validateBackup(parsed);
+  if (!checked.ok) return { error: checked.error };
+  const dry = await mergeIncoming(JSON.parse(JSON.stringify(checked.parsed)), false, { dryRun: true });
+  const per = []; for (const st of STORES) { const n = (checked.parsed.data[st] || []).length; if (n) per.push({ store: st, title: PREVIEW_TITLES[st] || st, count: n }); }
+  return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0 };
+}
+let BACKUP_PENDING = null;
+function openBackupSheet(sub) {
+  const last = Number(localStorage.getItem('crm_next_backup_at') || 0);
+  openSheet('Копии базы', `<p class="small muted">Копия — один зашифрованный файл со всей базой. Его можно хранить отдельно, перенести на другое устройство или открыть в прежней программе («Восстановить из файла»). Без пароля копии файл не открыть — запишите пароль отдельно.</p>
+    <div class="section-label step-label">Сохранить копию в файл</div>
+    <div class="form-grid">${fInput('bk-p1', 'Пароль копии, не короче 8 знаков', '', 'type="password" autocomplete="new-password"')}${fInput('bk-p2', 'Пароль ещё раз', '', 'type="password" autocomplete="new-password"')}</div>
+    <div class="form-actions"><button type="button" class="button primary" id="bk-save" onclick="backupSaveNow()">${icon('hard-drive')}Сохранить копию</button></div>
+    ${last ? `<p class="small muted">Последняя копия с этого устройства: ${esc(new Date(last).toLocaleString('ru-RU'))}.</p>` : ''}
+    <div class="section-label step-label">Загрузить из файла</div>
+    <p class="small muted">Записи из файла добавятся к базе и обновят более старые; ничего не стирается. Сначала программа покажет, что изменится.</p>
+    <div class="form-grid"><label class="field wide"><span>Файл копии (.crm)</span><input type="file" id="bk-file" accept=".crm,.json,application/json,application/octet-stream"></label>${wide(fInput('bk-pass', 'Пароль копии', '', 'type="password" autocomplete="off"'))}</div>
+    <div class="info-box warning" id="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button type="button" class="button" id="bk-check" onclick="backupCheckFile()">${icon('shield-check')}Проверить файл</button></div>
+    <div id="bk-preview"></div>`, sub === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
+}
+async function backupSaveNow() {
+  const bad = backupPassCheck(fv('bk-p1'), fv('bk-p2')); if (bad) { fErr(bad); return null; }
+  const b = document.getElementById('bk-save'); if (b) b.disabled = true;
+  try {
+    const text = await encryptDump(await collectAll(), fv('bk-p1')), name = backupFileName('kopiya');
+    if (!fileSave(name, text)) { fErr('Браузер не дал сохранить файл. Попробуйте в другом браузере или на компьютере'); return null; }
+    localStorage.setItem('crm_next_backup_at', String(Date.now()));
+    toast('Копия сохранена: ' + name + ' — файл в папке загрузок'); fErr('');
+    return { name, bytes: text.length };
+  } catch (e) { logErr('backup:save', e); fErr('Копия не создана: ' + String((e && e.message) || e).slice(0, 100)); return null; }
+  finally { if (b) b.disabled = false; }
+}
+async function backupCheckFile() {
+  const inp = document.getElementById('bk-file'), box = document.getElementById('bk-preview'), file = inp && inp.files && inp.files[0];
+  BACKUP_PENDING = null; if (box) box.innerHTML = '';
+  if (!file) { fErr('Выберите файл копии'); return null; }
+  if (file.size > 60 * 1048576) { fErr('Файл больше 60 МБ — такой объём загружайте на компьютере в прежней программе'); return null; }
+  let text; try { text = await file.text(); } catch (e) { logErr('backup:read', e); fErr('Файл не прочитан'); return null; }
+  toast('Проверяю файл…');
+  const m = await backupPreviewModel(text, fv('bk-pass'));
+  if (m.error) { fErr(m.error); return m; }
+  fErr(''); BACKUP_PENDING = m;
+  if (box) box.innerHTML = `<div class="info-box" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.</div>
+    <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
+    <div class="form-actions">${m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}</div>`;
+  return m;
+}
+async function backupApply() {
+  const m = BACKUP_PENDING; if (!m || !m.parsed) return null;
+  const b = document.getElementById('bk-apply'); if (b) { if (b.disabled) return null; b.disabled = true; }
+  try {
+    const r = await mergeIncoming(m.parsed, false);
+    if (r.failed) { fErr('Не записано записей: ' + r.failed + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
+    BACKUP_PENDING = null;
+    try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('backup:refresh', e); }
+    toast('Из файла: добавлено ' + r.added + ', обновлено ' + r.updated);
+    closeSheet(); if (UI.ready) nav(UI.screen);
+    return r;
+  } catch (e) { logErr('backup:apply', e); fErr('Загрузка не выполнена: ' + String((e && e.message) || e).slice(0, 100)); if (b) b.disabled = false; return null; }
+}
+// снимок с сервера — в файл: это та же зашифрованная база; пароль к файлу — пароль шифрования синхронизации
+async function srvSnapshotSave(ver) {
+  toast('Скачиваю снимок с сервера…');
+  const r = await nextDbGet(ver);
+  if (!r || !r.ok) { toast('Снимок не получен: ' + nextSrvError(r), true); return null; }
+  if (!r.exists || !r.data) { toast('Такого снимка на сервере уже нет', true); return null; }
+  const name = backupFileName('snimok', ver);
+  if (!fileSave(name, r.data)) { toast('Браузер не дал сохранить файл', true); return null; }
+  toast('Снимок сохранён: ' + name + '. Пароль к нему — пароль шифрования синхронизации');
+  return { name, bytes: r.data.length };
 }
 
 // ▼▼▼ sync/dadata.js
@@ -3427,7 +3535,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -3621,7 +3729,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Размер текста</p>${choice(UI_FONT_SIZES.map(f => [f[0], f[2]]), size, 'setFontSize')}
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     <div class="section-label">Данные</div>
-    <div class="list-rows"><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
       <button type="button" class="list-btn" onclick="openMonitorSettingsSheet()"><span>Мониторинг судов</span><span class="muted">${!SRV.url ? 'сервер не подключён' : crmCollectorSrvCfg().url ? 'сбор в облаке настроен' : 'сбор в облаке не настроен'}</span></button>
@@ -3685,7 +3793,7 @@ async function openSyncSheet(sub, msg) {
     <div class="form-actions"><button type="button" class="button" id="sy-preview" onclick="openMergePreviewSheet()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('shield-check')}Проверить слияние</button></div>
     ${step(4, 'Отправить изменения на сервер', !!localStorage.getItem('crm_next_push_at') && !nextLocalChanges())}
     <p class="small muted">${checked ? 'Только по этой кнопке: сама программа на сервер ничего не отправляет. Перед отправкой она берёт с сервера свежую базу и объединяет с базой устройства, затем показывает числа и ждёт подтверждения.' : 'Станет доступно после шага 1.'}</p>
-    <div class="form-actions"><button type="button" class="button${nextLocalChanges() ? ' primary' : ''}" id="sy-push" onclick="openPushConfirm()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('send')}Отправить изменения на сервер</button><button type="button" class="button" id="sy-hist" onclick="openSrvHistorySheet()"${checked ? '' : ' disabled'}>${icon('hard-drive')}Снимки на сервере</button><button type="button" class="button" id="sy-size" onclick="openDbSizeSheet()">${icon('chart-column')}Размер базы</button></div>
+    <div class="form-actions"><button type="button" class="button${nextLocalChanges() ? ' primary' : ''}" id="sy-push" onclick="openPushConfirm()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('send')}Отправить изменения на сервер</button><button type="button" class="button" id="sy-hist" onclick="openSrvHistorySheet()"${checked ? '' : ' disabled'}>${icon('hard-drive')}Снимки на сервере</button><button type="button" class="button" id="sy-size" onclick="openDbSizeSheet()">${icon('chart-column')}Размер базы</button><button type="button" class="button" id="sy-backup" onclick="openBackupSheet()">${icon('files')}Копии в файл</button></div>
     ${localStorage.getItem('crm_next_push_at') ? `<div class="list-rows"><div><span>Последняя отправка</span><span class="muted">${esc(new Date(Number(localStorage.getItem('crm_next_push_at'))).toLocaleString('ru-RU'))}</span></div></div>` : ''}
     ${nextLocalChanges() ? `<div class="info-box">На этом устройстве есть правки, которых нет на сервере. Они уйдут на сервер по кнопке «Отправить изменения на сервер».</div>` : ''}
     ${nConf ? `<div class="form-actions">${btn('Журнал коллизий · ' + nConf, 'showConflictsSheet()', '', 'info')}</div>` : ''}
