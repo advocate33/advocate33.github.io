@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="02.10.2026 13:56 · 554c382">
+<meta name="build" content="02.10.2026 15:39 · 85b6a5b">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2223,10 +2223,15 @@ mergeCaseRecords = function (cur, rec, base, events) {
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
 // eventsget — события судов с сервера (этап 4): чтение
 const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'blobget', 'bloblist', 'track', 'eventsget'];
+// этап 4, часть 2в: история снимков базы на сервере 178 — чтение
+const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
+// этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
+// отметку). Автоматической отправки нет: никакой другой код dbput вызвать не может.
+const NEXT_PUSH = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(action === 'dbput' && NEXT_PUSH.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -2402,7 +2407,7 @@ async function openMergePreviewSheet(res) {
     <div class="info-box${v.kind === 'warn' ? ' warning' : ''}" id="mp-verdict">${esc(v.text)}</div>
     <div class="section-label">С сервера на это устройство</div>${dev || '<p class="small muted">Новых данных на сервере нет.</p>'}
     <div class="section-label">С этого устройства на сервер</div>${srv || '<p class="small muted">На сервере есть всё, что есть на устройстве.</p>'}
-    <p class="small muted">Совпадающих записей: ${m.same}. Запись на сервер в новой версии пока выключена.</p>
+    <p class="small muted">Совпадающих записей: ${m.same}. На сервер изменения уходят только по кнопке «Отправить изменения на сервер».</p>
     ${res.conflictsTotal ? `<div class="section-label">Правились с обеих сторон · ${res.conflictsTotal}</div>${conf}${res.conflictsTotal > (res.conflicts || []).length ? `<p class="small muted">Показаны первые ${(res.conflicts || []).length}.</p>` : ''}` : ''}
     <div class="form-actions"><button type="button" class="button" id="mp-copy" onclick="mergePreviewCopy()">${icon('files', 'icon-sm')}Скопировать итог (только числа)</button></div>
     <p class="small muted">В скопированном итоге нет ни имён, ни номеров дел — его можно переслать разработчику.</p>`, sheetIsOpen() ? true : undefined);
@@ -2418,7 +2423,7 @@ const nextLocalChanges = () => !!SRVDB.lastPull && localStorage.getItem('crm_nex
 // Отключить сервер в новой версии: адрес, код, пароль и отметки удаляются; база на устройстве остаётся
 function nextServerForget() {
   SRV.url = ''; SRV.secret = ''; CLOUD.pass = '';
-  for (const k of ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_srvdb_lastpull', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver']) localStorage.removeItem(k);
+  for (const k of ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_next_push_at', 'crm_next_preview_at', 'crm_srvdb_lastpull', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver']) localStorage.removeItem(k);
   syncStatusRender();
 }
 
@@ -2459,6 +2464,85 @@ function showConflictsSheet() {
     <div class="info-box">Вернуть своё значение в отдельном поле можно будет после включения записи на сервер.</div>
     <div class="form-actions">${btn('Очистить журнал', 'clearSyncConflicts()', '', 'check-check')}</div>`
     : emptyState('check-check', 'Коллизий нет', 'Сюда попадают записи, которые менялись и здесь, и на другом устройстве.')), true);
+}
+
+// ▼▼▼ sync/push.js
+// ═══ sync/push.js — отправка изменений новой версии на личный сервер, только по кнопке (этап 4, часть 2в) ═══
+// Порядок тот же, что у прежней программы (srvdbPush v298): 1) взять снимок с сервера и влить его в базу устройства —
+// чтобы не затереть изменения других устройств; 2) собрать, зашифровать и отправить базу с номером версии, от которой шли
+// (baseVer); 3) сервер 178 при чужой записи между шагами отвечает «conflict» — один повтор «получить → влить → отправить».
+// Автоматической отправки нет. Запись разрешается сторожем (next/guard.js) только на время работы nextServerPush.
+async function nextServerPush() {
+  if (NEXT_SYNC.busy) return { ok: false, error: 'идёт обмен с сервером — дождитесь его окончания' };
+  if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
+  if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
+  NEXT_SYNC.busy = true; syncStatusRender();
+  const fail = (step, msg) => { srvdbNote('err', msg); return { ok: false, step, error: msg }; };
+  try {
+    const takeIn = async () => { // шаг «получить и влить»
+      const g = await srvCall('dbget');
+      if (!g || !g.ok) return { err: nextSrvError(g) };
+      if (g.exists && g.data) { const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: 'не записано записей с сервера: ' + r.failed + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
+      return { ver: 0, added: 0, updated: 0 };
+    };
+    const send = async baseVer => { // шаг «собрать, зашифровать, отправить»
+      const revision = syncRevision(), enc = await encryptDump(await collectAll(), SRVDB.pass);
+      NEXT_PUSH.on = true;
+      try { return { revision, bytes: enc.length, j: await srvCall('dbput', { data: enc, baseVer }) }; } finally { NEXT_PUSH.on = false; }
+    };
+    let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
+    let sent = await send(got.ver), retried = false;
+    if (sent.j && sent.j.error === 'conflict') { // другое устройство успело записать — один повтор
+      retried = true; got = await takeIn(); if (got.err) return fail('повторное получение базы с сервера', got.err);
+      sent = await send(got.ver);
+    }
+    const j = sent.j;
+    if (!j || !j.ok) return fail('отправка', j && j.error === 'conflict' ? 'другое устройство записывает базу одновременно — повторите через минуту' : j && j.error === 'db_too_big' ? 'база больше, чем сервер принимает за один раз (3,5 МБ шифротекста)' : nextSrvError(j));
+    SRVDB.ver = Number(j.ver || 0); SRVDB.lastAt = Date.now();
+    localStorage.setItem('crm_next_pull_rev', sent.revision); localStorage.setItem('crm_next_push_at', String(Date.now()));
+    srvdbNote('push');
+    return { ok: true, ver: SRVDB.ver, bytes: sent.bytes, added: got.added, updated: got.updated, retried };
+  } catch (e) { logErr('push', e); return fail('отправка', String((e && e.message) || e).slice(0, 120)); }
+  finally { NEXT_PUSH.on = false; NEXT_SYNC.busy = false; syncStatusRender(); }
+}
+// Подтверждение перед отправкой: свежая сверка, числа, предупреждение о копии. res — готовая сверка (для ui_check).
+async function openPushConfirm(res) {
+  if (!res) { toast('Сверяю базу на устройстве с базой на сервере…'); res = await nextMergePreview(); }
+  if (!res.ok) { toast('Отправка не начата: ' + res.error, true); return res; }
+  const m = res.empty ? { toServer: { add: 0, upd: 0, del: 0 }, toDevice: { add: 0, upd: 0 } } : res.model;
+  const toS = m.toServer.add + m.toServer.upd + m.toServer.del, toD = m.toDevice.add + m.toDevice.upd, conf = res.conflictsTotal || 0;
+  const first = !localStorage.getItem('crm_next_push_at');
+  if (!res.empty && !toS) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
+  openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
+      <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
+      <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
+    ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
+    <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}После отправки прежняя программа получит эти изменения при своей следующей синхронизации. Прежний снимок базы сервер хранит в истории.</div>
+    <div class="info-box warning" id="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button type="button" class="button primary" id="push-go" onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+  return res;
+}
+async function pushNow() {
+  const b = document.getElementById('push-go'); if (b) { if (b.disabled) return; b.disabled = true; }
+  toast('Отправляю базу на сервер…');
+  const r = await nextServerPush();
+  if (!r.ok) { fErr('Не отправлено (' + r.step + '): ' + r.error + '. База на устройстве не изменена отправкой; на сервере осталась прежняя версия.'); if (b) b.disabled = false; return r; }
+  toast('База отправлена на сервер');
+  openSheet('Отправка на сервер', `<div class="info-box" id="push-done">Отправлено. На сервере — версия от ${esc(new Date(r.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}.${r.added || r.updated ? ' Перед отправкой с сервера принято: новых ' + r.added + ', изменённых ' + r.updated + '.' : ''}${r.retried ? ' Другое устройство записало базу во время отправки — программа объединила и отправила повторно.' : ''}</div>
+    <p class="small muted">Прежний снимок базы сохранён в истории сервера. Откройте прежнюю программу и дождитесь синхронизации — изменения должны появиться там.</p>
+    <div class="form-actions"><button type="button" class="button primary" id="push-close" onclick="closeSheet(); openSyncSheet()">${icon('check')}Готово</button></div>`, 'replace');
+  if (UI.ready) nav(UI.screen);
+  return r;
+}
+// История снимков базы на сервере 178 (чтение). res — готовый ответ (для ui_check).
+async function openSrvHistorySheet(res) {
+  if (!res) { toast('Запрашиваю историю снимков…'); res = await srvCall('dbhistlist'); }
+  if (!res || !res.ok) { toast(res && res.error === 'unknown_action' ? 'Сервер старой версии: история снимков есть с версии 178' : 'История не получена: ' + nextSrvError(res), true); return res; }
+  const fmt = v => new Date(v).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const rows = (res.items || []).map((x, i) => `<div><span>${esc(fmt(x.ver))}${i === 0 ? ' · текущий' : ''}</span><span class="muted num">${esc((Math.round((x.bytes || 0) / 102.4) / 10).toLocaleString('ru-RU'))} КБ</span></div>`).join('');
+  openSheet('Снимки базы на сервере', (rows ? `<p class="small muted">Сервер хранит пять последних снимков и по одному за каждый из 14 последних дней с записями. Снимки зашифрованы паролем базы.</p><div class="list-rows">${rows}</div>` : emptyState('hard-drive', 'Снимков пока нет', 'Первый снимок появится после первой записи базы на сервер 178.')) +
+    `<div class="info-box">Возврат базы к выбранному снимку появится следующим выпуском. Сейчас этот список показывает, что запасные копии на сервере есть.</div>`, sheetIsOpen() ? true : undefined);
+  return res;
 }
 
 // ▼▼▼ sync/dadata.js
@@ -3164,7 +3248,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ['openSettingsSheet()', 'openCreateSheet()', "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -3420,7 +3504,11 @@ async function openSyncSheet(sub, msg) {
     ${step(3, 'Проверить слияние — без записи', !!localStorage.getItem('crm_next_preview_at'))}
     <p class="small muted">${checked ? 'Программа сверит базу на устройстве с базой на сервере и покажет, что пришло бы с сервера и что ушло бы на сервер. Ничего не записывается. Этот шаг нужен перед включением записи на сервер.' : 'Станет доступно после шага 1.'}</p>
     <div class="form-actions"><button type="button" class="button" id="sy-preview" onclick="openMergePreviewSheet()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('shield-check')}Проверить слияние</button></div>
-    ${nextLocalChanges() ? `<div class="info-box">После загрузки вы вносили правки в новой версии. Они хранятся на этом устройстве; отправка на сервер пока выключена — включится после проверки слияния на вашей базе.</div>` : ''}
+    ${step(4, 'Отправить изменения на сервер', !!localStorage.getItem('crm_next_push_at') && !nextLocalChanges())}
+    <p class="small muted">${checked ? 'Только по этой кнопке: сама программа на сервер ничего не отправляет. Перед отправкой она берёт с сервера свежую базу и объединяет с базой устройства, затем показывает числа и ждёт подтверждения.' : 'Станет доступно после шага 1.'}</p>
+    <div class="form-actions"><button type="button" class="button${nextLocalChanges() ? ' primary' : ''}" id="sy-push" onclick="openPushConfirm()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('send')}Отправить изменения на сервер</button><button type="button" class="button" id="sy-hist" onclick="openSrvHistorySheet()"${checked ? '' : ' disabled'}>${icon('hard-drive')}Снимки на сервере</button></div>
+    ${localStorage.getItem('crm_next_push_at') ? `<div class="list-rows"><div><span>Последняя отправка</span><span class="muted">${esc(new Date(Number(localStorage.getItem('crm_next_push_at'))).toLocaleString('ru-RU'))}</span></div></div>` : ''}
+    ${nextLocalChanges() ? `<div class="info-box">На этом устройстве есть правки, которых нет на сервере. Они уйдут на сервер по кнопке «Отправить изменения на сервер».</div>` : ''}
     ${nConf ? `<div class="form-actions">${btn('Журнал коллизий · ' + nConf, 'showConflictsSheet()', '', 'info')}</div>` : ''}
     <div class="section-label">Записей в базе новой версии</div><div class="list-rows">${rows}</div>
     ${SRV.url || SRV.secret || SRVDB.pass ? `<div class="form-actions">${btn('Отключить сервер', 'syncForget()', '', 'x')}</div><p class="small muted">Адрес, код и пароль удаляются из новой версии. Загруженные записи остаются на устройстве.</p>` : ''}`, sub);
