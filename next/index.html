@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 13:17 · b2bd9f3">
+<meta name="build" content="03.10.2026 14:13 · 0185b18">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2418,10 +2418,13 @@ async function srvdbMergeSnapshot(snapshot, silent) {
   catch (e) { return { ok: false, error: nextDecryptWhy(e) }; }
   if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: 'format' };
   const merged = await mergeIncoming(dump, false);
-  SRVDB.ver = Number(snapshot.ver || 0); SRVDB.lastAt = Date.now();
+  // аудит GPT 03.10.2026: при недосохранённых записях (failed) версия сервера не считается полученной — следующая проверка загрузит снова
+  if (!merged.failed) SRVDB.ver = Number(snapshot.ver || 0);
+  SRVDB.lastAt = Date.now();
   if (merged.added || merged.updated || merged.settingsChanged) {
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('pull:refresh', e); }
-    if (UI.ready) nav(UI.screen);
+    // открытый лист или форма в боковой панели не закрываются фоновым обновлением (nav закрывает панель); экран обновится при следующем переходе
+    if (UI.ready && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav(UI.screen);
   }
   if (!silent) toast('С сервера: новых записей — ' + merged.added + ', обновлено — ' + merged.updated);
   return { ok: true, ...merged };
@@ -2433,6 +2436,8 @@ async function nextServerPull() {
   if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
+  // аудит GPT 03.10.2026: неотправленные правки устройства не считаются отправленными после загрузки — отметку снимает только отправка
+  const hadLocal = nextLocalChanges();
   try {
     const g = await nextDbGet();
     if (!g || !g.ok) { const msg = nextSrvError(g); srvdbNote('err', msg); return { ok: false, error: msg }; }
@@ -2440,7 +2445,8 @@ async function nextServerPull() {
     if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
     if (r.empty) { SRVDB.lastErr = null; return r; }
     if (r.failed) { const msg = 'не записано записей: ' + r.failed + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
-    localStorage.setItem('crm_next_pull_rev', syncRevision()); localStorage.setItem('crm_next_pull_res', JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
+    if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevision());
+    localStorage.setItem('crm_next_pull_res', JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
     srvdbNote('pull');
     return r;
   } catch (e) { logErr('pull', e); const msg = String((e && e.message) || e).slice(0, 80); srvdbNote('err', msg); return { ok: false, error: msg }; }
@@ -2641,7 +2647,8 @@ async function nextServerPush() {
   if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
-  const fail = (step, msg) => { srvdbNote('err', msg); return { ok: false, step, error: msg }; };
+  // unconfirmed — ответа сервера нет (сеть, время): принял ли он снимок, неизвестно; при явном отказе сервера версия на нём прежняя
+  const fail = (step, msg, unconfirmed) => { srvdbNote('err', msg); return { ok: false, step, error: msg, unconfirmed: !!unconfirmed }; };
   try {
     const takeIn = async () => { // шаг «получить и влить»
       const g = await nextDbGet();
@@ -2668,7 +2675,7 @@ async function nextServerPush() {
       sent = await send(got.ver);
     }
     const j = sent.j;
-    if (!j || !j.ok) return fail('отправка', j && j.error === 'conflict' ? 'другое устройство записывает базу одновременно — повторите через минуту' : j && j.error === 'db_too_big' ? 'база больше, чем сервер принимает за один раз (3,5 МБ шифротекста)' : nextSrvError(j));
+    if (!j || !j.ok) return fail('отправка', j && j.error === 'conflict' ? 'другое устройство записывает базу одновременно — повторите через минуту' : j && j.error === 'db_too_big' ? 'база больше, чем сервер принимает за один раз (3,5 МБ шифротекста)' : nextSrvError(j), !j || j.error === 'network' || /не ответил|не загрузился|недоступно/.test(String(j.error || '')));
     SRVDB.ver = Number(j.ver || 0); SRVDB.lastAt = Date.now();
     localStorage.setItem('crm_next_pull_rev', sent.revision); localStorage.setItem('crm_next_push_at', String(Date.now()));
     srvdbNote('push');
@@ -2796,7 +2803,8 @@ async function pushNow() {
   const b = document.getElementById('push-go'); if (b) { if (b.disabled) return; b.disabled = true; }
   toast('Отправляю базу на сервер…');
   const r = await nextServerPush();
-  if (!r.ok) { fErr('Не отправлено (' + r.step + '): ' + r.error + '. База на устройстве не изменена отправкой; на сервере осталась прежняя версия.'); if (b) b.disabled = false; return r; }
+  // аудит GPT 03.10.2026: честная формулировка — данные с сервера уже влиты, а приём на сервере при обрыве связи не подтверждён
+  if (!r.ok) { fErr('Не отправлено (' + r.step + '): ' + r.error + '. ' + (r.unconfirmed ? 'Подтверждение от сервера не получено: записи с сервера, полученные перед отправкой, уже на устройстве; принял ли сервер снимок — видно в «Снимки на сервере» (снимок со временем этой попытки = принят). Повторите отправку.' : 'На сервере осталась прежняя версия; записи с сервера, полученные перед отправкой, уже на устройстве.')); if (b) b.disabled = false; return r; }
   toast('База отправлена на сервер');
   openSheet('Отправка на сервер', `<div class="info-box" id="push-done">Отправлено. На сервере — версия от ${esc(new Date(r.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}.${r.blobs && r.blobs.total ? ' Файлов документов положено в хранилище отдельно: ' + r.blobs.uploaded + (r.blobs.failed ? ', не удалось: ' + r.blobs.failed + ' (остались в снимке' + (r.blobs.errors && r.blobs.errors.length ? ': ' + esc(r.blobs.errors.join('; ')) : '') + ')' : '') + '.' : ''}${r.added || r.updated ? ' Перед отправкой с сервера принято: новых ' + r.added + ', изменённых ' + r.updated + '.' : ''}${r.retried ? ' Другое устройство записало базу во время отправки — программа объединила и отправила повторно.' : ''}</div>
     <p class="small muted">Прежний снимок базы сохранён в истории сервера. Откройте прежнюю программу и дождитесь синхронизации — изменения должны появиться там.</p>
@@ -2944,12 +2952,15 @@ async function nextAutoPull(force) {
   if (!v || !v.ok) { srvdbNote('err', nextSrvError(v)); return v; }
   if (v.ver && (force || Number(v.ver) !== SRVDB.ver)) {
     NEXT_SYNC.busy = true; syncStatusRender();
+    // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
+    const hadLocal = nextLocalChanges();
     try {
       const g = await nextDbGet();
       if (!g || !g.ok) { srvdbNote('err', nextSrvError(g)); return g; }
       const r = await srvdbMergeSnapshot(g, true);
       if (!r.ok) { srvdbNote('err', nextSrvError(r)); return r; }
-      localStorage.setItem('crm_next_pull_rev', syncRevision()); srvdbNote('pull');
+      if (r.failed) { srvdbNote('err', 'не записано записей с сервера: ' + r.failed + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
+      if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevision()); srvdbNote('pull');
       if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
     } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
   }
