@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 23:34 · 1d60838">
+<meta name="build" content="04.10.2026 00:09 · ed7ce98">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -396,6 +396,15 @@ button.agenda-row:hover{background:var(--surface2)}
 .agenda-judge{display:block;font-size:.875rem;margin-top:2px}.agenda-judge.muted{color:var(--text-muted)}
 .agenda-near{display:block;font-size:.6875rem;line-height:1.3;color:var(--accent);background:var(--accent-soft);border-radius:var(--r-sm);padding:2px 4px;margin-top:5px;text-align:center;white-space:normal}
 .agenda-row.near{box-shadow:inset 3px 0 0 var(--accent)}
+.push-stages{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.push-stages li{display:flex;gap:8px;align-items:flex-start}
+.push-stages li .icon-sm{flex:none;margin-top:2px}
+.push-stages .ps-done .icon-sm{color:var(--good)}
+.push-stages .ps-active .icon-sm{color:var(--accent);animation:ps-spin 1.2s linear infinite}
+.push-stages .ps-fail{color:var(--bad)}
+.push-stages .ps-wait,.push-stages .ps-skip{color:var(--text-muted)}
+@keyframes ps-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.push-stages .ps-active .icon-sm{animation:none}}
 .snap-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .imp-more-btn{display:none}
 .agenda-actions{display:flex;gap:8px;flex-wrap:wrap;padding:0 20px 14px 89px;border-bottom:1px solid var(--line)}
@@ -2718,6 +2727,16 @@ function showConflictsSheet() {
 // прежней программы) облако перед передачей функции упаковывает в base64, и предел в 3 670 016 байт наступает уже при
 // 2,75 МБ; тело application/json передаётся как есть — проходит до 3,67 МБ. Браузер перед таким запросом спрашивает сервер
 // (OPTIONS) — сервер на это отвечает с версии 171. Запись — только пока идёт отправка по кнопке (NEXT_PUSH).
+// План, п. 3.1 (03.10.2026): этапы отправки на экране вместо одного «Отправляю…». nextServerPush отмечает этап (pushStage), лист
+// отправки показывает список (pushStagesRender); при сбое отмечается этап, на котором отправка остановилась, и текст ошибки.
+const PUSH_STAGES = [['get', 'Получение базы с сервера'], ['merge', 'Объединение с базой устройства'], ['files', 'Файлы документов'], ['prepare', 'Подготовка снимка: сборка и шифрование'], ['upload', 'Загрузка на сервер'], ['confirm', 'Подтверждение сервером']];
+let PUSH_RUN = null;
+function pushStage(k, note) {
+  if (!PUSH_RUN) return;
+  PUSH_RUN.cur = k; PUSH_RUN.at = Date.now(); PUSH_RUN.seen.push(k);
+  if (note != null) PUSH_RUN.notes[k] = note;
+  if (typeof pushStagesRender === 'function') pushStagesRender();
+}
 async function nextSrvPost(action, payload, timeoutMs) {
   if (!NEXT_PUSH.on) { logErr('next:guard', new Error('запись базы вне отправки по кнопке: ' + action)); return { ok: false, blocked: true, error: 'запись на сервер вне отправки по кнопке закрыта' }; }
   const endpoint = safeExternalUrl(SRV.url);
@@ -2734,6 +2753,7 @@ async function nextSrvPost(action, payload, timeoutMs) {
 // устройством) — один повтор через 1–3 секунды. Возвращает ответ сервера в том же виде, что dbput ({ok, ver} | {error}).
 async function nextSnapSend(enc, baseVer) {
   const bytesArr = new TextEncoder().encode(enc), bytes = bytesArr.length;
+  pushStage('upload', mbText(bytes));
   const p = await nextSrvPost('snapput', { bytes });
   if (!p || !p.ok) return p || { ok: false, error: 'network' };
   nextSnapSet(true);
@@ -2743,6 +2763,7 @@ async function nextSnapSend(enc, baseVer) {
     if (!r.ok) return { ok: false, error: 'хранилище не приняло снимок: HTTP ' + r.status };
   } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не загрузился за 10 минут — медленная связь, повторите' : 'хранилище недоступно (сеть или правило CORS бакета — сервер ставит его сам; если ошибка повторяется, пришлите журнал)' }; }
   finally { clearTimeout(timer); }
+  pushStage('confirm');
   let sha = ''; try { sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytesArr))).map(b => b.toString(16).padStart(2, '0')).join(''); } catch (e) { logErr('snap:sha', e); }
   let c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha });
   if (c && c.error === 'conflict' && c.busy) { await new Promise(res => setTimeout(res, 1000 + Math.random() * 2000)); c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha }); }
@@ -2756,41 +2777,46 @@ async function nextServerPush() {
   if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
+  PUSH_RUN = { start: Date.now(), at: Date.now(), cur: '', seen: [], notes: {}, fail: '', done: false };
   // unconfirmed — ответа сервера нет (сеть, время): принял ли он снимок, неизвестно; при явном отказе сервера версия на нём прежняя
-  const fail = (step, msg, unconfirmed) => { srvdbNote('err', msg); return { ok: false, step, error: msg, unconfirmed: !!unconfirmed }; };
+  const fail = (step, msg, unconfirmed) => { srvdbNote('err', msg); PUSH_RUN.fail = msg; PUSH_RUN.unconfirmed = !!unconfirmed; if (typeof pushStagesRender === 'function') pushStagesRender(); return { ok: false, step, error: msg, unconfirmed: !!unconfirmed }; };
   try {
-    const takeIn = async () => { // шаг «получить и влить»
+    const takeIn = async again => { // шаг «получить и влить»
+      pushStage('get', again ? 'повтор: другое устройство записало базу во время отправки' : null);
       const g = await nextDbGet();
       if (!g || !g.ok) return { err: nextSrvError(g) };
-      if (g.exists && g.data) { const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: 'не записано записей с сервера: ' + r.failed + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
+      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: 'не записано записей с сервера: ' + r.failed + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
       return { ver: 0, added: 0, updated: 0 };
     };
     let blobs = null; // v8: файлы документов — отдельными объектами, один раз (sync/blobs.js)
     const send = async baseVer => { // шаг «положить файлы, собрать, зашифровать, отправить»
       NEXT_PUSH.on = true;
       try {
-        if (!blobs && typeof nextBlobsPush === 'function') { try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
+        if (!blobs && typeof nextBlobsPush === 'function') { pushStage('files'); try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
         // ревизия — ДО сборки (разбор GPT 03.10.2026): правка, сделанная во время сборки снимка, могла не попасть в него, но попадала в
         // отметку «отправлено»; теперь она остаётся «не отправленной» и уйдёт следующей отправкой
+        if (blobs && PUSH_RUN) PUSH_RUN.notes.files = blobs.skipped ? 'внутри снимка (сервер старше 180)' : blobs.total ? 'положено ' + blobs.uploaded + (blobs.failed ? ', не удалось ' + blobs.failed : '') : 'новых файлов нет';
+        pushStage('prepare');
         const revision = syncRevision();
         const dump = typeof collectForSync === 'function' ? await collectForSync() : await collectAll();
         const enc = await encryptDump(dump, SRVDB.pass), omitted = dump._blobsOmitted || 0;
         // v180: снимок — напрямую в хранилище по подписанной ссылке; сервер старше 180 — через функцию (dbput)
         if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted }; nextSnapSet(false); }
+        pushStage('upload', mbText(enc.length) + ' через функцию');
         return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }), omitted };
       } finally { NEXT_PUSH.on = false; }
     };
     let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
     let sent = await send(got.ver), retried = false;
     if (sent.j && sent.j.error === 'conflict') { // другое устройство успело записать — один повтор
-      retried = true; got = await takeIn(); if (got.err) return fail('повторное получение базы с сервера', got.err);
+      retried = true; got = await takeIn(true); if (got.err) return fail('повторное получение базы с сервера', got.err);
       sent = await send(got.ver);
     }
     const j = sent.j;
     if (!j || !j.ok) return fail('отправка', j && j.error === 'conflict' ? 'другое устройство записывает базу одновременно — повторите через минуту' : j && j.error === 'db_too_big' ? 'база больше, чем сервер принимает за один раз (3,5 МБ шифротекста)' : nextSrvError(j), !j || j.error === 'network' || /не ответил|не загрузился|недоступно/.test(String(j.error || '')));
     SRVDB.ver = Number(j.ver || 0); SRVDB.lastAt = Date.now();
     localStorage.setItem('crm_next_pull_rev', sent.revision); localStorage.setItem('crm_next_push_at', String(Date.now()));
-    srvdbNote('push');
+    srvdbNote('push'); pushStage('confirm'); PUSH_RUN.done = true;
     return { ok: true, ver: SRVDB.ver, bytes: sent.bytes, added: got.added, updated: got.updated, retried, blobs: blobs || null, blobsOmitted: sent.omitted || 0 };
   } catch (e) { logErr('push', e); return fail('отправка', String((e && e.message) || e).slice(0, 120)); }
   finally { NEXT_PUSH.on = false; NEXT_SYNC.busy = false; syncStatusRender(); }
@@ -2914,15 +2940,39 @@ async function openPushConfirm(res) {
     <div class="form-actions"><button type="button" class="button primary" id="push-go"${oldRisk ? ' disabled' : ''} onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
   return res;
 }
+// п. 3.1: состояние каждого этапа — пройден / идёт / остановилась здесь / ждёт / не понадобился
+function pushStagesModel(run, now) {
+  if (!run) return [];
+  const ci = PUSH_STAGES.findIndex(s => s[0] === run.cur);
+  return PUSH_STAGES.map(([k, title], i) => {
+    const seen = run.seen.includes(k);
+    const state = run.done ? (seen ? 'done' : 'skip') : i < ci ? (seen ? 'done' : 'skip') : i === ci ? (run.fail ? 'fail' : 'active') : 'wait';
+    const note = state === 'fail' ? run.fail : state === 'active' ? [run.notes[k], Math.max(0, Math.round((now - run.at) / 1000)) + ' с'].filter(Boolean).join(' · ') : state === 'skip' ? (k === 'merge' ? 'на сервере базы ещё нет — объединять нечего' : 'не понадобилось') : state === 'done' ? run.notes[k] || '' : '';
+    return { k, title, state, note };
+  });
+}
+function pushStagesHtml(run, now) {
+  const ic = { done: 'check', active: 'refresh-cw', fail: 'circle-alert', wait: 'clock-3', skip: 'chevron-right' };
+  return `<ol class="push-stages" aria-label="Этапы отправки">${pushStagesModel(run, now).map(s => `<li class="ps-${s.state}" data-stage="${s.k}">${icon(ic[s.state], 'icon-sm')}<span><b>${esc(s.title)}</b>${s.note ? `<br><span class="small">${esc(s.note)}</span>` : ''}</span></li>`).join('')}</ol>`;
+}
+function pushStagesRender() {
+  const el = document.getElementById('push-stages'); if (!el || !PUSH_RUN) return;
+  el.innerHTML = pushStagesHtml(PUSH_RUN, Date.now()) + (PUSH_RUN.done ? `<p class="small muted">Всё за ${Math.max(1, Math.round((Date.now() - PUSH_RUN.start) / 1000))} с</p>` : '');
+}
 function pushOldOk(v, ver) { if (v) localStorage.setItem('crm_next_oldver', String(ver || 313)); else { localStorage.removeItem('crm_next_oldver'); localStorage.removeItem('crm_next_old313'); } const b = document.getElementById('push-go'); if (b) b.disabled = !v; }
 async function pushNow() {
   const b = document.getElementById('push-go'); if (b) { if (b.disabled) return; b.disabled = true; }
-  toast('Отправляю базу на сервер…');
-  const r = await nextServerPush();
+  // п. 3.1: этапы — вверху листа, чтобы и ход, и место сбоя было видно без прокрутки (жалоба 02.10.2026 на ошибку внизу)
+  // тело листа (под заголовком и крестиком), а не весь контейнер листа
+  const box = document.querySelector('#sheetContent .modal-content') || document.getElementById('sheetContent');
+  if (box) { const old = document.getElementById('push-stages'); if (old) old.remove(); box.insertAdjacentHTML('afterbegin', '<div class="info-box" id="push-stages" aria-live="polite"></div>'); box.scrollTop = 0; }
+  const tick = setInterval(pushStagesRender, 1000);
+  let r; try { r = await nextServerPush(); } finally { clearInterval(tick); }
+  pushStagesRender();
   // аудит GPT 03.10.2026: честная формулировка — данные с сервера уже влиты, а приём на сервере при обрыве связи не подтверждён
   if (!r.ok) { fErr('Не отправлено (' + r.step + '): ' + r.error + '. ' + (r.unconfirmed ? 'Подтверждение от сервера не получено: записи с сервера, полученные перед отправкой, уже на устройстве; принял ли сервер снимок — видно в «Снимки на сервере» (снимок со временем этой попытки = принят). Повторите отправку.' : 'На сервере осталась прежняя версия; записи с сервера, полученные перед отправкой, уже на устройстве.')); if (b) b.disabled = false; return r; }
   toast('База отправлена на сервер');
-  openSheet('Отправка на сервер', `<div class="info-box" id="push-done">Отправлено. На сервере — версия от ${esc(new Date(r.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}.${r.blobs && r.blobs.total ? ' Файлов документов положено в хранилище отдельно: ' + r.blobs.uploaded + (r.blobs.failed ? ', не удалось: ' + r.blobs.failed + ' (остались в снимке' + (r.blobs.errors && r.blobs.errors.length ? ': ' + esc(r.blobs.errors.join('; ')) : '') + ')' : '') + '.' : ''}${r.added || r.updated ? ' Перед отправкой с сервера принято: новых ' + r.added + ', изменённых ' + r.updated + '.' : ''}${r.retried ? ' Другое устройство записало базу во время отправки — программа объединила и отправила повторно.' : ''}</div>
+  openSheet('Отправка на сервер', `<div class="info-box" id="push-stages">${PUSH_RUN ? pushStagesHtml(PUSH_RUN, Date.now()) : ''}</div><div class="info-box" id="push-done">Отправлено. На сервере — версия от ${esc(new Date(r.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}.${r.blobs && r.blobs.total ? ' Файлов документов положено в хранилище отдельно: ' + r.blobs.uploaded + (r.blobs.failed ? ', не удалось: ' + r.blobs.failed + ' (остались в снимке' + (r.blobs.errors && r.blobs.errors.length ? ': ' + esc(r.blobs.errors.join('; ')) : '') + ')' : '') + '.' : ''}${r.added || r.updated ? ' Перед отправкой с сервера принято: новых ' + r.added + ', изменённых ' + r.updated + '.' : ''}${r.retried ? ' Другое устройство записало базу во время отправки — программа объединила и отправила повторно.' : ''}</div>
     <p class="small muted">Прежний снимок базы сохранён в истории сервера. Откройте прежнюю программу и дождитесь синхронизации — изменения должны появиться там.</p>
     <div class="form-actions"><button type="button" class="button primary" id="push-close" onclick="closeSheet(); openSyncSheet()">${icon('check')}Готово</button></div>`, 'replace');
   if (UI.ready) nav(UI.screen);
