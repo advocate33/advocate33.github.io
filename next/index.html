@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 17:24 · ace2e84">
+<meta name="build" content="03.10.2026 17:54 · d97ce3c">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -5236,14 +5236,31 @@ function todayDayLabel(iso, todayIso) {
 // Судья для строки заседания: сначала судья самого заседания, затем судья дела той же инстанции (заседание апелляции —
 // judgeApp, кассации и надзора — judgeCass, иначе judge). Инстанция — как в decisionField: из заседания, иначе стадия дела с
 // поправкой на даты подачи жалоб. Судью первой инстанции в апелляцию не подставляем (замечание GPT 03.10.2026, проверено по коду).
+// инстанция заседания (п. 1.4 — общая для судьи и суда)
+function hearingStageOf(h, c) {
+  h = h || {}; c = c || {};
+  let s = h.stage || c.stage || '';
+  if (!h.stage && h.date) { if (s === 'Кассация' && c.csFilingDate && h.date < c.csFilingDate) s = 'Апелляция'; if (s === 'Апелляция' && c.apFilingDate && h.date < c.apFilingDate) s = 'Первая инстанция'; }
+  return s;
+}
 function todayJudgeOf(h, c) {
   h = h || {}; c = c || {};
   if (h.judge) return h.judge;
-  let s = h.stage || c.stage || '';
-  if (!h.stage && h.date) { if (s === 'Кассация' && c.csFilingDate && h.date < c.csFilingDate) s = 'Апелляция'; if (s === 'Апелляция' && c.apFilingDate && h.date < c.apFilingDate) s = 'Первая инстанция'; }
+  const s = hearingStageOf(h, c);
   if (s === 'Апелляция') return c.judgeApp || '';
   if (s === 'Кассация' || s === 'Надзор') return c.judgeCass || '';
   return c.judge || '';
+}
+// Суд заседания (п. 1.4, разбор GPT 03.10.2026 подтверждён: суд брался из дела без учёта инстанции): суд самого заседания, иначе суд
+// той же инстанции — апелляция: apCourt (новая форма) или courtApp (прежняя программа, мониторинг), кассация и надзор: courtCass.
+// Суд первой инстанции в апелляцию не подставляется — лучше пусто, чем неверный суд.
+function hearingCourtOf(h, c) {
+  h = h || {}; c = c || {};
+  if (h.court) return h.court;
+  const s = hearingStageOf(h, c);
+  if (s === 'Апелляция') return c.apCourt || c.courtApp || '';
+  if (s === 'Кассация' || s === 'Надзор') return c.courtCass || '';
+  return c.court || '';
 }
 function todayMinutes(t) { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; }
 function todayHiddenLoad(todayIso) {
@@ -5306,7 +5323,7 @@ function todayModel(d, now, hidden) {
   let hero = null;
   if (nh && !hidden['hero:' + nh.id]) { const c = caseOf(nh);
     hero = { key: 'hero:' + nh.id, id: nh.id, when: todayDayLabel(nh.date, today), date: nh.date, time: nh.time || '', title: caseTitle(c, nh.caseNum) || 'Дело не указано',
-      place: [nh.court || (c && c.court), nh.room ? 'зал ' + nh.room : '', nh.judge ? 'судья ' + nh.judge : ''].filter(Boolean).join(' · '), subject: (c && (c.subject || c.category)) || '', prep: nh.prep || '', prepDone: !!nh.prepDone, participation: nh.participation || '' }; }
+      place: [hearingCourtOf(nh, c), nh.room ? 'зал ' + nh.room : '', nh.judge ? 'судья ' + nh.judge : ''].filter(Boolean).join(' · '), subject: (c && (c.subject || c.category)) || '', prep: nh.prep || '', prepDone: !!nh.prepDone, participation: nh.participation || '' }; }
 
   // Расписание дня: заседания (кроме отменённых) и встречи сегодня — по времени
   const schedule = [
@@ -5314,7 +5331,7 @@ function todayModel(d, now, hidden) {
       return { key: 'sh:' + h.id, id: h.id, type: 'hearing', time: h.time || '', title: 'Заседание · ' + (caseTitle(c, h.caseNum) || 'дело не указано'),
         // телефон: доверитель вместо номера, судья по инстанции, предмет (вариант Б); номер остаётся в карточке и на компьютере
         client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', near: !!(nh && nh.id === h.id),
-        sub: [h.court || (c && c.court), h.room ? 'зал ' + h.room : '', h.participation || ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', prep: h.prep && !h.prepDone ? 'подготовить: ' + h.prep : '', caseId: c ? c.id : '' }; }),
+        sub: [hearingCourtOf(h, c), h.room ? 'зал ' + h.room : '', h.participation || ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', prep: h.prep && !h.prepDone ? 'подготовить: ' + h.prep : '', caseId: c ? c.id : '' }; }),
     ...tasks.filter(t => t && !t.done && t.time && t.due && todayDayDiff(t.due, today) === 0).map(t => ({ key: 'st:' + t.id, id: t.id, type: 'task', time: t.time, title: t.title || 'Задача', sub: caseTitle(caseOf(t), t.caseNum) || 'Без дела', status: '', caseId: (caseOf(t) || {}).id || '' })),
     ...meetings.filter(m => m && m.date && todayDayDiff(m.date, today) === 0).map(m => ({ key: 'sm:' + m.id, id: m.id, type: 'meeting', time: m.time || '', title: 'Встреча · ' + (m.with || 'без участника'), sub: [m.place, m.caseNum].filter(Boolean).join(' · '), status: '', caseId: (caseOf(m) || {}).id || '' })),
   ].sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
@@ -5323,9 +5340,9 @@ function todayModel(d, now, hidden) {
   const later = [];
   const inWin = iso => { const k = todayDayDiff(iso, today); return k !== null && k >= 1 && k <= TODAY_NEXT_DAYS; };
   // замечание пользователя 03.10.2026 (снимок планшета): судья нужен и в «Далее по плану», не только в плане дня
-  hearings.forEach(h => { if (planned(h) && inWin(h.date)) { const c = caseOf(h); later.push({ id: h.id, type: 'hearing', date: h.date, time: h.time || '', title: 'Заседание · ' + (caseTitle(c, h.caseNum) || 'дело не указано'), client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', sub: [h.court || (c && c.court), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · ') }); } });
+  hearings.forEach(h => { if (planned(h) && inWin(h.date)) { const c = caseOf(h); later.push({ id: h.id, type: 'hearing', date: h.date, time: h.time || '', title: 'Заседание · ' + (caseTitle(c, h.caseNum) || 'дело не указано'), client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', sub: [hearingCourtOf(h, c), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · ') }); } });
   meetings.forEach(m => { if (m && inWin(m.date)) later.push({ id: m.id, type: 'meeting', date: m.date, time: m.time || '', title: 'Встреча · ' + (m.with || 'без участника'), sub: m.place || '' }); });
-  tasks.forEach(t => { if (t && !t.done && inWin(t.due)) later.push({ id: t.id, type: 'task', date: t.due, time: '', title: t.title || 'Задача', sub: caseTitle(caseOf(t), t.caseNum) }); });
+  tasks.forEach(t => { if (t && !t.done && inWin(t.due)) later.push({ id: t.id, type: 'task', date: t.due, time: t.time || '', title: t.title || 'Задача', sub: caseTitle(caseOf(t), t.caseNum) }); });
   cases.filter(activeCase).forEach(c => (c.deadlines || []).forEach(dl => { if (dl && !dl.done && inWin(dl.date)) later.push({ id: c.id, type: 'deadline', date: dl.date, time: '', title: 'Срок · ' + (dl.title || 'срок'), sub: caseTitle(c) }); }));
   later.sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')));
   const nextItems = later.slice(0, TODAY_NEXT_MAX).map(x => ({ ...x, when: todayDayLabel(x.date, today) }));
@@ -5624,7 +5641,7 @@ async function openCaseSheet(id, keep) {
     ${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.inn ? 'ИНН ' + p.inn : '', p.addr].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}
     ${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, d.monitorEvents, d.hearings) : ''}
     ${sec('Сроки', m.deadlines.length ? `<div class="list-rows">${m.deadlines.map(x => `<button type="button" class="list-btn" onclick="openDeadlineSheet('${jsq(c.id)}', '${jsq(x.key)}')"><span>${esc(x.title || 'Срок')}${x.unconfirmed ? ' ' + badge('требует проверки', 'warn') : ''}</span><span class="${x.state === 'overdue' ? 'task-when overdue' : 'muted'}">${esc(fmtDate(x.date))}${x.state === 'done' ? ' · выполнен' : x.when ? ' · ' + esc(x.when) : ''}</span></button>`).join('')}</div>` : '<p class="small muted">Сроков нет.</p>', m.deadlines.length)}
-    ${sec('Заседания', m.hearings.length ? `<div class="list-rows">${m.hearings.slice(0, 12).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span>${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}${h.room ? ' · зал ' + esc(h.room) : ''}${hearingPartText(h) ? `<br><span class="muted small">${esc(hearingPartText(h))}</span>` : ''}${h.status === 'Проведено' && h.result ? `<br><span class="muted small">${esc(String(h.result).slice(0, 140))}</span>` : ''}${h.prep ? `<br><span class="muted small">${h.prepDone ? '✓ ' : ''}подготовить: ${esc(h.prep)}</span>` : ''}</span><span>${badge(h.status || 'Назначено', h.status === 'Проведено' ? 'good' : h.status === 'Отменено' ? '' : h.status === 'Дата прошла' ? 'warn' : 'accent')}</span></button>`).join('')}</div>${m.hearings.some(h => h.status === 'Проведено') ? `<p class="small muted" style="margin-top:6px">Проведено: ${m.hearings.filter(h => h.status === 'Проведено').length} · участвовал лично: ${m.hearings.filter(h => h.status === 'Проведено' && h.attended === true).length}</p>` : ''}` : '<p class="small muted">Заседаний нет.</p>', m.hearings.length)}
+    ${sec('Заседания', m.hearings.length ? `<div class="list-rows">${m.hearings.slice(0, 12).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span>${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}${h.room ? ' · зал ' + esc(h.room) : ''}${[hearingCourtOf(h, c), todayJudgeOf(h, c) ? 'судья ' + todayJudgeOf(h, c) : ''].filter(Boolean).length ? `<br><span class="muted small">${esc([hearingCourtOf(h, c), todayJudgeOf(h, c) ? 'судья ' + todayJudgeOf(h, c) : ''].filter(Boolean).join(' · '))}</span>` : ''}${hearingPartText(h) ? `<br><span class="muted small">${esc(hearingPartText(h))}</span>` : ''}${h.status === 'Проведено' && h.result ? `<br><span class="muted small">${esc(String(h.result).slice(0, 140))}</span>` : ''}${h.prep ? `<br><span class="muted small">${h.prepDone ? '✓ ' : ''}подготовить: ${esc(h.prep)}</span>` : ''}</span><span>${badge(h.status || 'Назначено', h.status === 'Проведено' ? 'good' : h.status === 'Отменено' ? '' : h.status === 'Дата прошла' ? 'warn' : 'accent')}</span></button>`).join('')}</div>${m.hearings.some(h => h.status === 'Проведено') ? `<p class="small muted" style="margin-top:6px">Проведено: ${m.hearings.filter(h => h.status === 'Проведено').length} · участвовал лично: ${m.hearings.filter(h => h.status === 'Проведено' && h.attended === true).length}</p>` : ''}` : '<p class="small muted">Заседаний нет.</p>', m.hearings.length)}
     ${sec('Задачи', m.tasks.length ? `<div class="list-rows">${m.tasks.slice(0, 12).map(t => `<button type="button" class="list-btn" onclick="openTaskForm('${jsq(t.id)}')"><span class="${t.done ? 'muted' : ''}">${esc(t.title || 'Задача')}</span><span class="muted">${t.done ? 'выполнена' : (t.due ? esc(fmtDate(t.due)) : '')}</span></button>`).join('')}</div>` : '<p class="small muted">Задач нет.</p>', m.tasks.length)}
     ${sec('Встречи', m.meetings.length ? `<div class="list-rows">${m.meetings.slice(0, 12).map(x => `<button type="button" class="list-btn" onclick="openMeetingForm('${jsq(x.id)}')"><span>${esc(fmtDate(x.date))}${x.time ? ' ' + esc(x.time) : ''} · ${esc(x.with || 'без участника')}</span><span class="muted">${esc(x.place || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Встреч нет.</p>', m.meetings.length)}
     ${m.mail.length ? sec('Переписка', `<div class="list-rows">${m.mail.slice(0, 12).map(x => { const k = mailStatusKind(x), mt = MAIL_KIND_META[k]; return `<button type="button" class="list-btn" onclick="openMailSheet('${jsq(x.id)}')"><span>${esc(x.title || x.barcode || 'Отправление')}</span><span class="muted">${esc([x.dir === 'in' ? 'вх.' : 'исх.', x.date ? fmtDate(x.date) : ''].filter(Boolean).join(' · '))} ${badge(mailIsPostal(x) ? (x.status || mt[0]) : mt[0], mt[1])}</span></button>`; }).join('')}</div>`, m.mail.length) : ''}
@@ -5657,7 +5674,7 @@ function calEvents(d, from, to) {
   const title = (c, num) => [c ? c.number : num, c ? c.client : ''].filter(Boolean).join(' · ');
   const inR = iso => iso && iso >= from && iso <= to, out = [];
   (d.hearings || []).forEach(h => { if (!h || !inR(h.date)) return; const c = caseOf(h);
-    out.push({ date: h.date, time: h.time || '', type: 'hearing', id: h.id, title: 'Заседание · ' + (title(c, h.caseNum) || 'дело не указано'), sub: [h.court || (c && c.court), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', muted: h.status === 'Отменено' || h.status === 'Проведено' }); });
+    out.push({ date: h.date, time: h.time || '', type: 'hearing', id: h.id, title: 'Заседание · ' + (title(c, h.caseNum) || 'дело не указано'), judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', sub: [hearingCourtOf(h, c), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', muted: h.status === 'Отменено' || h.status === 'Проведено' }); });
   (d.meetings || []).forEach(m => { if (m && inR(m.date)) out.push({ date: m.date, time: m.time || '', type: 'meeting', id: m.id, title: 'Встреча · ' + (m.with || 'без участника'), sub: [m.place, m.caseNum].filter(Boolean).join(' · '), status: '' }); });
   (d.tasks || []).forEach(t => { if (t && !t.done && inR(t.due)) out.push({ date: t.due, time: t.time || '', type: 'task', id: t.id, title: t.title || 'Задача', sub: title(caseOf(t), t.caseNum), status: '' }); });
   cases.filter(c => c && !c.archived && c.status !== 'Завершено').forEach(c => (c.deadlines || []).forEach(dl => { if (dl && !dl.done && inR(dl.date)) out.push({ date: dl.date, time: '', type: 'deadline', id: c.id, title: 'Срок · ' + (dl.title || 'срок'), sub: title(c), status: '' }); }));
@@ -5703,7 +5720,7 @@ SCREENS.calendar = async function () {
   const views = CAL_VIEWS.map(([k, t, i]) => `<button type="button" class="button small-btn" aria-pressed="${m.view === k}" onclick="calSet('view','${k}')">${icon(i, 'icon-sm')}${esc(t)}</button>`).join('');
   const dayLabel = iso => todayDayLabel(iso, m.today) + (todayDayDiff(iso, m.today) === 0 || Math.abs(todayDayDiff(iso, m.today)) === 1 ? ' · ' + parseLocalDate(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '');
   const row = x => `<button type="button" class="agenda-row" onclick="todayOpen('${x.type}', '${jsq(x.id)}')"><span class="agenda-time">${esc(x.time || ({ task: 'задача', deadline: 'срок' }[x.type] || '—'))}</span>
-    <span class="agenda-stripe ${x.type}${x.muted ? ' done' : ''}"><span class="agenda-title">${esc(x.title)}</span>${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : x.status === 'Отменено' ? '' : 'accent') : ''}</span></button>`;
+    <span class="agenda-stripe ${x.type}${x.muted ? ' done' : ''}"><span class="agenda-title">${x.type === 'hearing' && x.client ? `Заседание · <span class="l-long">${esc(x.number ? x.number + ' · ' : '')}</span>${esc(x.client)}` : esc(x.title)}</span>${x.judge ? `<span class="agenda-judge">Судья: ${esc(x.judge)}</span>` : ''}${x.subject ? `<span class="agenda-sub">${esc(x.subject)}</span>` : ''}${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : x.status === 'Отменено' ? '' : 'accent') : ''}</span></button>`;
   const rows = items => items.map(row).join('');
   const nav3 = (prev, next, label, reset) => `<div class="cal-nav">${iconBtn('Назад', prev, 'chevron-left')}<span class="cal-title">${esc(label)}</span>${iconBtn('Вперёд', next, 'chevron-right')}${reset ? btn('Сегодня', reset, 'small-btn') : ''}</div>`;
   let body = '';
