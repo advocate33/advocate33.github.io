@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 18:39 · 2eef8fe">
+<meta name="build" content="03.10.2026 19:06 · bad82dd">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -198,7 +198,7 @@ dialog::backdrop{background:#0c183a70}
   .layout{grid-template-columns:78px minmax(0,1fr)}.brand{justify-content:center;padding:0 0 20px}
   .brand>div:last-child,.nav-label,.nav-item span,.nav-item .count{display:none}
   .nav-item{justify-content:center;padding:12px}.nav-item .icon{width:22px;height:22px}.sidebar{padding:18px 10px}
-  .day-grid{grid-template-columns:1fr}.sync-status span{display:none}.intro-strip{align-items:flex-start;flex-direction:column;gap:14px}}
+  .day-grid{grid-template-columns:1fr}.sync-status span{display:inline-block;max-width:8.5em;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}.intro-strip{align-items:flex-start;flex-direction:column;gap:14px}}
 @media(max-width:640px){
   .layout{display:block}.sidebar{display:none}
   .topbar{padding:10px 12px;gap:8px;min-height:64px}.top-brand{display:grid}.top-brand .brand-mark{border-color:var(--line);color:var(--accent);width:34px;height:34px;font-size:21px}
@@ -363,6 +363,8 @@ button.agenda-row:hover{background:var(--surface2)}
   .month-layout{grid-template-columns:1fr;gap:14px}.day-cell{min-height:58px;padding:5px 2px;align-items:center;gap:3px}.day-event{display:none}.day-dots{display:flex}.cal-nav{padding:10px 8px}}
 @media(prefers-reduced-motion:no-preference){.panel{transition:border-color .15s}.button{transition:background .12s}}
 .l-short{display:none}
+.sync-err-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:12px 30px 0;padding:10px 8px 10px 14px;border:1px solid var(--bad);border-radius:var(--r-md);background:var(--surface);color:var(--text)}.sync-err-bar .grow{flex:1 1 220px;min-width:0}.sync-err-bar .actions{display:flex;gap:8px;align-items:center}
+@media(max-width:900px){.sync-err-bar{margin:10px 16px 0}}
 .fgroup{grid-column:1/-1;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
 .fgroup>summary{display:flex;align-items:center;gap:8px;min-height:var(--touch);padding:0 14px;cursor:pointer;font-weight:600;list-style:none}
 .fgroup>summary::-webkit-details-marker{display:none}
@@ -2632,7 +2634,7 @@ function syncStatusModel(now) {
   if (err) return { icon: 'circle-alert', text: 'Ошибка сервера', cls: 'bad', title: 'Сервер: ' + err.msg + (err.at ? ' (ошибка от ' + when(err.at) + '; исчезнет после удачного обмена)' : '') };
   const pushed = SRVDB.lastPush, last = Math.max(pulled || 0, pushed || 0);
   if (last) return nextLocalChanges()
-    ? { icon: 'cloud-download', text: (auto ? 'Авто ' : 'Сервер ') + when(last), cls: auto ? 'good' : 'warn', title: 'Последний обмен с сервером ' + when(last) + (auto ? '. Правки отправятся сами через несколько секунд' : '. Правки, сделанные здесь после обмена, хранятся на этом устройстве — отправьте их по кнопке') + auto }
+    ? { icon: 'cloud-download', text: auto ? 'Авто ' + when(last) : 'Ждёт отправки', cls: auto ? 'good' : 'warn', title: 'Последний обмен с сервером ' + when(last) + (auto ? '. Правки отправятся сами через несколько секунд' : '. Правки, сделанные здесь после обмена, хранятся на этом устройстве — отправьте их по кнопке') + auto }
     : { icon: 'cloud-download', text: (auto ? 'Авто ' : 'Сервер ') + when(last), cls: 'good', title: 'Последний обмен с сервером ' + when(last) + auto };
   if (nextSrvConfigured() && nextSrvChecked()) return { icon: 'hard-drive', text: 'Сервер подключён', cls: '', title: 'Связь с сервером проверена, база ещё не загружена' };
   return { icon: 'hard-drive', text: 'На устройстве', cls: '', title: 'Данные хранятся на этом устройстве' };
@@ -2643,6 +2645,26 @@ function syncStatusRender() {
   const m = syncStatusModel();
   b.className = 'sync-status' + (m.cls ? ' ' + m.cls : ''); b.title = m.title; b.setAttribute('aria-label', 'Синхронизация. ' + m.title);
   b.innerHTML = icon(m.icon) + '<span>' + esc(m.text) + '</span>';
+  syncErrBarRender();
+}
+// п. 1.7 (03.10.2026): ошибка обмена — постоянная полоска под шапкой с причиной, «Повторить» и «×» (скрыть эту ошибку); исчезает
+// сама после удачного обмена. Короткое сообщение внизу экрана пропадает через 8 секунд — для сбоя синхронизации этого мало.
+const SYNC_ERR_HIDE_KEY = 'crm_next_errbar_hide';
+function syncErrBarRender() {
+  if (typeof document === 'undefined') return;
+  const ws = document.querySelector('.workspace'), top = ws && ws.querySelector('.topbar'); if (!top) return;
+  let bar = document.getElementById('sync-err-bar');
+  const err = SRVDB.lastErr; let hidden = ''; try { hidden = sessionStorage.getItem(SYNC_ERR_HIDE_KEY) || ''; } catch (e) { hidden = ''; }
+  if (!err || !nextSrvConfigured() || String(err.at || '') === hidden) { if (bar) bar.remove(); return; }
+  if (!bar) { bar = document.createElement('div'); bar.id = 'sync-err-bar'; bar.className = 'sync-err-bar'; bar.setAttribute('role', 'alert'); top.insertAdjacentElement('afterend', bar); }
+  const when = err.at ? new Date(err.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+  bar.innerHTML = `${icon('circle-alert', 'icon-sm')}<div class="grow"><strong>Обмен с сервером не удался${when ? ' в ' + esc(when) : ''}</strong><div class="small">${esc(err.msg || 'нет связи')}. Данные на устройстве сохранены.</div></div><div class="actions">${btn('Повторить', 'syncRetry()', 'small-btn primary', 'refresh-cw')}${btn('Подробнее', 'openSyncSheet()', 'small-btn', 'info')}${iconBtn('Скрыть эту ошибку', 'syncErrBarHide()', 'x')}</div>`;
+}
+function syncErrBarHide() { try { sessionStorage.setItem(SYNC_ERR_HIDE_KEY, String((SRVDB.lastErr && SRVDB.lastErr.at) || '')); } catch (e) { logErr('errbar', e); } syncErrBarRender(); }
+// «Повторить»: с автообменом — проверить сервер и отправить свои правки; без него — открыть лист «Синхронизация» (обмен по кнопкам)
+async function syncRetry() {
+  if (typeof nextAutoOn === 'function' && nextAutoOn()) { toast('Повторяю обмен с сервером…'); try { await nextAutoPull(true); if (nextLocalChanges() && typeof nextAutoPush === 'function') await nextAutoPush('повтор'); } catch (e) { logErr('errbar:retry', e); } syncStatusRender(); if (!SRVDB.lastErr) toast('Обмен с сервером прошёл'); return; }
+  openSyncSheet();
 }
 
 // Названия полей для журнала коллизий; поле, которого здесь нет, показывается своим именем
@@ -3866,7 +3888,7 @@ window.UI_MANIFEST = {
   phoneWidths: [360, 390, 412], desktopWidth: 1280, phoneTheme: 'dark', desktopTheme: 'light',
   sidebarAlign: 'top', minTouch: 44, seedFile: 'ui_seed_next.js', readyExpr: 'window.NEXT_READY', lsPrefix: NEXT_NS.ls,
   variants: [{ name: 'monitoring-all', screen: 'monitoring', js: "monSet('f','all')" }, { name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
-    { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }],
+    { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'sync-error', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за минуту' }; syncStatusRender()" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }],
 };
 
 const UI = { screen: 'today', ready: false, stack: [], hist: false };
