@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 09:41 · 0287014">
+<meta name="build" content="03.10.2026 11:12 · 4d27a0d">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2274,7 +2274,7 @@ mergeCaseRecords = function (cur, rec, base, events) {
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
 // eventsget — события судов с сервера (этап 4): чтение
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'blobget', 'bloblist', 'track', 'eventsget'];
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'blobget', 'bloblist', 'track', 'eventsget'];
 // этап 4, часть 2в: история снимков базы на сервере 178 — чтение
 const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 // этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
@@ -2283,7 +2283,7 @@ const NEXT_PUSH = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(action === 'dbput' && NEXT_PUSH.on)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit'].includes(action) && NEXT_PUSH.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -2293,13 +2293,40 @@ const NEXT_PUSH = { on: false };
 // Чтение базы с сервера с запасом времени (снимок пользователя 02.10.2026, телефон: «сервер не ответил за 20 секунд»).
 // База ≈2,7 МБ: через мобильную сеть за 20 секунд общего предела srvCall она не успевает. Здесь — только чтение (dbget),
 // до 90 секунд; все прочие запросы идут через srvCall с прежним пределом.
+// v180: сервер ≥ 180 отдаёт подписанную ссылку (snapget), снимок скачивается из хранилища напрямую — предел функции не действует.
+// Сервер старше (unknown_action) — прежний путь через функцию; ответ запоминается, чтобы не спрашивать дважды.
+const NEXT_SNAP = { key: 'crm_next_snap_srv' };
+function nextSnapKnown() { const v = localStorage.getItem(NEXT_SNAP.key); return v === '1' ? true : v === '0' ? false : null; }
+function nextSnapSet(on) { try { localStorage.setItem(NEXT_SNAP.key, on ? '1' : '0'); } catch (e) { logErr('snap:set', e); } }
+async function nextSnapFetch(url, bytes) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 180000);
+  try {
+    const r = await fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    if (!r.ok) return { ok: false, error: 'хранилище: HTTP ' + r.status };
+    const data = await r.text();
+    if (bytes && new TextEncoder().encode(data).length !== bytes) return { ok: false, error: 'снимок скачан не полностью — повторите' };
+    return { ok: true, data };
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не скачался за 3 минуты — медленная связь, повторите' : 'хранилище недоступно (сеть или правило CORS бакета — сервер 180 ставит его сам при первой отправке)' }; }
+  finally { clearTimeout(timer); }
+}
 async function nextDbGet(histVer) {
+  if (!SRV.url) return null;
+  if (nextSnapKnown() !== false) {
+    const g = await nextDbGetVia(histVer ? { action: 'snapget', ver: Number(histVer) } : { action: 'snapget' });
+    // ответ без признака exists — сервер действия не знает (прежний ответ «ok» на неизвестное действие) → прежний путь
+    if (g && (g.error === 'unknown_action' || (g.ok && g.exists === undefined))) nextSnapSet(false);
+    else if (g && g.ok) { nextSnapSet(true); if (!g.exists) return { ok: true, exists: false, ver: Number(g.ver || 0) }; const f = await nextSnapFetch(g.url, g.bytes); return f.ok ? { ok: true, exists: true, data: f.data, ver: Number(g.ver || 0), bytes: g.bytes, direct: true } : f; }
+    else return g;
+  }
+  return nextDbGetVia(histVer ? { action: 'dbhistget', ver: Number(histVer) } : { action: 'dbget' });
+}
+async function nextDbGetVia(req) {
   if (!SRV.url) return null;
   const endpoint = safeExternalUrl(SRV.url);
   if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 90000);
   try {
-    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(histVer ? { secret: SRV.secret, action: 'dbhistget', ver: Number(histVer) } : { secret: SRV.secret, action: 'dbget' }), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ secret: SRV.secret }, req)), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
     const j = await r.json().catch(() => null);
     if (j && typeof j === 'object' && j.ok === undefined && j.error === undefined && j.errorMessage) return { ok: false, error: srvCloudError(j.errorMessage) };
     return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
@@ -2363,6 +2390,7 @@ async function nextServerCheck() {
   const v = await srvCall('dbver');
   if (!v || !v.ok) { const msg = nextSrvError(v); srvdbNote('err', msg); return { ok: false, error: msg }; }
   localStorage.setItem('crm_next_srv_checked', SRV.url); SRVDB.lastErr = null; syncStatusRender();
+  if (typeof nextSnapSet === 'function') nextSnapSet(Number(p.ver || 0) >= 180); // v180: снимки по ссылке
   return { ok: true, srvVer: Number(p.ver || 0), dbVer: Number(v.ver || 0) };
 }
 const nextSrvChecked = () => !!SRV.url && localStorage.getItem('crm_next_srv_checked') === SRV.url;
@@ -2572,6 +2600,27 @@ async function nextSrvPost(action, payload, timeoutMs) {
   } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'сервер не ответил за минуту' : 'network' }; }
   finally { clearTimeout(timer); }
 }
+// v180: snapput (ссылка) → PUT шифротекста в хранилище → snapcommit с размером и суммой sha256; «busy» (замок занят другим
+// устройством) — один повтор через 1–3 секунды. Возвращает ответ сервера в том же виде, что dbput ({ok, ver} | {error}).
+async function nextSnapSend(enc, baseVer) {
+  const bytesArr = new TextEncoder().encode(enc), bytes = bytesArr.length;
+  const p = await nextSrvPost('snapput', { bytes });
+  if (!p || !p.ok) return p || { ok: false, error: 'network' };
+  nextSnapSet(true);
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 600000);
+  try {
+    const r = await fetch(p.url, { method: 'PUT', body: bytesArr, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    if (!r.ok) return { ok: false, error: 'хранилище не приняло снимок: HTTP ' + r.status };
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не загрузился за 10 минут — медленная связь, повторите' : 'хранилище недоступно (сеть или правило CORS бакета — сервер ставит его сам; если ошибка повторяется, пришлите журнал)' }; }
+  finally { clearTimeout(timer); }
+  let sha = ''; try { sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytesArr))).map(b => b.toString(16).padStart(2, '0')).join(''); } catch (e) { logErr('snap:sha', e); }
+  let c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha });
+  if (c && c.error === 'conflict' && c.busy) { await new Promise(res => setTimeout(res, 1000 + Math.random() * 2000)); c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha }); }
+  if (c && !c.ok && c.error === 'size_mismatch') c.error = 'снимок в хранилище повреждён при загрузке (размер не совпал) — повторите отправку';
+  if (c && !c.ok && c.error === 'sha_mismatch') c.error = 'снимок в хранилище повреждён при загрузке (контрольная сумма не совпала) — повторите отправку';
+  if (c && !c.ok && c.error === 'not_uploaded') c.error = 'хранилище не получило снимок — повторите отправку';
+  return c || { ok: false, error: 'network' };
+}
 async function nextServerPush() {
   if (NEXT_SYNC.busy) return { ok: false, error: 'идёт обмен с сервером — дождитесь его окончания' };
   if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
@@ -2588,7 +2637,11 @@ async function nextServerPush() {
     const send = async baseVer => { // шаг «собрать, зашифровать, отправить»
       const revision = syncRevision(), enc = await encryptDump(await collectAll(), SRVDB.pass);
       NEXT_PUSH.on = true;
-      try { return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }) }; } finally { NEXT_PUSH.on = false; }
+      try {
+        // v180: снимок — напрямую в хранилище по подписанной ссылке; сервер старше 180 — через функцию (dbput)
+        if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true }; nextSnapSet(false); }
+        return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }) };
+      } finally { NEXT_PUSH.on = false; }
     };
     let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
     let sent = await send(got.ver), retried = false;
@@ -2610,7 +2663,7 @@ async function nextServerPush() {
 // Пределы (измерены 02.10.2026 запросами к серверу пользователя): запрос application/json — 3 670 016 байт; сервер сам не
 // принимает шифротекст длиннее 3 500 000 знаков; прежняя программа до версии 313 шлёт text/plain — её запрос облако
 // упаковывает в base64, поэтому ей доступно 3 670 016 × 3/4 ≈ 2,75 МБ.
-const SRV_REQ_LIMIT = 3670016, SRV_DATA_LIMIT = 3500000, SRV_OLD_LIMIT = 2740000;
+const SRV_REQ_LIMIT = 3670016, SRV_DATA_LIMIT = 3500000, SRV_OLD_LIMIT = 2740000, SNAP_LIMIT = 512 * 1024 * 1024; // v180: снимок по ссылке — до 512 МБ
 const utf8Len = s => new TextEncoder().encode(String(s)).length;
 // Чистая модель: по разделам — число записей и байты JSON; по трём самым тяжёлым полям раздела — их байты. Значений нет.
 function dbSizeModel(data, settings) {
@@ -2635,7 +2688,9 @@ function dbSizeZip(m, zipBytes, zipOn) {
   m.zipRequest = zipBytes == null ? null : Math.ceil(zipBytes / 3) * 4 + 400; m.zipOn = !!zipOn;
   m.willZip = m.zipRequest != null && (m.zipOn || m.plain > ENC_Z_FORCE);
   m.effective = m.willZip ? m.zipRequest : m.request;
-  m.fits = m.effective <= SRV_DATA_LIMIT; m.fitsOld = m.effective <= SRV_OLD_LIMIT;
+  // v180: сервер со снимками по ссылке принимает до SNAP_LIMIT; прежняя программа по-прежнему читает через функцию (fitsOld, needOld)
+  m.snap = typeof nextSnapKnown === 'function' && nextSnapKnown() === true; m.limit = m.snap ? SNAP_LIMIT : SRV_DATA_LIMIT;
+  m.fits = m.effective <= m.limit; m.fitsOld = m.effective <= SRV_OLD_LIMIT; m.fitsFn = m.effective <= SRV_DATA_LIMIT;
   m.needOld = m.willZip ? 314 : (m.fitsOld ? 0 : 313);
   return m;
 }
@@ -2669,7 +2724,7 @@ async function openDbSizeSheet(m) {
         <div class="form-actions" style="margin-top:8px"><button type="button" class="button primary" id="dbsize-zip-on" disabled onclick="dbZipEnable()">${icon('check')}Включить сжатие базы</button></div></div>`;
   openSheet('Размер базы', `<div class="info-box${m.fits ? '' : ' warning'}" id="dbsize-verdict">База ${m.fits ? 'помещается' : 'не помещается'} в один запрос к серверу: ${esc(mbText(m.effective))} из ${esc(mbText(m.limit))} (${pct(m.effective)} %)${m.willZip ? ', со сжатием' : ', без сжатия'}.</div>
     ${zipBox}
-    <p class="small muted">Предел задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ. Прежняя программа до версии 313 могла отправить не больше ${esc(mbText(m.oldLimit))}.</p>
+    <p class="small muted">${m.snap ? 'Сервер 180: снимок идёт в хранилище напрямую по подписанной ссылке, предел — ' + esc(mbText(m.limit)) + '. Прежняя программа читает базу через функцию, её предел 3,5 МБ' + (m.fitsFn ? ' — пока помещается.' : ' — база его ПРЕВЫСИЛА: прежняя программа базу с сервера больше не прочитает, работайте в новой версии.') : 'Предел задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ. Сервер 180 снимает его (снимок идёт в хранилище напрямую) — обновите сервер.'} Прежняя программа до версии 313 могла отправить не больше ${esc(mbText(m.oldLimit))}.</p>
     <div class="section-label">Что занимает место (до сжатия)</div><div class="list-rows">${rows}</div>
     <div class="form-actions"><button type="button" class="button" id="dbsize-copy" onclick="dbSizeCopy()">${icon('files', 'icon-sm')}Скопировать (только числа)</button></div>
     <p class="small muted">В скопированном — названия разделов и полей и их размер. Имён, номеров дел и текстов там нет.</p>`, sheetIsOpen() ? (UI.cur && UI.cur.title === 'Размер базы' ? 'replace' : true) : undefined);
