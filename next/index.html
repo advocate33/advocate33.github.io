@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 12:40 · 75b0dd4">
+<meta name="build" content="03.10.2026 13:17 · b2bd9f3">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2270,6 +2270,16 @@ mergeCaseRecords = function (cur, rec, base, events) {
   return m;
 };
 
+// v8 (sync/blobs.js): файл версии документа, которого нет на этом устройстве, берётся из хранилища по cloudId
+async function docBlobGet(v) {
+  if (!v) return '';
+  if (v.dataUrl) return v.dataUrl;
+  const b = await getOne('docBlobs', v.id);
+  if (b && b.data) return b.data;
+  if (v.cloudId && typeof nextBlobFetch === 'function') { try { return await nextBlobFetch(v.id); } catch (e) { logErr('docBlob:fetch', e); } }
+  return '';
+}
+
 // ▼▼▼ next/guard.js
 // ═══ next/guard.js — запрет записи на личный сервер из новой версии ═══
 // Решение 28.09.2026: на этапе 1 новая версия только ЧИТАЕТ базу с сервера. Запись включается на этапе 2 — после того
@@ -2286,7 +2296,7 @@ const NEXT_PUSH = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit'].includes(action) && NEXT_PUSH.on)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -2639,13 +2649,16 @@ async function nextServerPush() {
       if (g.exists && g.data) { const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: 'не записано записей с сервера: ' + r.failed + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
       return { ver: 0, added: 0, updated: 0 };
     };
-    const send = async baseVer => { // шаг «собрать, зашифровать, отправить»
-      const revision = syncRevision(), enc = await encryptDump(await collectAll(), SRVDB.pass);
+    let blobs = null; // v8: файлы документов — отдельными объектами, один раз (sync/blobs.js)
+    const send = async baseVer => { // шаг «положить файлы, собрать, зашифровать, отправить»
       NEXT_PUSH.on = true;
       try {
+        if (!blobs && typeof nextBlobsPush === 'function') { try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
+        const dump = typeof collectForSync === 'function' ? await collectForSync() : await collectAll();
+        const revision = syncRevision(), enc = await encryptDump(dump, SRVDB.pass), omitted = dump._blobsOmitted || 0;
         // v180: снимок — напрямую в хранилище по подписанной ссылке; сервер старше 180 — через функцию (dbput)
-        if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true }; nextSnapSet(false); }
-        return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }) };
+        if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted }; nextSnapSet(false); }
+        return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }), omitted };
       } finally { NEXT_PUSH.on = false; }
     };
     let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
@@ -2659,7 +2672,7 @@ async function nextServerPush() {
     SRVDB.ver = Number(j.ver || 0); SRVDB.lastAt = Date.now();
     localStorage.setItem('crm_next_pull_rev', sent.revision); localStorage.setItem('crm_next_push_at', String(Date.now()));
     srvdbNote('push');
-    return { ok: true, ver: SRVDB.ver, bytes: sent.bytes, added: got.added, updated: got.updated, retried };
+    return { ok: true, ver: SRVDB.ver, bytes: sent.bytes, added: got.added, updated: got.updated, retried, blobs: blobs || null, blobsOmitted: sent.omitted || 0 };
   } catch (e) { logErr('push', e); return fail('отправка', String((e && e.message) || e).slice(0, 120)); }
   finally { NEXT_PUSH.on = false; NEXT_SYNC.busy = false; syncStatusRender(); }
 }
@@ -2701,6 +2714,9 @@ function dbSizeZip(m, zipBytes, zipOn) {
 }
 async function dbSizeNow() {
   const d = await collectAll(), m = dbSizeModel(d.data, d.settings);
+  // v8: файлы документов — сколько всего, сколько уже в хранилище отдельно (не в снимке), сколько ещё уйдёт
+  try { const blobs = (d.data.docBlobs || []).filter(b => b && b.data), cloud = new Set((d.data.docVersions || []).filter(v => v && v.cloudAt && v.cloudId).map(v => v.id));
+    m.blobs = { count: blobs.length, bytes: blobs.reduce((a, b) => a + utf8Len(b.data), 0), inCloud: blobs.filter(b => cloud.has(b.id)).length, pending: blobs.filter(b => !cloud.has(b.id)).length }; } catch (e) { logErr('dbsize:blobs', e); }
   let z = null; if (encCanZip()) { try { z = (await encZip(new TextEncoder().encode(JSON.stringify(d)), false)).length; } catch (e) { logErr('dbsize:zip', e); } }
   return dbSizeZip(m, z, encZipOn());
 }
@@ -2730,6 +2746,7 @@ async function openDbSizeSheet(m) {
   openSheet('Размер базы', `<div class="info-box${m.fits ? '' : ' warning'}" id="dbsize-verdict">База ${m.fits ? 'помещается' : 'не помещается'} в один запрос к серверу: ${esc(mbText(m.effective))} из ${esc(mbText(m.limit))} (${pct(m.effective)} %)${m.willZip ? ', со сжатием' : ', без сжатия'}.</div>
     ${zipBox}
     <p class="small muted">${m.snap ? 'Сервер 180: снимок идёт в хранилище напрямую по подписанной ссылке, предел — ' + esc(mbText(m.limit)) + '. Прежняя программа читает базу через функцию, её предел 3,5 МБ' + (m.fitsFn ? ' — пока помещается.' : ' — база его ПРЕВЫСИЛА: прежняя программа базу с сервера больше не прочитает, работайте в новой версии.') : 'Предел задаёт Яндекс Облако: запрос к функции — не больше 3,5 МБ. Сервер 180 снимает его (снимок идёт в хранилище напрямую) — обновите сервер.'} Прежняя программа до версии 313 могла отправить не больше ${esc(mbText(m.oldLimit))}.</p>
+    ${m.blobs && m.blobs.count ? `<p class="small" id="dbsize-blobs">Файлы документов: ${m.blobs.count} (${esc(mbText(m.blobs.bytes))})${m.snap ? '; в хранилище отдельно: ' + m.blobs.inCloud + ', ещё уйдут при отправке: ' + m.blobs.pending + ' — после этого в снимке их не будет' : ' — внутри снимка (с сервером 180 будут храниться отдельно)'}.</p>` : ''}
     <div class="section-label">Что занимает место (до сжатия)</div><div class="list-rows">${rows}</div>
     <div class="form-actions"><button type="button" class="button" id="dbsize-copy" onclick="dbSizeCopy()">${icon('files', 'icon-sm')}Скопировать (только числа)</button></div>
     <p class="small muted">В скопированном — названия разделов и полей и их размер. Имён, номеров дел и текстов там нет.</p>`, sheetIsOpen() ? (UI.cur && UI.cur.title === 'Размер базы' ? 'replace' : true) : undefined);
@@ -2764,6 +2781,7 @@ async function openPushConfirm(res) {
   openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
       <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
       <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
+    ${size && size.blobs && size.blobs.count ? `<div class="info-box" id="push-blobs">Файлы документов: ${size.blobs.count} (${esc(mbText(size.blobs.bytes))}). ${size.snap ? (size.blobs.pending ? 'В хранилище отдельно уйдут ' + size.blobs.pending + ' — один раз, в снимке их больше не будет.' : 'Все уже в хранилище отдельно, в снимке их нет.') : 'Идут внутри снимка (сервер старше 180).'}</div>` : ''}
     ${recompress ? `<div class="info-box" id="push-recompress">База на сервере хранится без сжатия. Эта отправка заменит её сжатой: ${esc(mbText(size.zipRequest))} вместо ${esc(mbText(size.request))}.${toS ? '' : ' Новых данных для сервера при этом нет.'} Остальные устройства, получив сжатую базу, перейдут на сжатие сами.</div>` : ''}
     ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
     <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}После отправки прежняя программа получит эти изменения при своей следующей синхронизации. Прежний снимок базы сервер хранит в истории.</div>
@@ -2780,7 +2798,7 @@ async function pushNow() {
   const r = await nextServerPush();
   if (!r.ok) { fErr('Не отправлено (' + r.step + '): ' + r.error + '. База на устройстве не изменена отправкой; на сервере осталась прежняя версия.'); if (b) b.disabled = false; return r; }
   toast('База отправлена на сервер');
-  openSheet('Отправка на сервер', `<div class="info-box" id="push-done">Отправлено. На сервере — версия от ${esc(new Date(r.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}.${r.added || r.updated ? ' Перед отправкой с сервера принято: новых ' + r.added + ', изменённых ' + r.updated + '.' : ''}${r.retried ? ' Другое устройство записало базу во время отправки — программа объединила и отправила повторно.' : ''}</div>
+  openSheet('Отправка на сервер', `<div class="info-box" id="push-done">Отправлено. На сервере — версия от ${esc(new Date(r.ver).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}.${r.blobs && r.blobs.total ? ' Файлов документов положено в хранилище отдельно: ' + r.blobs.uploaded + (r.blobs.failed ? ', не удалось: ' + r.blobs.failed + ' (остались в снимке' + (r.blobs.errors && r.blobs.errors.length ? ': ' + esc(r.blobs.errors.join('; ')) : '') + ')' : '') + '.' : ''}${r.added || r.updated ? ' Перед отправкой с сервера принято: новых ' + r.added + ', изменённых ' + r.updated + '.' : ''}${r.retried ? ' Другое устройство записало базу во время отправки — программа объединила и отправила повторно.' : ''}</div>
     <p class="small muted">Прежний снимок базы сохранён в истории сервера. Откройте прежнюю программу и дождитесь синхронизации — изменения должны появиться там.</p>
     <div class="form-actions"><button type="button" class="button primary" id="push-close" onclick="closeSheet(); openSyncSheet()">${icon('check')}Готово</button></div>`, 'replace');
   if (UI.ready) nav(UI.screen);
@@ -2795,6 +2813,95 @@ async function openSrvHistorySheet(res) {
   openSheet('Снимки базы на сервере', (rows ? `<p class="small muted">Сервер хранит пять последних снимков и по одному за каждый из 14 последних дней с записями. Снимки зашифрованы паролем базы.</p><div class="list-rows">${rows}</div>` : emptyState('hard-drive', 'Снимков пока нет', 'Первый снимок появится после первой записи базы на сервер 178.')) +
     `<div class="info-box">«Скачать» сохраняет снимок файлом копии; пароль к нему — пароль шифрования синхронизации. Вернуться к снимку: в прежней программе — «Восстановить из файла»; в новой версии — «Копии базы» → «Загрузить из файла» (записи из снимка добавятся и обновят более старые, но правки, сделанные после снимка, не отменят).</div>`, sheetIsOpen() ? true : undefined);
   return res;
+}
+
+// ▼▼▼ sync/blobs.js
+// ═══ sync/blobs.js — файлы документов отдельно от снимка синхронизации (этап 4, часть 8) ═══
+// Файл версии документа (docBlobs, dataUrl) не меняется после создания — незачем гонять его при каждом обмене. С сервером ≥ 180
+// (снимок по ссылке) каждый файл один раз кладётся в хранилище отдельным зашифрованным объектом (blobput — тот же механизм, что
+// «онлайн-копия» v176; формат crm-advocate-blob, пароль синхронизации), версия документа получает cloudId/cloudAt, и из снимка
+// синхронизации такой файл исключается. Полная копия в файл (sync/files.js) по-прежнему содержит всё. Файл без онлайн-копии
+// (загрузка не удалась, старый сервер) остаётся в снимке — ничего не теряется. На другом устройстве файл берётся из хранилища
+// при открытии (nextBlobFetch) и кладётся в docBlobs.
+// Имя объекта в хранилище — латиницей (сервер принимает только [A-Za-z0-9_-]): идентификаторы версий «ВЕР-…» кириллические,
+// поэтому cloudId = 'v-' + 32 знака sha256 от id версии (урок 13).
+const BLOB_UPLOAD_MAX = 50 * 1048576;
+async function nextBlobCloudId(versionId) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(versionId)));
+  return 'v-' + Array.from(new Uint8Array(h)).slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function nextDataUrlToBlob(dataUrl) {
+  const m = /^data:([^;,]*)((?:;[^;,]*)*?)(;base64)?,([\s\S]*)$/.exec(String(dataUrl || ''));
+  if (!m) return null;
+  const mime = m[1] || 'application/octet-stream', body = m[4];
+  if (m[3]) { const bin = atob(body), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return new Blob([u8], { type: mime }); }
+  return new Blob([decodeURIComponent(body)], { type: mime });
+}
+function nextBlobToDataUrl(blob) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result)); r.onerror = () => rej(r.error || new Error('read')); r.readAsDataURL(blob); }); }
+// тот же контейнер, что у онлайн-копий прежней программы (cloudDocEncrypt/cloudDocDecrypt v176)
+async function nextBlobEncrypt(blob, pass) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pass, salt, ENC_ITER_V2);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, await blob.arrayBuffer());
+  const head = new TextEncoder().encode(JSON.stringify({ _fmt: 'crm-advocate-blob', v: 1, iter: ENC_ITER_V2, salt: bufToB64(salt), iv: bufToB64(iv), mime: blob.type || 'application/octet-stream' }));
+  const out = new Uint8Array(4 + head.length + ct.byteLength); new DataView(out.buffer).setUint32(0, head.length); out.set(head, 4); out.set(new Uint8Array(ct), 4 + head.length);
+  return new Blob([out], { type: 'application/octet-stream' });
+}
+async function nextBlobDecrypt(buf, pass) {
+  const u8 = new Uint8Array(buf), hl = new DataView(u8.buffer, u8.byteOffset).getUint32(0);
+  const meta = JSON.parse(new TextDecoder().decode(u8.subarray(4, 4 + hl)));
+  if (!meta || meta._fmt !== 'crm-advocate-blob') throw new Error('Файл не распознан');
+  const key = await deriveKey(pass, b64ToBuf(meta.salt), Number(meta.iter) || ENC_ITER_V2);
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBuf(meta.iv) }, key, u8.subarray(4 + hl));
+  return new Blob([pt], { type: meta.mime || 'application/octet-stream' });
+}
+// файлы, которых ещё нет в хранилище: есть docBlobs, у версии нет cloudAt
+async function nextBlobsPending() {
+  const vers = await getAll('docVersions'), byId = {}; vers.forEach(v => { if (v) byId[v.id] = v; });
+  const blobs = await getAllRaw('docBlobs');
+  return blobs.filter(b => b && b.data && !b._deleted && !(byId[b.id] && byId[b.id].cloudAt)).map(b => ({ blob: b, ver: byId[b.id] || null }));
+}
+// положить недостающие файлы в хранилище (во время отправки — NEXT_PUSH.on); результат — числа для подтверждения
+async function nextBlobsPush() {
+  if (typeof nextSnapKnown !== 'function' || nextSnapKnown() !== true) return { ok: true, uploaded: 0, failed: 0, total: 0, skipped: true };
+  const list = await nextBlobsPending(); let uploaded = 0, failed = 0; const errors = [];
+  for (const x of list) {
+    try {
+      if (!x.ver) { failed++; errors.push('у файла нет версии документа'); continue; } // файл-сирота — остаётся в снимке
+      const file = nextDataUrlToBlob(x.blob.data); if (!file) { failed++; errors.push('файл не прочитан'); continue; }
+      if (file.size > BLOB_UPLOAD_MAX) { failed++; errors.push('файл больше 50 МБ'); continue; }
+      const cloudId = await nextBlobCloudId(x.ver.id), enc = await nextBlobEncrypt(file, SRVDB.pass);
+      const j = await nextSrvPost('blobput', { id: cloudId, size: enc.size });
+      if (!j || !j.ok) { failed++; errors.push(nextSrvError(j)); continue; }
+      const r = await fetch(j.url, { method: 'PUT', body: enc, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
+      if (!r.ok) { failed++; errors.push('хранилище: HTTP ' + r.status); continue; }
+      x.ver.cloudId = cloudId; x.ver.cloudAt = Date.now(); x.ver.cloudSize = enc.size; await put('docVersions', x.ver); uploaded++;
+    } catch (e) { logErr('blobs:push', e); failed++; errors.push(String(e && e.message || e).slice(0, 80)); }
+  }
+  return { ok: true, uploaded, failed, total: list.length, errors: errors.slice(0, 3) };
+}
+// снимок для синхронизации: без файлов, у версий которых есть онлайн-копия (только при сервере ≥ 180)
+async function collectForSync() {
+  const d = await collectAll();
+  d._blobsOmitted = 0;
+  if (typeof nextSnapKnown === 'function' && nextSnapKnown() === true && d.data && Array.isArray(d.data.docBlobs) && d.data.docBlobs.length) {
+    const cloud = new Set((d.data.docVersions || []).filter(v => v && v.cloudAt && v.cloudId).map(v => v.id));
+    const keep = d.data.docBlobs.filter(b => !(b && cloud.has(b.id)));
+    d._blobsOmitted = d.data.docBlobs.length - keep.length;
+    if (keep.length) d.data.docBlobs = keep; else delete d.data.docBlobs;
+  }
+  return d;
+}
+// файл версии с другого устройства: из хранилища → docBlobs; возвращает dataUrl или ''
+async function nextBlobFetch(versionId) {
+  const v = await getOne('docVersions', versionId); if (!v) return '';
+  const local = await getOne('docBlobs', versionId); if (local && local.data) return local.data;
+  if (!v.cloudId || !SRV.url || !SRVDB.pass) return '';
+  const j = await srvCall('blobget', { id: v.cloudId }); if (!j || !j.ok) return '';
+  const r = await fetch(j.url, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (!r.ok) return '';
+  const blob = await nextBlobDecrypt(await r.arrayBuffer(), SRVDB.pass), dataUrl = await nextBlobToDataUrl(blob);
+  await put('docBlobs', { id: versionId, data: dataUrl });
+  return dataUrl;
 }
 
 // ▼▼▼ sync/auto.js
