@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 08:35 · 1ac767e">
+<meta name="build" content="03.10.2026 09:41 · 0287014">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -210,7 +210,7 @@ dialog::backdrop{background:#0c183a70}
   .bottom-nav .icon{width:21px;height:21px}
   .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.stat{padding:14px}.stat-value{font-size:1.65rem}.stat-value.small-value{font-size:1.3rem}.stat-label{font-size:.75rem}
   .day-grid{gap:16px}.day-grid>.stack{display:contents}
-  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-mon{order:4}.t-review{order:5}.t-next{order:6}.t-work{order:7}
+  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-mon{order:5}.t-review{order:6}.t-next{order:7}.t-work{order:8}
   .panel.pad{padding:18px}.panel-title{padding:10px 8px 10px 16px}
   .imp-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main x" "done done";padding:12px 4px 12px 16px;gap:8px}
   .imp-done .button{min-height:var(--touch)}
@@ -357,6 +357,10 @@ button.agenda-row:hover{background:var(--surface2)}
   .month-layout{grid-template-columns:1fr;gap:14px}.day-cell{min-height:58px;padding:5px 2px;align-items:center;gap:3px}.day-event{display:none}.day-dots{display:flex}.cal-nav{padding:10px 8px}}
 @media(prefers-reduced-motion:no-preference){.panel{transition:border-color .15s}.button{transition:background .12s}}
 .l-short{display:none}
+.t-sum,.t-tomorrow{display:none}
+.agenda-judge{display:block;font-size:.875rem;margin-top:2px}.agenda-judge.muted{color:var(--text-muted)}
+.agenda-near{display:block;font-size:.6875rem;line-height:1.3;color:var(--accent);background:var(--accent-soft);border-radius:var(--r-sm);padding:2px 4px;margin-top:5px;text-align:center;white-space:nowrap}
+.agenda-row.near{box-shadow:inset 3px 0 0 var(--accent)}
 .snap-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .imp-more-btn{display:none}
 .agenda-actions{display:flex;gap:8px;flex-wrap:wrap;padding:0 20px 14px 89px;border-bottom:1px solid var(--line)}
@@ -372,6 +376,11 @@ button.agenda-row:hover{background:var(--surface2)}
   .agenda-actions{padding:0 16px 12px 16px}
   #scr-today .page-head{margin-bottom:10px}
   .stats{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-bottom:14px}
+  /* вариант Б (03.10.2026): на телефоне плитки, карточка ближайшего заседания и «Далее по плану» не показываются — вместо них строка-сводка, выделенная строка в плане дня и «Завтра: N» */
+  .stats,.t-hero,.t-next{display:none}
+  .agenda-title .l-long{display:none}
+  .t-sum{display:flex;flex-wrap:wrap;align-items:center;margin:0 0 8px;color:var(--text-muted);font-size:.9375rem;line-height:1.4}.t-sum .text-button{display:inline-flex;align-items:center;padding:0 2px;min-height:var(--touch);font-size:inherit;color:var(--text)}.t-sum .text-button.overdue{color:var(--bad);font-weight:600}
+  .t-tomorrow{display:block;margin:4px 0 0}.t-tomorrow .text-button{padding:10px 4px}
   button.stat{display:flex;flex-direction:column-reverse;align-items:center;justify-content:center;padding:8px 4px;text-align:center;min-height:var(--touch)}
   .stat .l-long,.stat-meta,.stat-label .icon{display:none}.stat .l-short{display:inline}
   .stat-label{font-size:.6875rem;justify-content:center;white-space:nowrap}
@@ -4858,6 +4867,18 @@ function todayDayLabel(iso, todayIso) {
   if (k === 0) return 'Сегодня'; if (k === 1) return 'Завтра'; if (k === -1) return 'Вчера';
   const d = parseLocalDate(iso); return d && !isNaN(d) ? d.toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' }) : '—';
 }
+// Судья для строки заседания: сначала судья самого заседания, затем судья дела той же инстанции (заседание апелляции —
+// judgeApp, кассации и надзора — judgeCass, иначе judge). Инстанция — как в decisionField: из заседания, иначе стадия дела с
+// поправкой на даты подачи жалоб. Судью первой инстанции в апелляцию не подставляем (замечание GPT 03.10.2026, проверено по коду).
+function todayJudgeOf(h, c) {
+  h = h || {}; c = c || {};
+  if (h.judge) return h.judge;
+  let s = h.stage || c.stage || '';
+  if (!h.stage && h.date) { if (s === 'Кассация' && c.csFilingDate && h.date < c.csFilingDate) s = 'Апелляция'; if (s === 'Апелляция' && c.apFilingDate && h.date < c.apFilingDate) s = 'Первая инстанция'; }
+  if (s === 'Апелляция') return c.judgeApp || '';
+  if (s === 'Кассация' || s === 'Надзор') return c.judgeCass || '';
+  return c.judge || '';
+}
 function todayMinutes(t) { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; }
 function todayHiddenLoad(todayIso) {
   const h = lsJSON(TODAY_HIDE_KEY, {}); const out = {};
@@ -4891,6 +4912,8 @@ function todayModel(d, now, hidden) {
   }));
   tasks.forEach(t => {
     if (!t || t.done || !t.due) return; const k = todayDayDiff(t.due, today); if (k === null || k > 0) return;
+    // задача на сегодня с указанным временем стоит в плане дня, а не здесь (вариант Б, 03.10.2026)
+    if (k === 0 && t.time) return;
     const c = caseOf(t);
     imp.push({ key: 't:' + t.id, kind: 'task', pr: k < 0 ? 0 : 2, date: t.due, title: t.title || 'Задача', sub: caseTitle(c, t.caseNum) || 'Без дела',
       when: k < 0 ? 'Просрочена ' + ago(k) : 'Сегодня', overdue: k < 0, done: true, taskId: t.id, badges: [] });
@@ -4922,7 +4945,11 @@ function todayModel(d, now, hidden) {
   // Расписание дня: заседания (кроме отменённых) и встречи сегодня — по времени
   const schedule = [
     ...hearings.filter(h => h && h.date && todayDayDiff(h.date, today) === 0 && h.status !== 'Отменено').map(h => { const c = caseOf(h);
-      return { key: 'sh:' + h.id, id: h.id, type: 'hearing', time: h.time || '', title: 'Заседание · ' + (caseTitle(c, h.caseNum) || 'дело не указано'), sub: [h.court || (c && c.court), h.room ? 'зал ' + h.room : '', h.participation || ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', prep: h.prep && !h.prepDone ? 'подготовить: ' + h.prep : '', caseId: c ? c.id : '' }; }),
+      return { key: 'sh:' + h.id, id: h.id, type: 'hearing', time: h.time || '', title: 'Заседание · ' + (caseTitle(c, h.caseNum) || 'дело не указано'),
+        // телефон: доверитель вместо номера, судья по инстанции, предмет (вариант Б); номер остаётся в карточке и на компьютере
+        client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', near: !!(nh && nh.id === h.id),
+        sub: [h.court || (c && c.court), h.room ? 'зал ' + h.room : '', h.participation || ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', prep: h.prep && !h.prepDone ? 'подготовить: ' + h.prep : '', caseId: c ? c.id : '' }; }),
+    ...tasks.filter(t => t && !t.done && t.time && t.due && todayDayDiff(t.due, today) === 0).map(t => ({ key: 'st:' + t.id, id: t.id, type: 'task', time: t.time, title: t.title || 'Задача', sub: caseTitle(caseOf(t), t.caseNum) || 'Без дела', status: '', caseId: (caseOf(t) || {}).id || '' })),
     ...meetings.filter(m => m && m.date && todayDayDiff(m.date, today) === 0).map(m => ({ key: 'sm:' + m.id, id: m.id, type: 'meeting', time: m.time || '', title: 'Встреча · ' + (m.with || 'без участника'), sub: [m.place, m.caseNum].filter(Boolean).join(' · '), status: '', caseId: (caseOf(m) || {}).id || '' })),
   ].sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'));
 
@@ -4935,6 +4962,8 @@ function todayModel(d, now, hidden) {
   cases.filter(activeCase).forEach(c => (c.deadlines || []).forEach(dl => { if (dl && !dl.done && inWin(dl.date)) later.push({ id: c.id, type: 'deadline', date: dl.date, time: '', title: 'Срок · ' + (dl.title || 'срок'), sub: caseTitle(c) }); }));
   later.sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')));
   const nextItems = later.slice(0, TODAY_NEXT_MAX).map(x => ({ ...x, when: todayDayLabel(x.date, today) }));
+  // телефон: вместо списка на 14 дней — строка «Завтра: N событий» и ближайшая дата, если завтра пусто
+  const tomorrowCount = later.filter(x => todayDayDiff(x.date, today) === 1).length, nextDate = later.length ? later[0].date : '';
 
   // Показатели
   const paidOf = f => Array.isArray(f.payments) && f.payments.length ? f.payments.reduce((a, p) => a + Number(p.sum || 0), 0) : Number(f.paid || 0);
@@ -4942,11 +4971,12 @@ function todayModel(d, now, hidden) {
   const stats = {
     casesActive: cases.filter(activeCase).length,
     todayEvents: schedule.length,
+    hearingsToday: schedule.filter(x => x.type === 'hearing').length, meetingsToday: schedule.filter(x => x.type === 'meeting').length, tasksToday: schedule.filter(x => x.type === 'task').length,
     attention: important.length,
     overdue: important.filter(x => x.overdue).length,
     debt,
   };
-  return { today, stats, important, hiddenCount: imp.length - important.length, hero, schedule, next: nextItems, nextTotal: later.length, pastCount, empty: !cases.length && !hearings.length && !tasks.length };
+  return { today, stats, important, hiddenCount: imp.length - important.length, hero, schedule, next: nextItems, nextTotal: later.length, tomorrowCount, nextDate, pastCount, empty: !cases.length && !hearings.length && !tasks.length };
 }
 
 // ── отрисовка ──
@@ -4987,6 +5017,12 @@ SCREENS.today = async function () {
   // плитки занимали много места); на компьютере — прежний вид с пояснением
   const stat = (label, short, value, valueShort, meta, ico, cls, small, fn) => `<button type="button" class="stat ${cls || ''}" onclick="${fn}"><span class="stat-label"><span class="l-long">${esc(label)}</span><span class="l-short">${esc(short)}</span>${icon(ico)}</span><span class="stat-value${small ? ' small-value' : ''}"><span class="l-long">${esc(value)}</span><span class="l-short">${esc(valueShort)}</span></span><span class="stat-meta">${esc(meta)}</span></button>`;
   out += `<div class="stats">${stat('Требуют внимания', 'Важное', m.stats.attention, m.stats.attention, m.stats.overdue ? 'Из них просрочено: ' + m.stats.overdue : 'Сроки, задачи, заседания', 'circle-alert', m.stats.overdue ? 'alert' : '', false, "todayScrollTo('.t-important')")}${stat('На сегодня', 'Сегодня', m.stats.todayEvents, m.stats.todayEvents, 'Заседания и встречи', 'calendar-days', '', false, "todayScrollTo('.t-schedule')")}${stat('Дела в работе', 'Дела', m.stats.casesActive, m.stats.casesActive, 'Без завершённых и архивных', 'briefcase-business', '', false, "nav('cases')")}${stat('К оплате', 'К оплате, ₽', fmtMoney(m.stats.debt), todayMoneyShort(m.stats.debt), 'Остаток по счетам', 'wallet', '', true, "nav('finance')")}</div>`;
+  // вариант Б (03.10.2026): на телефоне вместо плиток — одна строка-сводка; каждая часть ведёт к своему блоку
+  const sumPart = (n, one, few, many, sel) => n ? `<button type="button" class="text-button" onclick="${sel}">${n} ${plural(n, one, few, many)}</button>` : '';
+  const sumParts = [sumPart(m.stats.hearingsToday, 'заседание', 'заседания', 'заседаний', "todayScrollTo('.t-schedule')"), sumPart(m.stats.meetingsToday, 'встреча', 'встречи', 'встреч', "todayScrollTo('.t-schedule')"), sumPart(m.stats.tasksToday, 'задача', 'задачи', 'задач', "todayScrollTo('.t-schedule')"),
+    m.stats.attention ? `<button type="button" class="text-button${m.stats.overdue ? ' overdue' : ''}" onclick="todayScrollTo('.t-important')">${m.stats.overdue ? 'просрочено ' + m.stats.overdue : 'внимания ' + m.stats.attention}</button>` : '',
+    m.stats.debt ? `<button type="button" class="text-button" onclick="nav('finance')">к оплате ${esc(todayMoneyShort(m.stats.debt))} ₽</button>` : ''].filter(Boolean);
+  out += `<p class="t-sum">${sumParts.length ? sumParts.join('<span class="sum-dot"> · </span>') : 'На сегодня ничего не назначено'}</p>`;
 
   const tools = (block, extra) => `<div class="panel-tools">${extra || ''}${folded(block) ? `<button type="button" class="text-button" onclick="todayFold('${block}',false)">${icon('chevron-down', 'icon-sm')}Развернуть</button>` : `<button type="button" class="text-button" aria-label="Свернуть блок до завтра" onclick="todayFold('${block}',true)">${icon('chevron-up', 'icon-sm')}Свернуть</button>`}</div>`;
   const panel = (cls, block, title, count, extra, body) => `<section class="panel ${cls}${folded(block) ? ' collapsed' : ''}"><div class="panel-title"><h2>${esc(title)}${count !== null ? ' ' + badge(String(count), count ? 'accent' : '') : ''}</h2>${tools(block, extra)}</div>${folded(block) ? '' : body}</section>`;
@@ -5012,10 +5048,15 @@ SCREENS.today = async function () {
 
   // без времени — короткая пометка вида записи вместо «весь день» (не переносится в узкой колонке)
   // этап 2б: строка открывает свою запись — заседание, встречу, задачу; срок — карточку дела
-  const agenda = (rows, act) => rows.map(x => `<button type="button" class="agenda-row${act && todayRowActions(x) ? ' has-act' : ''}" onclick="todayOpen('${x.type}', '${jsq(x.id || '')}')"><span class="agenda-time">${esc(x.time || ({ task: 'задача', deadline: 'срок' }[x.type] || '—'))}</span>
-      <span class="agenda-stripe ${x.type}${x.status === 'Проведено' ? ' done' : ''}"><span class="agenda-title">${esc(x.title)}</span>${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.prep ? badge(x.prep, 'warn') : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : 'accent') : ''}</span></button>${act ? todayRowActions(x) : ''}`).join('');
+  // заседание на телефоне: «Заседание · доверитель» (номер — на компьютере), судья по инстанции, суд · зал, предмет; ближайшее — с полоской и меткой
+  const hTitle = x => x.type === 'hearing' && x.client ? `Заседание · <span class="l-long">${esc(x.number ? x.number + ' · ' : '')}</span>${esc(x.client)}` : esc(x.title);
+  const hLines = x => x.type !== 'hearing' ? '' : (x.judge ? `<span class="agenda-judge">Судья: ${esc(x.judge)}</span>` : x.near ? `<span class="agenda-judge muted">Судья не указан</span>` : '') + (x.subject ? `<span class="agenda-sub">${esc(x.subject)}</span>` : '');
+  const agenda = (rows, act) => rows.map(x => `<button type="button" class="agenda-row${act && todayRowActions(x) ? ' has-act' : ''}${x.near ? ' near' : ''}" onclick="todayOpen('${x.type}', '${jsq(x.id || '')}')"><span class="agenda-time">${esc(x.time || ({ task: 'задача', deadline: 'срок' }[x.type] || '—'))}${x.near ? '<span class="agenda-near">Ближайшее</span>' : ''}</span>
+      <span class="agenda-stripe ${x.type}${x.status === 'Проведено' ? ' done' : ''}"><span class="agenda-title">${hTitle(x)}</span>${hLines(x)}${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.prep ? badge(x.prep, 'warn') : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : 'accent') : ''}</span></button>${act ? todayRowActions(x) : ''}`).join('');
   const byDay = rows => { let out = '', cur = ''; for (const x of rows) { if (x.date !== cur) { cur = x.date; out += `<div class="day-mark">${esc(x.when)}${x.when === 'Завтра' ? ' · ' + esc(parseLocalDate(x.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })) : ''}</div>`; } out += agenda([x]); } return out; };
-  const schedule = panel('t-schedule', 'schedule', 'План дня', m.schedule.length, '', m.schedule.length ? agenda(m.schedule, true) : emptyState('calendar-check', 'Заседаний и встреч сегодня нет', 'Ближайшие события — в блоке «Далее по плану».'));
+  const schedule = panel('t-schedule', 'schedule', 'План дня', m.schedule.length, '', m.schedule.length ? agenda(m.schedule, true) : emptyState('calendar-check', 'Заседаний, встреч и задач со временем сегодня нет', 'Ближайшие события — в календаре.'));
+  // телефон: строка «Завтра: N событий →» вместо блока «Далее по плану» (вариант Б)
+  const tomorrow = `<p class="t-tomorrow"><button type="button" class="text-button" onclick="nav('calendar')">${m.tomorrowCount ? 'Завтра: ' + m.tomorrowCount + ' ' + plural(m.tomorrowCount, 'событие', 'события', 'событий') : m.nextDate ? 'Завтра свободно · ближайшее ' + esc(fmtDate(m.nextDate)) : 'На две недели вперёд пусто'}${icon('arrow-right', 'icon-sm')}</button></p>`;
   const next = panel('t-next', 'next', 'Далее по плану', m.nextTotal, '', m.next.length ? byDay(m.next) + (m.nextTotal > m.next.length ? `<p class="panel-foot">Ещё ${m.nextTotal - m.next.length} за ${TODAY_NEXT_DAYS} дней — в календаре</p>` : '') : emptyState('calendar-days', 'На две недели вперёд пусто', 'Заседаний, встреч, задач и сроков в ближайшие 14 дней нет.'));
 
   const hero = m.hero ? `<section class="upcoming-hero t-hero" aria-label="Ближайшее заседание"><div class="split"><small>${esc(m.hero.when)} · ближайшее заседание</small>${iconBtn('Скрыть карточку заседания на 7 дней', `todayHide('${jsq(m.hero.key)}')`, 'x')}</div>
@@ -5030,7 +5071,7 @@ SCREENS.today = async function () {
   const work = todayWorkModel(d.cases, today);
   const workBox = work.rows.length ? `<section class="panel t-work"><div class="panel-title"><h2>В работе ${badge(String(work.total), '')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="nav('cases')">Все дела${icon('chevron-right', 'icon-sm')}</button></div></div>${work.rows.map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.id)}')"><span class="task-title">${esc(r.title)}</span><span class="task-sub">${r.due ? `<span class="task-when${r.overdue ? ' overdue' : ''}">${esc(r.when)}</span> · ` : ''}${esc(r.sub)}</span></button></div>`).join('')}</section>` : '';
   // на телефоне порядок блоков задаёт tokens.css: важное → ближайшее заседание → план дня → события судов → далее → в работе
-  out += `<div class="day-grid"><div class="stack">${important}${reviewBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}</div></div>`;
+  out += `<div class="day-grid"><div class="stack">${important}${reviewBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
   return out;
 };
 
@@ -5223,7 +5264,7 @@ async function openCaseSheet(id, keep) {
     ${m.expenses.length ? sec('Расходы', `<div class="list-rows">${m.expenses.slice(0, 8).map(e => `<button type="button" class="list-btn" onclick="openExpenseForm('${jsq(e.id)}')"><span>${esc(e.category || 'Расход')}${e.note ? ' · ' + esc(e.note) : ''}</span><span class="muted">${esc(fmtMoney(e.amount))}${e.recoverable ? ' ' + badge(e.recovered ? 'возмещено' : 'к возмещению', e.recovered ? 'good' : 'warn') : ''}</span></button>`).join('')}</div>`, m.expenses.length) : ''}
     ${sec('Финансы', `<div class="list-rows">${row('Начислено', m.fin.amount ? fmtMoney(m.fin.amount) : '')}${row('Оплачено', m.fin.paid ? fmtMoney(m.fin.paid) : '')}${row('Остаток', m.fin.debt ? fmtMoney(m.fin.debt) : (m.fin.amount ? '0 ₽' : ''))}${row('Ожидается', m.fin.pending ? fmtMoney(m.fin.pending) : '')}${row('Документов', m.docs ? String(m.docs) : '')}</div>`)}
     ${c.comment ? sec('Примечание', `<p class="small">${esc(c.comment)}</p>`) : ''}
-    <div class="info-box">Записи хранятся на этом устройстве; новая версия читает базу с сервера, но изменения на него пока не отправляет.</div>`;
+    <div class="info-box">Записи хранятся на этом устройстве; обмен с личным сервером — по кнопкам или автоматически (лист «Синхронизация»).</div>`;
   // keep — карточка открыта из формы записи: форма остаётся в стеке, «←» возвращает в неё
   const stack = keep && sheetIsOpen() && UI.cur ? UI.stack.concat([UI.cur]) : null;
   openSheet([c.number, c.client].filter(Boolean).join(' · ') || 'Дело', body, 'panel');
