@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 22:23 · d654323">
+<meta name="build" content="03.10.2026 23:05 · e7f0af5">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4710,9 +4710,20 @@ function afterHearingModel(h, v) {
   const caseUpd = v.decision && v.caseObj ? decisionDateModel(v.caseObj, h.date, h) : null;
   delete upd.autoDone; upd.afterNextId = h.afterNextId || uid('С'); upd.afterTaskId = h.afterTaskId || uid('З');
   const next = v.next ? { id: upd.afterNextId, caseId: h.caseId, caseNum: h.caseNum, date: v.next, time: v.nextTime || h.time || '', court: h.court || '', judge: h.judge || '', room: h.room || '', status: 'Назначено', note: what === 'postponed' ? 'после отложения от ' + fmtDate(h.date) : '' } : null;
-  const task = String(v.task || '').trim() ? { id: upd.afterTaskId, title: String(v.task).trim(), caseId: h.caseId, caseNum: h.caseNum, due: v.taskDue || '', src: 'после заседания' } : null;
+  // п. 2.2 (03.10.2026): заседание этого дела на ту же дату уже есть (мониторинг, прежняя программа, ручная запись) — новое не создаётся
+  const same = x => x && !x._deleted && (h.caseId ? x.caseId === h.caseId : (!!x.caseNum && x.caseNum === h.caseNum));
+  const dupH = next ? (v.hearings || []).find(x => same(x) && x.id !== h.id && x.id !== upd.afterNextId && x.date === next.date && x.status !== 'Отменено') : null;
+  const nextRec = dupH ? { ...dupH, time: dupH.time || next.time, room: dupH.room || next.room } : next;
+  const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+  const dupT = String(v.task || '').trim() ? (v.tasks || []).find(x => same(x) && !x.done && x.id !== upd.afterTaskId && norm(x.title) === norm(v.task)) : null;
+  const task = String(v.task || '').trim() && !dupT ? { id: upd.afterTaskId, title: String(v.task).trim(), caseId: h.caseId, caseNum: h.caseNum, due: v.taskDue || '', src: 'после заседания' } : null;
   const log = `Заседание ${fmtDate(h.date)}: ${what === 'cancelled' ? 'отменено' : what === 'postponed' ? 'отложено' : 'состоялось'}${result ? ' — ' + result.slice(0, 120) : ''}${v.next ? '; следующее ' + fmtDate(v.next) : ''}`;
-  return { hearing: upd, next, task, log: log + (caseUpd ? '; ' + DECISION_FIELD_LABEL[caseUpd.field] + ' ' + fmtDate(h.date) : ''), what, caseUpd };
+  const preview = [`Это заседание ${fmtDate(h.date)} — ${what === 'cancelled' ? 'отменено' : what === 'postponed' ? 'отложено' : 'состоялось'}${upd.participation ? ', ' + upd.participation.toLowerCase() : ''}`];
+  if (caseUpd) preview.push(caseUpd.kept ? `В деле уже есть ${DECISION_FIELD_LABEL[caseUpd.field]} ${fmtDate(caseUpd.obj[caseUpd.field])} — не меняется` : `В деле: ${DECISION_FIELD_LABEL[caseUpd.field]} ${fmtDate(h.date)} — сроки обжалования посчитаются от неё`);
+  if (nextRec) preview.push(dupH ? `Заседание ${fmtDate(nextRec.date)}${nextRec.time ? ' в ' + nextRec.time : ''} уже есть в деле — второе не создаётся` : `Новое заседание ${fmtDate(nextRec.date)}${nextRec.time ? ' в ' + nextRec.time : ''}`);
+  if (task) preview.push(`Задача «${task.title}»${task.due ? ' до ' + fmtDate(task.due) : ' без срока'}`);
+  else if (dupT) preview.push(`Задача «${dupT.title}» уже есть и не выполнена — вторая не создаётся`);
+  return { hearing: upd, next: nextRec, nextDup: !!dupH, task, taskDup: dupT || null, preview, log: log + (caseUpd ? '; ' + DECISION_FIELD_LABEL[caseUpd.field] + ' ' + fmtDate(h.date) : ''), what, caseUpd };
 }
 // дата решения по виду дела: приговор — crimVerdictDate, КоАП — koapDate, иначе i1DecisionDate; уже указанная другая дата не перезаписывается
 const DECISION_FIELD_LABEL = { i1DecisionDate: 'дата решения', apDecisionDate: 'дата апелляционного определения', csDecisionDate: 'дата кассационного определения', cs2DecisionDate: 'дата определения Верховного Суда', crimVerdictDate: 'дата приговора', koapDate: 'дата постановления' };
@@ -4748,9 +4759,21 @@ async function openAfterHearing(id, preset) {
       ${wide(fInput('ah-task', 'Задача после заседания', '', 'autocomplete="off" placeholder="получить протокол, подготовить письменные пояснения"'))}
       ${fInput('ah-task-due', 'Срок задачи', '', 'type="date"')}
     </div>
+    <div class="info-box" id="ah-preview" aria-live="polite"></div>
     <p class="small muted">Учёт времени работы по заседанию ещё переносится.</p>
     ${fSaveBar(`afterHearingSave('${jsq(id)}')`, 'Записать')}`;
   openSheet('После заседания', body, UI.cur ? true : undefined);
+  AH_CTX = { h, caseObj: c ? await getOne('cases', c.id) : null, hearings: await getAll('hearings'), tasks: await getAll('tasks') };
+  const box = document.getElementById('sheetContent'); if (box) { box.addEventListener('input', ahPreview); box.addEventListener('change', ahPreview); box.addEventListener('click', e => { if (e.target.closest && e.target.closest('#ah-what button, .chips .chip')) setTimeout(ahPreview, 0); }); }
+  ahPreview();
+}
+// п. 2.2: что будет записано — до сохранения, тем же расчётом, что и запись (afterHearingModel)
+let AH_CTX = null;
+function ahValues() { return { what: (document.querySelector('#ah-what button[aria-pressed="true"]') || {}).dataset?.v || 'held', result: fv('ah-result'), next: fv('ah-next'), nextTime: fv('ah-next-time'), task: fv('ah-task'), taskDue: fv('ah-task-due'), decision: !!(document.getElementById('ah-decision') || {}).checked, participation: fv('ah-participation') }; }
+function ahPreview() {
+  const el = document.getElementById('ah-preview'); if (!el || !AH_CTX) return;
+  const r = afterHearingModel(AH_CTX.h, { ...ahValues(), caseObj: AH_CTX.caseObj, hearings: AH_CTX.hearings, tasks: AH_CTX.tasks });
+  el.innerHTML = r.error ? esc(r.error) : '<b>Будет записано:</b><ul style="margin:6px 0 0 18px;padding:0">' + r.preview.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>';
 }
 function ahQuick(i) { const q = HEARING_QUICK[i]; if (!q) return; const r = document.getElementById('ah-result'); if (r) r.value = q[2]; const d = document.getElementById('ah-decision'); if (d) d.checked = !!q[3]; const w = document.querySelector('#ah-what button[data-v="' + q[0] + '"]'); if (w) ahPick(w); }
 function ahPick(btn) { btn.parentElement.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === btn))); }
@@ -4758,11 +4781,11 @@ async function afterHearingSave(id) {
   const h = await getOne('hearings', id); if (!h) { toast('Заседание не найдено', true); return; }
   const what = (document.querySelector('#ah-what button[aria-pressed="true"]') || {}).dataset?.v || 'held';
   const caseObj = h.caseNum ? await getOne('cases', (CASES_BY_NUM[h.caseNum] || {}).id || '') : null;
-  const r = afterHearingModel(h, { what, result: fv('ah-result'), next: fv('ah-next'), nextTime: fv('ah-next-time'), task: fv('ah-task'), taskDue: fv('ah-task-due'), decision: !!(document.getElementById('ah-decision') || {}).checked, participation: fv('ah-participation'), caseObj }); if (r.error) { fErr(r.error); return; }
+  const r = afterHearingModel(h, { what, hearings: await getAll('hearings'), tasks: await getAll('tasks'), result: fv('ah-result'), next: fv('ah-next'), nextTime: fv('ah-next-time'), task: fv('ah-task'), taskDue: fv('ah-task-due'), decision: !!(document.getElementById('ah-decision') || {}).checked, participation: fv('ah-participation'), caseObj }); if (r.error) { fErr(r.error); return; }
   const made = [];
   try {
     await put('hearings', r.hearing);
-    if (r.next) { const prev = await getOne('hearings', r.next.id); await put('hearings', { ...(prev || { createdAt: Date.now() }), ...r.next }); made.push('заседание ' + fmtDate(r.next.date)); }
+    if (r.next) { const prev = await getOne('hearings', r.next.id); await put('hearings', { ...(prev || { createdAt: Date.now() }), ...r.next }); made.push((r.nextDup ? 'заседание ' + fmtDate(r.next.date) + ' уже было — дополнено' : 'заседание ' + fmtDate(r.next.date))); }
     if (r.task) { const prev = await getOne('tasks', r.task.id); await put('tasks', { ...(prev || { createdAt: Date.now(), done: false }), ...r.task }); made.push('задача'); }
     const c = h.caseNum ? CASES_BY_NUM[h.caseNum] : null; if (c) addCaseHistoryEvent(c, 'hearing_upd', '', r.log, 'auto');
     if (r.caseUpd && !r.caseUpd.kept) { const upd = r.caseUpd.obj; const msgs = nextActDeadlines(upd, caseObj); if (msgs.length) addCaseHistoryEvent(upd, 'deadline', '', msgs.join(' | '), 'auto'); await put('cases', upd); await refreshCasesCache(); made.push(DECISION_FIELD_LABEL[r.caseUpd.field] + ' ' + fmtDate(h.date) + (msgs.length ? ' и сроки: ' + msgs.join('; ').slice(0, 160) : '')); }
@@ -5811,10 +5834,10 @@ function caseFeedModel(c, d, journal, now) {
   const mine = x => x && !x._deleted && (x.caseId ? x.caseId === c.id : (!!x.caseNum && x.caseNum === c.number));
   const push = o => { if (o.date && /^\d{4}-\d{2}-\d{2}$/.test(o.date)) items.push(o); };
   const days = k => k + ' ' + plural(k, 'день', 'дня', 'дней');
-  (d.hearings || []).filter(mine).forEach(h => { const j = todayJudgeOf(h, c);
-    push({ key: 'h:' + h.id, date: h.date, time: h.time || '', group: 'court', icon: 'gavel', title: 'Заседание' + (h.status && h.status !== 'Назначено' ? ' · ' + h.status.toLowerCase() : ''),
+  (d.hearings || []).filter(mine).forEach(h => { const j = todayJudgeOf(h, c), noRes = h.date < today && h.status !== 'Проведено' && h.status !== 'Отменено';
+    push({ key: 'h:' + h.id, date: h.date, time: h.time || '', group: 'court', icon: 'gavel', title: 'Заседание' + (noRes ? ' · результат не указан' : h.status && h.status !== 'Назначено' ? ' · ' + h.status.toLowerCase() : ''), state: noRes ? 'warn' : '',
       sub: [hearingCourtOf(h, c), h.room ? 'зал ' + h.room : '', j ? 'судья ' + j : ''].filter(Boolean).join(' · '),
-      extra: h.status === 'Проведено' && h.result ? String(h.result).slice(0, 160) : (h.prep && !h.prepDone ? 'подготовить: ' + h.prep : ''), open: `openHearingForm('${jsq(h.id)}')` }); });
+      extra: h.status === 'Проведено' && h.result ? String(h.result).slice(0, 160) : noRes ? 'нажмите, чтобы записать итог' : (h.prep && !h.prepDone ? 'подготовить: ' + h.prep : ''), open: noRes ? `openAfterHearing('${jsq(h.id)}')` : `openHearingForm('${jsq(h.id)}')` }); });
   (c.deadlines || []).forEach((dl, i) => { if (!dl || !dl.date) return; const k = todayDayDiff(dl.date, today); if (k === null) return;
     // «фитиль»: доля прошедшего времени от даты основания (паспорт срока) или создания до срока
     let fuse = null; if (!dl.done && k >= 0) { const start = dl.baseDate || feedISO(dl.createdAt || ''), total = start ? todayDayDiff(dl.date, start) : null; if (total && total > 0) fuse = Math.max(3, Math.min(100, Math.round((1 - k / total) * 100))); }
