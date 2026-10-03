@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 21:37 · 2745342">
+<meta name="build" content="03.10.2026 22:23 · d654323">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2520,7 +2520,7 @@ async function nextServerPull() {
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
   // аудит GPT 03.10.2026: неотправленные правки устройства не считаются отправленными после загрузки — отметку снимает только отправка
-  const hadLocal = nextLocalChanges();
+  const hadLocal = nextLocalChanges(), revBefore = syncRevision();
   try {
     const g = await nextDbGet();
     if (!g || !g.ok) { const msg = nextSrvError(g); srvdbNote('err', msg); return { ok: false, error: msg }; }
@@ -2528,7 +2528,7 @@ async function nextServerPull() {
     if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
     if (r.empty) { SRVDB.lastErr = null; return r; }
     if (r.failed) { const msg = 'не записано записей: ' + r.failed + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
-    if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevision());
+    if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore));
     localStorage.setItem('crm_next_pull_res', JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
     srvdbNote('pull');
     return r;
@@ -2633,6 +2633,10 @@ async function mergePreviewCopy() {
 }
 // Правки, сделанные в новой версии после последней загрузки: они хранятся на устройстве и на сервер не уходят
 const nextLocalChanges = () => !!SRVDB.lastPull && localStorage.getItem('crm_next_pull_rev') !== syncRevision();
+// Отметка «синхронизировано» после загрузки (разбор GPT 03.10.2026): часть записей — какой она была ДО запроса (записи слияния её не
+// двигают — putRaw), части настроек — после слияния (настройки с сервера приняты). Правка, сделанная, пока шла загрузка, сдвигает
+// отметку записей (put) — и остаётся «не отправленной».
+function syncRevisionAfterPull(before) { const a = String(before || '').split(':'), b = syncRevision().split(':'); return [a[0] || '0', b[1] || '0', b[2] || '0'].join(':'); }
 // Отключить сервер в новой версии: адрес, код, пароль и отметки удаляются; база на устройстве остаётся
 function nextServerForget() {
   SRV.url = ''; SRV.secret = ''; CLOUD.pass = '';
@@ -2764,8 +2768,11 @@ async function nextServerPush() {
       NEXT_PUSH.on = true;
       try {
         if (!blobs && typeof nextBlobsPush === 'function') { try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
+        // ревизия — ДО сборки (разбор GPT 03.10.2026): правка, сделанная во время сборки снимка, могла не попасть в него, но попадала в
+        // отметку «отправлено»; теперь она остаётся «не отправленной» и уйдёт следующей отправкой
+        const revision = syncRevision();
         const dump = typeof collectForSync === 'function' ? await collectForSync() : await collectAll();
-        const revision = syncRevision(), enc = await encryptDump(dump, SRVDB.pass), omitted = dump._blobsOmitted || 0;
+        const enc = await encryptDump(dump, SRVDB.pass), omitted = dump._blobsOmitted || 0;
         // v180: снимок — напрямую в хранилище по подписанной ссылке; сервер старше 180 — через функцию (dbput)
         if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted }; nextSnapSet(false); }
         return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }), omitted };
@@ -2888,9 +2895,13 @@ async function openPushConfirm(res) {
   const recompress = !!(size && size.willZip && res.srvFmt && res.srvFmt < 3);
   if (!res.empty && !toS && !recompress) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   const oldRisk = !!(size && size.needOld > oldVerOk());
+  // разбор GPT 03.10.2026: версия 314 не гарантирует, что прежняя программа справится с размером — она получает и отправляет базу через
+  // функцию (предел 3,5 МБ); новая версия с сервером 180 работает и с большей
+  const oldTooBig = !!(size && size.snap && size.fitsFn === false);
   openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
       <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
       <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
+    ${oldTooBig ? `<div class="info-box warning" id="push-old-toobig">База со сжатием — ${esc(mbText(size.effective))}: это больше предела функции (3,5 МБ). Прежняя программа не сможет ни получить её с сервера, ни отправить — работайте в новой версии на всех устройствах (она передаёт базу через хранилище).</div>` : ''}
     ${size && size.blobs && size.blobs.count ? `<div class="info-box" id="push-blobs">Файлы документов: ${size.blobs.count} (${esc(mbText(size.blobs.bytes))}). ${size.snap ? (size.blobs.pending ? 'В хранилище отдельно уйдут ' + size.blobs.pending + ' — один раз, в снимке их больше не будет.' : 'Все уже в хранилище отдельно, в снимке их нет.') : 'Идут внутри снимка (сервер старше 180).'}</div>` : ''}
     ${recompress ? `<div class="info-box" id="push-recompress">База на сервере хранится без сжатия. Эта отправка заменит её сжатой: ${esc(mbText(size.zipRequest))} вместо ${esc(mbText(size.request))}.${toS ? '' : ' Новых данных для сервера при этом нет.'} Остальные устройства, получив сжатую базу, перейдут на сжатие сами.</div>` : ''}
     ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
@@ -3056,14 +3067,14 @@ async function nextAutoPull(force) {
   if (v.ver && (force || Number(v.ver) !== SRVDB.ver)) {
     NEXT_SYNC.busy = true; syncStatusRender();
     // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
-    const hadLocal = nextLocalChanges();
+    const hadLocal = nextLocalChanges(), revBefore = syncRevision();
     try {
       const g = await nextDbGet();
       if (!g || !g.ok) { srvdbNote('err', nextSrvError(g)); return g; }
       const r = await srvdbMergeSnapshot(g, true);
       if (!r.ok) { srvdbNote('err', nextSrvError(r)); return r; }
       if (r.failed) { srvdbNote('err', 'не записано записей с сервера: ' + r.failed + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
-      if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevision()); srvdbNote('pull');
+      if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore)); srvdbNote('pull');
       if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
     } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
   }
@@ -3966,13 +3977,16 @@ window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; retu
 const SCREENS = {};
 async function nav(id) {
   if (!NAV_ITEMS.some(i => i.id === id)) id = 'today';
+  // незавершённая форма в боковой панели — сначала её судьба, потом смена раздела (разбор GPT 03.10.2026: раньше раздел и подсветка
+  // менялись до проверки, и при отказе программа считала активным другой раздел)
+  { const side0 = document.getElementById('side'); if (side0 && !side0.hidden && !closeSheet()) return; }
   // п. 1.6 (03.10.2026): позиция прокрутки уходящего экрана запоминается (страница прокручивается окном — html и body не контейнеры, урок 30)
   const prevScreen = UI.screen; if (UI.ready && document.getElementById('scr-' + prevScreen)) navScrollSave(prevScreen);
   UI.screen = id;
   document.querySelectorAll('[data-nav]').forEach(b => { const on = b.dataset.nav === id; b.classList.toggle('active', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   const more = document.querySelector('[data-more]'); if (more) more.classList.toggle('active', !NAV_PHONE.includes(id));
   const main = document.getElementById('main'); if (!main) return;
-  const side = document.getElementById('side'); if (side && !side.hidden && !closeSheet()) return; // карточка относится к прежнему экрану; незавершённая форма — остаёмся
+  const side = document.getElementById('side'); if (side && !side.hidden) closeSheet(true); // карточка относится к прежнему экрану (форма уже согласована выше)
   let html;
   try { html = UI.ready ? await (SCREENS[id] || screenStub)(NAV_ITEMS.find(i => i.id === id)) : '<p class="muted">Загрузка…</p>'; }
   catch (e) { logErr('nav:' + id, e); html = `<div class="panel">${emptyState('circle-alert', 'Экран не открылся', 'Сбой записан в журнал ошибок. Попробуйте открыть раздел ещё раз.')}</div>`; }
@@ -4058,6 +4072,8 @@ function closeSheet(force) { if (!force && typeof guardBeforeClose === 'function
 // ── сообщение внизу экрана ──
 let _toastTimer = 0;
 function toast(msg, warn) {
+  // сообщение об ошибке во время записи формы — запись не удалась, защита формы остаётся
+  if (warn && typeof guardSaveFailed === 'function') guardSaveFailed();
   const t = document.getElementById('toast'); if (!t) return;
   t.textContent = String(msg || ''); t.className = 'visible' + (warn ? ' error' : ''); t.setAttribute('role', warn ? 'alert' : 'status');
   // сообщение — в верхнем слое браузера (popover), иначе открытый лист <dialog> его закрывает (снимок пользователя 03.10.2026);
@@ -4105,7 +4121,12 @@ applyTheme(); applyFontSettings(); // до первой отрисовки — �
 // сутки); после сохранения, удаления или «Закрыть без сохранения» черновик стирается. При запуске с черновиком на экране —
 // полоска «Незавершённая форма «…» — Открыть / Удалить».
 const GUARD_DRAFT_KEY = 'crm_next_draft', GUARD_DRAFT_TTL = 24 * 3600000;
-const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false };
+// saving — время нажатия «Сохранить»/«Удалить»: пока запись идёт, закрытие листа (успех) разрешено; ошибка записи (fErr, сообщение об
+// ошибке) сбрасывает отметку — защита и черновик остаются (разбор GPT 03.10.2026: раньше защита снималась до результата записи)
+const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0 };
+const GUARD_SAVE_MS = 20000;
+function guardSaving() { return !!SHEET_GUARD.saving && Date.now() - SHEET_GUARD.saving < GUARD_SAVE_MS; }
+function guardSaveFailed() { SHEET_GUARD.saving = 0; }
 function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions'); }
 // значения всех полей формы одной строкой — для сравнения
 function guardFormState() {
@@ -4117,6 +4138,9 @@ function guardFormState() {
 // вызывается после каждого показа листа (sheetShow): форма — взводится сторож и снимок
 function guardArm() {
   clearTimeout(SHEET_GUARD.timer); SHEET_GUARD.prompt = false;
+  // показан следующий лист, пока шло сохранение, — запись удалась: черновик прежней формы больше не нужен
+  if (guardSaving()) guardDraftDrop();
+  SHEET_GUARD.saving = 0;
   if (!guardIsForm()) { SHEET_GUARD.armed = false; SHEET_GUARD.snap = ''; return; }
   SHEET_GUARD.armed = true;
   if (UI.cur && UI.cur.guardSnap === undefined) UI.cur.guardSnap = guardFormState();
@@ -4125,8 +4149,8 @@ function guardArm() {
   if (box && !box.__guardBound) { box.__guardBound = true;
     box.addEventListener('input', guardOnInput, true); box.addEventListener('change', guardOnInput, true);
     // сохранить/удалить — намеренный выход: защита снимается до того, как обработчик закроет лист
-    // «Отмена» (sheetBack) защиту не снимает — только сохранить и удалить
-    box.addEventListener('click', e => { const b = e.target && e.target.closest && e.target.closest('.form-actions .button'); if (b && !b.closest('.guard-box') && (b.classList.contains('primary') || b.classList.contains('danger'))) guardDisarm(true); }, true);
+    // «Сохранить» и «Удалить» — отметка «идёт запись»; защита и черновик снимаются, только когда лист закрылся или сменился (успех)
+    box.addEventListener('click', e => { const b = e.target && e.target.closest && e.target.closest('.form-actions .button'); if (b && !b.closest('.guard-box') && (b.classList.contains('primary') || b.classList.contains('danger'))) SHEET_GUARD.saving = Date.now(); }, true);
   }
 }
 function guardDirty() { return SHEET_GUARD.armed && guardIsForm() && guardFormState() !== SHEET_GUARD.snap; }
@@ -4141,6 +4165,7 @@ function guardDraftDrop() { try { localStorage.removeItem(GUARD_DRAFT_KEY); } ca
 function guardDraftGet() { try { const d = JSON.parse(localStorage.getItem(GUARD_DRAFT_KEY) || 'null'); return d && d.body && Date.now() - (d.at || 0) < GUARD_DRAFT_TTL ? d : null; } catch (e) { return null; } }
 // попытка закрыть: true — можно закрывать; false — показан выбор, лист остаётся
 function guardBeforeClose(how) {
+  if (guardSaving()) { guardDisarm(true); SHEET_GUARD.saving = 0; return true; }
   if (!guardDirty()) return true;
   guardPrompt(how); return false;
 }
@@ -4357,7 +4382,7 @@ function fSelect(id, label, val, opts, allowEmpty) { return `<label class="field
 function wide(html) { return html.replace('class="field"', 'class="field wide"'); } // поле на всю ширину формы
 function fText(id, label, val, rows) { return `<label class="field wide"><span>${esc(label)}</span><textarea id="${id}" rows="${rows || 3}">${esc(val || '')}</textarea></label>`; }
 function fv(id) { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; }
-function fErr(msg) { const box = document.getElementById('form-error'); if (box) { box.textContent = msg; box.hidden = !msg; } if (msg) toast(msg, true); }
+function fErr(msg) { const box = document.getElementById('form-error'); if (box) { box.textContent = msg; box.hidden = !msg; } if (msg) { if (typeof guardSaveFailed === 'function') guardSaveFailed(); toast(msg, true); } }
 // delFn — при правке: кнопка «Удалить» (этап 2б) открывает подтверждение, сама ничего не удаляет
 function fSaveBar(fn, saveText, delFn) { return `<div class="info-box warning" id="form-error" role="alert" hidden></div><div class="form-actions save-bar"><button type="button" class="button primary" onclick="${fn}">${icon('check')}${esc(saveText || 'Сохранить')}</button><button type="button" class="button" onclick="sheetBack()">Отмена</button>${delFn ? `<button type="button" class="button danger push-right" onclick="${delFn}">${icon('trash-2')}Удалить</button>` : ''}</div>`; }
 const refList = k => (REF && Array.isArray(REF[k]) ? REF[k] : []).map(x => (x && typeof x === 'object') ? (x.name || '') : String(x)).filter(Boolean);
@@ -4372,7 +4397,12 @@ function formModelCase(v, prev, ctx) {
   const dup = typeof caseNoTakenBy === 'function' ? caseNoTakenBy(ctx.cases, number, prev ? prev.id : null) : (ctx.cases || []).find(c => c && !c._deleted && c.number === number && (!prev || c.id !== prev.id));
   if (dup) return { error: 'Номер дела ' + number + ' уже занят: ' + (dup.client || 'без доверителя') + (dup.subject ? ', ' + dup.subject : '') + (dup._deleted ? ' (дело в корзине)' : '') + '. Укажите другой номер или нажмите «Авто»' };
   const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').trim();
-  let clientRec = (ctx.clients || []).find(c => c && !c._deleted && norm(c.name) === norm(client)) || null, newClient = null;
+  // доверитель (разбор GPT 03.10.2026): выбранный из списка (clientId) → при правке с тем же ФИО — прежняя карточка → единственный с таким
+  // ФИО; несколько с одинаковым ФИО без выбора — просьба выбрать (раньше бралась первая карточка, дело могло уйти к однофамильцу)
+  const same = (ctx.clients || []).filter(c => c && !c._deleted && norm(c.name) === norm(client));
+  let clientRec = (v.clientId && same.find(c => c.id === v.clientId)) || (prev && prev.clientId && norm(prev.client) === norm(client) && same.find(c => c.id === prev.clientId)) || null, newClient = null;
+  if (!clientRec && same.length > 1) return { error: 'Доверителей с ФИО «' + client + '» несколько (' + same.length + '). Выберите нужного в списке поля «Доверитель» — рядом с ФИО указан телефон или ИНН' };
+  if (!clientRec) clientRec = same[0] || null;
   if (!clientRec) { newClient = { id: uid('К'), name: client, type: 'Физическое лицо', createdAt: Date.now() }; clientRec = newClient; }
   const obj = { ...(prev || {}), id: prev ? prev.id : uid('Д'), number, client: clientRec.name, clientId: clientRec.id,
     subject: v.subject || '', kind: v.kind || '', category: v.category || '', stage: v.stage || '', status: v.status || 'Новое',
@@ -4455,7 +4485,10 @@ async function openCaseForm(id, full) {
   const cl = clients.find(x => x && (x.id === c.clientId || x.name === c.client)) || {};
   // подсказки для противной стороны — участники всех дел и реестр; при выборе известного лица его реквизиты подставляются
   FORM_PARTIES = {}; for (const x of (await getAll('cases'))) for (const p of (x.participants || [])) if (p && p.name && !FORM_PARTIES[p.name]) FORM_PARTIES[p.name] = { inn: p.inn || '', addr: p.addr || '', ogrn: p.ogrn || '', kpp: p.kpp || '' };
-  FORM_CLIENTS = {}; for (const x of clients) if (x && x.name && !x._deleted) FORM_CLIENTS[x.name] = x;
+  FORM_CLIENTS = {}; FORM_CLIENTS_BY_ID = {}; for (const x of clients) if (x && x.name && !x._deleted) { FORM_CLIENTS[x.name] = x; FORM_CLIENTS_BY_ID[x.id] = x; }
+  // однофамильцы: в списке поля «Доверитель» — отдельной строкой каждый, с телефоном, ИНН или адресом
+  { const groups = {}; for (const x of clients) if (x && x.name && !x._deleted) (groups[x.name.toLowerCase().replace(/ё/g, 'е').trim()] = groups[x.name.toLowerCase().replace(/ё/g, 'е').trim()] || []).push(x);
+    COMBO_DUPS['cf-client'] = {}; for (const g of Object.values(groups)) if (g.length > 1) for (const x of g) (COMBO_DUPS['cf-client'][x.name] = COMBO_DUPS['cf-client'][x.name] || []).push({ id: x.id, hint: [x.phone, x.inn ? 'ИНН ' + x.inn : '', x.addr].filter(Boolean)[0] || 'карточка ' + String(x.id).slice(-4) }); }
   const oppNames = [...new Set([...Object.keys(FORM_PARTIES), ...Object.keys(FORM_CLIENTS)])];
   // роли доверителя: свои для кодекса (CASE_ROLES_BY_CODE) + справочник; текущая роль всегда в списке
   const refs = { clientRole: [...new Set([...(CASE_ROLES_BY_CODE[caseCodeOf(c.kind || '')] || []), ...Object.values(CASE_ROLES_BY_CODE).flat(), ...refList('clientRole'), ...(c.clientRole ? [c.clientRole] : [])])], courts: refList('courts'), agencies: refList('agencies') };
@@ -4489,6 +4522,7 @@ async function openCaseForm(id, full) {
   const modeBtn = `<div class="actions" style="margin-bottom:10px">${btn(full ? 'Кратко' : 'Все поля', `caseFormMode('${jsq(id || '')}', ${full ? 'false' : 'true'})`, 'small-btn', full ? 'chevron-up' : 'chevron-down')}${full ? `<span class="small muted">Вкладки зависят от вида дела</span>` : ''}</div>`;
   const body = modeBtn + tabBar + main + panes + fSaveBar(`saveCaseForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('cases', '${jsq(id)}')` : '');
   openSheet(id ? 'Правка дела' : 'Новое дело', body, id ? true : 'panel');
+  { const ci = document.getElementById('cf-client'); if (ci && c.clientId) ci.dataset.pickedId = c.clientId; }
   partyPrefillBind();
   caseGroupsBind(true);
   if (full) { const k = document.getElementById('cf-kind'); if (k) k.onchange = () => caseTabsRefresh(); caseTabsRefresh(); const kb = document.getElementById('cx-koap-koapBodyKind'); if (kb) { kb.onchange = () => caseKoapHint(); caseKoapHint(); } }
@@ -4498,7 +4532,7 @@ function fAutoRow(id, label, val, fn, ph) { return `<label class="field wide"><s
 // ИНН с кнопкой «По ИНН» (sync/dadata.js)
 function fInnRow(prefix, label, val) { return `<label class="field"><span>${esc(label)}</span><div class="inn-row"><input id="${prefix}Inn" value="${esc(val || '')}" autocomplete="off" inputmode="numeric" placeholder="10 или 12 цифр"><button type="button" class="button small-btn" onclick="innLookup('${prefix}')">${icon('search', 'icon-sm')}По ИНН</button></div></label>`; }
 // выбор известного доверителя или противной стороны из подсказок подставляет его реквизиты в пустые поля
-let FORM_PARTIES = {}, FORM_CLIENTS = {};
+let FORM_PARTIES = {}, FORM_CLIENTS = {}, FORM_CLIENTS_BY_ID = {};
 // Смена лица в форме дела (аудит 02.10.2026: реквизиты прежнего доверителя записывались в карточку нового).
 // Правило: выбран известный человек — его реквизиты заменяют то, что стояло в полях; у выбранного значения нет, а в поле
 // осталось значение прежнего лица — поле очищается; то, что пользователь ввёл сам, не трогается.
@@ -4512,7 +4546,7 @@ function partyPrefillModel(rec, cur, prevRec) {
   return out;
 }
 function partyPrefillBind() {
-  const bind = (id, prefix, src) => { const el = document.getElementById(id); if (!el) return; let prevName = el.value.trim(); el.addEventListener('change', () => { const rec = src()[el.value.trim()], prevRec = src()[prevName]; prevName = el.value.trim(); const get = k => document.getElementById(prefix + k[0].toUpperCase() + k.slice(1)); const cur = {}; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) cur[k] = (get(k) || {}).value || '';
+  const bind = (id, prefix, src) => { const el = document.getElementById(id); if (!el) return; let prevName = el.value.trim(); el.addEventListener('change', () => { const rec = (id === 'cf-client' && el.dataset.pickedId && FORM_CLIENTS_BY_ID[el.dataset.pickedId]) || src()[el.value.trim()], prevRec = src()[prevName]; prevName = el.value.trim(); const get = k => document.getElementById(prefix + k[0].toUpperCase() + k.slice(1)); const cur = {}; for (const k of ['inn', 'addr', 'zip', 'ogrn', 'kpp', 'type']) cur[k] = (get(k) || {}).value || '';
     const fill = partyPrefillModel(rec, cur, prevRec === rec ? null : prevRec); for (const k of Object.keys(fill)) { const f = get(k); if (f) f.value = fill[k]; } }); };
   bind('cf-client', 'cf-client', () => FORM_CLIENTS); bind('cf-opponent', 'cf-opp', () => FORM_PARTIES);
 }
@@ -4554,7 +4588,7 @@ function caseTabPick(tab) {
 function caseKoapHint() { const box = document.getElementById('cx-koap-hint'); if (!box) return; const k = fv('cx-koap-koapBodyKind'); const h = KOAP_APPEAL_HINT[k]; box.textContent = (h ? 'Обжалование: ' + h + '. ' : '') + KOAP_APPEAL_TERM; }
 async function saveCaseForm(id) {
   const prev = id ? await getOne('cases', id) : null;
-  const v = {}; ['number', 'client', 'clientInn', 'clientAddr', 'clientZip', 'clientType', 'subject', 'kind', 'category', 'stage', 'status', 'court', 'courtNo', 'judge', 'opponent', 'oppInn', 'oppAddr', 'oppOgrn', 'oppKpp', 'nextAction', 'nextActionDue', 'comment'].forEach(k => { v[k] = fv('cf-' + k); });
+  const v = { clientId: (document.getElementById('cf-client') || { dataset: {} }).dataset.pickedId || '' }; ['number', 'client', 'clientInn', 'clientAddr', 'clientZip', 'clientType', 'subject', 'kind', 'category', 'stage', 'status', 'court', 'courtNo', 'judge', 'opponent', 'oppInn', 'oppAddr', 'oppOgrn', 'oppKpp', 'nextAction', 'nextActionDue', 'comment'].forEach(k => { v[k] = fv('cf-' + k); });
   const allCases = await getAll('cases');
   const r = formModelCase(v, prev, { clients: await getAll('clients'), cases: allCases }); if (r.error) { fErr(r.error); return; }
   // введённое в строках-справочниках (категория, суд, судья, орган, роль) запоминается; поля вкладок другого вида дела — нет
@@ -4576,7 +4610,7 @@ async function saveCaseForm(id) {
     const msgs = typeof nextActDeadlines === 'function' ? nextActDeadlines(r.obj, prev) : [];
     if (msgs && msgs.length) addCaseHistoryEvent(r.obj, 'deadline', '', msgs.join(' | '), id ? 'form' : 'created');
     await put('cases', r.obj);
-  } catch (e) { logErr('form:case', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  } catch (e) { logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (r.newClient ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
   await refreshCasesCache(); toast(id ? 'Дело сохранено' : 'Дело создано');
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
@@ -4773,6 +4807,9 @@ if (typeof DEFAULT_REF === 'object' && DEFAULT_REF) DEFAULT_REF.caseCategory = [
 if (typeof REF === 'object' && REF) nextRefsClean();
 
 // поле формы: id, подпись, значение, ключ справочника (REF), дополнительные подсказки (например, роли по кодексу)
+// однофамильцы (разбор GPT 03.10.2026): COMBO_DUPS[поле][имя] = [{ id, hint }] — каждая запись отдельной строкой «имя · подсказка»; выбор
+// запоминает id в data-picked-id поля, ввод с клавиатуры его сбрасывает
+const COMBO_DUPS = {};
 function fCombo(id, label, val, refKey, extra) {
   COMBO_EXTRA[id] = (extra || []).map(refName).filter(Boolean);
   return `<label class="field combo"><span>${esc(label)}</span><div class="combo-box"><input id="${id}" value="${esc(val == null ? '' : val)}" autocomplete="off" spellcheck="false" data-combo="1" data-ref="${esc(refKey)}"><button type="button" class="combo-toggle" tabindex="-1" aria-label="Показать список" data-for="${id}">${icon('chevron-down', 'icon-sm')}</button></div><div class="combo-list" id="${id}-menu" hidden></div></label>`;
@@ -4785,12 +4822,13 @@ function comboRender(input) {
   const addRow = q && !comboHasExact(all, q) ? `<button type="button" class="combo-item combo-add" data-v="${esc(q)}">${icon('plus', 'icon-sm')}<span>Добавить «${esc(q)}» в справочник</span></button>` : '';
   const empty = !addRow && !items.length ? `<div class="combo-empty">Справочник пуст — введите значение, при сохранении оно запомнится</div>` : '';
   // строка «Добавить» — после найденных: Enter без выбора берёт первое совпадение, а не создаёт запись
-  menu.innerHTML = items.map(v => `<button type="button" class="combo-item" data-v="${esc(v)}"><span>${esc(v)}</span></button>`).join('') + addRow + empty;
+  const dups = COMBO_DUPS[input.id] || {};
+  menu.innerHTML = items.map(v => dups[v] ? dups[v].map(d => `<button type="button" class="combo-item" data-v="${esc(v)}" data-id="${esc(d.id)}"><span>${esc(v)} <span class="muted">· ${esc(d.hint)}</span></span></button>`).join('') : `<button type="button" class="combo-item" data-v="${esc(v)}"><span>${esc(v)}</span></button>`).join('') + addRow + empty;
   menu.hidden = false;
 }
 function comboClose(input) { const menu = comboMenu(input); if (menu) { menu.hidden = true; menu.innerHTML = ''; } }
 function comboCloseAll(except) { document.querySelectorAll('.combo-list:not([hidden])').forEach(m => { const inp = document.getElementById(m.id.replace(/-menu$/, '')); if (inp !== except) { m.hidden = true; m.innerHTML = ''; } }); }
-function comboPick(input, v) { input.value = v; comboClose(input); input.dispatchEvent(new Event('change', { bubbles: true })); }
+function comboPick(input, v, pid) { input.value = v; if (pid) input.dataset.pickedId = pid; else delete input.dataset.pickedId; comboClose(input); input.dispatchEvent(new Event('change', { bubbles: true })); }
 function comboMove(input, dir) {
   const menu = comboMenu(input); if (!menu || menu.hidden) { comboRender(input); return; }
   const items = [...menu.querySelectorAll('.combo-item')]; if (!items.length) return;
@@ -4810,11 +4848,11 @@ async function comboRememberAll(root, allow) {
   return n;
 }
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) comboRender(t); });
+  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { delete t.dataset.pickedId; comboRender(t); } });
   document.addEventListener('focusin', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { comboCloseAll(t); comboRender(t); } });
   document.addEventListener('click', e => {
     const t = e.target, item = t.closest && t.closest('.combo-item');
-    if (item) { const input = item.closest('.combo').querySelector('input[data-combo],input[data-addr]'); if (item.dataset.zip && input.dataset.zipFor) { const z = document.getElementById(input.dataset.zipFor); if (z) z.value = item.dataset.zip; } comboPick(input, item.dataset.v || ''); return; }
+    if (item) { const input = item.closest('.combo').querySelector('input[data-combo],input[data-addr]'); if (item.dataset.zip && input.dataset.zipFor) { const z = document.getElementById(input.dataset.zipFor); if (z) z.value = item.dataset.zip; } comboPick(input, item.dataset.v || '', item.dataset.id || ''); return; }
     const tg = t.closest && t.closest('.combo-toggle');
     if (tg) { const input = document.getElementById(tg.dataset.for); if (!input) return; const m = comboMenu(input); if (m && !m.hidden) comboClose(input); else { comboCloseAll(input); comboRender(input); input.focus(); } return; }
     if (!(t.closest && t.closest('.combo'))) comboCloseAll(null);
@@ -4825,7 +4863,7 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
     if (e.key === 'ArrowDown') { e.preventDefault(); comboMove(t, 1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); comboMove(t, -1); }
     else if (e.key === 'Escape' && m && !m.hidden) { e.preventDefault(); comboClose(t); }
-    else if (e.key === 'Enter' && m && !m.hidden) { e.preventDefault(); const a = m.querySelector('.combo-item.active') || m.querySelector('.combo-item'); if (a) comboPick(t, a.dataset.v || ''); else comboClose(t); }
+    else if (e.key === 'Enter' && m && !m.hidden) { e.preventDefault(); const a = m.querySelector('.combo-item.active') || m.querySelector('.combo-item'); if (a) comboPick(t, a.dataset.v || '', a.dataset.id || ''); else comboClose(t); }
   });
 }
 
