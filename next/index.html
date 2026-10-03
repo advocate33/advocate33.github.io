@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 16:34 · a245f74">
+<meta name="build" content="03.10.2026 17:24 · ace2e84">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -363,6 +363,12 @@ button.agenda-row:hover{background:var(--surface2)}
   .month-layout{grid-template-columns:1fr;gap:14px}.day-cell{min-height:58px;padding:5px 2px;align-items:center;gap:3px}.day-event{display:none}.day-dots{display:flex}.cal-nav{padding:10px 8px}}
 @media(prefers-reduced-motion:no-preference){.panel{transition:border-color .15s}.button{transition:background .12s}}
 .l-short{display:none}
+.fgroup{grid-column:1/-1;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
+.fgroup>summary{display:flex;align-items:center;gap:8px;min-height:var(--touch);padding:0 14px;cursor:pointer;font-weight:600;list-style:none}
+.fgroup>summary::-webkit-details-marker{display:none}
+.fgroup>summary .icon{transform:rotate(-90deg);transition:transform .15s}.fgroup[open]>summary .icon{transform:none}
+.fgroup-cnt{margin-left:auto;font-weight:400;font-size:.8125rem;color:var(--text-muted)}
+.fgroup>.form-grid{padding:4px 14px 14px}
 .guard-box{margin-bottom:12px}
 .draft-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 14px;margin-bottom:14px;border:1px solid var(--warn);border-radius:var(--r-md);background:var(--surface);color:var(--text)}.draft-bar .actions{display:flex;gap:8px;margin-left:auto}
 .t-sum,.t-tomorrow{display:none}
@@ -4401,21 +4407,27 @@ async function openCaseForm(id, full) {
   const oppNames = [...new Set([...Object.keys(FORM_PARTIES), ...Object.keys(FORM_CLIENTS)])];
   // роли доверителя: свои для кодекса (CASE_ROLES_BY_CODE) + справочник; текущая роль всегда в списке
   const refs = { clientRole: [...new Set([...(CASE_ROLES_BY_CODE[caseCodeOf(c.kind || '')] || []), ...Object.values(CASE_ROLES_BY_CODE).flat(), ...refList('clientRole'), ...(c.clientRole ? [c.clientRole] : [])])], courts: refList('courts'), agencies: refList('agencies') };
-  const main = `<div class="form-grid" id="cx-pane-main">
-    ${fAutoRow('cf-number', 'Номер дела *', c.number, 'autoCaseNo', 'Д-1/2026')}
-    ${wide(fCombo('cf-client', 'Доверитель *', c.client, '', clients.filter(x => x && !x._deleted).map(x => x.name)))}
-    ${fInnRow('cf-client', 'ИНН доверителя', cl.inn)}${fInput('cf-clientZip', 'Индекс', cl.zip, 'autocomplete="off" inputmode="numeric"')}
-    ${fAddr('cf-clientAddr', 'Адрес доверителя', cl.addr, 'cf-clientZip')}${fSelect('cf-clientType', 'Тип доверителя', cl.type || 'Физическое лицо', refList('clientType'))}
-    ${fText('cf-subject', 'Предмет спора', c.subject, 2)}
-    ${fSelect('cf-kind', 'Вид', c.kind, refList('caseKind'), true)}${fCombo('cf-category', 'Категория', c.category, 'caseCategory')}
-    ${fSelect('cf-stage', 'Стадия', c.stage, CASE_STAGES_NEXT.filter(s => s !== 'Завершено'), true)}${fSelect('cf-status', 'Статус', c.status || 'Новое', refList('caseStatus'))}
-    ${fCombo('cf-court', 'Суд', c.court, 'courts')}${fInput('cf-courtNo', '№ дела в суде', c.courtNo, 'autocomplete="off"')}
-    ${fCombo('cf-judge', 'Судья', c.judge, 'judges')}${fCombo('cf-opponent', 'Противная сторона', (opp && opp.name) || c.opponent, '', oppNames)}
-    ${fInnRow('cf-opp', 'ИНН противной стороны', opp && opp.inn)}${fInput('cf-oppOgrn', 'ОГРН', opp && opp.ogrn, 'autocomplete="off" inputmode="numeric"')}
-    ${fAddr('cf-oppAddr', 'Адрес противной стороны', opp && opp.addr)}${fInput('cf-oppKpp', 'КПП', opp && opp.kpp, 'autocomplete="off" inputmode="numeric"')}
-    ${fInput('cf-nextAction', 'Следующее действие', c.nextAction, 'autocomplete="off"')}${fInput('cf-nextActionDue', 'Срок действия', c.nextActionDue, 'type="date"')}
-    ${full ? CASE_MAIN_EXTRA.map(f => caseFormField(f, c[f[0]], refs)).join('') : ''}
-    ${fText('cf-comment', 'Примечание', c.comment, 3)}
+  // поля формы — фрагментами: полная форма собирает их подряд, краткая (п. 1.3, 03.10.2026) — основные видны, остальное в группах
+  const F = {
+    number: fAutoRow('cf-number', 'Номер дела *', c.number, 'autoCaseNo', 'Д-1/2026'),
+    client: wide(fCombo('cf-client', 'Доверитель *', c.client, '', clients.filter(x => x && !x._deleted).map(x => x.name))),
+    clientReq: fInnRow('cf-client', 'ИНН доверителя', cl.inn) + fInput('cf-clientZip', 'Индекс', cl.zip, 'autocomplete="off" inputmode="numeric"') + fAddr('cf-clientAddr', 'Адрес доверителя', cl.addr, 'cf-clientZip') + fSelect('cf-clientType', 'Тип доверителя', cl.type || 'Физическое лицо', refList('clientType')),
+    subject: fText('cf-subject', 'Предмет спора', c.subject, 2),
+    kind: fSelect('cf-kind', 'Вид', c.kind, refList('caseKind'), true),
+    category: fCombo('cf-category', 'Категория', c.category, 'caseCategory'),
+    stageStatus: fSelect('cf-stage', 'Стадия', c.stage, CASE_STAGES_NEXT.filter(s => s !== 'Завершено'), true) + fSelect('cf-status', 'Статус', c.status || 'Новое', refList('caseStatus')),
+    court: fCombo('cf-court', 'Суд', c.court, 'courts') + fInput('cf-courtNo', '№ дела в суде', c.courtNo, 'autocomplete="off"') + fCombo('cf-judge', 'Судья', c.judge, 'judges'),
+    opponent: fCombo('cf-opponent', 'Противная сторона', (opp && opp.name) || c.opponent, '', oppNames),
+    oppReq: fInnRow('cf-opp', 'ИНН противной стороны', opp && opp.inn) + fInput('cf-oppOgrn', 'ОГРН', opp && opp.ogrn, 'autocomplete="off" inputmode="numeric"') + fAddr('cf-oppAddr', 'Адрес противной стороны', opp && opp.addr) + fInput('cf-oppKpp', 'КПП', opp && opp.kpp, 'autocomplete="off" inputmode="numeric"'),
+    next: fInput('cf-nextAction', 'Следующее действие', c.nextAction, 'autocomplete="off"') + fInput('cf-nextActionDue', 'Срок действия', c.nextActionDue, 'type="date"'),
+    comment: fText('cf-comment', 'Примечание', c.comment, 3),
+  };
+  // группа краткой формы: раскрыта, если в ней что-то заполнено (правка дела); в заголовке — сколько полей заполнено
+  const grp = (gid, title, html) => `<details class="fgroup" id="${gid}"><summary>${icon('chevron-down', 'icon-sm')}<span>${esc(title)}</span><span class="fgroup-cnt"></span></summary><div class="form-grid">${html}</div></details>`;
+  const main = full
+    ? `<div class="form-grid" id="cx-pane-main">${F.number}${F.client}${F.clientReq}${F.subject}${F.kind}${F.category}${F.stageStatus}${F.court}${F.opponent}${F.oppReq}${F.next}${CASE_MAIN_EXTRA.map(f => caseFormField(f, c[f[0]], refs)).join('')}${F.comment}</div>`
+    : `<div class="form-grid" id="cx-pane-main">${F.number}${F.client}${F.subject}${F.kind}${F.next}
+    ${grp('cfg-client', 'Реквизиты доверителя', F.clientReq)}${grp('cfg-court', 'Суд, категория, стадия', F.category + F.stageStatus + F.court)}${grp('cfg-opp', 'Противная сторона', F.opponent + F.oppReq)}${grp('cfg-note', 'Примечание', F.comment)}
   </div>`;
   const tabs = full ? caseTabsFor(c.kind || '') : [];
   const tabBar = full ? `<div class="choice case-tabs" id="cx-tabs">${CASE_FORM_TABS.map(t => `<button type="button" class="button small-btn" data-tab="${t.id}" data-kinds="${(t.kinds || []).join('|')}" aria-pressed="${t.id === 'main'}" onclick="caseTabPick('${t.id}')"${tabs.some(x => x.id === t.id) ? '' : ' hidden'}>${esc(t.title)}</button>`).join('')}</div>` : '';
@@ -4426,6 +4438,7 @@ async function openCaseForm(id, full) {
   const body = modeBtn + tabBar + main + panes + fSaveBar(`saveCaseForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('cases', '${jsq(id)}')` : '');
   openSheet(id ? 'Правка дела' : 'Новое дело', body, id ? true : 'panel');
   partyPrefillBind();
+  caseGroupsBind(true);
   if (full) { const k = document.getElementById('cf-kind'); if (k) k.onchange = () => caseTabsRefresh(); caseTabsRefresh(); const kb = document.getElementById('cx-koap-koapBodyKind'); if (kb) { kb.onchange = () => caseKoapHint(); caseKoapHint(); } }
 }
 // поле номера с кнопкой «Авто» (data/numbering.js): следующий свободный номер подставляется, но номер можно править
@@ -4451,6 +4464,22 @@ function partyPrefillBind() {
     const fill = partyPrefillModel(rec, cur, prevRec === rec ? null : prevRec); for (const k of Object.keys(fill)) { const f = get(k); if (f) f.value = fill[k]; } }); };
   bind('cf-client', 'cf-client', () => FORM_CLIENTS); bind('cf-opponent', 'cf-opp', () => FORM_PARTIES);
 }
+// группы краткой формы дела (п. 1.3): «заполнено: N» в заголовке; open — раскрыть группы, где есть данные
+// Выбор со значением по умолчанию (тип доверителя, статус «Новое») заполненным не считается.
+const CASE_GROUP_DEFAULTS = { 'cf-clientType': 'Физическое лицо', 'cf-status': 'Новое' };
+function caseGroupsRefresh(open) {
+  document.querySelectorAll('#sheetContent details.fgroup').forEach(g => {
+    let n = 0; g.querySelectorAll('input, textarea, select').forEach(el => { const v = String(el.value || '').trim(); if (v && v !== (CASE_GROUP_DEFAULTS[el.id] || null)) n++; });
+    const cnt = g.querySelector('.fgroup-cnt'); if (cnt) cnt.textContent = n ? 'заполнено: ' + n : '';
+    if (open && n) g.open = true;
+  });
+}
+function caseGroupsBind(open) {
+  const pane = document.getElementById('cx-pane-main'); if (!pane || !pane.querySelector('details.fgroup')) return;
+  // слушатель на контейнере срабатывает после обработчика поля (автоподстановка реквизитов при выборе доверителя)
+  pane.addEventListener('input', () => caseGroupsRefresh(false)); pane.addEventListener('change', () => caseGroupsRefresh(false));
+  caseGroupsRefresh(open);
+}
 function caseFormMode(id, full) { localStorage.setItem(CASE_FORM_BRIEF_KEY, full ? '0' : '1'); caseFormReopen(id, full); }
 // перерисовать форму, не теряя введённое: значения переносятся по id полей; лист под формой (карточка) остаётся в стеке
 async function caseFormReopen(id, full) {
@@ -4458,6 +4487,7 @@ async function caseFormReopen(id, full) {
   UI.cur = UI.stack.length ? UI.stack.pop() : null; await openCaseForm(id, full);
   for (const [k, v] of Object.entries(vals)) { const el = document.getElementById(k); if (el && 'value' in el && el.tagName !== 'BUTTON') el.value = v; }
   caseTabsRefresh(); caseKoapHint();
+  caseGroupsRefresh(true);
 }
 function caseTabsRefresh() {
   const kind = fv('cf-kind'), bar = document.getElementById('cx-tabs'); if (!bar) return;
