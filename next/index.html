@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 11:12 · 4d27a0d">
+<meta name="build" content="03.10.2026 11:38 · 46c25ad">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2274,7 +2274,7 @@ mergeCaseRecords = function (cur, rec, base, events) {
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
 // eventsget — события судов с сервера (этап 4): чтение
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'blobget', 'bloblist', 'track', 'eventsget'];
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget'];
 // этап 4, часть 2в: история снимков базы на сервере 178 — чтение
 const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 // этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
@@ -2391,7 +2391,9 @@ async function nextServerCheck() {
   if (!v || !v.ok) { const msg = nextSrvError(v); srvdbNote('err', msg); return { ok: false, error: msg }; }
   localStorage.setItem('crm_next_srv_checked', SRV.url); SRVDB.lastErr = null; syncStatusRender();
   if (typeof nextSnapSet === 'function') nextSnapSet(Number(p.ver || 0) >= 180); // v180: снимки по ссылке
-  return { ok: true, srvVer: Number(p.ver || 0), dbVer: Number(v.ver || 0) };
+  // v181: состояние правила CORS бакета — хранилище отвечает на предварительный запрос или нет (снимок пользователя 03.10.2026)
+  let cors = null; if (Number(p.ver || 0) >= 181) { const c = await srvCall('corscheck'); if (c && c.ok) cors = { enabled: !!c.enabled, text: c.probe ? (c.probe.status + (c.probe.text ? ' «' + c.probe.text + '»' : '')) : '' }; }
+  return { ok: true, srvVer: Number(p.ver || 0), dbVer: Number(v.ver || 0), cors };
 }
 const nextSrvChecked = () => !!SRV.url && localStorage.getItem('crm_next_srv_checked') === SRV.url;
 
@@ -3947,7 +3949,7 @@ async function syncSaveAndCheck() {
   if (url !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
   SRV.url = url; if (secret !== SRV.secret) SRV.secret = secret; if (pass !== SRVDB.pass) CLOUD.pass = pass;
   const r = await nextServerCheck();
-  openSyncSheet('replace', r.ok ? { text: 'Связь есть: сервер версии ' + r.srvVer + (r.dbVer ? ', база на сервере есть. Теперь шаг 2.' : ', базы на сервере пока нет.') }
+  openSyncSheet('replace', r.ok ? { text: 'Связь есть: сервер версии ' + r.srvVer + (r.cors ? (r.cors.enabled ? ', хранилище принимает снимки напрямую (правило CORS действует)' : ', хранилище НЕ принимает снимки напрямую: ответ ' + r.cors.text + ' — сервер поставит правило при первой отправке; если не поможет, пришлите этот текст') : '') + (r.dbVer ? ', база на сервере есть. Теперь шаг 2.' : ', базы на сервере пока нет.') }
     : { text: 'Связь не установлена: ' + r.error + '.', bad: true });
 }
 async function syncPullNow() {
