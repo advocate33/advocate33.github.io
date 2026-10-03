@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 15:10 · acea46d">
+<meta name="build" content="03.10.2026 16:01 · df6ba41">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2282,6 +2282,59 @@ async function docBlobGet(v) {
   return '';
 }
 
+// ▼▼▼ data/numbering.js
+// ═══ data/numbering.js — автонумерация дел и соглашений (поручение пользователя 03.10.2026) ═══
+// Правила — как в прежней программе (v312 nextCaseNo / nextAgreementNo): номер дела «Д-N/ГГГГ» — первый свободный N текущего года
+// с учётом записей-сирот (заседания, счета, задачи, ордера, привязанные к уже удалённому делу, — чтобы новое дело их не
+// унаследовало); номер соглашения «N/ГГГГ» — максимум года + 1. Дело в корзине держит свои номера (его можно вернуть). Номера подставляются в новую форму дела, их можно править;
+// при сохранении номер дела и номер соглашения проверяются на занятость другим делом. Чистые функции — для тестов.
+const CASE_NO_RE = /^Д-(\d+)\s*\/\s*(\d{4})$/, AGREEMENT_NO_RE = /^(\d+)\s*\/\s*(\d{4})$/;
+function numberingYear(now) { return (now ? new Date(now) : new Date()).getFullYear(); }
+// cases — записи дел; orphans — номера дел из связанных записей (caseNum); year — год (для тестов)
+function nextCaseNo(cases, orphans, year) {
+  year = year || numberingYear(); const used = new Set();
+  const take = s => { const m = CASE_NO_RE.exec(String(s || '').trim()); if (m && Number(m[2]) === year) used.add(Number(m[1])); };
+  (cases || []).forEach(c => { if (c) take(c.number); });
+  (orphans || []).forEach(take);
+  let n = 1; while (used.has(n)) n++;
+  return 'Д-' + n + '/' + year;
+}
+function nextAgreementNo(cases, year) {
+  year = year || numberingYear(); let max = 0;
+  (cases || []).forEach(c => { if (!c) return; const m = AGREEMENT_NO_RE.exec(String(c.agreementNo || '').trim()); if (m && Number(m[2]) === year && Number(m[1]) > max) max = Number(m[1]); });
+  return (max + 1) + '/' + year;
+}
+// номера сравниваются без лишних пробелов и регистра
+const numberingNorm = s => String(s || '').replace(/\s+/g, '').toLowerCase();
+// дело, у которого уже есть такой номер дела (кроме exceptId) — или null. Дело в корзине тоже держит номер: его можно вернуть
+function caseNoTakenBy(cases, number, exceptId) {
+  const n = numberingNorm(number); if (!n) return null;
+  return (cases || []).find(c => c && c.id !== exceptId && numberingNorm(c.number) === n) || null;
+}
+// дело, у которого уже есть такой номер соглашения (кроме exceptId) — или null
+function agreementNoTakenBy(cases, no, exceptId) {
+  const n = numberingNorm(no); if (!n) return null;
+  return (cases || []).find(c => c && c.id !== exceptId && numberingNorm(c.agreementNo) === n) || null;
+}
+// номера-сироты: caseNum связанных записей, у которых дела уже нет
+async function orphanCaseNums(cases) {
+  const have = new Set((cases || []).filter(c => c && !c._deleted).map(c => numberingNorm(c.number))), out = [];
+  for (const store of ['hearings', 'finance', 'tasks', 'orders', 'meetings']) {
+    let recs; try { recs = await getAll(store); } catch (e) { continue; }
+    recs.forEach(r => { if (r && r.caseNum && !have.has(numberingNorm(r.caseNum))) out.push(r.caseNum); });
+  }
+  return out;
+}
+// кнопка «Авто» у поля: подставить следующий свободный номер
+async function autoCaseNo(inputId) {
+  const cases = await getAll('cases'), inp = document.getElementById(inputId || 'cf-number'); if (!inp) return;
+  inp.value = nextCaseNo(cases, await orphanCaseNums(cases)); inp.dispatchEvent(new Event('input', { bubbles: true })); toast('Подставлен следующий свободный номер дела');
+}
+async function autoAgreementNo(inputId) {
+  const inp = document.getElementById(inputId || 'cx-agreementNo'); if (!inp) return;
+  inp.value = nextAgreementNo(await getAll('cases')); inp.dispatchEvent(new Event('input', { bubbles: true })); toast('Подставлен следующий номер соглашения');
+}
+
 // ▼▼▼ next/guard.js
 // ═══ next/guard.js — запрет записи на личный сервер из новой версии ═══
 // Решение 28.09.2026: на этапе 1 новая версия только ЧИТАЕТ базу с сервера. Запись включается на этапе 2 — после того
@@ -4251,8 +4304,8 @@ function formModelCase(v, prev, ctx) {
   if (!number) return { error: 'Укажите номер дела' };
   if (!client) return { error: 'Укажите доверителя' };
   if (v.nextActionDue && !/^\d{4}-\d{2}-\d{2}$/.test(v.nextActionDue)) return { error: 'Дата следующего действия — в формате ДД.ММ.ГГГГ' };
-  const dup = (ctx.cases || []).find(c => c && !c._deleted && c.number === number && (!prev || c.id !== prev.id));
-  if (dup) return { error: 'Дело с номером ' + number + ' уже есть (' + (dup.client || 'без доверителя') + ')' };
+  const dup = typeof caseNoTakenBy === 'function' ? caseNoTakenBy(ctx.cases, number, prev ? prev.id : null) : (ctx.cases || []).find(c => c && !c._deleted && c.number === number && (!prev || c.id !== prev.id));
+  if (dup) return { error: 'Номер дела ' + number + ' уже занят: ' + (dup.client || 'без доверителя') + (dup.subject ? ', ' + dup.subject : '') + (dup._deleted ? ' (дело в корзине)' : '') + '. Укажите другой номер или нажмите «Авто»' };
   const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').trim();
   let clientRec = (ctx.clients || []).find(c => c && !c._deleted && norm(c.name) === norm(client)) || null, newClient = null;
   if (!clientRec) { newClient = { id: uid('К'), name: client, type: 'Физическое лицо', createdAt: Date.now() }; clientRec = newClient; }
@@ -4330,6 +4383,8 @@ function formModelHearing(v, prev) {
 async function openCaseForm(id, full) {
   const prev = id ? await getOne('cases', id) : null; if (id && !prev) { toast('Дело не найдено', true); return; }
   const c = prev || {}, clients = await getAll('clients');
+  // автонумерация (03.10.2026): новому делу — следующий свободный номер дела и номер соглашения; оба можно править
+  if (!prev && typeof nextCaseNo === 'function') { const all = await getAll('cases'); c.number = nextCaseNo(all, await orphanCaseNums(all)); c.agreementNo = nextAgreementNo(all); c.agreementDate = c.agreementDate || todayISO(); }
   if (full === undefined) full = id ? localStorage.getItem(CASE_FORM_BRIEF_KEY) === '0' : false;
   const opp = (c.participants || []).find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
   const cl = clients.find(x => x && (x.id === c.clientId || x.name === c.client)) || {};
@@ -4340,7 +4395,7 @@ async function openCaseForm(id, full) {
   // роли доверителя: свои для кодекса (CASE_ROLES_BY_CODE) + справочник; текущая роль всегда в списке
   const refs = { clientRole: [...new Set([...(CASE_ROLES_BY_CODE[caseCodeOf(c.kind || '')] || []), ...Object.values(CASE_ROLES_BY_CODE).flat(), ...refList('clientRole'), ...(c.clientRole ? [c.clientRole] : [])])], courts: refList('courts'), agencies: refList('agencies') };
   const main = `<div class="form-grid" id="cx-pane-main">
-    ${wide(fInput('cf-number', 'Номер дела *', c.number, 'placeholder="Д-1/2026" autocomplete="off"'))}
+    ${fAutoRow('cf-number', 'Номер дела *', c.number, 'autoCaseNo', 'Д-1/2026')}
     ${wide(fCombo('cf-client', 'Доверитель *', c.client, '', clients.filter(x => x && !x._deleted).map(x => x.name)))}
     ${fInnRow('cf-client', 'ИНН доверителя', cl.inn)}${fInput('cf-clientZip', 'Индекс', cl.zip, 'autocomplete="off" inputmode="numeric"')}
     ${fAddr('cf-clientAddr', 'Адрес доверителя', cl.addr, 'cf-clientZip')}${fSelect('cf-clientType', 'Тип доверителя', cl.type || 'Физическое лицо', refList('clientType'))}
@@ -4366,6 +4421,8 @@ async function openCaseForm(id, full) {
   partyPrefillBind();
   if (full) { const k = document.getElementById('cf-kind'); if (k) k.onchange = () => caseTabsRefresh(); caseTabsRefresh(); const kb = document.getElementById('cx-koap-koapBodyKind'); if (kb) { kb.onchange = () => caseKoapHint(); caseKoapHint(); } }
 }
+// поле номера с кнопкой «Авто» (data/numbering.js): следующий свободный номер подставляется, но номер можно править
+function fAutoRow(id, label, val, fn, ph) { return `<label class="field wide"><span>${esc(label)}</span><div class="inn-row"><input id="${id}" value="${esc(val || '')}" autocomplete="off" placeholder="${esc(ph || '')}"><button type="button" class="button small-btn" onclick="${fn}('${id}')" title="Подставить следующий свободный номер">${icon('sparkles', 'icon-sm')}Авто</button></div></label>`; }
 // ИНН с кнопкой «По ИНН» (sync/dadata.js)
 function fInnRow(prefix, label, val) { return `<label class="field"><span>${esc(label)}</span><div class="inn-row"><input id="${prefix}Inn" value="${esc(val || '')}" autocomplete="off" inputmode="numeric" placeholder="10 или 12 цифр"><button type="button" class="button small-btn" onclick="innLookup('${prefix}')">${icon('search', 'icon-sm')}По ИНН</button></div></label>`; }
 // выбор известного доверителя или противной стороны из подсказок подставляет его реквизиты в пустые поля
@@ -4409,11 +4466,18 @@ function caseKoapHint() { const box = document.getElementById('cx-koap-hint'); i
 async function saveCaseForm(id) {
   const prev = id ? await getOne('cases', id) : null;
   const v = {}; ['number', 'client', 'clientInn', 'clientAddr', 'clientZip', 'clientType', 'subject', 'kind', 'category', 'stage', 'status', 'court', 'courtNo', 'judge', 'opponent', 'oppInn', 'oppAddr', 'oppOgrn', 'oppKpp', 'nextAction', 'nextActionDue', 'comment'].forEach(k => { v[k] = fv('cf-' + k); });
-  const r = formModelCase(v, prev, { clients: await getAll('clients'), cases: await getAll('cases') }); if (r.error) { fErr(r.error); return; }
+  const allCases = await getAll('cases');
+  const r = formModelCase(v, prev, { clients: await getAll('clients'), cases: allCases }); if (r.error) { fErr(r.error); return; }
   // введённое в строках-справочниках (категория, суд, судья, орган, роль) запоминается; поля вкладок другого вида дела — нет
   { const tabs = new Set(caseTabsFor(r.obj.kind || '').map(t => t.id)); await comboRememberAll(document.getElementById('sheetContent'), inp => { const pane = inp.closest('[id^="cx-pane-"]'); return !pane || tabs.has(pane.id.slice(8)); }); }
   // полная форма: поля показанных вкладок — поверх записи (имена полей — как в v312); поля скрытых вкладок не трогаются
   if (document.getElementById('cx-tabs')) { const ex = caseFormValues(k => fv('cx-' + k), caseTabsFor(r.obj.kind || '')); for (const k of Object.keys(ex)) { const val = ex[k]; if (k === 'amount' || k === 'recovered' || /^ip(Sum|Collected|Fee)$/.test(k)) r.obj[k] = val === '' ? '' : Number(String(val).replace(',', '.')) || 0; else if (k === 'labels') r.obj[k] = String(val).split(',').map(s => s.trim()).filter(Boolean); else r.obj[k] = val; } }
+  // автонумерация соглашений (03.10.2026): новому делу без номера — следующий; номер, занятый другим делом, — отказ
+  if (typeof nextAgreementNo === 'function') {
+    if (!id && !String(r.obj.agreementNo || '').trim()) { r.obj.agreementNo = nextAgreementNo(allCases); r.obj.agreementDate = r.obj.agreementDate || todayISO(); }
+    const taken = agreementNoTakenBy(allCases, r.obj.agreementNo, id || null);
+    if (taken) { fErr('Номер соглашения ' + r.obj.agreementNo + ' уже занят делом ' + (taken.number || '') + (taken.client ? ' (' + taken.client + ')' : '') + (taken._deleted ? ' — дело в корзине' : '') + '. Укажите другой номер или нажмите «Авто» на вкладке «Соглашение»'); return; }
+  }
   try {
     if (r.newClient) await put('clients', r.newClient);
     if (r.clientUpd) await put('clients', r.clientUpd);
@@ -4738,7 +4802,7 @@ const KIND_CIV = ['Гражданское', 'Арбитраж'], KIND_COURT = ['
 // hint — подсказка с нормой: строка или { код кодекса: строка } (показывается для кодекса выбранного вида дела)
 const CASE_FORM_TABS = [
   { id: 'main', title: 'Основное' },
-  { id: 'agreement', title: 'Соглашение', fields: [['agreementNo', 'Номер соглашения'], ['agreementDate', 'Дата соглашения', 'date'], ['agreementSigned', 'Соглашение подписано', 'select', ['Да', 'Нет — ждёт подписи']],
+  { id: 'agreement', title: 'Соглашение', fields: [['agreementNo', 'Номер соглашения', 'text', { auto: 'autoAgreementNo' }], ['agreementDate', 'Дата соглашения', 'date'], ['agreementSigned', 'Соглашение подписано', 'select', ['Да', 'Нет — ждёт подписи']],
     ['actSigned', 'Акт оказанных услуг', 'select', ['Подписан', 'Не подписан', 'Не требуется']], ['orderNo', 'Номер ордера'], ['orderDate', 'Дата ордера', 'date'], ['regdate', 'Дата принятия поручения', 'date'],
     ['recovered', 'Взыскано фактически, ₽', 'number'], ['labels', 'Метки (через запятую)', 'text', { wide: true }], ['docsUrl', 'Папка документов (ссылка)', 'url', { wide: true }]] },
   // ── УПК ──
@@ -4809,6 +4873,7 @@ function caseFormField(f, val, refs, tabId) {
   if (type === 'area') return fText(el, label, val, 3);
   const attrs = type === 'date' ? 'type="date"' : type === 'number' ? 'type="number" inputmode="decimal" step="0.01"' : type === 'url' ? 'type="url" inputmode="url" autocomplete="off" spellcheck="false"' : 'autocomplete="off"';
   if (opts.list) return w(fCombo(el, label, val, opts.list, []));
+  if (opts.auto) return fAutoRow(el, label, val, opts.auto, ''); // номер с кнопкой «Авто» (data/numbering.js)
   return w(fInput(el, label, val, attrs, null));
 }
 
