@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="03.10.2026 18:17 · 0f9b06f">
+<meta name="build" content="03.10.2026 18:39 · 2eef8fe">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -3927,6 +3927,8 @@ window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; retu
 const SCREENS = {};
 async function nav(id) {
   if (!NAV_ITEMS.some(i => i.id === id)) id = 'today';
+  // п. 1.6 (03.10.2026): позиция прокрутки уходящего экрана запоминается (страница прокручивается окном — html и body не контейнеры, урок 30)
+  const prevScreen = UI.screen; if (UI.ready && document.getElementById('scr-' + prevScreen)) navScrollSave(prevScreen);
   UI.screen = id;
   document.querySelectorAll('[data-nav]').forEach(b => { const on = b.dataset.nav === id; b.classList.toggle('active', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   const more = document.querySelector('[data-more]'); if (more) more.classList.toggle('active', !NAV_PHONE.includes(id));
@@ -3937,7 +3939,18 @@ async function nav(id) {
   catch (e) { logErr('nav:' + id, e); html = `<div class="panel">${emptyState('circle-alert', 'Экран не открылся', 'Сбой записан в журнал ошибок. Попробуйте открыть раздел ещё раз.')}</div>`; }
   if (UI.screen !== id) return; // пока читали базу, пользователь уже открыл другой раздел
   main.innerHTML = `<section class="screen active" id="scr-${id}">${html}</section>`;
+  // перерисовка того же экрана (сохранение, обмен) и возврат в «Дела» — на прежнее место; переход в другой раздел — в начало
+  if (UI.ready) navScrollRestore(id, id === prevScreen || NAV_KEEP_PLACE.includes(id));
   const it = NAV_ITEMS.find(i => i.id === id); document.title = (it ? it.title + ' — ' : '') + 'CRM Адвоката (новая версия)';
+}
+// п. 1.6: место на экране. Хранится в sessionStorage (живёт, пока открыта вкладка, и переживает перезагрузку), а не в памяти
+const NAV_KEEP_PLACE = ['cases', 'clients', 'tasks', 'finance', 'leads', 'correspondence'], NAV_SCROLL_KEY = 'crm_next_scroll';
+function navScrollSave(id) { try { const s = JSON.parse(sessionStorage.getItem(NAV_SCROLL_KEY) || '{}'); s[id] = Math.round(window.scrollY || 0); sessionStorage.setItem(NAV_SCROLL_KEY, JSON.stringify(s)); } catch (e) { logErr('nav:scroll', e); } }
+function navScrollRestore(id, keep) {
+  let y = 0; if (UI.navTop) { UI.navTop = false; keep = false; }
+  if (keep) { try { y = Number((JSON.parse(sessionStorage.getItem(NAV_SCROLL_KEY) || '{}'))[id] || 0); } catch (e) { logErr('nav:scroll', e); } }
+  // после вставки разметки — до следующего кадра высота страницы уже известна
+  requestAnimationFrame(() => window.scrollTo(0, y));
 }
 function renderDashboard() { if (UI.ready && UI.screen === 'today') nav('today'); } // вызывают модули данных после слияния
 
@@ -5577,9 +5590,14 @@ function caseCardModel(c, d, now) {
 
 // ── экран ──
 function casesPrefs() { const p = lsJSON(CASES_VIEW_KEY, {}) || {}; return { view: ['list', 'table', 'board'].includes(p.view) ? p.view : 'list', status: CASE_FILTERS.some(f => f[0] === p.status) ? p.status : 'active', q: '' }; }
-function casesSet(k, v) { const p = casesPrefs(); p[k] = v; localStorage.setItem(CASES_VIEW_KEY, JSON.stringify({ view: p.view, status: p.status })); if (k === 'q') UI.casesQ = v; nav('cases'); }
+// п. 1.6 (03.10.2026, разбор GPT подтверждён: запрос жил только в памяти и пропадал при перезагрузке): запрос — в sessionStorage
+// (живёт, пока открыта вкладка программы, и переживает перезагрузку; через день не «прячет» дела старым запросом)
+const CASES_Q_KEY = 'crm_next_cases_q';
+function casesQ() { try { return sessionStorage.getItem(CASES_Q_KEY) || ''; } catch (e) { return UI.casesQ || ''; } }
+function casesSet(k, v) { const p = casesPrefs(); p[k] = v; localStorage.setItem(CASES_VIEW_KEY, JSON.stringify({ view: p.view, status: p.status })); if (k === 'q') { UI.casesQ = v; try { sessionStorage.setItem(CASES_Q_KEY, v); } catch (e) { logErr('cases:q', e); } } UI.navTop = true; nav('cases'); }
+// смена фильтра, вида или запроса — список с начала (иначе прежняя позиция указывает в середину другого списка): флаг UI.navTop
 SCREENS.cases = async function () {
-  const p = casesPrefs(); p.q = UI.casesQ || '';
+  const p = casesPrefs(); p.q = casesQ();
   if (window.innerWidth < 1024) p.view = 'list'; // таблица и доска — только на широком экране (раздел 7)
   const cases = await getAll('cases');
   const m = casesModel(cases, p, new Date());
