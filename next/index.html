@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 00:45 · a42bb29">
+<meta name="build" content="04.10.2026 01:19 · 5478bb7">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2388,10 +2388,12 @@ const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 // этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
 // отметку). Автоматической отправки нет: никакой другой код dbput вызвать не может.
 const NEXT_PUSH = { on: false };
+// план, п. 3.3: список напоминаний (remindput) — только пока идёт передача (sync/remind.js ставит и снимает отметку)
+const NEXT_REMIND = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -3151,6 +3153,82 @@ function nextAutoSet(on) {
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') nextAutoPull(false).catch(e => logErr('auto:pull', e)); });
   window.addEventListener('online', () => nextAutoPull(true).catch(e => logErr('auto:pull', e)));
+}
+
+// ▼▼▼ sync/remind.js
+// ═══ sync/remind.js — напоминания в Telegram с личного сервера (план основных функций, п. 3.3) ═══
+// Перенос v293 (srvRemindBuild / srvRemindSync): список ближайших сроков и заседаний на 14 дней вперёд — даты, номера дел, названия
+// сроков, суд и зал, без ФИО доверителей — уходит на личный сервер (remindput, сервер 177+); таймер Облака раз в день шлёт в Telegram
+// то, что наступает сегодня и завтра. Работает, даже если программа неделю не открывалась. Бот и чат задаются только в переменных
+// функции crm-bridge (TG_TOKEN, TG_CHAT) — в программу токен не вводится. Запись remindput сторож пропускает только на время передачи
+// (NEXT_REMIND в next/guard.js), как отправку базы — NEXT_PUSH. Признак «передавать» (crm_srv_remind) общий с прежней программой.
+const srvRemindOn = () => localStorage.getItem('crm_srv_remind') === '1';
+let SRV_REMIND_TIMER = null;
+async function srvRemindBuild(nowTs) {
+  const now = nowTs || Date.now(), horizon = now + 14 * 864e5, out = [];
+  const isPlanned = h => h && h.status !== 'Проведено' && h.status !== 'Отменено' && h.status !== 'Дата прошла';
+  const cases = await getAll('cases'); const active = cases.filter(c => c && !c._deleted && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено');
+  active.forEach(c => (c.deadlines || []).forEach(dl => { if (!dl || dl.done || !dl.date) return; const t = parseLocalDate(dl.date); if (!t || t.getTime() < now - 864e5 || t.getTime() > horizon) return;
+    out.push({ id: 'd:' + c.id + ':' + dl.date + ':' + String(dl.title || '').slice(0, 20), date: dl.date, title: `Срок: ${dl.title || 'срок'}`, text: [c.number, dl.confirmedAt ? '' : 'не подтверждён'].filter(Boolean).join(' · ') }); }));
+  (await getAll('hearings')).forEach(h => { if (!h || h._deleted || !h.date || !isPlanned(h)) return; const t = parseLocalDate(h.date); if (!t || t.getTime() < now - 864e5 || t.getTime() > horizon) return;
+    out.push({ id: 'h:' + h.id, date: h.date, time: h.time || '', title: `Заседание ${h.caseNum || ''}`.trim(), text: [h.court, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', ') }); });
+  return out.sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || ''))).slice(0, 300);
+}
+// Передать список (или пустой — остановить напоминания). Возвращает ответ сервера; ошибки — словами.
+async function srvRemindSend(items) {
+  if (!(SRV.url && SRV.secret)) return { ok: false, error: 'сначала подключите личный сервер («Синхронизация», шаг 1)' };
+  NEXT_REMIND.on = true;
+  try { const j = await srvCall('remindput', { items }); return j && j.ok ? j : { ok: false, error: j && j.error === 'unknown_action' ? 'сервер старой версии — напоминания есть с версии 177, обновите сервер' : nextSrvError(j) }; }
+  catch (e) { logErr('remind:send', e); return { ok: false, error: String((e && e.message) || e).slice(0, 120) }; }
+  finally { NEXT_REMIND.on = false; }
+}
+async function srvRemindSync(silent) {
+  if (!srvRemindOn()) return null;
+  const j = await srvRemindSend(await srvRemindBuild());
+  if (!j.ok) { localStorage.setItem('crm_next_remind_err', JSON.stringify({ at: Date.now(), msg: j.error })); if (!silent) toast('Напоминания не переданы: ' + j.error, true); return j; }
+  localStorage.setItem('crm_srv_remind_at', String(Date.now())); localStorage.setItem('crm_next_remind_n', String(j.n || 0)); localStorage.setItem('crm_next_remind_tg', j.telegram ? '1' : '0'); localStorage.removeItem('crm_next_remind_err');
+  if (!silent) toast(`На сервер передано напоминаний: ${j.n}${j.telegram ? '' : ' · в функции не заданы TG_TOKEN и TG_CHAT'}`);
+  return j;
+}
+// после правки сроков и заседаний — передать заново через 8 секунд (как в прежней программе)
+function srvRemindTouch() { if (!srvRemindOn() || !(SRV.url && SRV.secret)) return; clearTimeout(SRV_REMIND_TIMER); SRV_REMIND_TIMER = setTimeout(() => srvRemindSync(true).catch(e => logErr('remind:touch', e)), 8000); }
+// каждая запись в базу зовёт srvdbTouch (автообмен, sync/auto.js) — к нему же подключается передача напоминаний
+{ const srvdbTouchAuto = srvdbTouch; srvdbTouch = function () { srvdbTouchAuto(); srvRemindTouch(); }; }
+async function srvRemindToggle(on) {
+  if (on) {
+    localStorage.setItem('crm_srv_remind', '1'); if (typeof bumpSettings === 'function') bumpSettings();
+    // итог передачи показывает строка состояния вверху листа — второго сообщения о том же нет (урок 49)
+    await srvRemindSync(true); openRemindSheet('replace');
+    return;
+  }
+  localStorage.setItem('crm_srv_remind', '0'); if (typeof bumpSettings === 'function') bumpSettings();
+  const j = await srvRemindSend([]);
+  openRemindSheet('replace', j.ok ? { text: 'Список на сервере очищен — напоминания остановлены.' } : { text: 'Передача выключена, но список на сервере не очищен: ' + j.error + '. Повторите, когда будет связь.', bad: true });
+}
+async function srvRemindNow() { const b = document.getElementById('rm-now'); if (b) b.disabled = true; await srvRemindSync(true); openRemindSheet('replace'); }
+function openRemindSheet(sub, msg) {
+  const on = srvRemindOn(), srv = !!(SRV.url && SRV.secret), at = Number(localStorage.getItem('crm_srv_remind_at') || 0), err = lsJSON('crm_next_remind_err', null), tg = localStorage.getItem('crm_next_remind_tg');
+  const state = !srv ? ['', 'Личный сервер не подключён — сначала «Синхронизация», шаг 1'] : !on ? ['', 'Передача на сервер выключена'] : err ? ['bad', 'Последняя передача не удалась: ' + err.msg] : at ? [tg === '0' ? 'warn' : 'good', `Включено · передано ${localStorage.getItem('crm_next_remind_n') || 0} ${new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}${tg === '0' ? ' · у сервера не заданы TG_TOKEN и TG_CHAT — сделайте шаги 1–3' : ' · Telegram у сервера настроен'}`] : ['', 'Включено, список ещё не передавался'];
+  openSheet('Напоминания в Telegram', `<div class="status-line ${state[0]}" id="rm-state" role="status">${icon(state[0] === 'good' ? 'check' : state[0] ? 'circle-alert' : 'send')}<span>${esc(state[1])}</span></div>
+    ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="rm-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
+    <p class="small muted">Раз в день, в 08:05 по Москве, ваш сервер присылает в Telegram сроки и заседания на сегодня и завтра — даже если программа закрыта. Бот — ваш собственный; автор программы к нему доступа не имеет.</p>
+    <div class="section-label step-label">Шаг 1. Создать бота</div>
+    <ol class="steps-list"><li>В Telegram найдите @BotFather (с синей галочкой) → «Start» → команда <b>/newbot</b>.</li>
+      <li>Придумайте имя бота (любое) и адрес, оканчивающийся на «bot», например «advokat_ivanov_bot».</li>
+      <li>BotFather пришлёт <b>токен</b> — строку вида «123456789:AA…». Это секрет: не пересылайте его и не показывайте на снимках экрана. В программу его вводить не нужно — только в Облако (шаг 3).</li></ol>
+    <div class="section-label step-label">Шаг 2. Узнать номер чата</div>
+    <ol class="steps-list"><li>Откройте своего бота по ссылке от BotFather и нажмите «Start» (или напишите ему любое слово).</li>
+      <li>В браузере откройте адрес <b>https://api.telegram.org/bot<i>ТОКЕН</i>/getUpdates</b>, подставив токен вместо слова ТОКЕН.</li>
+      <li>Найдите на странице <b>"chat":{"id":</b> — число после него (например 123456789) и есть номер чата.</li></ol>
+    <div class="section-label step-label">Шаг 3. Записать бота в свой сервер</div>
+    <ol class="steps-list"><li>console.yandex.cloud → каталог с сервером → Cloud Functions → <b>crm-bridge</b> → «Редактор» → «Переменные окружения».</li>
+      <li>Добавьте две переменные: <b>TG_TOKEN</b> — токен из шага 1, <b>TG_CHAT</b> — номер чата из шага 2 → «Создать версию».</li>
+      <li>Таймер: Cloud Functions → crm-bridge → «Триггеры» → создать таймер, выражение cron <b>5 5 * * ? *</b> (это 08:05 по Москве), функция crm-bridge, сервисный аккаунт crm-server.</li></ol>
+    <div class="section-label step-label">Шаг 4. Передавать список на сервер</div>
+    <p class="small muted">На сервер уходят даты, номера дел, названия сроков (как вы их записали — не пишите в них фамилии), суд и зал заседаний на 14 дней вперёд, до 300 записей. Имена доверителей не передаются. Список обновляется сам через несколько секунд после правки срока или заседания.</p>
+    <label class="check"><input type="checkbox" id="rm-on"${on ? ' checked' : ''}${srv ? '' : ' disabled'} onchange="srvRemindToggle(this.checked)"><span>Передавать список напоминаний на сервер</span></label>
+    <div class="form-actions"><button type="button" class="button primary" id="rm-now"${on && srv ? '' : ' disabled'} onclick="srvRemindNow()">${icon('send')}Передать сейчас</button>${srv ? '' : `<button type="button" class="button" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button>`}</div>
+    <p class="small muted">Проверка: после «Передать сейчас» в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных — латиницей, заглавными). Первое сообщение придёт в 08:05, если на сегодня или завтра есть срок или заседание. Ничего не пришло — проверьте таймер (шаг 3) и что вы нажали «Start» у бота.</p>`, sub);
 }
 
 // ▼▼▼ sync/files.js
@@ -4226,7 +4304,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", 'openCasesColsSheet()', 'openYcSetupSheet()', 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -4535,7 +4613,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Размер текста</p>${choice(UI_FONT_SIZES.map(f => [f[0], f[2]]), size, 'setFontSize')}
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     <div class="section-label">Данные</div>
-    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
       <button type="button" class="list-btn" onclick="openMonitorSettingsSheet()"><span>Мониторинг судов</span><span class="muted">${!SRV.url ? 'сервер не подключён' : crmCollectorSrvCfg().url ? 'сбор в облаке настроен' : 'сбор в облаке не настроен'}</span></button>
@@ -4548,7 +4626,7 @@ async function openSettingsSheet(sub) {
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
-    <div class="info-box">Остальные настройки (напоминания в Telegram, лицензия, PIN) ещё переносятся и пока меняются в прежней программе.</div>`, sub);
+    <div class="info-box">Остальные настройки (лицензия, PIN) ещё переносятся и пока меняются в прежней программе.</div>`, sub);
 }
 // журнал ошибок: что сломалось, где и когда — чтобы прислать разработчику; «Скопировать» собирает текст для чата
 function errlogText() { return errLogGet().slice().reverse().map(r => `${new Date(r.t).toLocaleString('ru-RU')} · ${r.ver || ''} · ${r.where || ''}: ${r.msg || ''}${r.extra ? ' · ' + r.extra : ''}${r.stack ? '\n    ' + r.stack : ''}`).join('\n'); }
