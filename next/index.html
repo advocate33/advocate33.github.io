@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 15:28 · dcb99a7">
+<meta name="build" content="04.10.2026 17:17 · 1315f78">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -440,6 +440,25 @@ button.agenda-row:hover{background:var(--surface2)}
   .stat-value,.stat-value.small-value{font-size:1.1rem;margin-top:0;white-space:nowrap}
 }
 @media print{.sidebar,.topbar,.bottom-nav,#toast{display:none!important}.layout{display:block}}
+
+/* отчёты (план перехода, п. 1, 04.10.2026): полосы и столбцы без библиотек */
+.rep-panel{margin-bottom:14px}.rep-body{padding:12px 20px 10px}.rep-tabs{flex-wrap:wrap}.rep-empty{margin:0 0 6px}
+.rep-bars{display:flex;flex-direction:column;gap:2px}
+.rep-row{display:block;width:100%;padding:6px 0;text-align:left;background:none;border:0;color:inherit;font:inherit}
+.rep-link{cursor:pointer;min-height:var(--touch);border-radius:var(--r-sm)}.rep-link:hover .rep-label{color:var(--text)}
+.rep-top{display:flex;justify-content:space-between;gap:10px;font-size:.8125rem}
+.rep-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted)}
+.rep-top b{flex-shrink:0;font-variant-numeric:tabular-nums}
+.rep-track{display:block;height:8px;background:var(--surface2);border-radius:var(--r-sm);margin-top:5px;overflow:hidden}
+.rep-fill{display:block;height:100%;background:var(--accent);border-radius:var(--r-sm)}.rep-fill.good{background:var(--good)}.rep-fill.warn{background:var(--warn)}
+.rep-cols{display:flex;align-items:flex-end;gap:6px;height:160px;padding-top:8px}
+.rep-col{flex:1;min-width:0;max-width:72px;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px}
+.rep-col-v,.rep-col-l{font-size:.6875rem;color:var(--text-muted);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.rep-col-bar{position:relative;display:block;width:100%;background:var(--accent-soft);border-radius:var(--r-sm) var(--r-sm) 0 0;overflow:hidden}.rep-col-bar.solid{background:var(--accent)}
+.rep-col-part{position:absolute;left:0;right:0;bottom:0;background:var(--good)}
+.rep-dot{display:inline-block;width:10px;height:10px;border-radius:var(--r-sm);background:var(--good);vertical-align:-1px}
+/* на телефоне плитки скрыты правилом «Сегодня» (вариант Б) — у отчётов они нужны: сетка 2×2 */
+@media (max-width:760px){.rep-body{padding:10px 14px 8px}.stats.rep-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}.rep-stats .stat{display:block;text-align:left;padding:10px 12px}.rep-stats .stat-label{justify-content:space-between;white-space:normal}.rep-stats .stat-meta{display:block;margin-top:4px}.rep-stats .stat-value.small-value{font-size:1.15rem;margin-top:4px;white-space:normal}}
 
 </style>
 </head>
@@ -7670,6 +7689,200 @@ async function saveExpenseForm(id) {
   try { await put('expenses', r.obj); } catch (e) { logErr('form:expense', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(id ? 'Расход сохранён' : 'Расход записан'); closeSheet(); if (UI.screen === 'finance') finSet('tab', 'expenses'); else nav(UI.screen);
 }
+
+// ▼▼▼ screens/reports.js
+// ═══ screens/reports.js — отчёты (план перехода, п. 1; решение пользователя 04.10.2026) ═══
+// Расчёты — как в прежней программе (renderReports v289, renderAnalytics v221, renderProfitChart): те же правила периода, статус дела на
+// конец периода по журналу (history), завершённые — по вехе «Завершено» или дате завершения, доход — по журналу платежей счёта, долг — без
+// условного гонорара успеха, заседания «Проведено» (статус «Дата прошла» проведённым не считается). Цифры сверяются с прежней программой на
+// тех же данных (tests/next_reports_cmp.py). Отличие от прежней: оплата «Карта / СБП» показана отдельно (в прежней — «способ не указан»).
+// Разметка своя: вкладки Дела · Финансы · Нагрузка · Обращения, у каждого блока — «за период» / «на сегодня» / «все дела».
+const REP_KEY = 'crm_next_reports';
+const REP_PRESETS = [['month', 'Месяц'], ['quarter', 'Квартал'], ['year', 'Год'], ['all', 'Всё время'], ['custom', 'Свой период']];
+const REP_TABS = [['cases', 'Дела'], ['fin', 'Финансы'], ['load', 'Нагрузка'], ['leads', 'Обращения']];
+const REP_NO_CASE = '— без дела —';
+function repPrefs() {
+  const p = lsJSON(REP_KEY, {}) || {};
+  return { preset: REP_PRESETS.some(x => x[0] === p.preset) ? p.preset : 'month', tab: REP_TABS.some(x => x[0] === p.tab) ? p.tab : 'cases',
+    from: /^\d{4}-\d{2}-\d{2}$/.test(p.from || '') ? p.from : '', to: /^\d{4}-\d{2}-\d{2}$/.test(p.to || '') ? p.to : '' };
+}
+function repSave(p) { localStorage.setItem(REP_KEY, JSON.stringify(p)); }
+function repSet(k, v) { const p = repPrefs(); p[k] = v; if (k === 'preset' && v === 'custom') { const n = new Date(); p.from = p.from || localISO(new Date(n.getFullYear(), n.getMonth(), 1)); p.to = p.to || todayISO(); } repSave(p); nav('reports'); }
+function repSetRange() {
+  const f = fv('rp-from'), t = fv('rp-to');
+  if (!f || !t) { toast('Укажите обе даты периода', true); return; }
+  if (f > t) { toast('Начало периода позже конца — поменяйте даты местами', true); return; }
+  const p = repPrefs(); p.from = f; p.to = t; repSave(p); nav('reports');
+}
+// даты: число (мс), Date или 'ГГГГ-ММ-ДД…' — как dateValue прежней программы
+function repDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(v).slice(0, 10))) return parseLocalDate(String(v).slice(0, 10));
+  const d = new Date(v); return isNaN(d) ? null : d;
+}
+const repIn = (v, from, to) => { const d = repDate(v); return !!d && d >= from && d <= to; };
+// период — как reportRange прежней программы; «сейчас» — параметром (урок 8)
+function repRange(p, now) {
+  now = now || new Date();
+  let from, to = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+  if (p.preset === 'month') from = new Date(now.getFullYear(), now.getMonth(), 1);
+  else if (p.preset === 'quarter') from = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
+  else if (p.preset === 'year') from = new Date(now.getFullYear(), 0, 1);
+  else if (p.preset === 'all') from = new Date(2000, 0, 1);
+  else { from = repDate(p.from) || new Date(now.getFullYear(), now.getMonth(), 1); const t = repDate(p.to); if (t) to = new Date(t.getFullYear(), t.getMonth(), t.getDate(), 23, 59, 59); }
+  return { from, to, label: p.preset === 'all' ? 'за всё время' : fmtDate(localISO(from)) + ' — ' + fmtDate(localISO(to)) };
+}
+// статус дела на конец периода (caseStatusAt v2xx): по журналу статусов; без журнала — по дате завершения
+function repStatusAt(c, at) {
+  const opened = repDate(c.regdate || c.createdAt);
+  if (opened && opened > at) return null;
+  const ev = (Array.isArray(c.history) ? c.history : []).filter(e => e && e.field === 'status' && Number(e.at) <= at.getTime()).sort((a, b) => Number(a.at) - Number(b.at));
+  if (ev.length) return ev[ev.length - 1].to || c.initialStatus || c.status;
+  const closed = repDate(c.closedAt);
+  if (c.status === 'Завершено' && (!closed || closed <= at)) return 'Завершено';
+  if (c.status === 'Завершено' && closed && closed > at) return c.initialStatus || 'В работе';
+  return c.status || c.initialStatus || 'Новое';
+}
+function repClosedInRange(c, from, to) {
+  const ev = (Array.isArray(c.history) ? c.history : []).filter(e => e && e.field === 'status' && e.to === 'Завершено');
+  return ev.some(e => repIn(new Date(Number(e.at)), from, to)) || repIn(c.closedAt, from, to) || repIn(c.lastClosedAt, from, to);
+}
+const repPays = f => (typeof finPaymentsOf === 'function' ? finPaymentsOf(f) : (Array.isArray(f.payments) && f.payments.length ? f.payments : (Number(f.paid || 0) > 0 ? [{ at: f.paidAt || f.createdAt, sum: Number(f.paid), method: '' }] : [])));
+// результат дела — последний из кассации → апелляции → первой инстанции (anOutcomeKey v221)
+function repOutcome(c) {
+  const r = c.csResult || c.apResult || c.i1Result || '';
+  if (/удовлетвор|оставлено без изменения/i.test(r) && !/частично/i.test(r)) return 'win';
+  if (/частично|изменено/i.test(r)) return 'part';
+  if (/отказано|отменено/i.test(r)) return 'loss';
+  return 'other';
+}
+const repTop = (obj, n) => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n || 1e9);
+// d = { cases, finance, hearings, leads, time }; возвращает все цифры отчётов
+function reportsModel(d, from, to, opts) {
+  opts = opts || {};
+  const cases = (d.cases || []).filter(x => x && !x._deleted), finance = (d.finance || []).filter(x => x && !x._deleted), hearings = (d.hearings || []).filter(x => x && !x._deleted);
+  const leads = (d.leads || []).filter(x => x && !x._deleted), time = (d.time || []).filter(x => x && !x._deleted);
+  const byNum = {}; cases.forEach(c => { if (c.number) byNum[c.number] = c; });
+  const fromISO = localISO(from), toISO = localISO(to), inP = iso => !!iso && String(iso).slice(0, 10) >= fromISO && String(iso).slice(0, 10) <= toISO;
+  // ── дела ──
+  const done = cases.filter(c => repClosedInRange(c, from, to));
+  const active = cases.filter(c => { const s = repStatusAt(c, to); return s && s !== 'Завершено'; });
+  const period = [...active, ...done], withNo = period.filter(c => String(c.courtNo || '').trim()).length;
+  const claimed = done.reduce((a, c) => a + Number(c.amount || 0), 0), recovered = done.reduce((a, c) => a + Number(c.recovered || 0), 0);
+  const statuses = (typeof REF === 'object' && REF && Array.isArray(REF.caseStatus) ? REF.caseStatus : ['Новое', 'В работе', 'Ожидание', 'Завершено']);
+  const byStatus = statuses.map(s => [s, s === 'Завершено' ? done.length : cases.filter(c => repStatusAt(c, to) === s).length]);
+  const kindTot = {}, kindAct = {}; cases.forEach(c => { const k = c.kind || '— без категории —'; kindTot[k] = (kindTot[k] || 0) + 1; if (c.status !== 'Завершено' && !c.archived) kindAct[k] = (kindAct[k] || 0) + 1; });
+  const byKind = Object.keys(kindTot).map(k => [k, kindTot[k], kindAct[k] || 0]).sort((a, b) => b[1] - a[1]);
+  const stageCnt = {}; cases.filter(c => c.status !== 'Завершено' && c.stage !== 'Завершено' && !c.archived).forEach(c => { const k = c.stage || 'Без стадии'; stageCnt[k] = (stageCnt[k] || 0) + 1; });
+  const stageOrder = (typeof CASE_STAGES_NEXT !== 'undefined' ? CASE_STAGES_NEXT : ['Досудебная', 'Первая инстанция', 'Апелляция', 'Кассация', 'Надзор', 'Исполнение', 'Завершено']).concat(['Без стадии']);
+  const byStage = stageOrder.filter(k => stageCnt[k]).map(k => [k, stageCnt[k]]).concat(Object.keys(stageCnt).filter(k => !stageOrder.includes(k)).map(k => [k, stageCnt[k]]));
+  const outCat = {}; done.forEach(c => { const k = c.category || c.kind || 'Без категории'; outCat[k] = outCat[k] || {}; const o = repOutcome(c); outCat[k][o] = (outCat[k][o] || 0) + 1; });
+  const outcomes = Object.entries(outCat).map(([label, parts]) => ({ label, parts, total: Object.values(parts).reduce((x, y) => x + y, 0) })).sort((a, b) => b.total - a.total).slice(0, 8);
+  // ── финансы ──
+  const payPeriod = []; finance.forEach(f => repPays(f).forEach(pp => { if (repIn(pp.at, from, to) && Number(pp.sum) > 0) payPeriod.push({ ...pp, f }); }));
+  const income = payPeriod.reduce((a, pp) => a + Number(pp.sum || 0), 0);
+  const byMethod = { cash: 0, bank: 0, card: 0, '': 0 }; payPeriod.forEach(pp => { byMethod[pp.method in byMethod ? pp.method : ''] += Number(pp.sum || 0); });
+  const billedList = finance.filter(f => repIn(f.createdAt, from, to));
+  const billed = billedList.reduce((a, f) => a + Number(f.amount || 0), 0);
+  const debt = billedList.reduce((a, f) => a + (f.pending ? 0 : Math.max(0, Number(f.amount || 0) - Number(f.paid || 0))), 0);
+  const Y = opts.year || new Date().getFullYear(); let yNow = 0, yPrev = 0;
+  finance.forEach(f => repPays(f).forEach(pp => { const yy = Number(String(pp.at || '').slice(0, 4)); if (yy === Y) yNow += Number(pp.sum || 0); else if (yy === Y - 1) yPrev += Number(pp.sum || 0); }));
+  const months = {}; finance.forEach(f => repPays(f).forEach(pp => { if (!repIn(pp.at, from, to) || !Number(pp.sum)) return; const dd = repDate(pp.at), k = dd.getFullYear() + '-' + String(dd.getMonth() + 1).padStart(2, '0'); months[k] = (months[k] || 0) + Number(pp.sum || 0); }));
+  const byMonth = Object.keys(months).sort().map(k => [k, months[k]]);
+  const finCase = {}; payPeriod.forEach(pp => { const k = pp.f.caseNum || REP_NO_CASE; finCase[k] = (finCase[k] || 0) + Number(pp.sum || 0); });
+  const byCase = repTop(finCase).filter(r => r[1] > 0).map(([num, sum]) => ({ num, sum, client: num !== REP_NO_CASE && byNum[num] ? byNum[num].client || '' : '', caseId: byNum[num] ? byNum[num].id : '' }));
+  const debtCl = {}; finance.forEach(f => { if (f.pending) return; const owed = Number(f.amount || 0) - Number(f.paid || 0); if (owed <= 0) return; const k = f.client || '— без участника —'; debtCl[k] = (debtCl[k] || 0) + owed; });
+  const debtors = repTop(debtCl), totalDebt = debtors.reduce((a, r) => a + r[1], 0);
+  const kindInc = {}, kindCnt = {}; payPeriod.forEach(pp => { const cs = byNum[pp.f.caseNum], k = (cs && cs.kind) || '— прочее —'; kindInc[k] = (kindInc[k] || 0) + Number(pp.sum || 0); });
+  period.forEach(c => { const k = c.kind || '— прочее —'; kindCnt[k] = (kindCnt[k] || 0) + 1; });
+  const kindIncome = Array.from(new Set([...Object.keys(kindInc), ...Object.keys(kindCnt)])).map(k => [k, kindInc[k] || 0, kindCnt[k] || 0]).sort((a, b) => b[1] - a[1] || b[2] - a[2]);
+  const ipGot = {}; cases.forEach(c => (Array.isArray(c.ipReceipts) ? c.ipReceipts : []).forEach(r => { if (inP(r.date)) { const k = c.client || c.number || 'Без участника'; ipGot[k] = (ipGot[k] || 0) + (Number(r.sum) || 0); } }));
+  const ip = repTop(ipGot, 5), ipTotal = Object.values(ipGot).reduce((a, b) => a + b, 0);
+  // ── нагрузка ──
+  const conducted = hearings.filter(h => h.status === 'Проведено' && repIn(h.date, from, to)), attended = conducted.filter(h => h.attended === true);
+  const hCase = {}; conducted.forEach(h => { const k = h.caseNum || REP_NO_CASE; hCase[k] = (hCase[k] || 0) + 1; });
+  const hearByCase = repTop(hCase).map(([num, n]) => ({ num, n, client: num !== REP_NO_CASE && byNum[num] ? byNum[num].client || '' : '', caseId: byNum[num] ? byNum[num].id : '' }));
+  const hiddenOutside = opts.preset === 'all' ? 0 : hearings.filter(h => h.status === 'Проведено').length - conducted.length;
+  const hm = {}; hearings.filter(h => inP(h.date) && h.status !== 'Отменено').forEach(h => { const k = h.date.slice(0, 7); hm[k] = hm[k] || { n: 0, a: 0 }; hm[k].n++; if (h.attended) hm[k].a++; });
+  const hearMonths = Object.keys(hm).sort().slice(-12).map(k => ({ ym: k, n: hm[k].n, a: hm[k].a }));
+  const byCourt = {}, byJudge = {}; cases.forEach(c => { if (c.court) byCourt[c.court] = (byCourt[c.court] || 0) + 1; if (c.judge) byJudge[c.judge] = (byJudge[c.judge] || 0) + 1; });
+  const hrs = {}; time.filter(t => inP(t.date)).forEach(t => { const k = t.caseNum || 'Без дела'; hrs[k] = (hrs[k] || 0) + Number(t.minutes || 0); });
+  const hours = repTop(hrs, 5).map(([k, m]) => ({ num: k, client: byNum[k] ? byNum[k].client || '' : '', h: Math.round(m / 6) / 10 })), totalHours = Math.round(Object.values(hrs).reduce((a, b) => a + b, 0) / 6) / 10;
+  // ── обращения (все, как в прежней программе) ──
+  const won = leads.filter(l => l.status === 'Взято в работу').length, lost = leads.filter(l => l.status === 'Отказ').length;
+  const leadSt = (typeof LEAD_STATUSES !== 'undefined' ? LEAD_STATUSES : ['Новое', 'Консультация', 'Думает', 'Взято в работу', 'Отказ']).map(s => [s, leads.filter(l => l.status === s).length]).filter(r => r[1] > 0);
+  const src = {}; leads.forEach(l => { const s = l.source || 'Не указан'; src[s] = (src[s] || 0) + 1; });
+  return {
+    cases: { active: active.length, done: done.length, withNo, noNo: period.length - withNo, claimed, recovered, pct: claimed > 0 ? Math.round(recovered / claimed * 100) : null, byStatus, byKind, total: cases.length, activeNow: cases.filter(c => c.status !== 'Завершено' && !c.archived).length, byStage, outcomes },
+    fin: { income, billed, debt, year: { y: Y, now: yNow, prev: yPrev, pct: yPrev > 0 ? Math.round((yNow - yPrev) / yPrev * 100) : null }, byMethod, byMonth, byCase, debtors, totalDebt, kindIncome, ip, ipTotal },
+    load: { conducted: conducted.length, attended: attended.length, attendedCases: new Set(attended.map(h => h.caseNum || '').filter(Boolean)).size, casesWithHearings: hearByCase.filter(r => r.num !== REP_NO_CASE).length, hearByCase, hiddenOutside, hearMonths, courts: repTop(byCourt, 8), judges: repTop(byJudge, 8), hours, totalHours },
+    leads: { total: leads.length, won, lost, conv: leads.length ? Math.round(won / leads.length * 100) : 0, byStatus: leadSt, sources: repTop(src) },
+  };
+}
+// ── показ ──
+function repBars(rows, opts) {
+  opts = opts || {};
+  if (!rows.length) return `<p class="small muted rep-empty">${esc(opts.empty || 'Нет данных')}</p>`;
+  const max = Math.max(1, ...rows.map(r => r.value));
+  return `<div class="rep-bars">${rows.map(r => {
+    const inner = `<span class="rep-top"><span class="rep-label">${esc(r.label)}${r.sub ? ` <span class="muted">· ${esc(r.sub)}</span>` : ''}</span><b>${esc(r.text != null ? r.text : String(r.value))}</b></span><span class="rep-track"><span class="rep-fill ${opts.cls || ''}" style="width:${Math.round(r.value / max * 100)}%"></span></span>`;
+    return r.open ? `<button type="button" class="rep-row rep-link" onclick="${r.open}">${inner}</button>` : `<div class="rep-row">${inner}</div>`;
+  }).join('')}</div>`;
+}
+function repCols(cols, opts) {
+  opts = opts || {};
+  if (!cols.length) return `<p class="small muted rep-empty">${esc(opts.empty || 'Нет данных за период')}</p>`;
+  const max = Math.max(1, ...cols.map(c => c.value));
+  return `<div class="rep-cols">${cols.map(c => `<div class="rep-col"><span class="rep-col-v">${esc(c.text)}</span><span class="rep-col-bar${opts.solid ? ' solid' : ''}" style="height:${Math.round(c.value / max * 110) + 4}px">${c.part ? `<span class="rep-col-part" style="height:${Math.round(c.part / c.value * 100)}%"></span>` : ''}</span><span class="rep-col-l">${esc(c.label)}</span></div>`).join('')}</div>${opts.legend ? `<p class="small muted" style="margin:6px 0 0"><span class="rep-dot"></span> ${esc(opts.legend)}</p>` : ''}`;
+}
+const repMonth = (ym, year) => { const m = new Date(+ym.slice(0, 4), +ym.slice(5, 7) - 1, 1).toLocaleDateString('ru-RU', { month: 'short' }).replace('.', ''); return ym.slice(0, 4) !== String(year) ? m + ' ' + ym.slice(2, 4) : m; };
+const repPanel = (id, title, when, body) => `<section class="panel rep-panel" id="${id}"><div class="panel-title"><h2>${esc(title)}</h2><span class="badge">${esc(when)}</span></div><div class="rep-body">${body}</div></section>`;
+const repStat = (t, v, sub, ico) => `<div class="stat"><span class="stat-label"><span>${esc(t)}</span>${icon(ico)}</span><span class="stat-value small-value">${esc(v)}</span><span class="stat-meta">${esc(sub)}</span></div>`;
+SCREENS.reports = async function () {
+  const p = repPrefs(), now = new Date(), r = repRange(p, now);
+  const d = {}; for (const st of ['cases', 'finance', 'hearings', 'leads', 'time']) { try { d[st] = await getAll(st); } catch (e) { logErr('reports:' + st, e); d[st] = []; } }
+  const m = reportsModel(d, r.from, r.to, { year: now.getFullYear(), preset: p.preset });
+  const chips = REP_PRESETS.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.preset === k}" onclick="repSet('preset','${k}')">${esc(t)}</button>`).join('');
+  const custom = p.preset === 'custom' ? `<div class="form-grid" style="margin-bottom:12px">${fInput('rp-from', 'С', p.from, 'type="date"')}${fInput('rp-to', 'По', p.to, 'type="date"')}<div class="field"><span>&nbsp;</span>${btn('Показать', 'repSetRange()', 'primary', 'search')}</div></div>` : '';
+  const tabs = REP_TABS.map(([k, t]) => `<button type="button" class="button small-btn" aria-pressed="${p.tab === k}" onclick="repSet('tab','${k}')">${esc(t)}</button>`).join('');
+  const P = 'за период', N = 'на сегодня', A = 'все дела';
+  const caseOpen = x => x.caseId ? `openCaseSheet('${jsq(x.caseId)}')` : '';
+  let body = '';
+  if (p.tab === 'cases') {
+    const c = m.cases, OUT = [['win', 'в пользу'], ['part', 'частично'], ['loss', 'против'], ['other', 'иное']];
+    body = `<div class="stats rep-stats">${repStat('В производстве', String(c.active), 'на конец периода', 'briefcase-business')}${repStat('Завершено', String(c.done), r.label, 'check-check')}${repStat('С номером в суде', String(c.withNo), 'без номера: ' + c.noNo, 'gavel')}${repStat('Взыскано', fmtMoney(c.recovered), 'предъявлено ' + fmtMoney(c.claimed) + (c.pct !== null ? ' · ' + c.pct + '%' : ''), 'wallet')}</div>`
+      + repPanel('rep-status', 'Дела по статусам', 'на конец периода', repBars(c.byStatus.map(([s, n]) => ({ label: s, value: n }))))
+      + repPanel('rep-stage', 'Дела в работе по стадиям', N, repBars(c.byStage.map(([s, n]) => ({ label: s, value: n })), { empty: 'Нет дел в работе' }))
+      + repPanel('rep-kind', 'Дела по видам', A, `<p class="small muted" style="margin:0 0 10px">Всего дел: ${c.total} · в работе: ${c.activeNow}</p>` + repBars(c.byKind.map(([k, tot, act]) => ({ label: k, value: tot, text: tot + (act < tot ? ' (' + act + ' в работе)' : '') })), { empty: 'Дел пока нет' }))
+      + repPanel('rep-outcomes', 'Результаты завершённых дел', P, c.outcomes.length ? repBars(c.outcomes.map(o => ({ label: o.label, value: o.total, sub: OUT.filter(([k]) => o.parts[k]).map(([k, t]) => t + ' ' + o.parts[k]).join(', ') }))) : `<p class="small muted rep-empty">Нет завершённых дел за период</p>`);
+  } else if (p.tab === 'fin') {
+    const f = m.fin, meth = [['cash', 'Наличными'], ['bank', 'Безналом'], ['card', 'Карта / СБП'], ['', 'Способ не указан']].filter(([k]) => f.byMethod[k] > 0);
+    body = `<div class="stats rep-stats">${repStat('Получено', fmtMoney(f.income), r.label, 'wallet')}${repStat('Выставлено', fmtMoney(f.billed), 'счета периода', 'files')}${repStat('Долг по счетам периода', fmtMoney(f.debt), 'без гонорара успеха', 'circle-alert')}${repStat('Доход за ' + f.year.y, fmtMoney(f.year.now), f.year.pct !== null ? 'к ' + (f.year.y - 1) + ': ' + (f.year.pct >= 0 ? '+' : '') + f.year.pct + '%' : (f.year.now > 0 ? 'в ' + (f.year.y - 1) + ': 0 ₽' : 'по журналу платежей'), 'chart-column')}</div>`
+      + repPanel('rep-methods', 'По способам оплаты', P, repBars(meth.map(([k, t]) => ({ label: t, value: f.byMethod[k], text: fmtMoney(f.byMethod[k]) })), { cls: 'good', empty: 'Нет оплат за период' }))
+      + repPanel('rep-months', 'Получено по месяцам', P, repCols(f.byMonth.map(([k, s]) => ({ label: repMonth(k, f.year.y), value: s, text: Math.round(s / 1000) + ' тыс.' })), { empty: 'Нет оплат за период', solid: true }))
+      + repPanel('rep-bycase', 'Получено по делам', P, repBars(f.byCase.map(x => ({ label: x.num, sub: x.client, value: x.sum, text: fmtMoney(x.sum), open: caseOpen(x) })), { cls: 'good', empty: 'Нет оплат за период' }))
+      + repPanel('rep-kindinc', 'По видам дел', P, repBars(f.kindIncome.map(([k, s, n]) => ({ label: k, sub: n + ' ' + plural(n, 'дело', 'дела', 'дел'), value: s, text: fmtMoney(s) }))))
+      + repPanel('rep-debtors', 'Кто должен', N, f.debtors.length ? `<p class="small" style="margin:0 0 10px">Всего к получению: <b>${esc(fmtMoney(f.totalDebt))}</b></p>` + repBars(f.debtors.map(([cl, s]) => ({ label: cl, value: s, text: fmtMoney(s) })), { cls: 'warn' }) : `<p class="small muted rep-empty">Задолженностей нет — все счета оплачены</p>`)
+      + (f.ip.length ? repPanel('rep-ip', 'Взыскано по исполнительным производствам · ' + fmtMoney(f.ipTotal), P, repBars(f.ip.map(([cl, s]) => ({ label: cl, value: s, text: fmtMoney(s) })), { cls: 'good' })) : '');
+  } else if (p.tab === 'load') {
+    const l = m.load;
+    body = `<div class="stats rep-stats">${repStat('Проведено заседаний', String(l.conducted), r.label, 'gavel')}${repStat('Лично участвовал(а)', String(l.attended), 'дел: ' + l.attendedCases, 'users-round')}${repStat('Дел с заседаниями', String(l.casesWithHearings), 'за период', 'briefcase-business')}${repStat('Часы по делам', l.totalHours ? l.totalHours + ' ч' : '—', 'по записям времени', 'clock-3')}</div>`
+      + (l.hiddenOutside > 0 ? `<div class="info-box" id="rep-hidden">Вне выбранного периода ещё ${l.hiddenOutside} ${plural(l.hiddenOutside, 'проведённое заседание', 'проведённых заседания', 'проведённых заседаний')}. <button type="button" class="text-button" onclick="repSet('preset','all')">Показать за всё время</button></div>` : '')
+      + repPanel('rep-hmonths', 'Заседания по месяцам', P, repCols(l.hearMonths.map(x => ({ label: repMonth(x.ym, now.getFullYear()), value: x.n, part: x.a, text: String(x.n) })), { empty: 'Нет заседаний за период', legend: 'участвовал(а) лично' }))
+      + repPanel('rep-hcases', 'Проведённые заседания по делам', P, repBars(l.hearByCase.map(x => ({ label: x.num, sub: x.client, value: x.n, text: x.n + ' ' + plural(x.n, 'заседание', 'заседания', 'заседаний'), open: caseOpen(x) })), { empty: 'Нет проведённых заседаний за период' }))
+      + repPanel('rep-courts', 'Суды', A, repBars(l.courts.map(([k, n]) => ({ label: k, value: n })), { empty: 'Суды в делах не указаны' }))
+      + repPanel('rep-judges', 'Судьи', A, repBars(l.judges.map(([k, n]) => ({ label: k, value: n })), { empty: 'Судьи в делах не указаны' }))
+      + (l.hours.length ? repPanel('rep-hours', 'Часы по делам · всего ' + l.totalHours + ' ч', P, repBars(l.hours.map(x => ({ label: x.num, sub: x.client, value: x.h, text: x.h + ' ч' })))) : '');
+  } else {
+    const q = m.leads;
+    body = q.total ? `<div class="stats rep-stats">${repStat('Всего обращений', String(q.total), 'все', 'user-plus')}${repStat('Конверсия в дела', q.conv + '%', 'взято в работу: ' + q.won, 'check')}${repStat('Отказов', String(q.lost), 'все', 'x')}${repStat('В работе с ними', String(q.total - q.won - q.lost), 'новые и думают', 'clock-3')}</div>`
+      + repPanel('rep-lstatus', 'Обращения по статусам', 'все', repBars(q.byStatus.map(([s, n]) => ({ label: s, value: n }))))
+      + repPanel('rep-lsource', 'Источники обращений', 'все', repBars(q.sources.map(([s, n]) => ({ label: s, value: n }))))
+      : `<section class="panel">${emptyState('user-plus', 'Обращений пока нет', 'Воронка обращений и конверсия в дела появятся, когда будут обращения.')}</section>`;
+  }
+  return pageHead('Отчёты', 'Период: ' + r.label, '') + `<div class="chips" style="margin-bottom:12px">${chips}</div>${custom}<div class="choice rep-tabs" style="margin:0 0 14px">${tabs}</div>${body}`;
+};
 
 // ▼▼▼ screens/monitoring.js
 // ═══ screens/monitoring.js — экран «Суды и мониторинг» (этап 4, часть 1) ═══
