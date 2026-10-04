@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 03:46 · 762f56a">
+<meta name="build" content="04.10.2026 04:15 · 874e066">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2327,6 +2327,54 @@ async function docBlobGet(v) {
   return '';
 }
 
+// 3. Слияние не затирает правку, сделанную во время обмена (разбор GPT 04.10.2026, п. 1). mergeIncoming читает раздел целиком, решает по
+//    этой копии и пишет записи по одной. Если между чтением и записью запись сохранили на устройстве (форма, быстрая заметка), результат,
+//    посчитанный по старой копии, лёг бы поверх. Теперь запись слияния проверяется в той же транзакции: метка _upd записи на устройстве должна
+//    совпасть с прочитанной при чтении раздела. Не совпала — запись не трогается, слияние считается неполным (failed, raced): метка слияния и
+//    версия сервера не сдвигаются, и следующий обмен объединит записи заново, уже со свежей правкой. Записи, которых при чтении не было, и
+//    повторные записи самого слияния проверяются по своей последней метке. Отправки на сервер такая запись не вызывает (как putRaw, урок 66).
+const MERGE_SEEN = { on: false, upd: new Map(), raced: 0 };
+const mergeSeenKey = (store, id) => store + '\u0001' + id;
+// модули данных есть в сборке всегда; в тестовых песочницах без них переопределение пропускается
+if (typeof putRaw === 'function' && typeof mergeIncoming === 'function') {
+  const getAllRawUnguarded = getAllRaw;
+  getAllRaw = async function (store) {
+    const a = await getAllRawUnguarded(store);
+    if (MERGE_SEEN.on) for (const r of a) if (r && r.id != null && !MERGE_SEEN.upd.has(mergeSeenKey(store, r.id))) MERGE_SEEN.upd.set(mergeSeenKey(store, r.id), r._upd || 0);
+    return a;
+  };
+  const putRawUnguarded = putRaw;
+  putRaw = function (store, obj) {
+    if (!MERGE_SEEN.on || !obj || obj.id == null || !MERGE_SEEN.upd.has(mergeSeenKey(store, obj.id))) return putRawUnguarded(store, obj);
+    const key = mergeSeenKey(store, obj.id), seen = MERGE_SEEN.upd.get(key);
+    return new Promise((res, rej) => {
+      let done = false; const finish = (ok, e) => { if (done) return; done = true; if (ok) res(true); else rej(e); };
+      let t; try { t = db.transaction(store, 'readwrite'); } catch (e) { storageWriteError(e); finish(false, new Error('Не удалось сохранить: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
+      const os = t.objectStore(store), g = os.get(obj.id);
+      g.onsuccess = () => {
+        const fresh = g.result, now = fresh ? (fresh._upd || 0) : null;
+        if (now !== seen) { MERGE_SEEN.raced++; finish(false, new Error('запись «' + obj.id + '» изменилась на этом устройстве во время обмена — объединится при следующем обмене')); try { t.abort(); } catch (e) { /* штатно: транзакция уже завершается */ } return; }
+        os.put(obj);
+      };
+      t.oncomplete = () => { MERGE_SEEN.upd.set(key, obj._upd || 0); finish(true); };
+      t.onerror = () => { if (!done) storageWriteError(t.error); finish(false, new Error('Не удалось сохранить запись: ' + ((t.error && t.error.message) || 'ошибка хранилища'))); };
+      t.onabort = () => finish(false, new Error('Не удалось сохранить запись: транзакция прервана'));
+    });
+  };
+  const mergeIncomingUnguarded = mergeIncoming;
+  mergeIncoming = async function (parsed, allowSecrets, opts) {
+    if (opts && opts.dryRun) return mergeIncomingUnguarded(parsed, allowSecrets, opts);
+    MERGE_SEEN.on = true; MERGE_SEEN.upd.clear(); MERGE_SEEN.raced = 0;
+    try { const r = await mergeIncomingUnguarded(parsed, allowSecrets, opts); return Object.assign(r, { raced: MERGE_SEEN.raced }); }
+    finally { MERGE_SEEN.on = false; MERGE_SEEN.upd.clear(); }
+  };
+}
+// текст о неполном слиянии: записи, изменённые во время обмена, называются отдельно (их не «не удалось записать» — их не тронули нарочно)
+function mergeFailText(r, plain) {
+  if (r && r.raced && r.raced >= r.failed) return 'записи изменились на этом устройстве во время обмена (' + r.raced + ') — объединятся при повторе';
+  return plain;
+}
+
 // ▼▼▼ data/numbering.js
 // ═══ data/numbering.js — автонумерация дел и соглашений (поручение пользователя 03.10.2026) ═══
 // Правила — как в прежней программе (v312 nextCaseNo / nextAgreementNo): номер дела «Д-N/ГГГГ» — первый свободный N текущего года
@@ -2546,7 +2594,7 @@ async function nextServerPull() {
     const r = await srvdbMergeSnapshot(g, true);
     if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
     if (r.empty) { SRVDB.lastErr = null; return r; }
-    if (r.failed) { const msg = 'не записано записей: ' + r.failed + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
+    if (r.failed) { const msg = (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей: ' + r.failed) : 'не записано записей: ' + r.failed) + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
     if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore));
     localStorage.setItem('crm_next_pull_res', JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
     srvdbNote('pull');
@@ -2793,7 +2841,7 @@ async function nextServerPush() {
       pushStage('get', again ? 'повтор: другое устройство записало базу во время отправки' : null);
       const g = await nextDbGet();
       if (!g || !g.ok) return { err: nextSrvError(g) };
-      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: 'не записано записей с сервера: ' + r.failed + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
+      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
       return { ver: 0, added: 0, updated: 0 };
     };
     let blobs = null; // v8: файлы документов — отдельными объектами, один раз (sync/blobs.js)
@@ -3133,7 +3181,7 @@ async function nextAutoPull(force) {
       if (!g || !g.ok) { srvdbNote('err', nextSrvError(g)); return g; }
       const r = await srvdbMergeSnapshot(g, true);
       if (!r.ok) { srvdbNote('err', nextSrvError(r)); return r; }
-      if (r.failed) { srvdbNote('err', 'не записано записей с сервера: ' + r.failed + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
+      if (r.failed) { srvdbNote('err', (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
       if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore)); srvdbNote('pull');
       if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
     } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
@@ -3322,7 +3370,7 @@ async function backupApply() {
   const b = document.getElementById('bk-apply'); if (b) { if (b.disabled) return null; b.disabled = true; }
   try {
     const r = await mergeIncoming(m.parsed, false);
-    if (r.failed) { fErr('Не записано записей: ' + r.failed + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
+    if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
     BACKUP_PENDING = null;
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('backup:refresh', e); }
     toast('Из файла: добавлено ' + r.added + ', обновлено ' + r.updated);
