@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 05:51 · 7b820fc">
+<meta name="build" content="04.10.2026 06:25 · 255c1de">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4596,7 +4596,22 @@ function guardSaving() { return !!SHEET_GUARD.saving && Date.now() - SHEET_GUARD
 const GUARD_WRITES = { n: 0 };
 function guardWriteInProgress() { return guardSaving() && (GUARD_WRITES.n > 0 || Date.now() - SHEET_GUARD.saving < GUARD_START_MS); }
 { const wrap = f => async function (...a) { GUARD_WRITES.n++; try { return await f.apply(this, a); } finally { GUARD_WRITES.n--; } };
-  if (typeof put === 'function') put = wrap(put); if (typeof putRaw === 'function') putRaw = wrap(putRaw); if (typeof del === 'function') del = wrap(del); }
+  if (typeof put === 'function') { const putForm = put; put = wrap(async function (store, obj, ...rest) { await formRecCheck(store, obj); return putForm.call(this, store, obj, ...rest); }); }
+  if (typeof putRaw === 'function') putRaw = wrap(putRaw); if (typeof del === 'function') del = wrap(del); }
+// Запись изменилась, пока форма была открыта (очередь; предложение GPT 04.10.2026 «Конфликты»). Открыватель формы отмечает запись
+// (formRecMark); при сохранении из этой формы запись перечитывается: метка _upd другая — сохранение останавливается, изменённые поля названы
+// по-русски (CONFLICT_FIELDS), остальные — числом; второе «Сохранить» записывает версию формы поверх (ack). Записи других разделов не трогаются.
+function formRecMark(store, rec) { if (UI.cur && rec && rec.id) UI.cur.rec = { store, id: rec.id, upd: rec._upd || 0, snap: JSON.parse(JSON.stringify(rec)), ack: null }; }
+async function formRecCheck(store, obj) {
+  const r = UI.cur && UI.cur.rec; if (!r || !obj || r.store !== store || r.id !== obj.id || !guardSaving()) return;
+  let cur = null; try { cur = await getOne(store, obj.id); } catch (e) { logErr('form:recheck', e); return; }
+  if (!cur) return;
+  const now = cur._upd || 0; if (now === r.upd || now === r.ack) return;
+  const keys = Object.keys(Object.assign({}, r.snap, cur)).filter(k => !k.startsWith('_') && k !== 'updatedAt' && k !== 'createdAt' && JSON.stringify(r.snap[k]) !== JSON.stringify(cur[k]));
+  const names = keys.filter(k => typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]).map(k => CONFLICT_FIELDS[k]), other = keys.length - names.length;
+  r.ack = now;
+  throw new Error('Пока форма была открыта, эту запись изменили на другом устройстве или в другой вкладке' + (names.length || other ? ' (' + names.concat(other ? ['ещё ' + other + ' ' + plural(other, 'поле', 'поля', 'полей')] : []).join(', ') + ')' : '') + '. «Сохранить» ещё раз — записать вашу версию поверх; «Отмена» и открыть заново — увидеть новые данные');
+}
 function guardSaveFailed() { SHEET_GUARD.saving = 0; }
 function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions'); }
 // значения всех полей формы одной строкой — для сравнения
@@ -5010,6 +5025,8 @@ async function openCaseForm(id, full) {
   const modeBtn = `<div class="actions" style="margin-bottom:10px">${btn(full ? 'Кратко' : 'Все поля', `caseFormMode('${jsq(id || '')}', ${full ? 'false' : 'true'})`, 'small-btn', full ? 'chevron-up' : 'chevron-down')}${full ? `<span class="small muted">Вкладки зависят от вида дела</span>` : ''}</div>`;
   const body = modeBtn + tabBar + main + panes + fSaveBar(`saveCaseForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('cases', '${jsq(id)}')` : '');
   openSheet(id ? 'Правка дела' : 'Новое дело', body, id ? true : 'panel');
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('cases', prev);
   { const ci = document.getElementById('cf-client'); if (ci && c.clientId) ci.dataset.pickedId = c.clientId; }
   partyPrefillBind();
   caseGroupsBind(true);
@@ -5119,6 +5136,8 @@ async function openTaskForm(id, presetCaseNum) {
     ${fText('tf-note', 'Заметка', t.note, 2)}
   </div>${fSaveBar(`saveTaskForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('tasks', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка задачи' : 'Новая задача', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('tasks', prev);
 }
 async function saveTaskForm(id) {
   const prev = id ? await getOne('tasks', id) : null;
@@ -5145,6 +5164,8 @@ async function openHearingForm(id, presetCaseNum) {
     ${fText('hf-result', 'Результат (для проведённого)', h.result, 2)}${fText('hf-comment', 'Примечание', h.comment, 2)}
   </div><div class="info-box warning" id="hf-busy" hidden></div>${id && h.status !== 'Проведено' && h.status !== 'Отменено' && h.date && h.date <= todayISO() ? `<div class="actions" style="margin-top:14px">${btn('После заседания: состоялось / отложено / отменено', `openAfterHearing('${jsq(id)}')`, '', 'gavel')}</div>` : ''}${fSaveBar(`saveHearingForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('hearings', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка заседания' : 'Новое заседание', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('hearings', prev);
   const sel = document.getElementById('hf-caseNum'); if (sel && !id) sel.onchange = () => { const c = CASES_BY_NUM[sel.value]; if (c) { if (!fv('hf-court')) document.getElementById('hf-court').value = c.court || ''; if (!fv('hf-judge')) document.getElementById('hf-judge').value = c.judge || ''; } };
 }
 async function saveHearingForm(id) {
@@ -5171,6 +5192,8 @@ async function openMeetingForm(id, presetCaseNum) {
     ${fText('mf-note', 'Заметка', m.note, 2)}
   </div><div class="info-box warning" id="mf-busy" hidden></div>${fSaveBar(`saveMeetingForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('meetings', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка встречи' : 'Новая встреча', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('meetings', prev);
 }
 async function saveMeetingForm(id) {
   const prev = id ? await getOne('meetings', id) : null;
@@ -6754,6 +6777,8 @@ async function openMailForm(id, presetCaseNum) {
     <div class="info-box" style="grid-column:1/-1" id="ml-hint">Статус отправления Почты России подтянется по кнопке «Обновить статусы» на экране «Переписка», если подключено отслеживание (Настройки → «Почта России — отслеживание»).</div>
   </div>${fSaveBar(`saveMailForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('mail', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка отправления' : 'Новое отправление', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('mail', prev);
   const ch = document.getElementById('ml-channel'); if (ch) { ch.onchange = mailChannelChanged; mailChannelChanged(); }
 }
 // трек-номер нужен только Почте России; для остальных каналов поле скрыто
@@ -6937,6 +6962,8 @@ async function openClientForm(id) {
     ${fText('cl-comment', 'Примечание', c.comment, 2)}
   </div>${fSaveBar(`saveClientForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('clients', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка доверителя' : 'Новый доверитель', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('clients', prev);
 }
 async function saveClientForm(id) {
   const prev = id ? await getOne('clients', id) : null, clients = await getAll('clients');
@@ -7011,6 +7038,8 @@ async function openLeadForm(id) {
     ${fText('ld-summary', 'Подробности, итог консультации, договорённости', l.summary, 4)}
   </div>${fSaveBar(`saveLeadForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('leads', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка обращения' : 'Новое обращение', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('leads', prev);
   const upd = () => { const d = leadClaimDue({ claimDate: fv('ld-claimDate'), claimDays: fv('ld-claimDays') }), box = document.getElementById('ld-due'); if (box) box.textContent = d ? fmtDate(d) : '— укажите дату и срок —'; };
   ['ld-claimDate', 'ld-claimDays'].forEach(i => { const el = document.getElementById(i); if (el) el.addEventListener('input', upd); });
   const nm = document.getElementById('ld-name'); if (nm) nm.addEventListener('change', () => { const rec = FORM_CLIENTS[nm.value.trim()]; if (!rec) return; ['phone', 'email'].forEach(k => { const f = document.getElementById('ld-' + k); if (f && !f.value && rec[k]) f.value = rec[k]; }); const a = document.getElementById('ldAddr'); if (a && !a.value && rec.addr) a.value = rec.addr; });
@@ -7202,6 +7231,8 @@ async function openFinanceForm(id, presetCaseNum) {
     ${fText('fn-comment', 'Примечание', f.comment, 2)}
   </div>${fSaveBar(`saveFinanceForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('finance', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка счёта' : 'Новый счёт', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('finance', prev);
   const bt = document.getElementById('fn-billType'), cs = document.getElementById('fn-caseNum');
   const refresh = () => { const t = fv('fn-billType'); document.querySelectorAll('#sheetContent [class*="fn-"]').forEach(el => { const on = [...el.classList].some(c => c === 'fn-' + t); if (el.classList.contains('field') || el.classList.contains('info-box')) el.hidden = !on; }); };
   if (bt) { bt.onchange = refresh; refresh(); }
@@ -7307,6 +7338,8 @@ async function openExpenseForm(id, presetCaseNum) {
     <label class="check"><input type="checkbox" id="ex-recovered"${e.recovered ? ' checked' : ''}><span>Уже возмещено</span></label>
   </div>${fSaveBar(`saveExpenseForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('expenses', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Правка расхода' : 'Новый расход', body, UI.cur ? true : undefined);
+  // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (prev && typeof formRecMark === 'function') formRecMark('expenses', prev);
 }
 async function saveExpenseForm(id) {
   const prev = id ? await getOne('expenses', id) : null;
