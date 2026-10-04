@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 01:46 · dc10edc">
+<meta name="build" content="04.10.2026 03:12 · 940ab97">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -3863,6 +3863,9 @@ function crmCollectorSrvCfg() {
 async function crmCollectorCall(body, timeoutMs) {
   const cfg = crmCollectorSrvCfg();
   if (!cfg.url || !cfg.secret) { toast('Укажите URL и секрет облачной функции', true); return null; }
+  // жалоба 04.10.2026: адрес личного сервера в поле коллектора проверяется до запроса для ВСЕХ действий коллектора (карточка дела,
+  // список дел, сбор, состояние), а не только в «Проверить» — запрос с кодом сервера туда не уходит
+  if (typeof monColIsBridge === 'function' && typeof SRV !== 'undefined' && monColIsBridge(cfg.url, SRV.url)) return { err: MON_COL_BRIDGE_MSG, bridge: true };
   const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), timeoutMs || 30000);
   try {
     const r = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3921,9 +3924,10 @@ async function crmCollectorSendLinks() {
   toast('Отправляю список дел на сервер…');
   const r = await crmCollectorCall({ action: 'linksput', links: pack });
   if (!r) return;
-  if (r.err) { toast('Не удалось связаться с функцией: ' + r.err, true); return; }
-  if (r.j && r.j.ok) { toast(`Список отправлен: дел ${r.j.cases}`); crmCollectorStatus(false); }
-  else toast('Функция ответила: ' + (r.j && r.j.error ? r.j.error : 'HTTP ' + r.http), true);
+  if (r.j && r.j.ok) { toast(`Список отправлен: дел ${r.j.cases}`); crmCollectorStatus(false); return; }
+  // ответ словами — по тому, кто ответил (crmCollectorWhy, screens/monitoring.js)
+  const why = typeof crmCollectorWhy === 'function' ? crmCollectorWhy(r) : { text: r.err || (r.j && r.j.error) || 'HTTP ' + r.http };
+  toast('Список дел не отправлен: ' + why.text, true);
 }
 
 // ▼▼▼ sync/ycdeploy.js
@@ -7257,6 +7261,21 @@ function monCollectorHint(j) {
 // Жалоба пользователя 02.10.2026: «Серверный сбор: unknown_action». Так отвечает не коллектор, а личный сервер crm-bridge —
 // значит, в поле «Адрес функции коллектора» вписан адрес сервера. Программа говорит это прямо и запрос не шлёт.
 const MON_COL_BRIDGE_MSG = 'по адресу из поля «Адрес функции коллектора» отвечает личный сервер crm-bridge, а не коллектор. В это поле нужен адрес функции collector-sud: Яндекс Облако → collector-sud → «Обзор» → «Ссылка для вызова». Адрес сервера crm-bridge вписывается не сюда, а в переменную BRIDGE_URL самой функции collector-sud.';
+// Ответ на запрос коллектору — словами, по тому, КТО ответил (урок 62; жалоба 04.10.2026: «функция коллектора устарела» на «Данные с сайта
+// суда» — так отвечал не коллектор). Личный сервер на чужой код отвечает «auth», на незнакомое действие — «unknown_action» с HTTP 200;
+// коллектор на чужой секрет — «forbidden» (HTTP 403), «unknown_action» — с HTTP 400 и только на действие, которого его версия не знает.
+// Ответ самого коллектора (есть collectorVer или stateText — например, итог сбора с ошибкой доставки «auth») за ответ сервера не принимается.
+// Возвращает null (успех) или { text, cfg } — cfg: ошибка настроек, повторять запрос по другим ссылкам бессмысленно.
+function crmCollectorWhy(r) {
+  if (!r) return { text: 'нет ответа', cfg: false };
+  if (r.err) return { text: r.err, cfg: !!r.bridge };
+  const j = r.j || {}; if (j.ok) return null;
+  const fromCollector = !!(j.collectorVer || j.stateText);
+  if (!fromCollector && (j.error === 'auth' || (j.error === 'unknown_action' && r.http === 200))) return { text: MON_COL_BRIDGE_MSG, cfg: true };
+  if (j.error === 'unknown_action') return { text: 'функция коллектора старой версии и этого не умеет. Она обновляется сама из папки раздачи (переменная UPDATE_URL функции collector-sud) в течение 10–15 минут; если сообщение повторяется — «Журнал ошибок» → «Скопировать» и пришлите текст', cfg: true };
+  if (j.error === 'forbidden') return { text: 'секрет коллектора не подошёл — сверьте поле «Секрет коллектора» с переменной SECRET функции collector-sud (это не секретный код личного сервера)', cfg: true };
+  return { text: j.error || ('HTTP ' + r.http), cfg: false };
+}
 function monColIsBridge(colUrl, srvUrl) { const n = u => String(u || '').trim().replace(/[/]+$/, '').toLowerCase(); return !!n(colUrl) && n(colUrl) === n(srvUrl); }
 function monBridgeCheckText(j, srvUrl, http) {
   const norm = u => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
@@ -7299,13 +7318,14 @@ let CASE_CARD_ASK = null;
 function caseCardResultModel(r) {
   r = r || {}; const done = r.done || [], diff = r.diff || [], errs = r.errs || [], ask = r.ask || [], lines = [];
   if (done.length) lines.push({ kind: 'done', text: 'Записано в дело: ' + done.join('; ') + '.' });
-  else if (!errs.length && !ask.length && !diff.length) lines.push({ kind: 'info', text: 'Новых данных нет: пустых полей, которые можно заполнить с сайта суда, в деле не осталось.' });
+  else if (!errs.length && !ask.length && !diff.length && !r.cfgErr) lines.push({ kind: 'info', text: 'Новых данных нет: пустых полей, которые можно заполнить с сайта суда, в деле не осталось.' });
   if (r.evCount) lines.push({ kind: 'info', text: 'Событий суда получено: ' + r.evCount + ' — они в разделе «Мониторинг».' });
   diff.forEach(t => lines.push({ kind: 'diff', text: 'Расхождение: ' + t + '. В деле оставлено прежнее значение — исправьте в форме дела, если верны данные сайта.' }));
+  if (r.cfgErr) lines.push({ kind: 'err', text: 'Карточку не прочитать: ' + String(r.cfgErr).replace(/[.\s]+$/, '') + '.' });
   errs.forEach(t => lines.push({ kind: 'err', text: 'Не прочитано — ' + t + '.' }));
-  if (errs.length) lines.push({ kind: 'hint', text: 'Что проверить: ссылка в форме дела открывает страницу именно этого дела на сайте суда; коллектор настроен (Настройки → «Мониторинг судов» → «Проверить»). Сайты судов часто отвечают медленно — повторите позже.' });
-  const toastText = done.length ? 'С сайта суда: ' + done.join('; ') : errs.length ? 'Карточку дела прочитать не удалось' : 'Новых данных на сайте суда нет';
-  return { lines, ask, plain: !diff.length && !errs.length && !ask.length, toast: toastText, bad: !!errs.length && !done.length };
+  if (errs.length && !r.cfgErr) lines.push({ kind: 'hint', text: 'Что проверить: ссылка в форме дела открывает страницу именно этого дела на сайте суда; коллектор настроен (Настройки → «Мониторинг судов» → «Проверить»). Сайты судов часто отвечают медленно — повторите позже.' });
+  const toastText = done.length ? 'С сайта суда: ' + done.join('; ') : r.cfgErr ? 'Коллектор настроен неверно — причина в листе' : errs.length ? 'Карточку дела прочитать не удалось' : 'Новых данных на сайте суда нет';
+  return { lines, ask, plain: !diff.length && !errs.length && !ask.length && !r.cfgErr, toast: toastText, bad: (!!errs.length || !!r.cfgErr) && !done.length };
 }
 function openCaseCardResult(caseId, res) {
   const m = caseCardResultModel(res); CASE_CARD_ASK = { caseId, items: m.ask };
@@ -7331,11 +7351,11 @@ async function caseFetchCard(caseId, opts) {
   if (!stages.length) { if (!opts.silent) toast('В деле нет ссылки на сайт суда — добавьте её в форме дела', true); return null; }
   const fb = document.getElementById('case-card-fetch'); if (fb && !opts.silent) fb.disabled = true;
   if (!opts.silent) toast('Читаю карточку дела на сайте суда — это может занять до минуты…');
-  const before = JSON.parse(JSON.stringify(c)), done = [], diff = [], errs = [], ask = []; let evCount = 0;
+  const before = JSON.parse(JSON.stringify(c)), done = [], diff = [], errs = [], ask = []; let evCount = 0, cfgErr = '';
   for (const [f, stage, sfx, noField] of stages) {
     const r = await crmCollectorCall({ action: 'collectone', url: c[f], courtNo: c[noField] || '', number: c.number, stage }, 45000);
-    if (!r || !r.j) { errs.push(stage + ': ' + ((r && r.err) || 'нет ответа')); continue; }
-    if (!r.j.ok) { errs.push(stage + ': ' + (r.j.error === 'forbidden' ? 'секрет коллектора не подошёл' : r.j.error === 'unknown_action' ? 'функция коллектора устарела и не умеет читать карточку' : (r.j.error || 'ошибка'))); continue; }
+    const why = crmCollectorWhy(r);
+    if (why) { if (why.cfg) { cfgErr = why.text; break; } errs.push(stage + ': ' + why.text); continue; }
     const res = crmCaseApplyCard(c, r.j.card || {}, sfx), sameCourt = courtNameSame(c['court' + sfx], (r.j.card || {}).court);
     done.push(...res.done); diff.push(...res.diff.filter(t => !(sameCourt && (t.startsWith('суд —') || t.startsWith('суд ('))))); ask.push(...(res.ask || []));
     if (Array.isArray(r.j.events) && r.j.events.length) { const rows = await crmMonNormalizeRows(r.j.events, 'Коллектор судов'); await crmMonPersist(rows, { quiet: true }); evCount += r.j.events.length; }
@@ -7349,7 +7369,7 @@ async function caseFetchCard(caseId, opts) {
     await crmCaseLogByNum(c.number, 'flow', 'С сайта суда: ' + done.join('; '));
   }
   await refreshCasesCache();
-  const out = { done, diff, errs, ask, evCount }, m = caseCardResultModel(out);
+  const out = { done, diff, errs, ask, evCount, cfgErr }, m = caseCardResultModel(out);
   const shown = sheetIsOpen() && UI.cur && UI.cur.caseId === caseId;
   if (opts.silent) {
     if (done.length) { toast(m.toast); if (shown) await openCaseSheet(caseId); }
@@ -7357,7 +7377,7 @@ async function caseFetchCard(caseId, opts) {
     return out;
   }
   await openCaseSheet(caseId);
-  if (m.plain) toast(m.toast, m.bad); else { toast(done.length ? m.toast : 'Карточка прочитана — посмотрите, что требует внимания', m.bad); openCaseCardResult(caseId, out); }
+  if (m.plain) toast(m.toast, m.bad); else { toast(done.length || cfgErr ? m.toast : 'Карточка прочитана — посмотрите, что требует внимания', m.bad); openCaseCardResult(caseId, out); }
   return out;
 }
 function monCollectorHintRender(j) { const box = document.getElementById('col-srv-hint'); if (!box) return; const h = monCollectorHint(j); box.textContent = h; box.hidden = !h; }
@@ -7459,7 +7479,10 @@ async function monitorCollectorStatus(manual) {
   if (manual) toast('Запрашиваю состояние сбора…');
   const r = await crmCollectorCall({ action: 'status' }); if (!r) return null;
   // 403 (forbidden) — неверный секрет, 404 — неверный адрес: подсказка словами (crmCollectorHttpHint v270), а не код
-  const bad = r.err || (r.j && r.j.error === 'unknown_action' ? MON_COL_BRIDGE_MSG : r.j && r.j.error === 'forbidden' ? 'секрет коллектора не подошёл (forbidden) — сверьте переменную SECRET функции collector-sud и поле «Секрет коллектора»' : r.http >= 400 ? crmCollectorHttpHint(r.http) : '');
+  // жалоба 04.10.2026: ответ словами — общей функцией crmCollectorWhy (кто ответил: сервер или коллектор)
+  // сохранённое коллектором состояние (в нём at, collectorVer или stateText) — строка состояния, даже если сбор был с ошибкой
+  const isStatus = !!(r.j && (r.j.ok || r.j.empty || r.j.at || r.j.collectorVer || r.j.stateText));
+  const bad = r.err ? r.err : isStatus ? '' : ((crmCollectorWhy(r) || {}).text || (r.http >= 400 ? crmCollectorHttpHint(r.http) : ''));
   if (el) el.textContent = bad ? 'Серверный сбор: ' + bad : crmCollectorStatusLine(r.j);
   monCollectorHintRender(bad ? null : r.j);
   if (manual) toast(bad ? 'Коллектор: ' + bad : 'Коллектор ответил', !!bad);
@@ -7470,6 +7493,8 @@ async function monitorCollectorRun() {
   toast('Сбор запущен — это может занять несколько минут');
   const r = await crmCollectorCall({ action: 'collect' }, 590000); if (!r) return;
   if (r.err) { toast('Сбой запуска сбора: ' + r.err, true); monitorCollectorStatus(false); return; }
+  // ответ не коллектора (сервер по этому адресу) или отказ по настройкам — словами, а не кодом ошибки
+  if (r.j && !('ok' in r.j && (r.j.collectorVer || r.j.stateText))) { const why = crmCollectorWhy(r); if (why && why.cfg) { if (el) el.textContent = 'Серверный сбор: ' + why.text; toast('Сбор не запущен: ' + why.text, true); return; } }
   const j = r.j; if (j && ('ok' in j)) { if (el) el.textContent = crmCollectorStatusLine(j); monCollectorHintRender(j); toast(j.ok ? `Сбор завершён: событий ${j.events ?? 0}, новых ${j.added ?? 0}` : 'Сбор завершился с ошибкой: ' + (j.error || ''), !j.ok); if (j.ok && (j.added || j.updated)) await monitorPull(); } else toast('Ответ функции не распознан (HTTP ' + r.http + ')', true);
 }
 
