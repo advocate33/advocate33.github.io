@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 06:49 · 6d004e8">
+<meta name="build" content="04.10.2026 10:28 · 88cfb2a">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -7380,6 +7380,22 @@ function monitorSettingsState(srvUrl, col, autoOn) {
   return { lines: out, ready: !!srvUrl && !!(col && col.url && col.secret) };
 }
 // что означает ошибка в ответе коллектора — словами и с действием (снимок пользователя 01.10.2026: «отправка на /bridge: сервер ответил: auth»)
+// сообщение пользователя 04.10.2026: совет — по каждой причине, которую называет ответ коллектора (а не «обычно сайт не ответил» для всего)
+function monCollectorTips(j) {
+  const errs = Array.isArray(j.failed) ? j.failed : [], st = String(j.stateText || ''), has = re => re.test(st) || errs.some(f => f && re.test(String(f.err || '')));
+  const tips = [];
+  if (has(/другое дело/)) tips.push('«Ссылка ведёт на другое дело» сама не пройдёт: откройте дело → «Изменить» → ссылку на сайт суда. На странице по ссылке должен быть номер дела в суде из формы; если на странице другой номер — ссылка скопирована из другого дела или номер в суде указан с ошибкой. Исправьте одно из двух.');
+  if (has(/не распознана/)) tips.push('«Страница не распознана» — откройте ссылку глазами: это должна быть страница самого дела (с движением дела и заседаниями), а не результат поиска или список дел.');
+  if (has(/не пустил|не ответил|не отдал|капч/i) || j.blocked) tips.push('«Сайт суда не пустил» или «не ответил» — обычно временно: эти ссылки повторятся при следующем сборе.');
+  if (!tips.length) tips.push('Обычно это временный сбой: сайт суда не ответил или ответил с ошибкой; эти ссылки повторятся при следующем сборе.');
+  return tips;
+}
+// дела со ссылкой «на другое дело» — кнопками «Открыть дело», чтобы сразу исправить ссылку или номер
+function monCollectorFixList(j) {
+  const errs = Array.isArray(j && j.failed) ? j.failed : [], seen = new Set(), out = [];
+  for (const f of errs) { if (!f || !/другое дело|не распознана/.test(String(f.err || '')) || seen.has(f.number)) continue; seen.add(f.number); const c = typeof CASES_BY_NUM === 'object' ? CASES_BY_NUM[f.number] : null; if (c) out.push({ id: c.id, number: f.number }); }
+  return out.slice(0, 10);
+}
 function monCollectorHint(j) {
   const e = String((j && j.error) || '');
   if (/auth/i.test(e)) return 'Коллектор собрал события, но личный сервер их не принял. Причин бывает две: коллектор шлёт события не на ваш сервер (переменная BRIDGE_URL) или код в переменной BRIDGE_SECRET не совпадает с кодом сервера. Нажмите «Проверить доставку на сервер» ниже — программа скажет, что из двух. Исправление: Яндекс Облако → collector-sud → Редактор → Переменные окружения: BRIDGE_URL — адрес сервера из листа «Синхронизация», BRIDGE_SECRET — секретный код оттуда же → «Создать версию» → здесь «Собрать сейчас». Пока это не исправлено, новые события в программу не приходят.';
@@ -7390,7 +7406,7 @@ function monCollectorHint(j) {
   if (j && !e && (j.state === 'partial' || j.failedCount)) {
     const list = Array.isArray(j.failed) ? j.failed.slice(0, 5).map(f => [f && f.number, f && f.stage ? '(' + f.stage + ')' : '', f && f.err ? '— ' + f.err : ''].filter(Boolean).join(' ')) : [];
     const head = j.stateText ? j.stateText.charAt(0).toUpperCase() + j.stateText.slice(1) : 'Сбор частичный — ошибок: ' + j.failedCount;
-    return head + '. ' + (list.length ? 'Не обработаны: ' + list.join('; ') + (j.failedCount > list.length ? ' и ещё ' + (j.failedCount - list.length) : '') + '. ' : '') + 'Обычно сайт суда не ответил; эти ссылки повторятся при следующем сборе. Остальные события доставлены.';
+    return head + '. ' + (list.length ? 'Не обработаны: ' + list.join('; ') + (j.failedCount > list.length ? ' и ещё ' + (j.failedCount - list.length) : '') + '. ' : '') + monCollectorTips(j).join(' ') + ' Остальные события доставлены.';
   }
   return '';
 }
@@ -7518,7 +7534,12 @@ async function caseFetchCard(caseId, opts) {
   if (m.plain) toast(m.toast, m.bad); else { toast(done.length || cfgErr ? m.toast : 'Карточка прочитана — посмотрите, что требует внимания', m.bad); openCaseCardResult(caseId, out); }
   return out;
 }
-function monCollectorHintRender(j) { const box = document.getElementById('col-srv-hint'); if (!box) return; const h = monCollectorHint(j); box.textContent = h; box.hidden = !h; }
+function monCollectorHintRender(j) { const box = document.getElementById('col-srv-hint'); if (!box) return; const h = monCollectorHint(j), fix = h ? monCollectorFixList(j) : [];
+  // частичный сбор: перечень ссылок — абзацем, советы — списком, «остальное доставлено» — отдельной строкой (читается на телефоне)
+  const tips = h && j ? monCollectorTips(j).filter(t => h.includes(t)) : [];
+  let main = h; for (const t of tips) main = main.replace(' ' + t, '').replace(t, '');
+  const tail = tips.length && / Остальные события доставлены\.$/.test(main) ? 'Остальные события доставлены.' : ''; if (tail) main = main.replace(/ Остальные события доставлены\.$/, '');
+  box.innerHTML = `<div>${esc(main)}</div>` + (tips.length ? `<ul style="margin:6px 0 0 18px;padding:0">${tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '') + (tail ? `<div style="margin-top:6px">${tail}</div>` : '') + (fix.length ? `<div class="form-actions" style="margin:8px 0 0">${fix.map(x => `<button type="button" class="button small-btn" onclick="openCaseSheet('${jsq(x.id)}')">${icon('briefcase-business', 'icon-sm')}Открыть ${esc(x.number)}</button>`).join('')}</div>` : ''); box.hidden = !h; }
 // получить события с личного сервера (коллектор кладёт их туда): только по кнопке
 async function monitorPull() {
   if (!SRV.url) { toast('Подключите личный сервер: Настройки → «Мониторинг судов» или Синхронизация', true); return null; }
