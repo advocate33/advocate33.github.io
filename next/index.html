@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 12:04 · 643e6a5">
+<meta name="build" content="04.10.2026 12:42 · f6c9015">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -257,6 +257,9 @@ table.grid tbody tr:last-child td{border-bottom:0}
 .stage-track li span{display:inline-block;padding:4px 9px;border-radius:var(--r-sm);font-size:.75rem;background:var(--surface2);color:var(--text-muted)}
 .stage-track li.past span{background:var(--good-bg);color:var(--good)}
 .stage-track li.cur span{background:var(--accent);color:var(--on-accent);font-weight:600}
+.stage-track li .stage-btn{display:inline-flex;align-items:center;min-height:36px;padding:4px 10px;border:0;border-radius:var(--r-sm);font-size:.75rem;background:var(--surface2);color:var(--text-muted);cursor:pointer}
+.stage-track li.past .stage-btn{background:var(--good-bg);color:var(--good)}.stage-track li.cur .stage-btn{background:var(--accent);color:var(--on-accent);font-weight:600}
+@media (max-width:760px){.stage-track li .stage-btn{min-height:44px}}
 @media(min-width:1200px){
   .work-grid.has-side{grid-template-columns:minmax(0,1fr) 440px}
   /* п. 1.2 (03.10.2026): панель начинается под шапкой, поэтому высота — без высоты шапки (--topbar-h измеряется), иначе её низ (и кнопка «Сохранить») уходил за экран */
@@ -2447,7 +2450,18 @@ function caseStageEvidence(c, hearings) {
   if (!c) return null;
   const same = (a, b) => { const x = stageCourtNorm(a), y = stageCourtNorm(b); return !!x && !!y && (x.includes(y) || y.includes(x)); };
   const mine = (hearings || []).filter(h => h && !h._deleted && h.status !== 'Отменено' && (h.caseId ? h.caseId === c.id : (!!h.caseNum && h.caseNum === c.number)));
-  const at = st => mine.filter(h => h.stage === st || (!h.stage && h.court && !same(h.court, c.court) && same(h.court, st === 'Апелляция' ? (c.apCourt || c.courtApp) : c.courtCass)))
+  // снимок 04.10.2026: заседание апелляции пришло с отметкой первой инстанции (ссылка стояла в поле первой инстанции) — инстанция видна и по
+  // названию суда: кассационный суд — кассация; апелляционный, областной, краевой суд и суд республики или города федерального значения при деле
+  // районного, городского суда или мирового судьи — апелляция
+  const byCourt = court => {
+    const n = String(court || '').toLowerCase(); if (!n || same(court, c.court)) return '';
+    if (/кассационн/.test(n)) return 'Кассация';
+    if (/апелляционн/.test(n)) return 'Апелляция';
+    const low = String(c.court || '').toLowerCase(), lowIsDistrict = /районн|мирово|судебн\S* участ/.test(low) || (/городск/.test(low) && !/московский городской|санкт-петербургский городской|севастопольский городской/.test(low));
+    if (lowIsDistrict && /областн|краев|верховн\S* суд\S* республик|московский городской|санкт-петербургский городской|севастопольский городской|автономн/.test(n)) return 'Апелляция';
+    return '';
+  };
+  const at = st => mine.filter(h => h.stage === st || byCourt(h.court) === st || (!h.stage && h.court && !same(h.court, c.court) && same(h.court, st === 'Апелляция' ? (c.apCourt || c.courtApp) : c.courtCass)))
     .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))[0];
   const dt = d => (typeof fmtDate === 'function' ? fmtDate(d) : d);
   if (c.nzNo || c.linkNadzor) return { stage: 'Надзор', why: c.nzNo ? 'номер надзорного производства ' + c.nzNo : 'ссылка на надзорное производство', key: 'nz:' + (c.nzNo || c.linkNadzor) };
@@ -2507,6 +2521,29 @@ if (typeof put === 'function') {
     if (!STAGE_AUTO.busy && obj && (store === 'cases' || store === 'hearings')) setTimeout(() => stageAutoAfterWrite(store, obj, prev), 300);
     return res;
   };
+}
+// снимок 04.10.2026: плашки стадий в карточке дела нажимаются (раньше были только показом — «изменить вручную не получается»). Выбор ниже
+// данных держится (stageAutoSkip); «Завершено» — с подтверждением: дело получает и статус «Завершено»
+async function caseStageSet(id, stage, confirmed) {
+  const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
+  const cur = c.status === 'Завершено' ? 'Завершено' : (c.stage || '');
+  if (stage === cur) return;
+  if (stage === 'Завершено' && !confirmed) {
+    openSheet('Завершить дело?', `<p>Дело ${esc(c.number || '')} получит стадию и статус «Завершено». Вернуть в работу можно нажатием на другую стадию.</p>
+      <div class="form-actions"><button type="button" class="button primary" id="stage-close-go" onclick="caseStageSet('${jsq(id)}', 'Завершено', true)">${icon('check')}Завершить дело</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+    return;
+  }
+  const from = c.stage || '', hs = await getAll('hearings');
+  c.stage = stage;
+  if (stage === 'Завершено') { const ps = c.status || ''; c.status = 'Завершено'; c.closedAt = c.closedAt || (typeof todayISO === 'function' ? todayISO() : new Date().toISOString().slice(0, 10)); addCaseHistoryEvent(c, 'status', ps, 'Завершено', 'card'); }
+  else if (c.status === 'Завершено') { c.status = 'В работе'; c.closedAt = ''; addCaseHistoryEvent(c, 'status', 'Завершено', 'В работе', 'card'); }
+  const ev = caseStageEvidence(c, hs); if (ev && STAGE_RANK[ev.stage] > stageRankOf(stage)) c.stageAutoSkip = ev.key;
+  addCaseHistoryEvent(c, 'stage', from, stage, 'card');
+  STAGE_AUTO.busy = true;
+  try { await put('cases', c); } catch (e) { logErr('stage:set', e); toast('Не удалось сохранить: ' + ((e && e.message) || 'ошибка записи'), true); return; } finally { STAGE_AUTO.busy = false; }
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast(stage === 'Завершено' ? 'Дело завершено' : 'Стадия: ' + stage);
+  if (typeof openCaseSheet === 'function') await openCaseSheet(id);
 }
 // ── «Сегодня»: дела, где данные выше стадии (были и раньше или пришли с другого устройства) — поднять по подтверждению ──
 function stageLagHidden() { try { return JSON.parse(localStorage.getItem(STAGE_LAG_HIDE_KEY) || '{}') || {}; } catch (e) { return {}; } }
@@ -6530,7 +6567,8 @@ async function openCaseSheet(id, keep) {
   const jm = caseJudgeModel(c, d.hearings), hasLink = !!(c.link || c.linkApp || c.linkCass);
   const oppP = m.participants.find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
   const sec = (title, html, count) => html ? `<div class="section-label">${esc(title)}${count !== undefined ? ' · ' + count : ''}</div>${html}` : '';
-  const steps = `<ol class="stage-track" aria-label="Стадия">${CASE_STAGES_NEXT.map((s, i) => `<li class="${i < m.stageIdx ? 'past' : i === m.stageIdx ? 'cur' : ''}"><span>${esc(s)}</span></li>`).join('')}</ol>`;
+  // снимок пользователя 04.10.2026: плашки стадий нажимаются — выбор стадии прямо в карточке (data/stageauto.js, caseStageSet)
+  const steps = `<ol class="stage-track" aria-label="Стадия — нажмите, чтобы сменить">${CASE_STAGES_NEXT.map((s, i) => `<li class="${i < m.stageIdx ? 'past' : i === m.stageIdx ? 'cur' : ''}"><button type="button" class="stage-btn" aria-pressed="${i === m.stageIdx}" onclick="caseStageSet('${jsq(c.id)}', '${jsq(s)}')">${esc(s)}</button></li>`).join('')}</ol>`;
   // карточка дела (03.10.2026, PLAN_kartochka_lenta): сверху — кто, что, где, ближайшее и следующий шаг; действия; быстрая запись;
   // лента дела; прежние разделы — без изменений в свёрнутых группах (ничего не удалено)
   const tdy = localISO(new Date()), cHead = { court: hearingCourtOf({}, c), judge: todayJudgeOf({}, c) || jm.judge, next: m.hearings.filter(h => h && h.date >= tdy && h.status !== 'Отменено' && h.status !== 'Проведено').sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')))[0] || null };
@@ -6625,7 +6663,7 @@ function caseFeedModel(c, d, journal, now) {
   (d.expenses || []).filter(mine).forEach(e => push({ key: 'e:' + e.id, date: e.date || feedISO(e.createdAt || ''), time: '', group: 'money', icon: 'wallet', title: '− ' + fmtMoney(Number(e.amount || 0)) + ' · ' + (e.category || 'расход'), sub: e.note || e.descr || '', state: 'minus', open: `openExpenseForm('${jsq(e.id)}')` }));
   (journal || []).forEach(j => { if (!j || j._deleted || !j.ts) return;
     if (j.field === 'note') push({ key: 'n:' + j.id, date: feedISO(j.ts), time: feedHM(j.ts), group: 'notes', icon: 'pencil', title: j.to || '', sub: 'заметка' + (j.editedAt ? ' · изменена' : ''), note: true, open: `openNoteSheet('${jsq(j.id)}')` });
-    else if (FEED_JOURNAL_LABELS[j.field]) push({ key: 'j:' + j.id, date: feedISO(j.ts), time: feedHM(j.ts), group: 'journal', icon: 'info', title: FEED_JOURNAL_LABELS[j.field] + ': ' + (j.from && j.to ? j.from + ' → ' + j.to : (j.to || j.from || '')), sub: [{ auto: 'автозапись', monitor: 'мониторинг', lead: 'из обращения', created: 'при создании дела' }[j.source] || '', j.note || ''].filter(Boolean).join(' · '), muted: true, open: '' });
+    else if (FEED_JOURNAL_LABELS[j.field]) push({ key: 'j:' + j.id, date: feedISO(j.ts), time: feedHM(j.ts), group: 'journal', icon: 'info', title: FEED_JOURNAL_LABELS[j.field] + ': ' + (j.from && j.to ? j.from + ' → ' + j.to : (j.to || j.from || '')), sub: [{ auto: 'автозапись', card: 'в карточке', monitor: 'мониторинг', lead: 'из обращения', created: 'при создании дела' }[j.source] || '', j.note || ''].filter(Boolean).join(' · '), muted: true, open: '' });
   });
   const ord = (a, b) => a.date.localeCompare(b.date) || (a.time || '99:99').localeCompare(b.time || '99:99');
   const future = items.filter(x => x.date > today).sort(ord), past = items.filter(x => x.date <= today).sort((a, b) => -ord(a, b));
