@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 10:28 · 88cfb2a">
+<meta name="build" content="04.10.2026 12:04 · 643e6a5">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -214,7 +214,7 @@ dialog::backdrop{background:#0c183a70}
   .bottom-nav .icon{width:21px;height:21px}
   .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.stat{padding:14px}.stat-value{font-size:1.65rem}.stat-value.small-value{font-size:1.3rem}.stat-label{font-size:.75rem}
   .day-grid{gap:16px}.day-grid>.stack{display:contents}
-  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-next{order:8}.t-work{order:9}
+  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
   .panel.pad{padding:18px}.panel-title{padding:10px 8px 10px 16px}
   .imp-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main x" "done done";padding:12px 4px 12px 16px;gap:8px}
   .imp-done .button{min-height:var(--touch)}
@@ -2426,6 +2426,124 @@ async function autoCaseNo(inputId) {
 async function autoAgreementNo(inputId) {
   const inp = document.getElementById(inputId || 'cx-agreementNo'); if (!inp) return;
   inp.value = nextAgreementNo(await getAll('cases')); inp.dispatchEvent(new Event('input', { bubbles: true })); toast('Подставлен следующий номер соглашения');
+}
+
+// ▼▼▼ data/stageauto.js
+// ═══ data/stageauto.js — стадия дела по данным дела (решение пользователя 04.10.2026) ═══
+// Стадия только повышается и только при появлении данных более высокой инстанции: номер или ссылка (апелляция, кассация, Верховный Суд,
+// надзор) или заседание в суде апелляции или кассации (с явной инстанцией — из мониторинга — или в суде, указанном в деле для этой
+// инстанции). «Исполнение» и «Завершено» не трогаются. Вручную понижено — по тем же данным снова не поднимается (stageAutoSkip — ключ данных).
+// Сама стадия поднимается, когда запись ДОБАВИЛА такие данные (форма дела, заседание, данные с сайта суда); дела, где данные были и раньше,
+// показываются на «Сегодня» списком «Стадия отстаёт от данных» — поднимаются по подтверждению (решение пользователя).
+// Нормы (сверены 04.10.2026 по consultant.ru): кассация в судебную коллегию ВС — ст. 390.2 ГПК (ред. 04.08.2026), ст. 291.1 АПК
+// (ред. 15.12.2025), ст. 319 КАС (ред. 09.04.2026) — стадия «Кассация»; надзор Президиумом ВС — ст. 391.1 ГПК, ст. 308.1 АПК, ст. 332 КАС —
+// стадия «Надзор».
+const STAGE_RANK = { 'Досудебная': 0, 'Первая инстанция': 1, 'Апелляция': 2, 'Кассация': 3, 'Надзор': 4 };
+const STAGE_LAG_HIDE_KEY = 'crm_next_stage_lag_hide';
+const stageCourtNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^а-яa-z0-9]/g, '');
+const stageRankOf = s => (s in STAGE_RANK ? STAGE_RANK[s] : -1);
+// какую стадию показывают данные дела; null — данных выше первой инстанции нет
+function caseStageEvidence(c, hearings) {
+  if (!c) return null;
+  const same = (a, b) => { const x = stageCourtNorm(a), y = stageCourtNorm(b); return !!x && !!y && (x.includes(y) || y.includes(x)); };
+  const mine = (hearings || []).filter(h => h && !h._deleted && h.status !== 'Отменено' && (h.caseId ? h.caseId === c.id : (!!h.caseNum && h.caseNum === c.number)));
+  const at = st => mine.filter(h => h.stage === st || (!h.stage && h.court && !same(h.court, c.court) && same(h.court, st === 'Апелляция' ? (c.apCourt || c.courtApp) : c.courtCass)))
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')))[0];
+  const dt = d => (typeof fmtDate === 'function' ? fmtDate(d) : d);
+  if (c.nzNo || c.linkNadzor) return { stage: 'Надзор', why: c.nzNo ? 'номер надзорного производства ' + c.nzNo : 'ссылка на надзорное производство', key: 'nz:' + (c.nzNo || c.linkNadzor) };
+  if (c.courtNoVs || c.linkVs) return { stage: 'Кассация', why: c.courtNoVs ? 'номер дела в Верховном Суде ' + c.courtNoVs : 'ссылка на дело в Верховном Суде', key: 'vs:' + (c.courtNoVs || c.linkVs) };
+  if (c.courtNoCass || c.linkCass) return { stage: 'Кассация', why: c.courtNoCass ? 'номер дела в кассации ' + c.courtNoCass : 'ссылка на дело в кассации', key: 'cs:' + (c.courtNoCass || c.linkCass) };
+  const hc = at('Кассация'); if (hc) return { stage: 'Кассация', why: 'заседание ' + dt(hc.date) + ' в суде кассационной инстанции' + (hc.court ? ' (' + hc.court + ')' : ''), key: 'hc:' + hc.id };
+  if (c.courtNoApp || c.linkApp) return { stage: 'Апелляция', why: c.courtNoApp ? 'номер дела в апелляции ' + c.courtNoApp : 'ссылка на дело в апелляции', key: 'ap:' + (c.courtNoApp || c.linkApp) };
+  const ha = at('Апелляция'); if (ha) return { stage: 'Апелляция', why: 'заседание ' + dt(ha.date) + ' в суде апелляционной инстанции' + (ha.court ? ' (' + ha.court + ')' : ''), key: 'ha:' + ha.id };
+  return null;
+}
+// нужно ли поднять стадию: данные выше текущей стадии, стадия не «Исполнение»/«Завершено», пользователь не понижал по этим же данным
+function caseStageAutoCheck(c, hearings) {
+  if (!c || c._deleted || c.archived || c.status === 'Завершено' || c.stage === 'Исполнение' || c.stage === 'Завершено') return null;
+  const ev = caseStageEvidence(c, hearings); if (!ev) return null;
+  if (STAGE_RANK[ev.stage] <= stageRankOf(c.stage) || c.stageAutoSkip === ev.key) return null;
+  return ev;
+}
+// поднять стадию в объекте записи (запись в базу — у вызывающего); строка в журнале дела — с причиной
+function caseStageAutoApply(c, ev) {
+  const from = c.stage || ''; c.stage = ev.stage;
+  try { const p = put('caseEvents', { id: uid('СБ'), caseId: c.id || '', caseNum: c.number || '', ts: Date.now(), field: 'stage', from, to: ev.stage, source: 'auto', note: ev.why }); if (p && p.catch) p.catch(e => logErr('stage:auto:event', e)); } catch (e) { logErr('stage:auto:event', e); }
+  return { from, to: ev.stage, why: ev.why };
+}
+// форма дела: поднять, если эта правка добавила данные более высокой инстанции; пользователь сам выбрал стадию ниже данных — запомнить
+function caseStageAutoForm(prev, obj, hearings) {
+  const evNew = caseStageEvidence(obj, hearings); if (!evNew) return null;
+  const userSet = prev ? (obj.stage || '') !== (prev.stage || '') : false;
+  if (userSet) { if (STAGE_RANK[evNew.stage] > stageRankOf(obj.stage)) obj.stageAutoSkip = evNew.key; return null; }
+  const evOld = prev ? caseStageEvidence(prev, hearings) : null;
+  if (evOld && STAGE_RANK[evOld.stage] >= STAGE_RANK[evNew.stage]) return null; // данные были и раньше — это список «отстаёт», а не правка
+  const ev = caseStageAutoCheck(obj, hearings); return ev ? caseStageAutoApply(obj, ev) : null;
+}
+// запись заседания или дела в другом месте (мониторинг, «Данные с сайта суда», форма заседания): добавила данные — стадия поднимается сама
+const STAGE_AUTO = { busy: false };
+async function stageAutoAfterWrite(store, obj, prev) {
+  try {
+    const c = store === 'cases' ? await getOne('cases', obj.id) : (obj.caseId ? await getOne('cases', obj.caseId) : (await getAll('cases')).find(x => x.number === obj.caseNum));
+    if (!c) return;
+    const hs = await getAll('hearings');
+    const evNow = caseStageAutoCheck(c, hs); if (!evNow) return;
+    // данные добавила именно эта запись: для дела — их не было в прежней версии; для заседания — это оно и оно новое или сменило суд/инстанцию
+    if (store === 'cases') { const evOld = prev ? caseStageEvidence(prev, hs) : null; if (evOld && STAGE_RANK[evOld.stage] >= STAGE_RANK[evNow.stage]) return; }
+    else { if (evNow.key !== 'ha:' + obj.id && evNow.key !== 'hc:' + obj.id) return; if (prev && prev.stage === obj.stage && prev.court === obj.court && !prev._deleted) return; }
+    const r = caseStageAutoApply(c, evNow);
+    STAGE_AUTO.busy = true;
+    try { await put('cases', c); } finally { STAGE_AUTO.busy = false; }
+    if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+    if (typeof toast === 'function') toast('Дело ' + (c.number || '') + ': стадия «' + r.to + '» — ' + r.why);
+  } catch (e) { logErr('stage:auto', e); }
+}
+if (typeof put === 'function') {
+  const putStage = put;
+  put = async function (store, obj, ...rest) {
+    let prev = null;
+    if (!STAGE_AUTO.busy && obj && obj.id && (store === 'cases' || store === 'hearings')) { try { prev = await getOne(store, obj.id); } catch (e) { logErr('stage:auto:prev', e); } }
+    const res = await putStage.call(this, store, obj, ...rest);
+    if (!STAGE_AUTO.busy && obj && (store === 'cases' || store === 'hearings')) setTimeout(() => stageAutoAfterWrite(store, obj, prev), 300);
+    return res;
+  };
+}
+// ── «Сегодня»: дела, где данные выше стадии (были и раньше или пришли с другого устройства) — поднять по подтверждению ──
+function stageLagHidden() { try { return JSON.parse(localStorage.getItem(STAGE_LAG_HIDE_KEY) || '{}') || {}; } catch (e) { return {}; } }
+function stageLagModel(cases, hearings, hidden) {
+  hidden = hidden || {};
+  return (cases || []).map(c => ({ c, ev: caseStageAutoCheck(c, hearings) })).filter(x => x.ev && hidden[x.c.id] !== x.ev.key);
+}
+async function stageLagBox() {
+  let rows; try { rows = stageLagModel(await getAll('cases'), await getAll('hearings'), stageLagHidden()); } catch (e) { logErr('stage:lag', e); return ''; }
+  if (!rows.length) return '';
+  const list = rows.slice(0, 8).map(x => `<div class="imp-row"><div class="imp-main" style="cursor:default"><span class="task-title">${esc([x.c.number, x.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc((x.c.stage || 'без стадии') + ' → ' + x.ev.stage + ' — ' + x.ev.why)}</span></div>
+    <div class="imp-done"><button type="button" class="button small-btn" onclick="stageLagRaise('${jsq(x.c.id)}')">${icon('check', 'icon-sm')}Поднять</button></div>
+    <div class="imp-x">${iconBtn('Не поднимать по этим данным', `stageLagHide('${jsq(x.c.id)}', '${jsq(x.ev.key)}')`, 'x')}</div></div>`).join('');
+  return `<section class="panel t-stage" id="stage-lag"><div class="panel-title"><h2>Стадия отстаёт от данных ${badge(String(rows.length), 'accent')}</h2><div class="panel-tools">${rows.length > 1 ? `<button type="button" class="text-button" onclick="stageLagRaiseAll()">Поднять все</button>` : ''}</div></div>
+    <p class="small muted" style="margin:10px 20px 0">По номерам, ссылкам или заседаниям дело уже в более высокой инстанции, а стадия прежняя.</p>${list}${rows.length > 8 ? `<p class="panel-foot">Ещё ${rows.length - 8}</p>` : ''}</section>`;
+}
+async function stageLagRaise(id, quiet) {
+  const c = await getOne('cases', id); if (!c) return false;
+  const ev = caseStageAutoCheck(c, await getAll('hearings')); if (!ev) { if (!quiet) nav('today'); return false; }
+  const r = caseStageAutoApply(c, ev);
+  STAGE_AUTO.busy = true;
+  try { await put('cases', c); } catch (e) { logErr('stage:lag:raise', e); if (!quiet) toast('Не удалось сохранить: ' + ((e && e.message) || 'ошибка записи'), true); return false; } finally { STAGE_AUTO.busy = false; }
+  if (!quiet) { if (typeof refreshCasesCache === 'function') await refreshCasesCache(); toast('Дело ' + (c.number || '') + ': стадия «' + r.to + '»'); nav('today'); }
+  return true;
+}
+async function stageLagRaiseAll() {
+  const rows = stageLagModel(await getAll('cases'), await getAll('hearings'), stageLagHidden()); let n = 0;
+  for (const x of rows) if (await stageLagRaise(x.c.id, true)) n++;
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast('Стадия поднята у дел: ' + n); nav('today');
+}
+// «не поднимать по этим данным» — в самом деле (stageAutoSkip), как ручное понижение: действует на всех устройствах
+async function stageLagHide(id, key) {
+  const c = await getOne('cases', id); if (!c) return;
+  c.stageAutoSkip = key; STAGE_AUTO.busy = true;
+  try { await put('cases', c); } catch (e) { logErr('stage:lag:hide', e); toast('Не удалось сохранить: ' + ((e && e.message) || 'ошибка записи'), true); return; } finally { STAGE_AUTO.busy = false; }
+  toast('По этим данным стадия не поднимается'); nav('today');
 }
 
 // ▼▼▼ next/guard.js
@@ -5108,7 +5226,7 @@ async function saveCaseForm(id) {
     if (taken) { fErr('Номер соглашения ' + r.obj.agreementNo + ' уже занят делом ' + (taken.number || '') + (taken.client ? ' (' + taken.client + ')' : '') + (taken._deleted ? ' — дело в корзине' : '') + '. Укажите другой номер или нажмите «Авто» на вкладке «Соглашение»'); return; }
   }
   // разбор GPT 04.10.2026, п. 5: сообщение об ошибке — по фактически выполненным шагам
-  let clientSaved = false;
+  let clientSaved = false, stageUp = null;
   try {
     if (r.newClient) { await put('clients', r.newClient); clientSaved = true; }
     if (r.clientUpd) await put('clients', r.clientUpd);
@@ -5117,9 +5235,11 @@ async function saveCaseForm(id) {
     // сроки по датам актов: правила v312 + правило пользователя о мотивированном акте (ui/deadlines.js)
     const msgs = typeof nextActDeadlines === 'function' ? nextActDeadlines(r.obj, prev) : [];
     if (msgs && msgs.length) addCaseHistoryEvent(r.obj, 'deadline', '', msgs.join(' | '), id ? 'form' : 'created');
+    // решение пользователя 04.10.2026: правка добавила данные более высокой инстанции — стадия поднимается (data/stageauto.js)
+    stageUp = typeof caseStageAutoForm === 'function' ? caseStageAutoForm(prev, r.obj, await getAll('hearings')) : null;
     await put('cases', r.obj);
   } catch (e) { logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (clientSaved ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
-  await refreshCasesCache(); toast(id ? 'Дело сохранено' : 'Дело создано');
+  await refreshCasesCache(); toast((id ? 'Дело сохранено' : 'Дело создано') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
   closeSheet(); await nav('cases'); openCaseSheet(r.obj.id);
@@ -5514,7 +5634,11 @@ const CASE_FORM_TABS = [
     fields: [['csFilingDate', 'Жалоба подана', 'date'], ['csBy', 'Кто обжалует', 'select', APPEAL_BY], ['courtCass', 'Кассационный суд', 'text', { list: 'courts' }], ['courtNoCass', '№ дела в кассации'], ['judgeCass', 'Судья (кассация)', 'text', { list: 'judges' }],
     ['csDecisionDate', 'Дата кассационного определения', 'date'], ['csResult', 'Результат кассации', 'select', CS_RESULTS], ['linkCass', 'Ссылка на дело (кассация)', 'url'], ['secretaryCass', 'Помощник судьи'], ['secretaryPhoneCass', 'Телефон помощника'], ['cabinetCass', 'Кабинет'], ['csNote', 'Заметки (кассация)', 'area']] },
   { id: 'cs2', title: 'Верховный Суд', kinds: KIND_COURT, hint: { 'ГПК': 'Кассационная жалоба в Судебную коллегию ВС РФ — 3 месяца со дня вынесения определения кассационного суда общей юрисдикции (ст. 390.3 ГПК РФ); надзор — гл. 41.1.', 'АПК': 'Кассационная жалоба в ВС РФ — 2 месяца со дня вступления в силу последнего обжалуемого акта (ст. 291.2 АПК РФ).', 'КАС': 'Кассационная жалоба в ВС РФ — 6 месяцев (ст. 318 КАС РФ).', 'УПК': 'Выборочная кассация в ВС РФ и надзор (гл. 47.1, 48.1 УПК РФ) — срок не установлен.' },
-    fields: [['cs2FilingDate', 'Жалоба подана', 'date'], ['cs2By', 'Кто обжалует', 'select', APPEAL_BY], ['cs2DecisionDate', 'Дата определения (постановления)', 'date'], ['cs2Result', 'Результат', 'select', CS_RESULTS], ['cs2Note', 'Заметки', 'area']] },
+    // решение пользователя 04.10.2026: номер и ссылка дела в ВС (вторая кассация: ст. 390.2 ГПК, ст. 291.1 АПК, ст. 319 КАС) — стадия «Кассация»
+    fields: [['cs2FilingDate', 'Жалоба подана', 'date'], ['cs2By', 'Кто обжалует', 'select', APPEAL_BY], ['courtNoVs', '№ дела в ВС РФ'], ['linkVs', 'Ссылка на дело (ВС РФ)', 'url'], ['cs2DecisionDate', 'Дата определения (постановления)', 'date'], ['cs2Result', 'Результат', 'select', CS_RESULTS], ['cs2Note', 'Заметки', 'area']] },
+  // надзор — Президиум ВС РФ (ст. 391.1 ГПК, ст. 308.1 АПК, ст. 332 КАС; сверено 04.10.2026) — стадия «Надзор»
+  { id: 'nz', title: 'Надзор (Президиум ВС)', kinds: KIND_COURT, hint: { 'ГПК': 'Пересмотр в порядке надзора — Президиум ВС РФ (ст. 391.1 ГПК РФ).', 'АПК': 'Пересмотр в порядке надзора — Президиум ВС РФ (ст. 308.1 АПК РФ).', 'КАС': 'Пересмотр в порядке надзора — Президиум ВС РФ (ст. 332 КАС РФ).', 'УПК': 'Надзорное производство — гл. 48.1 УПК РФ.' },
+    fields: [['nzFilingDate', 'Надзорная жалоба подана', 'date'], ['nzNo', '№ надзорного производства'], ['linkNadzor', 'Ссылка (надзор)', 'url'], ['nzDecisionDate', 'Дата постановления (определения)', 'date'], ['nzResult', 'Результат', 'select', CS_RESULTS], ['nzNote', 'Заметки', 'area']] },
   // ── исполнение ──
   { id: 'ip', title: 'Исполнение', kinds: ['Гражданское', 'Арбитраж', 'КАС'], hint: 'Исполнительный лист предъявляется в течение 3 лет со дня вступления акта в силу (ст. 21 Закона № 229-ФЗ); жалоба на постановление пристава — 10 дней (ст. 122).',
     fields: [['ipDocType', 'Исполнительный документ', 'select', ['Исполнительный лист', 'Судебный приказ', 'Постановление', 'Иное']], ['ipDocNo', '№ исполнительного документа'], ['ipDocDate', 'Дата выдачи', 'date'], ['ipDocIssuer', 'Кем выдан'],
@@ -6192,7 +6316,9 @@ SCREENS.today = async function () {
   // на телефоне порядок блоков задаёт tokens.css: важное → ближайшее заседание → план дня → события судов → далее → в работе
   // очередь 4: напоминание о продлении лицензии — за 30, 7, 1 день; скрывается до следующей ступени (ui/license.js)
   const licBox = typeof licRenewBox === 'function' ? await licRenewBox() : '';
-  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${licBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
+  // решение пользователя 04.10.2026: дела, где данные выше стадии, — поднять по подтверждению (data/stageauto.js)
+  const stageBox = typeof stageLagBox === 'function' ? await stageLagBox() : '';
+  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${licBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
   return out;
 };
 
@@ -6499,7 +6625,7 @@ function caseFeedModel(c, d, journal, now) {
   (d.expenses || []).filter(mine).forEach(e => push({ key: 'e:' + e.id, date: e.date || feedISO(e.createdAt || ''), time: '', group: 'money', icon: 'wallet', title: '− ' + fmtMoney(Number(e.amount || 0)) + ' · ' + (e.category || 'расход'), sub: e.note || e.descr || '', state: 'minus', open: `openExpenseForm('${jsq(e.id)}')` }));
   (journal || []).forEach(j => { if (!j || j._deleted || !j.ts) return;
     if (j.field === 'note') push({ key: 'n:' + j.id, date: feedISO(j.ts), time: feedHM(j.ts), group: 'notes', icon: 'pencil', title: j.to || '', sub: 'заметка' + (j.editedAt ? ' · изменена' : ''), note: true, open: `openNoteSheet('${jsq(j.id)}')` });
-    else if (FEED_JOURNAL_LABELS[j.field]) push({ key: 'j:' + j.id, date: feedISO(j.ts), time: feedHM(j.ts), group: 'journal', icon: 'info', title: FEED_JOURNAL_LABELS[j.field] + ': ' + (j.from && j.to ? j.from + ' → ' + j.to : (j.to || j.from || '')), sub: { auto: 'автозапись', monitor: 'мониторинг', lead: 'из обращения', created: 'при создании дела' }[j.source] || '', muted: true, open: '' });
+    else if (FEED_JOURNAL_LABELS[j.field]) push({ key: 'j:' + j.id, date: feedISO(j.ts), time: feedHM(j.ts), group: 'journal', icon: 'info', title: FEED_JOURNAL_LABELS[j.field] + ': ' + (j.from && j.to ? j.from + ' → ' + j.to : (j.to || j.from || '')), sub: [{ auto: 'автозапись', monitor: 'мониторинг', lead: 'из обращения', created: 'при создании дела' }[j.source] || '', j.note || ''].filter(Boolean).join(' · '), muted: true, open: '' });
   });
   const ord = (a, b) => a.date.localeCompare(b.date) || (a.time || '99:99').localeCompare(b.time || '99:99');
   const future = items.filter(x => x.date > today).sort(ord), past = items.filter(x => x.date <= today).sort((a, b) => -ord(a, b));
