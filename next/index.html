@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 22:54 · e6ca193">
+<meta name="build" content="05.10.2026 00:02 · ce093ee">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2426,6 +2426,32 @@ if (typeof putRaw === 'function' && typeof mergeIncoming === 'function') {
     finally { MERGE_SEEN.on = false; MERGE_SEEN.upd.clear(); }
   };
 }
+// Разбор GPT 04.10.2026 (вечер), п. 6: запись из формы правки (ui/guard.js: formRecMark при открытии, formRecFor при записи) — проверка версии
+// и запись в ОДНОЙ транзакции: между проверкой и записью другое устройство или вкладка вмешаться не могут. Запись изменилась (метка _upd не та,
+// что при открытии, и не подтверждённая вторым «Сохранить») — отказ с перечнем полей «ваше / с другого устройства» (formRecConflictText); сбой
+// чтения перед записью — отказ (раньше проверка пропускалась), введённое остаётся в форме и черновике. Остальные записи идут прежним путём.
+function formRecPut(store, obj, r) {
+  if (store !== 'cases' && obj.caseNum && !obj.caseId && typeof CASES_BY_NUM === 'object' && CASES_BY_NUM[obj.caseNum]) obj.caseId = CASES_BY_NUM[obj.caseNum].id;
+  const prevStamp = Math.min(Number(localStorage.getItem('crm_last_write_stamp') || 0), Date.now() + 86400000);
+  obj._upd = Math.max(Date.now(), prevStamp + 1); localStorage.setItem('crm_last_write_stamp', String(obj._upd));
+  try { obj._device = deviceId(); } catch (e) { logErr('form:put', e); }
+  return new Promise((res, rej) => {
+    let done = false; const finish = (ok, e) => { if (done) return; done = true; if (ok) res(true); else rej(e); };
+    let t; try { t = db.transaction(store, 'readwrite'); } catch (e) { storageWriteError(e); finish(false, new Error('Не удалось сохранить: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
+    const os = t.objectStore(store), g = os.get(obj.id);
+    g.onsuccess = () => {
+      const cur = g.result || null, now = cur ? (cur._upd || 0) : null;
+      if (cur && now !== r.upd && now !== r.ack) { const msg = typeof formRecConflictText === 'function' ? formRecConflictText(r, cur, obj) : 'Запись изменили, пока форма была открыта — нажмите «Сохранить» ещё раз'; r.ack = now; finish(false, new Error(msg)); try { t.abort(); } catch (e) { /* штатно: транзакция уже прервана */ } return; }
+      try { fieldStamps(obj, cur, obj._upd); } catch (e) { logErr('form:stamps', e); }
+      os.put(obj);
+    };
+    g.onerror = () => { finish(false, new Error('Не удалось проверить запись перед сохранением (' + ((g.error && g.error.message) || 'ошибка чтения') + ') — введённое осталось в форме и черновике')); try { t.abort(); } catch (e) { /* штатно */ } };
+    t.oncomplete = () => { if (typeof cloudTouch === 'function') cloudTouch(); finish(true); };
+    t.onerror = () => { if (!done) storageWriteError(t.error); finish(false, new Error('Не удалось сохранить запись: ' + ((t.error && t.error.message) || 'ошибка хранилища'))); };
+    t.onabort = () => finish(false, new Error('Не удалось сохранить запись: транзакция прервана'));
+  });
+}
+if (typeof put === 'function') { const putPlain = put; put = function (store, obj, ...rest) { const r = typeof formRecFor === 'function' ? formRecFor(store, obj) : null; return r ? formRecPut(store, obj, r) : putPlain.call(this, store, obj, ...rest); }; }
 // текст о неполном слиянии: записи, изменённые во время обмена, называются отдельно (их не «не удалось записать» — их не тронули нарочно)
 function mergeFailText(r, plain) {
   if (r && r.raced && r.raced >= r.failed) return 'записи изменились на этом устройстве во время обмена (' + r.raced + ') — объединятся при повторе';
@@ -2909,6 +2935,12 @@ async function mergePreviewCopy() {
 }
 // Правки, сделанные в новой версии после последней загрузки: они хранятся на устройстве и на сервер не уходят
 // разбор GPT 04.10.2026, п. 3: точка отсчёта — последняя подтверждённая ревизия, от загрузки ИЛИ от отправки (первая отправка на пустой сервер)
+// предложение GPT 04.10.2026 «Диагностика»: одной строкой в «О программе» — последняя подтверждённая отправка и есть ли неотправленные правки
+function syncDiagLine() {
+  if (!nextSrvConfigured()) return 'сервер не подключён';
+  const at = Number(localStorage.getItem('crm_next_push_at') || 0), rev = localStorage.getItem('crm_next_pull_rev') || '';
+  return (at ? 'последняя подтверждённая отправка ' + new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'отправки ещё не было') + (rev ? ' · версия на сервере ' + String(rev).slice(0, 12) : '') + (nextLocalChanges() ? ' · есть неотправленные правки' : ' · неотправленных правок нет');
+}
 const nextLocalChanges = () => !!(SRVDB.lastPull || localStorage.getItem('crm_next_push_at')) && localStorage.getItem('crm_next_pull_rev') !== syncRevision();
 // Отметка «синхронизировано» после загрузки (разбор GPT 03.10.2026): часть записей — какой она была ДО запроса (записи слияния её не
 // двигают — putRaw), части настроек — после слияния (настройки с сервера приняты). Правка, сделанная, пока шла загрузка, сдвигает
@@ -5042,31 +5074,45 @@ applyTheme(); applyFontSettings(); // до первой отрисовки — �
 const GUARD_DRAFT_KEY = 'crm_next_draft', GUARD_DRAFT_TTL = 24 * 3600000;
 // saving — время нажатия «Сохранить»/«Удалить»: пока запись идёт, закрытие листа (успех) разрешено; ошибка записи (fErr, сообщение об
 // ошибке) сбрасывает отметку — защита и черновик остаются (разбор GPT 03.10.2026: раньше защита снималась до результата записи)
-const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0 };
-const GUARD_SAVE_MS = 20000, GUARD_START_MS = 1500;
-function guardSaving() { return !!SHEET_GUARD.saving && Date.now() - SHEET_GUARD.saving < GUARD_SAVE_MS; }
+const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0, busy: null, slowT: 0 };
+const GUARD_SAVE_MS = 20000, GUARD_START_MS = 1500, GUARD_SLOW_MS = 8000;
+// разбор GPT 04.10.2026 (вечер), п. 5: «идёт запись» — пока обработчик «Сохранить» не завершился (guardRun держит его обещание), а не по таймеру;
+// таймер остаётся запасным для кнопок без guardRun («Удалить») и для сообщения «дольше обычного»
+function guardSaving() { return !!SHEET_GUARD.busy || (!!SHEET_GUARD.saving && Date.now() - SHEET_GUARD.saving < GUARD_SAVE_MS); }
+function guardRun(fn) {
+  if (SHEET_GUARD.busy) { toast('Сохраняю — подождите'); return SHEET_GUARD.busy; }
+  SHEET_GUARD.saving = Date.now(); clearTimeout(SHEET_GUARD.slowT); SHEET_GUARD.slowT = setTimeout(() => { if (SHEET_GUARD.busy) toast('Сохранение занимает дольше обычного — подождите'); }, GUARD_SLOW_MS);
+  const p = Promise.resolve().then(fn).catch(e => { logErr('form:run', e); if (typeof fErr === 'function') fErr((e && e.message) || 'Не удалось сохранить'); }).finally(() => { if (SHEET_GUARD.busy === p) SHEET_GUARD.busy = null; clearTimeout(SHEET_GUARD.slowT); });
+  SHEET_GUARD.busy = p; return p;
+}
 // разбор GPT 04.10.2026, пп. 2 и 7: «идёт запись» — пока в базу действительно пишется (незавершённые put/putRaw/del) или первые 1,5 с после
 // нажатия (обработчик ещё читает и проверяет). Предупреждение формы («время занято — нажмите ещё раз») записи не начинает: через 1,5 с
 // повторное нажатие и закрытие работают как обычно
 const GUARD_WRITES = { n: 0 };
-function guardWriteInProgress() { return guardSaving() && (GUARD_WRITES.n > 0 || Date.now() - SHEET_GUARD.saving < GUARD_START_MS); }
+function guardWriteInProgress() { return !!SHEET_GUARD.busy || (guardSaving() && (GUARD_WRITES.n > 0 || Date.now() - SHEET_GUARD.saving < GUARD_START_MS)); }
 { const wrap = f => async function (...a) { GUARD_WRITES.n++; try { return await f.apply(this, a); } finally { GUARD_WRITES.n--; } };
-  if (typeof put === 'function') { const putForm = put; put = wrap(async function (store, obj, ...rest) { await formRecCheck(store, obj); return putForm.call(this, store, obj, ...rest); }); }
+  // проверка версии записи, открытой в форме, — в одной транзакции с записью (next/fixes.js, formRecPut); здесь — только счётчик
+  if (typeof put === 'function') put = wrap(put);
   if (typeof putRaw === 'function') putRaw = wrap(putRaw); if (typeof del === 'function') del = wrap(del); }
 // Запись изменилась, пока форма была открыта (очередь; предложение GPT 04.10.2026 «Конфликты»). Открыватель формы отмечает запись
 // (formRecMark); при сохранении из этой формы запись перечитывается: метка _upd другая — сохранение останавливается, изменённые поля названы
 // по-русски (CONFLICT_FIELDS), остальные — числом; второе «Сохранить» записывает версию формы поверх (ack). Записи других разделов не трогаются.
 function formRecMark(store, rec) { if (UI.cur && rec && rec.id) UI.cur.rec = { store, id: rec.id, upd: rec._upd || 0, snap: JSON.parse(JSON.stringify(rec)), ack: null }; }
-async function formRecCheck(store, obj) {
-  const r = UI.cur && UI.cur.rec; if (!r || !obj || r.store !== store || r.id !== obj.id || !guardSaving()) return;
-  let cur = null; try { cur = await getOne(store, obj.id); } catch (e) { logErr('form:recheck', e); return; }
-  if (!cur) return;
-  const now = cur._upd || 0; if (now === r.upd || now === r.ack) return;
+// запись для проверки версии при записи из формы (next/fixes.js, formRecPut): только пока обработчик «Сохранить» работает
+function formRecFor(store, obj) { const r = UI.cur && UI.cur.rec; return r && obj && r.store === store && r.id === obj.id && guardSaving() ? r : null; }
+// текст конфликта (разбор GPT 04.10.2026, предложение «Конфликты»): по каждому изменённому полю — «ваше» и «с другого устройства»
+const formRecVal = v => { if (v === undefined || v === null || v === '') return '—'; const s = typeof v === 'object' ? JSON.stringify(v) : String(v); return s.length > 40 ? s.slice(0, 39) + '…' : s; };
+// «ваше» — то, что сейчас в форме (obj), «с другого устройства» — запись в базе; перечисляются поля, которые изменило другое устройство
+function formRecConflictText(r, cur, obj) {
+  const mine = obj || r.snap;
   const keys = Object.keys(Object.assign({}, r.snap, cur)).filter(k => !k.startsWith('_') && k !== 'updatedAt' && k !== 'createdAt' && JSON.stringify(r.snap[k]) !== JSON.stringify(cur[k]));
-  const names = keys.filter(k => typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]).map(k => CONFLICT_FIELDS[k]), other = keys.length - names.length;
-  r.ack = now;
-  throw new Error('Пока форма была открыта, эту запись изменили на другом устройстве или в другой вкладке' + (names.length || other ? ' (' + names.concat(other ? ['ещё ' + other + ' ' + plural(other, 'поле', 'поля', 'полей')] : []).join(', ') + ')' : '') + '. «Сохранить» ещё раз — записать вашу версию поверх; «Отмена» и открыть заново — увидеть новые данные');
+  const named = keys.filter(k => typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]), other = keys.length - named.length;
+  const parts = named.slice(0, 5).map(k => CONFLICT_FIELDS[k] + ': ваше «' + formRecVal(mine[k]) + '», с другого устройства «' + formRecVal(cur[k]) + '»');
+  if (named.length > 5) parts.push('ещё ' + (named.length - 5) + ' ' + plural(named.length - 5, 'поле', 'поля', 'полей')); if (other) parts.push('служебных полей: ' + other);
+  return 'Пока форма была открыта, эту запись изменили на другом устройстве или в другой вкладке' + (parts.length ? '. ' + parts.join('; ') : '') + '. «Сохранить» ещё раз — записать вашу версию поверх; «Отмена» и открыть заново — увидеть новые данные';
 }
+// устойчивый id новой записи на время жизни формы: повтор «Сохранить» после сбоя не создаёт вторую запись (разбор GPT 04.10.2026 (вечер), п. 1)
+function formNewId(prefix, fallback) { if (!UI.cur) return fallback; UI.cur.newIds = UI.cur.newIds || {}; if (!UI.cur.newIds[prefix]) UI.cur.newIds[prefix] = fallback; return UI.cur.newIds[prefix]; }
 function guardSaveFailed() { SHEET_GUARD.saving = 0; }
 function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions'); }
 // значения всех полей формы одной строкой — для сравнения
@@ -5104,11 +5150,29 @@ function guardArm() {
 function guardDirty() { return SHEET_GUARD.armed && guardIsForm() && guardFormState() !== SHEET_GUARD.snap; }
 function guardDisarm(dropDraft) { SHEET_GUARD.armed = false; clearTimeout(SHEET_GUARD.timer); if (dropDraft) guardDraftDrop(); }
 function guardOnInput() { if (!SHEET_GUARD.armed) return; clearTimeout(SHEET_GUARD.timer); SHEET_GUARD.timer = setTimeout(guardDraftSave, 600); }
-// черновик — замороженная разметка формы (значения в атрибутах), как для «←»
+// черновик (разбор GPT 04.10.2026 (вечер), п. 4): какая форма открыта (функция открытия и её аргументы — из кнопки «Сохранить»), значения полей,
+// у полной формы дела — вкладка; восстанавливается штатной функцией открытия (обработчики, подсказки, отметка записи для проверки конфликтов —
+// на месте), затем подставляются значения. Замороженная разметка хранится запасным путём — если открыть форму не удалось (запись удалена).
+const GUARD_OPENERS = { saveCaseForm: 'openCaseForm', saveClientForm: 'openClientForm', saveDeadlineForm: 'openDeadlineForm', saveExpenseForm: 'openExpenseForm', saveFinanceForm: 'openFinanceForm', saveHearingForm: 'openHearingForm', saveLeadForm: 'openLeadForm', saveMailForm: 'openMailForm', saveMeetingForm: 'openMeetingForm', savePayForm: 'openPayForm', savePoaForm: 'openPoaForm', saveTaskForm: 'openTaskForm', planSave: 'openPlanForm', noteSave: 'openNoteSheet', afterHearingSave: 'openAfterHearing' };
+function guardFormOpener() {
+  const b = document.querySelector('#sheetContent .save-bar .button.primary'); const m = /(\w+)\(([^)]*)\)\s*\)?\s*$/.exec(b && b.getAttribute('onclick') || ''); if (!m || !GUARD_OPENERS[m[1]]) return null;
+  const args = []; m[2].replace(/'((?:\\.|[^'\\])*)'/g, (_, s) => { args.push(s.replace(/\\(.)/g, '$1')); return ''; });
+  if (m[1] === 'saveCaseForm') args.push(!!document.getElementById('cx-tabs'));
+  return { fn: GUARD_OPENERS[m[1]], args };
+}
+function guardFormFields() {
+  const box = document.querySelector('#sheetContent .modal-content'); if (!box) return [];
+  const out = []; box.querySelectorAll('input, textarea, select').forEach(el => { if (!el.id || el.type === 'button' || el.type === 'submit' || el.closest('.combo-list')) return;
+    const f = { id: el.id }; if (el.type === 'checkbox' || el.type === 'radio') f.checked = !!el.checked; else f.value = String(el.value || ''); if (el.dataset && el.dataset.pickedId) f.picked = el.dataset.pickedId; out.push(f); });
+  return out;
+}
 function guardDraftSave() {
   if (!guardDirty() || !UI.cur) return;
-  try { sheetFreeze(); localStorage.setItem(GUARD_DRAFT_KEY, JSON.stringify({ title: UI.cur.title, body: UI.cur.body, at: Date.now(), screen: UI.screen })); } catch (e) { logErr('guard:draft', e); }
+  try { sheetFreeze(); const tab = document.querySelector('#cx-tabs [aria-pressed="true"]');
+    localStorage.setItem(GUARD_DRAFT_KEY, JSON.stringify({ title: UI.cur.title, body: UI.cur.body, at: Date.now(), screen: UI.screen, open: guardFormOpener(), fields: guardFormFields(), tab: tab ? tab.dataset.tab : '' })); } catch (e) { logErr('guard:draft', e); }
 }
+// предложение GPT «Смартфон»: уход со страницы (переключение приложений, клавиатура свернула окно) — черновик пишется сразу, не дожидаясь паузы ввода
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && SHEET_GUARD.armed) { clearTimeout(SHEET_GUARD.timer); try { guardDraftSave(); } catch (e) { logErr('guard:draft', e); } } });
 function guardDraftDrop() { try { localStorage.removeItem(GUARD_DRAFT_KEY); } catch (e) { logErr('guard:draft', e); } }
 function guardDraftGet() { try { const d = JSON.parse(localStorage.getItem(GUARD_DRAFT_KEY) || 'null'); return d && d.body && Date.now() - (d.at || 0) < GUARD_DRAFT_TTL ? d : null; } catch (e) { return null; } }
 // попытка закрыть: true — можно закрывать; false — показан выбор, лист остаётся
@@ -5145,7 +5209,19 @@ function guardDraftBar() {
   const d = guardDraftGet(); if (!d) return '';
   return `<div class="draft-bar" id="draft-bar">${icon('pencil', 'icon-sm')}<span>Незавершённая форма «${esc(d.title)}» от ${esc(new Date(d.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span><div class="actions">${btn('Открыть', 'guardDraftOpen()', 'small-btn primary', 'pencil')}${btn('Удалить', 'guardDraftDiscard()', 'small-btn', 'trash-2')}</div></div>`;
 }
-function guardDraftOpen() { const d = guardDraftGet(); if (!d) { toast('Черновика уже нет'); return; } openSheet(d.title, d.body); if (UI.cur) { UI.cur.guardSnap = ''; SHEET_GUARD.snap = ''; SHEET_GUARD.armed = true; } /* снимок пустой — форма считается изменённой, пока не сохранена */ }
+async function guardDraftOpen() {
+  const d = guardDraftGet(); if (!d) { toast('Черновика уже нет'); return; }
+  let restored = false;
+  if (d.open && typeof window[d.open.fn] === 'function') {
+    try { await window[d.open.fn](...d.open.args); restored = sheetIsOpen() && guardIsForm(); } catch (e) { logErr('guard:draft-open', e); }
+    if (restored) { (d.fields || []).forEach(f => { const el = document.getElementById(f.id); if (!el) return;
+        if (f.checked !== undefined) el.checked = f.checked; else el.value = f.value; if (f.picked) el.dataset.pickedId = f.picked;
+        el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); });
+      if (d.tab && typeof caseTabPick === 'function' && document.getElementById('cx-tabs')) caseTabPick(d.tab);
+      if (typeof comboCloseAll === 'function') comboCloseAll(); }
+  }
+  if (!restored) { openSheet(d.title, d.body); toast('Запись изменилась или удалена — показаны только введённые значения'); }
+  if (UI.cur) { UI.cur.guardSnap = ''; SHEET_GUARD.snap = ''; SHEET_GUARD.armed = true; } /* снимок пустой — форма считается изменённой, пока не сохранена */ }
 function guardDraftDiscard() { guardDraftDrop(); const b = document.getElementById('draft-bar'); if (b) b.remove(); toast('Черновик удалён'); }
 
 // ▼▼▼ ui/sheets.js
@@ -5182,6 +5258,7 @@ async function openSettingsSheet(sub) {
     <div class="list-rows">
       <div><span>Версия</span><span class="muted">${esc(APP_VER)} · база ${esc(db ? db.name : '—')}, версия ${esc(db ? db.version : '—')}</span></div>
       <div><span>Сборка</span><span class="muted">${esc(BUILD_ID)}</span></div>
+      <div><span>Обмен с сервером</span><span class="muted">${esc(typeof syncDiagLine === 'function' ? syncDiagLine() : '—')}</span></div>
       <div><span>Правила сроков</span><span class="muted">${esc(RULES_VER)}</span></div>
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
@@ -5336,7 +5413,7 @@ function fv(id) { const el = document.getElementById(id); return el ? String(el.
 function fErr(msg) { const box = document.getElementById('form-error'); if (box) { box.textContent = msg; box.hidden = !msg; } if (msg) { if (typeof guardSaveFailed === 'function') guardSaveFailed(); toast(msg, true); } }
 // delFn — при правке: кнопка «Удалить» (этап 2б) открывает подтверждение, сама ничего не удаляет
 // деморежим (04.10.2026): у формы новой записи — строка «можно создать ещё N из 5» (ui/license.js, demoHintSlot)
-function fSaveBar(fn, saveText, delFn) { return `${typeof demoHintSlot === 'function' ? demoHintSlot(fn) : ''}<div class="info-box warning" id="form-error" role="alert" hidden></div><div class="form-actions save-bar"><button type="button" class="button primary" onclick="${fn}">${icon('check')}${esc(saveText || 'Сохранить')}</button><button type="button" class="button" onclick="sheetBack()">Отмена</button>${delFn ? `<button type="button" class="button danger push-right" onclick="${delFn}">${icon('trash-2')}Удалить</button>` : ''}</div>`; }
+function fSaveBar(fn, saveText, delFn) { return `${typeof demoHintSlot === 'function' ? demoHintSlot(fn) : ''}<div class="info-box warning" id="form-error" role="alert" hidden></div><div class="form-actions save-bar"><button type="button" class="button primary" onclick="guardRun(() => ${fn})">${icon('check')}${esc(saveText || 'Сохранить')}</button><button type="button" class="button" onclick="sheetBack()">Отмена</button>${delFn ? `<button type="button" class="button danger push-right" onclick="${delFn}">${icon('trash-2')}Удалить</button>` : ''}</div>`; }
 const refList = k => (REF && Array.isArray(REF[k]) ? REF[k] : []).map(x => (x && typeof x === 'object') ? (x.name || '') : String(x)).filter(Boolean);
 
 // ── чистые сборщики записей ──
@@ -5560,6 +5637,8 @@ async function saveCaseForm(id) {
     const taken = agreementNoTakenBy(allCases, r.obj.agreementNo, id || null);
     if (taken) { fErr('Номер соглашения ' + r.obj.agreementNo + ' уже занят делом ' + (taken.number || '') + (taken.client ? ' (' + taken.client + ')' : '') + (taken._deleted ? ' — дело в корзине' : '') + '. Укажите другой номер или нажмите «Авто» на вкладке «Соглашение»'); return; }
   }
+  // разбор GPT 04.10.2026 (вечер), п. 1: id нового дела — один на всё время формы (повтор «Сохранить» после сбоя пишет ту же запись)
+  if (!id && typeof formNewId === 'function') r.obj.id = formNewId('Д', r.obj.id);
   // разбор GPT 04.10.2026, п. 5: сообщение об ошибке — по фактически выполненным шагам
   let clientSaved = false, stageUp = null;
   try {
@@ -6447,7 +6526,7 @@ async function demoInfoHtml(v, now) {
 // Всё, что экран показывает сам, пользователь может убрать (раздел 7): строку — «×» (на 7 дней), блок — «Свернуть» (до завтра),
 // «Сначала важное» — «Скрыть все»; просроченное — действие «Выполнено».
 
-const TODAY_HIDE_KEY = 'crm_today_hide';   // скрытые строки: ключ → дата скрытия; через 7 дней строка возвращается
+const TODAY_HIDE_KEY = 'crm_today_hide', TODAY_HIDE_DL_KEY = 'crm_today_hide_dl'; // предложение GPT 04.10.2026: дата срока на момент скрытия — изменилась → строка возвращается   // скрытые строки: ключ → дата скрытия; через 7 дней строка возвращается
 const TODAY_FOLD_KEY = 'crm_today_fold';   // свёрнутые блоки: имя → дата; на следующий день блок снова развёрнут
 const TODAY_IMPORTANT_MAX = 8, TODAY_NEXT_DAYS = 14, TODAY_NEXT_MAX = 6;
 
@@ -6554,7 +6633,8 @@ function todayModel(d, now, hidden) {
   if (typeof poaTodayItems === 'function') poaTodayItems(d.poa || [], today).forEach(x => imp.push(x));
   imp.sort((a, b) => a.pr - b.pr || String(a.date).localeCompare(String(b.date)) || String(a.title).localeCompare(String(b.title), 'ru'));
   // разбор GPT 04.10.2026, п. 6: процессуальный срок, скрытый до дня срока, возвращается в этот день (скрытие — не дольше срока)
-  const important = imp.filter(x => !hidden[x.key] || (x.kind === 'deadline' && !!x.date && String(hidden[x.key]) < x.date && x.date <= today));
+  const hiddenDl = lsJSON(TODAY_HIDE_DL_KEY, {}) || {};
+  const important = imp.filter(x => !hidden[x.key] || (x.kind === 'deadline' && !!x.date && ((String(hidden[x.key]) < x.date && x.date <= today) || (hiddenDl[x.key] && hiddenDl[x.key] !== x.date))));
 
   // Ближайшее заседание: идущее не прячем 30 минут после начала
   const upcoming = hearings.filter(h => planned(h) && h.date && todayDayDiff(h.date, today) >= 0)
@@ -6747,8 +6827,9 @@ async function todayHearingsAllDone() {
   toast(n ? 'Заседаний отмечено проведёнными: ' + n : 'Прошедших заседаний без результата нет'); nav('today');
 }
 function todayScrollTo(sel) { const el = document.querySelector('#main ' + sel); if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
-function todayHide(key) { const h = todayHiddenLoad(todayISO()); h[key] = todayISO(); localStorage.setItem(TODAY_HIDE_KEY, JSON.stringify(h)); toast('Скрыто на 7 дней'); nav('today'); }
-function todayHideAll() { if (!TODAY_LAST) return; const h = todayHiddenLoad(todayISO()); TODAY_LAST.important.forEach(x => { h[x.key] = todayISO(); }); localStorage.setItem(TODAY_HIDE_KEY, JSON.stringify(h)); toast('Отмечено разобранным на 7 дней'); nav('today'); }
+function todayHideDlMark(keys) { const d = lsJSON(TODAY_HIDE_DL_KEY, {}) || {}, live = new Set(keys); for (const k of Object.keys(d)) if (!live.has(k)) delete d[k]; (TODAY_LAST ? TODAY_LAST.important : []).forEach(x => { if (x.kind === 'deadline' && live.has(x.key)) d[x.key] = x.date; }); localStorage.setItem(TODAY_HIDE_DL_KEY, JSON.stringify(d)); }
+function todayHide(key) { const h = todayHiddenLoad(todayISO()); h[key] = todayISO(); localStorage.setItem(TODAY_HIDE_KEY, JSON.stringify(h)); todayHideDlMark(Object.keys(h)); toast('Скрыто на 7 дней'); nav('today'); }
+function todayHideAll() { if (!TODAY_LAST) return; const h = todayHiddenLoad(todayISO()); TODAY_LAST.important.forEach(x => { h[x.key] = todayISO(); }); localStorage.setItem(TODAY_HIDE_KEY, JSON.stringify(h)); todayHideDlMark(Object.keys(h)); toast('Отмечено разобранным на 7 дней'); nav('today'); }
 function todayUnhideAll() { localStorage.removeItem(TODAY_HIDE_KEY); nav('today'); }
 function todayFold(block, on) { const f = lsJSON(TODAY_FOLD_KEY, {}) || {}; if (on) f[block] = todayISO(); else delete f[block]; localStorage.setItem(TODAY_FOLD_KEY, JSON.stringify(f)); nav('today'); }
 
@@ -7881,14 +7962,20 @@ function formModelFinance(v, prev, ctx) {
   if (!(amount > 0 && amount <= FIN_MAX)) return { error: 'Сумма счёта — больше нуля и не больше 1 млрд ₽' };
   if (v.createdAt && !/^\d{4}-\d{2}-\d{2}$/.test(v.createdAt)) return { error: 'Дата выставления — из поля даты' };
   if (v.dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(v.dueDate)) return { error: 'Срок оплаты — из поля даты' };
-  const p = prev || {}, client = String(v.client || '').trim(), clientRec = client ? (ctx.clients || []).find(c => c && !c._deleted && clientKey(c.name) === clientKey(client)) : null, caseRec = v.caseNum ? (ctx.cases || []).find(c => c && c.number === v.caseNum) : null;
-  const obj = { ...p, id: p.id || uid('Ф'), client, clientId: clientRec ? clientRec.id : (p.clientId || ''), caseNum: v.caseNum || '', caseId: caseRec ? caseRec.id : (v.caseNum ? (p.caseId || '') : ''), service: String(v.service || '').trim(), billType, amount, ...extra,
+  // разбор GPT 04.10.2026 (вечер), п. 3: плательщик — по выбранной карточке (id из списка), затем по прежней связи при том же ФИО; однофамильцы
+  // без выбора — отказ (как в форме дела), а не первый попавшийся
+  const p = prev || {}, client = String(v.client || '').trim(), live = (ctx.clients || []).filter(c => c && !c._deleted), same = client ? live.filter(c => clientKey(c.name) === clientKey(client)) : [];
+  let clientRec = (v.clientId && same.find(c => c.id === v.clientId)) || (p.clientId && clientKey(p.client) === clientKey(client) && same.find(c => c.id === p.clientId)) || null;
+  if (!clientRec && same.length > 1) return { error: 'Доверителей с ФИО «' + client + '» несколько (' + same.length + '). Выберите нужного в списке поля «Плательщик» — рядом с ФИО указан телефон или ИНН' };
+  if (!clientRec) clientRec = same[0] || null;
+  const caseRec = v.caseNum ? (ctx.cases || []).find(c => c && c.number === v.caseNum) : null;
+  const obj = { ...p, id: p.id || uid('Ф'), client, clientId: clientRec ? clientRec.id : '', caseNum: v.caseNum || '', caseId: caseRec ? caseRec.id : (v.caseNum ? (p.caseId || '') : ''), service: String(v.service || '').trim(), billType, amount, ...extra,
     pending: billType === 'success' ? (prev ? p.pending !== false : true) : false, comment: String(v.comment || '').trim(), createdAt: v.createdAt || p.createdAt || todayISO(), dueDate: v.dueDate || '',
     nextDue: billType === 'retainer' ? (p.nextDue || addMonthsLocalISO(v.createdAt || p.createdAt || todayISO(), 1)) : '', payments: Array.isArray(p.payments) ? p.payments : undefined, plan: p.plan };
   if (billType !== 'hourly') { delete obj.rate; delete obj.hours; } if (billType !== 'success') { delete obj.successBase; delete obj.successPct; }
   // замечание пользователя 30.09.2026: оплата при выставлении — сразу в форме счёта, без отдельного захода в карточку
   const paidNow = num(v.paidNow);
-  if (paidNow > 0 && !obj.pending) { if (!Array.isArray(obj.payments)) { const old = Number(p.paid || 0); obj.payments = old > 0 ? [{ id: uid('ПЛ'), at: p.paidAt || p.createdAt || obj.createdAt, sum: old, method: '', note: 'до журнала' }] : []; } obj.payments.push({ id: uid('ПЛ'), at: obj.createdAt, sum: r2(paidNow), method: PAY_METHODS[v.payMethod] !== undefined ? v.payMethod : '', note: prev ? '' : 'при выставлении', createdAt: Date.now(), updatedAt: Date.now() }); }
+  if (paidNow > 0 && !obj.pending) { if (!Array.isArray(obj.payments)) { const old = Number(p.paid || 0); obj.payments = old > 0 ? [{ id: uid('ПЛ'), at: p.paidAt || p.createdAt || obj.createdAt, sum: old, method: '', note: 'до журнала' }] : []; } obj.payments.push({ id: uid('ПЛ'), at: prev ? todayISO() : obj.createdAt, sum: r2(paidNow), method: PAY_METHODS[v.payMethod] !== undefined ? v.payMethod : '', note: prev ? '' : 'при выставлении', createdAt: Date.now(), updatedAt: Date.now() }); }
   if (Array.isArray(obj.payments) && obj.payments.length) finRecalc(obj); else { obj.paid = Number(p.paid || 0); obj.status = obj.paid <= 0 ? 'Не оплачено' : (obj.paid >= amount ? 'Оплачено' : 'Частично оплачено'); }
   return { obj, paidNow: paidNow > 0 && !obj.pending ? r2(paidNow) : 0 };
 }
@@ -7914,18 +8001,25 @@ async function openFinanceForm(id, presetCaseNum) {
   openSheet(id ? 'Правка счёта' : 'Новый счёт', body, UI.cur ? true : undefined);
   // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
   if (prev && typeof formRecMark === 'function') formRecMark('finance', prev);
+  // однофамильцы (п. 3): каждый — отдельной строкой с подсказкой, выбор запоминает id карточки (data-picked-id, ui/combo.js)
+  { const groups = {}; for (const x of clients) if (x && x.name) (groups[clientKey(x.name)] = groups[clientKey(x.name)] || []).push(x);
+    COMBO_DUPS['fn-client'] = {}; for (const g of Object.values(groups)) if (g.length > 1) for (const x of g) (COMBO_DUPS['fn-client'][x.name] = COMBO_DUPS['fn-client'][x.name] || []).push({ id: x.id, hint: [x.phone, x.inn ? 'ИНН ' + x.inn : '', x.addr].filter(Boolean)[0] || 'карточка ' + String(x.id).slice(-4) });
+    const cl = document.getElementById('fn-client'); if (cl && prev && prev.clientId) cl.dataset.pickedId = prev.clientId; else if (cl && !prev && pc && pc.clientId) cl.dataset.pickedId = pc.clientId; }
   const bt = document.getElementById('fn-billType'), cs = document.getElementById('fn-caseNum');
   const refresh = () => { const t = fv('fn-billType'); document.querySelectorAll('#sheetContent [class*="fn-"]').forEach(el => { const on = [...el.classList].some(c => c === 'fn-' + t); if (el.classList.contains('field') || el.classList.contains('info-box')) el.hidden = !on; }); };
   if (bt) { bt.onchange = refresh; refresh(); }
-  if (cs) cs.onchange = () => { const c = cases.find(x => x.number === cs.value), cl = document.getElementById('fn-client'); if (c && cl && !cl.value) cl.value = c.client || ''; };
+  if (cs) cs.onchange = () => { const c = cases.find(x => x.number === cs.value), cl = document.getElementById('fn-client'); if (c && cl && !cl.value) { cl.value = c.client || ''; if (c.clientId) cl.dataset.pickedId = c.clientId; else delete cl.dataset.pickedId; } };
 }
 async function saveFinanceForm(id) {
   const prev = id ? await getOne('finance', id) : null;
-  const v = {}; ['billType', 'caseNum', 'client', 'service', 'amount', 'rate', 'hours', 'successBase', 'successPct', 'createdAt', 'dueDate', 'comment', 'paidNow', 'payMethod'].forEach(k => { v[k] = fv('fn-' + k); });
+  const v = { clientId: (document.getElementById('fn-client') || { dataset: {} }).dataset.pickedId || '' }; ['billType', 'caseNum', 'client', 'service', 'amount', 'rate', 'hours', 'successBase', 'successPct', 'createdAt', 'dueDate', 'comment', 'paidNow', 'payMethod'].forEach(k => { v[k] = fv('fn-' + k); });
   const r = formModelFinance(v, prev, { clients: await getAll('clients'), cases: await getAll('cases') }); if (r.error) { fErr(r.error); return; }
+  // разбор GPT 04.10.2026 (вечер), п. 1: id нового счёта — один на всё время формы (повтор после сбоя не выставляет второй)
+  if (!id && typeof formNewId === 'function') r.obj.id = formNewId('Ф', r.obj.id);
   if (!id && typeof demoAllow === 'function' && !(await demoAllow('finance'))) return;
   await comboRememberAll(document.getElementById('sheetContent'));
-  try { await put('finance', r.obj); if (r.obj.caseNum && CASES_BY_NUM[r.obj.caseNum]) { const c = CASES_BY_NUM[r.obj.caseNum]; addCaseHistoryEvent(c, 'finance', '', 'Финансы: ' + (r.obj.service || 'счёт') + ' ' + fmtMoney(r.obj.amount), 'form'); await put('cases', c); } } catch (e) { logErr('form:finance', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  // разбор GPT 04.10.2026 (вечер), п. 2: журнал дела пишет сам addCaseHistoryEvent (caseEvents); копия дела из кэша в базу не пишется — устаревшая копия вернула бы старые поля
+  try { await put('finance', r.obj); if (r.obj.caseNum && CASES_BY_NUM[r.obj.caseNum]) addCaseHistoryEvent(CASES_BY_NUM[r.obj.caseNum], 'finance', '', 'Финансы: ' + (r.obj.service || 'счёт') + ' ' + fmtMoney(r.obj.amount), 'form'); } catch (e) { logErr('form:finance', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   if (r.paidNow && fv('fn-payMethod')) localStorage.setItem('crm_pay_method', fv('fn-payMethod'));
   toast((id ? 'Счёт сохранён' : 'Счёт выставлен') + (r.paidNow ? ' · оплата ' + fmtMoney(r.paidNow) + ' записана' + (r.obj.status === 'Оплачено' ? ', счёт оплачен полностью' : '') : '')); closeSheet(); await nav(UI.screen); openFinanceSheet(r.obj.id);
 }
@@ -8926,7 +9020,7 @@ function openEulaSheet(mandatory) {
   const prev = lsJSON('crm_eula', null);
   openSheet('Лицензионное соглашение', `<p>${prev && prev.ver !== eulaVer() ? 'Вышла новая редакция соглашения от ' + esc(fmtDate(eulaVer())) + '. ' : ''}Программа предоставляется по лицензионному соглашению (публичная оферта). Использование программы означает согласие с ним. Главное:</p>
     <ul class="eula-list"><li>одна лицензия — один адвокат, полная версия на 2 устройствах; без ключа — деморежим;</li><li>ключ нельзя передавать, защиту — обходить, копии программы — размещать по другим адресам;</li>
-    <li>ваши данные хранятся у вас — на устройствах и в вашем облаке, в зашифрованном виде; автор к ним доступа не имеет;</li><li>при активации и проверке ключа передаются только ключ, устройство, версия и время;</li>
+    <li>ваши данные хранятся у вас — на устройствах и в вашем облаке; на сервере и в копиях — в зашифрованном виде, паролем, которого сервер не знает; на самом устройстве база открыта — её защищают PIN-код программы и защита устройства; автор к данным доступа не имеет;</li><li>при активации и проверке ключа передаются только ключ, устройство, версия и время;</li>
     <li>расчёты сроков носят справочный характер и подлежат проверке адвокатом;</li><li>ответственность лицензиара ограничена суммой вознаграждения за 12 месяцев.</li></ul>
     <div class="form-actions" style="margin:4px 0"><a class="button" id="eula-full" href="${esc(location.origin + '/eula.html')}" target="_blank" rel="noopener noreferrer">${icon('files')}Полный текст соглашения</a></div>
     <p class="small muted">Редакция от ${esc(fmtDate(eulaVer()))}${prev && prev.ver === eulaVer() ? ' · принято ' + esc(new Date(prev.at || 0).toLocaleDateString('ru-RU')) : ''}</p>
