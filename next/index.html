@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 05:22 · e963aa7">
+<meta name="build" content="04.10.2026 05:51 · 7b820fc">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -6014,7 +6014,8 @@ function todayModel(d, now, hidden) {
       sub: fmtDate(h.date) + (h.time ? ' ' + h.time : '') + ' · ' + (caseTitle(c, h.caseNum) || 'дело не указано'), when: todayDayLabel(h.date, today), badges: [[h.status === 'Дата прошла' ? 'Дата прошла — результат не указан' : 'Статус «Назначено», дата прошла', 'warn']] }); }
   const pastCount = pastOpen.length;
   imp.sort((a, b) => a.pr - b.pr || String(a.date).localeCompare(String(b.date)) || String(a.title).localeCompare(String(b.title), 'ru'));
-  const important = imp.filter(x => !hidden[x.key]);
+  // разбор GPT 04.10.2026, п. 6: процессуальный срок, скрытый до дня срока, возвращается в этот день (скрытие — не дольше срока)
+  const important = imp.filter(x => !hidden[x.key] || (x.kind === 'deadline' && !!x.date && String(hidden[x.key]) < x.date && x.date <= today));
 
   // Ближайшее заседание: идущее не прячем 30 минут после начала
   const upcoming = hearings.filter(h => planned(h) && h.date && todayDayDiff(h.date, today) >= 0)
@@ -6059,6 +6060,8 @@ function todayModel(d, now, hidden) {
     deadlinesToday: important.filter(x => x.kind === 'deadline' && x.date === today).length,
     attention: important.length,
     overdue: important.filter(x => x.overdue).length,
+    // просроченные с учётом скрытых — чтобы «скрыто» не выглядело как «срочного нет»
+    overdueAll: imp.filter(x => x.overdue).length,
     debt,
   };
   todo.sort((a, b) => (a.priority === 'Высокий' ? 0 : 1) - (b.priority === 'Высокий' ? 0 : 1) || String(a.title).localeCompare(String(b.title), 'ru'));
@@ -6130,7 +6133,9 @@ SCREENS.today = async function () {
   const hiddenNote = m.hiddenCount ? `<p class="panel-foot">Скрыто: ${m.hiddenCount}. <button type="button" class="text-button" onclick="todayUnhideAll()">Показать снова</button></p>` : '';
   // на телефоне видны первые строки — самое срочное; остальное раскрывается кнопкой, чтобы план дня не уезжал далеко вниз
   const moreBtn = Math.min(m.important.length, TODAY_IMPORTANT_MAX) > TODAY_PHONE_MAX ? `<p class="panel-foot imp-more-btn"><button type="button" class="text-button" id="imp-show-all" onclick="todayImpAll()">Показать все: ${Math.min(m.important.length, TODAY_IMPORTANT_MAX)}${icon('chevron-down', 'icon-sm')}</button></p>` : '';
-  const impBody = (m.important.length ? impRows + moreBtn + more : `<p class="panel-foot">Срочного нет: просроченных сроков и задач нет, заседания с неуказанным результатом разобраны.</p>`) + hiddenNote;
+  // все строки скрыты — сказано именно это (и сколько среди них просроченных), а не «срочного нет»; одной строкой с «Показать снова»
+  const hiddenOverdue = Math.max(0, (m.stats.overdueAll || 0) - (m.stats.overdue || 0));
+  const impBody = m.important.length ? impRows + moreBtn + more + hiddenNote : m.hiddenCount ? `<p class="panel-foot" id="imp-all-hidden">Все предупреждения скрыты: ${m.hiddenCount}${hiddenOverdue ? ', из них просроченных — ' + hiddenOverdue : ''}. <button type="button" class="text-button" onclick="todayUnhideAll()">Показать снова</button></p>` : `<p class="panel-foot">Срочного нет: просроченных сроков и задач нет, заседания с неуказанным результатом разобраны.</p>`;
   // v312: «Считать все проведёнными» — прошедшим заседаниям без результата ставится «Проведено»
   // п. 1.5: «Сделать сегодня» — задачи на сегодня без времени; у строки «Выполнено»; блок сворачивается до завтра
   const todoBox = m.todo.length ? panel('t-todo', 'todo', 'Сделать сегодня', m.todo.length, '', m.todo.map(x => `<div class="imp-row"><button type="button" class="imp-main" onclick="openTaskForm('${jsq(x.taskId)}')"><span class="task-title">${esc(x.title)}</span><span class="task-sub">${esc(x.sub)}${x.priority === 'Высокий' ? ' · ' + badge('Высокий', 'warn') : ''}</span></button><div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button></div></div>`).join('')) : '';
