@@ -13,7 +13,7 @@
 
    При выходе новой версии приложения поднимите число в CACHE.
 */
-const CACHE = 'crm-next-v86'; // новая версия: свой кэш, область /next/
+const CACHE = 'crm-next-v87'; // новая версия: свой кэш, область /next/
 const CACHE_PREFIX = 'crm-next-v'; // удаляем только СВОИ старые кэши — кэши прежней версии на том же сайте не трогаем
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
@@ -102,5 +102,16 @@ self.addEventListener('fetch', (e) => {
       })
       .catch(() => cached);
     return cached || network;
+  })());
+});
+// напоминания на устройстве (04.10.2026): нажатие на уведомление открывает программу (вкладку, если она уже открыта)
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const scope = new URL(self.registration.scope).pathname;
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const w = wins.find((c) => new URL(c.url).pathname.startsWith(scope));
+    if (w) return w.focus();
+    return self.clients.openWindow(self.registration.scope);
   })());
 });

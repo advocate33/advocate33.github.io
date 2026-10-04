@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 19:00 · 4c003d0">
+<meta name="build" content="04.10.2026 19:44 · 6f97ffc">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -3488,6 +3488,136 @@ function openRemindSheet(sub, msg) {
     <p class="small muted">Проверка: после «Передать сейчас» в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных — латиницей, заглавными). Первое сообщение придёт в 08:05, если на сегодня или завтра есть срок или заседание. Ничего не пришло — проверьте таймер (шаг 3) и что вы нажали «Start» у бота.</p>`, sub);
 }
 
+// ▼▼▼ sync/devremind.js
+// ═══ sync/devremind.js — напоминания на устройстве (план перехода, п. 7; решение пользователя 04.10.2026) ═══
+// Перенесено из прежней программы: уведомления браузера (notifCheck v215: заседания сегодня и завтра, сроки — по одному уведомлению на ступень,
+// при просрочке — каждый день) и будильники приложения для Android (v263: мост AndroidApp.scheduleReminders — список на 30 дней вперёд, приходят
+// и при закрытой программе, переживают перезагрузку телефона). Ключи настроек — те же: crm_notif (включено на этом устройстве), crm_notif_lead
+// (за сколько напоминать — расходится между устройствами), crm_notif_log (что уже показано). Отличия: уведомление показывается через service worker
+// (иначе на Android-телефоне в браузере не появляется); ступени сроков в браузере — те же, что у будильников (настройка «за сколько»); заседание и
+// встреча — ещё и за 2 часа, задача — в её время, пока программа открыта (проверка раз в 5 минут); будильники перепланируются после правки
+// заседаний, сроков, задач и встреч. Телеграм-напоминания с сервера — отдельно (sync/remind.js).
+const DEVR_LEAD_DEFAULT = { h: [1440, 120], d: [10080, 4320, 1440, 0] }; // минуты: заседания — за сутки и за 2 часа; сроки — за 7, 3, 1 день и в день срока
+function devrLead() { const v = lsJSON('crm_notif_lead', null); return v && Array.isArray(v.h) && Array.isArray(v.d) ? v : DEVR_LEAD_DEFAULT; }
+function devrLeadSave(v) { localStorage.setItem('crm_notif_lead', JSON.stringify(v)); if (typeof bumpSettings === 'function') bumpSettings(); }
+const devrSupported = () => typeof Notification !== 'undefined';
+const devrOn = () => localStorage.getItem('crm_notif') === '1' && devrSupported() && Notification.permission === 'granted';
+const devrAlarms = () => typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.scheduleReminders === 'function';
+function devrSent(key) { return !!(lsJSON('crm_notif_log', {}) || {})[key]; }
+function devrMark(key, now) { const log = lsJSON('crm_notif_log', {}) || {}; log[key] = now || Date.now(); const cut = (now || Date.now()) - 30 * 864e5; for (const k of Object.keys(log)) if (log[k] < cut) delete log[k]; localStorage.setItem('crm_notif_log', JSON.stringify(log)); }
+async function devrFire(title, body, tag) {
+  try {
+    const sw = typeof navigator !== 'undefined' ? navigator.serviceWorker : null;
+    const reg = sw && typeof sw.getRegistration === 'function' ? await Promise.race([sw.getRegistration(), new Promise(r => setTimeout(() => r(null), 1500))]) : null;
+    if (reg && reg.showNotification) { await reg.showNotification(title, { body, tag, renotify: false }); return true; }
+    const n = new Notification(title, { body, tag }); n.onclick = () => { window.focus(); n.close(); }; return true;
+  } catch (e) { logErr('devremind:fire', e); return false; }
+}
+const devrPlanned = h => h && h.date && h.status !== 'Проведено' && h.status !== 'Отменено' && h.status !== 'Дата прошла';
+const devrAt = (dateISO, timeStr, minutesBefore) => { const t = /^(\d{1,2}):(\d{2})/.exec(timeStr || ''), d = parseLocalDate(dateISO); if (!d || isNaN(d)) return null; d.setHours(t ? +t[1] : 9, t ? +t[2] : 0, 0, 0); return d.getTime() - (minutesBefore || 0) * 60000; };
+const devrLeadText = m => m >= 1440 ? (m % 1440 === 0 ? (m / 1440) + ' ' + plural(m / 1440, 'день', 'дня', 'дней') : Math.round(m / 60) + ' ч') : m >= 60 ? Math.round(m / 60) + ' ч' : m + ' мин';
+// оставшееся время словами («1 ч 30 мин»): текст уведомления — по настоящему остатку, а не по ступени (программа могла быть закрыта в момент ступени)
+const devrLeftText = ms => { const m = Math.max(1, Math.round(ms / 60000)); if (m < 60) return m + ' мин'; const h = Math.floor(m / 60), r = Math.round((m % 60) / 5) * 5; return r ? (r === 60 ? (h + 1) + ' ч' : h + ' ч ' + r + ' мин') : h + ' ч'; };
+// что пора показать сейчас (пока программа открыта): по каждой записи — только последняя наступившая ступень (не старше 36 часов, ещё не показанная);
+// заседание и встреча, которые уже начались, не напоминают; просроченный срок — раз в день
+function devrDue(d, now, lead) {
+  lead = lead || devrLead(); const t = now.getTime(), today = localISO(now), out = [];
+  const byNum = {}; (d.cases || []).forEach(c => { if (c && c.number) byNum[c.number] = c; });
+  // stages: [[ключ, момент ступени, минуты]] — берётся наступившая с наибольшим моментом
+  const latest = stages => { let best = null; for (const s of stages) if (s[1] !== null && s[1] <= t && s[1] >= t - 36 * 3600e3 && (!best || s[1] > best[1])) best = s; return best; };
+  (d.hearings || []).filter(devrPlanned).forEach(h => {
+    const ev = devrAt(h.date, h.time, 0); if (ev === null || ev <= t) return;
+    const s = latest(lead.h.map(m => ['h:' + h.id + ':' + h.date + ':' + (h.time || '') + ':' + m, devrAt(h.date, h.time, m), m])); if (!s) return;
+    const c = byNum[h.caseNum], body = [h.caseNum, c ? c.client : '', [h.court, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+    out.push({ key: s[0], title: s[2] >= 1440 ? `Заседание ${h.date === today ? 'сегодня' : 'завтра'}${h.time ? ' в ' + h.time : ''}` : `Заседание через ${devrLeftText(ev - t)}${h.time ? ' (' + h.time + ')' : ''}`, body });
+  });
+  (d.cases || []).filter(c => c && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено').forEach(c => (c.deadlines || []).forEach(dl => {
+    if (!dl || dl.done || !dl.date) return; const body = [c.number, c.client, dl.confirmedAt || !dl.autoKey ? '' : 'дата не подтверждена'].filter(Boolean).join(' · ');
+    if (dl.date < today) { out.push({ key: 'dover:' + c.id + ':' + (dl.id || dl.title) + ':' + today, title: `Срок просрочен: ${dl.title || 'срок'}`, body }); return; }
+    const s = latest(lead.d.map(m => ['d:' + c.id + ':' + (dl.id || dl.title) + ':' + dl.date + ':' + m, devrAt(dl.date, '09:00', m), m])); if (!s) return;
+    const days = Math.round((parseLocalDate(dl.date) - parseLocalDate(today)) / 864e5);
+    out.push({ key: s[0], title: days > 0 ? `Через ${days} ${plural(days, 'день', 'дня', 'дней')} истекает срок: ${dl.title || 'срок'}` : `Срок сегодня: ${dl.title || 'срок'}`, body });
+  }));
+  (d.tasks || []).forEach(x => { if (!x || x.done || !x.due) return; const s = latest([['t:' + x.id + ':' + x.due + ':' + (x.time || ''), devrAt(x.due, x.time || '09:00', 0), 0]]); if (s) out.push({ key: s[0], title: 'Задача: ' + (x.title || 'без названия'), body: [x.caseNum, x.note].filter(Boolean).join(' · ') }); });
+  (d.meetings || []).forEach(mt => {
+    if (!mt || !mt.date) return; const ev = devrAt(mt.date, mt.time, 0); if (ev === null || ev <= t) return;
+    const s = latest([['m:' + mt.id + ':' + mt.date + ':' + (mt.time || ''), devrAt(mt.date, mt.time, 120), 120]]);
+    if (s) out.push({ key: s[0], title: 'Встреча через ' + devrLeftText(ev - t) + (mt.time ? ' (' + mt.time + ')' : ''), body: [mt.with, mt.place].filter(Boolean).join(' · ') });
+  });
+  return out;
+}
+let DEVR_BUSY = false;
+async function devrCheck(force) {
+  if (!devrOn() || DEVR_BUSY) return 0; DEVR_BUSY = true; let n = 0;
+  try {
+    const d = {}; for (const st of ['hearings', 'cases', 'tasks', 'meetings']) d[st] = await getAll(st);
+    for (const x of devrDue(d, new Date())) { if (devrSent(x.key)) continue; if (await devrFire(x.title, x.body, x.key)) { devrMark(x.key); n++; } if (n >= 8) break; }
+  } catch (e) { logErr('devremind:check', e); } finally { DEVR_BUSY = false; }
+  return n;
+}
+// будильники приложения для Android — как alarmsBuild v263 (30 дней вперёд, не больше 400)
+async function devrAlarmsBuild(nowTs) {
+  const now = nowTs || Date.now(), horizon = now + 30 * 864e5, out = [], lead = devrLead();
+  const push = (id, ts, title, text) => { if (ts === null || ts <= now + 60000 || ts > horizon) return; out.push({ id, at: ts, title, text }); };
+  const cases = await getAll('cases'), byNum = {}; cases.forEach(c => { if (c && c.number) byNum[c.number] = c; });
+  (await getAll('hearings')).filter(devrPlanned).forEach(h => { const c = byNum[h.caseNum], text = [h.caseNum, c ? c.client : '', [h.court, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', ')].filter(Boolean).join(' · ');
+    lead.h.forEach(m => push('h:' + h.id + ':' + m, devrAt(h.date, h.time, m), m >= 1440 ? `Заседание завтра${h.time ? ' в ' + h.time : ''}` : `Заседание через ${devrLeadText(m)}${h.time ? ' (' + h.time + ')' : ''}`, text)); });
+  cases.filter(c => c && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено').forEach(c => (c.deadlines || []).forEach(dl => { if (!dl || dl.done || !dl.date) return;
+    lead.d.forEach(m => push('d:' + c.id + ':' + dl.date + ':' + String(dl.title || '').slice(0, 20) + ':' + m, devrAt(dl.date, '09:00', m), m > 0 ? `Через ${devrLeadText(m)} истекает срок: ${dl.title || 'срок'}` : `Срок сегодня: ${dl.title || 'срок'}`, [c.number, c.client].filter(Boolean).join(' · '))); }));
+  (await getAll('tasks')).forEach(x => { if (!x || x.done || !x.due) return; push('t:' + x.id, devrAt(x.due, x.time || '09:00', 0), 'Задача: ' + (x.title || 'без названия'), [x.caseNum, x.note].filter(Boolean).join(' · ')); });
+  (await getAll('meetings')).forEach(mt => { if (!mt || !mt.date) return; push('m:' + mt.id, devrAt(mt.date, mt.time, 120), 'Встреча через 2 ч' + (mt.time ? ' (' + mt.time + ')' : ''), [mt.with, mt.place].filter(Boolean).join(' · ')); });
+  out.sort((a, b) => a.at - b.at); return out.slice(0, 400);
+}
+async function devrAlarmsSync(silent) {
+  if (!devrAlarms()) { if (!silent) toast('Будильники работают в приложении для Android', true); return 0; }
+  let list = []; try { list = await devrAlarmsBuild(); AndroidApp.scheduleReminders(JSON.stringify(list)); } catch (e) { logErr('devremind:alarms', e); if (!silent) toast('Не удалось передать напоминания приложению', true); return 0; }
+  localStorage.setItem('crm_alarms_at', String(Date.now())); if (!silent) toast(`Напоминаний запланировано: ${list.length}`); return list.length;
+}
+// после правки заседаний, сроков (в деле), задач и встреч — будильники перепланируются (через 6 с, одним разом)
+let DEVR_ALARM_T = 0;
+if (typeof put === 'function') {
+  const devrPutBase = put;
+  put = async function (store, obj) { const r = await devrPutBase.apply(this, arguments); if (devrAlarms() && ['hearings', 'cases', 'tasks', 'meetings'].includes(store)) { clearTimeout(DEVR_ALARM_T); DEVR_ALARM_T = setTimeout(() => { devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }, 6000); } return r; };
+}
+// запуск: проверка при открытии, раз в 5 минут и при возвращении на вкладку; будильники — при открытии
+function devrStart() {
+  setTimeout(() => { devrCheck().catch(e => logErr('devremind:check', e)); if (devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }, 4000);
+  setInterval(() => { devrCheck().catch(e => logErr('devremind:check', e)); }, 5 * 60000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') devrCheck().catch(e => logErr('devremind:check', e)); });
+}
+// ── лист настройки ──
+async function devrEnable() {
+  if (!devrSupported()) { toast('Этот браузер не показывает уведомления', true); return; }
+  let perm = Notification.permission;
+  if (perm === 'default') { try { perm = await Notification.requestPermission(); } catch (e) { logErr('devremind:perm', e); } }
+  if (perm === 'granted') { localStorage.setItem('crm_notif', '1'); await devrCheck(true); openDevRemindSheet('replace', { text: 'Уведомления включены на этом устройстве' }); }
+  else openDevRemindSheet('replace', { text: perm === 'denied' ? 'Уведомления запрещены для этого сайта в настройках браузера — разрешите их (значок замка у адреса → «Уведомления»), затем нажмите «Включить» ещё раз.' : 'Разрешение не дано — уведомления выключены.', bad: true });
+}
+function devrDisable() { localStorage.removeItem('crm_notif'); openDevRemindSheet('replace', { text: 'Уведомления выключены на этом устройстве' }); }
+async function devrTest() { const okFire = await devrFire('Напоминания работают', 'Так будут выглядеть напоминания о заседаниях и сроках', 'devr-test'); openDevRemindSheet('replace', okFire ? { text: 'Пробное уведомление отправлено — оно должно появиться на экране' } : { text: 'Не удалось показать уведомление — подробности в журнале ошибок', bad: true }); }
+function devrLeadSet() {
+  const h = [...document.querySelectorAll('#sheetContent input[data-lead-h]:checked')].map(x => +x.dataset.leadH), d = [...document.querySelectorAll('#sheetContent input[data-lead-d]:checked')].map(x => +x.dataset.leadD);
+  devrLeadSave({ h, d }); if (devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); toast('Сохранено: напоминания ' + (h.length || d.length ? 'по выбранным ступеням' : 'выключены по всем ступеням'));
+}
+function openDevRemindSheet(mode, msg) {
+  const sup = devrSupported(), perm = sup ? Notification.permission : 'unsupported', on = devrOn(), alarms = devrAlarms(), lead = devrLead();
+  const state = !sup ? ['', 'Этот браузер не показывает уведомления'] : on ? ['good', 'Уведомления включены на этом устройстве'] : perm === 'denied' ? ['bad', 'Уведомления запрещены для этого сайта в браузере'] : ['', 'Уведомления выключены на этом устройстве'];
+  const cb = (kind, m, label) => `<label class="check"><input type="checkbox" data-lead-${kind}="${m}"${lead[kind].includes(m) ? ' checked' : ''} onchange="devrLeadSet()"><span>${esc(label)}</span></label>`;
+  const at = Number(localStorage.getItem('crm_alarms_at') || 0);
+  openSheet('Напоминания на устройстве', `<div class="status-line ${state[0]}" id="devr-state" role="status">${icon(state[0] === 'good' ? 'check' : 'circle-alert')}<span>${esc(state[1])}</span></div>
+    ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="devr-msg">${esc(msg.text)}</div>` : ''}
+    <div class="section-label step-label">Шаг 1. Уведомления в этом браузере</div>
+    <p class="small muted">О заседаниях, сроках, задачах и встречах. Приходят, пока программа открыта — в том числе свёрнутой вкладкой. Закрытая страница браузера уведомлений не присылает: для этого — приложение для Android (шаг 2) или напоминания в Telegram с вашего сервера. На iPhone уведомления работают только у программы, добавленной на экран «Домой».</p>
+    <div class="form-actions" style="margin:0 0 8px">${on ? `<button type="button" class="button" id="devr-test" onclick="devrTest()">${icon('check')}Проверить</button><button type="button" class="button danger" id="devr-off" onclick="devrDisable()">${icon('x')}Выключить</button>` : `<button type="button" class="button primary" id="devr-on" onclick="devrEnable()">${icon('check')}Включить</button>`}</div>
+    <div class="section-label step-label">Шаг 2. Приложение для Android</div>
+    <p class="small muted" id="devr-alarms">${alarms ? 'Программа открыта в приложении для Android: напоминания ставятся будильниками телефона и приходят, даже когда программа закрыта.' + (at ? ' Последний раз переданы ' + new Date(at).toLocaleString('ru-RU') + '.' : '') : 'Будильники телефона работают, когда программа открыта в приложении для Android. В браузере этот шаг пропускается.'}</p>
+    ${alarms ? `<div class="form-actions" style="margin:0 0 8px"><button type="button" class="button" id="devr-sync" onclick="devrAlarmsSync(false)">${icon('refresh-cw')}Передать напоминания сейчас</button></div>` : ''}
+    <div class="section-label step-label">За сколько напоминать</div>
+    <p class="small muted">Заседания</p><div class="chips">${cb('h', 1440, 'за сутки')}${cb('h', 120, 'за 2 часа')}</div>
+    <p class="small muted" style="margin-top:8px">Сроки</p><div class="chips">${cb('d', 10080, 'за 7 дней')}${cb('d', 4320, 'за 3 дня')}${cb('d', 1440, 'за день')}${cb('d', 0, 'в день срока')}</div>
+    <p class="small muted" style="margin-top:8px">Просроченный срок напоминает раз в день; задача — в её время (без времени — в 9:00); встреча — за 2 часа. Настройка «за сколько» общая для ваших устройств.</p>`, mode || (sheetIsOpen() ? true : undefined));
+}
+
 // ▼▼▼ sync/files.js
 // ═══ sync/files.js — копии базы в файл и обмен через файл (этап 4, часть 4) ═══
 // Файл копии — тот же зашифрованный контейнер, что уходит на сервер (core/crypto.js): его читает и прежняя программа
@@ -4618,7 +4748,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -4965,7 +5095,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Размер текста</p>${choice(UI_FONT_SIZES.map(f => [f[0], f[2]]), size, 'setFontSize')}
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     <div class="section-label">Данные</div>
-    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
       <button type="button" class="list-btn" onclick="openMonitorSettingsSheet()"><span>Мониторинг судов</span><span class="muted">${!SRV.url ? 'сервер не подключён' : crmCollectorSrvCfg().url ? 'сбор в облаке настроен' : 'сбор в облаке не настроен'}</span></button>
@@ -8855,6 +8985,8 @@ const NEXT_BOOT = {
     syncStatusRender(); // этап 1г: состояние синхронизации в шапке — после запуска слоя данных (секреты уже прочитаны)
     UI.ready = true; await nav('today');
     window.NEXT_READY = await this.report();
+    // план перехода, п. 7 (04.10.2026): напоминания на устройстве — проверка при открытии, раз в 5 минут, будильники Android (sync/devremind.js)
+    try { if (typeof devrStart === 'function') devrStart(); } catch (e) { logErr('devremind:start', e); }
   },
 };
 document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() => { if (typeof nextAutoStart === 'function') setTimeout(() => { try { nextAutoStart(); } catch (e) { logErr('auto:start', e); } }, 2500); }); });
