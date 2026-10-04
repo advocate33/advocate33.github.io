@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 12:42 · f6c9015">
+<meta name="build" content="04.10.2026 14:01 · 8b9b7e8">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -3784,7 +3784,58 @@ function crmMonBind(cases,e){
   if(fit.length>1)return{match:null,ambiguous:true,uidConflict:false};
   return{match:null,ambiguous:false,uidConflict:byNo.length>0&&!!uidE};
 }
-async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.source+'|'+x.externalId,x])),added=[];let updated=0;for(const x of rows){if(hashes.has(x.hash))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.source+'|'+x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);added.push(x);}
+// ── снимок пользователя 04.10.2026: одно событие суда — одна запись ──
+// Событие приходит двумя путями: в ответе коллектора на «Собрать сейчас» (источник «Коллектор судов») и при чтении событий с личного
+// сервера («Личный сервер»); с обменом — ещё и записанное прежней программой. Хэш события включает источник, поэтому одно и то же
+// заседание записывалось дважды. Ключ события — те же поля без источника; движение дела сводится по externalId без источника.
+function monEvKey(e) { return [e.eventType || '', e.externalId || '', crmMonNorm(e.title), e.date || '', crmMonNorm(e.courtNo), crmMonNorm(e.caseUid)].join('|'); }
+const MON_DUP_RANK = { applied: 4, ignored: 3, flow: 2, new: 1 };
+const MON_DUP_FIELDS = ['status', 'appliedAction', 'appliedAt', 'appliedRecordId', 'actApplied', 'actSkip', 'autoSkip'];
+// группы одинаковых событий: остаётся запись с меньшим id — выбор не зависит от состояния, и два устройства, убирая дубли каждое у
+// себя, удаляют одни и те же копии (иначе после обмена пропали бы обе). Отметки применения и привязку к делу оставшаяся запись берёт у
+// лучшей копии (применённая, пропущенная пользователем, привязанная)
+function monEvDupPlan(list) {
+  const groups = new Map();
+  for (const e of list || []) { if (!e || e._deleted || !e.id) continue; const k = monEvKey(e); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(e); }
+  const plan = [];
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
+    const keep = { ...g[0] }, drop = g.slice(1), best = g.reduce((m, e) => ((MON_DUP_RANK[e.status] || 0) > (MON_DUP_RANK[m.status] || 0) ? e : m), g[0]);
+    let changed = false;
+    if (best !== g[0]) { for (const f of MON_DUP_FIELDS) if (best[f] !== undefined && keep[f] !== best[f]) { keep[f] = best[f]; changed = true; } }
+    if (!keep.caseId) { const b = g.find(e => e.caseId); if (b) { keep.caseId = b.caseId; keep.caseNum = b.caseNum; changed = true; } }
+    plan.push({ keep, changed, drop });
+  }
+  return plan;
+}
+// показ: дубли не показываются, даже если ещё не удалены (пришли обменом)
+function monEvUnique(list) {
+  const plan = monEvDupPlan(list), dropIds = new Set(), repl = new Map();
+  plan.forEach(p => { p.drop.forEach(e => dropIds.add(e.id)); if (p.changed) repl.set(p.keep.id, p.keep); });
+  return (list || []).filter(e => e && !e._deleted && !dropIds.has(e.id)).map(e => repl.get(e.id) || e);
+}
+// лента дела: одно объявление заседания (тот же externalId) с уточнениями (зал, вид заседания) — одной строкой, последнее полученное
+function monEvFeedList(list) {
+  const u = monEvUnique(list), last = new Map(), out = [];
+  for (const e of u) { if (!e.externalId) { out.push(e); continue; } const k = (e.eventType || '') + '|' + e.externalId, p = last.get(k); if (!p || (e.receivedAt || 0) > (p.receivedAt || 0)) last.set(k, e); }
+  return out.concat([...last.values()]);
+}
+// удалить записанные дубли (надгробием — копии на других устройствах после обмена тоже уйдут); возвращает число удалённых
+async function monEvDedupe() {
+  let all; try { all = await getAllRaw('monitorEvents'); } catch (e) { logErr('monitor:dedupe', e); return 0; }
+  let n = 0;
+  for (const p of monEvDupPlan(all)) {
+    try {
+      if (p.changed) await put('monitorEvents', p.keep);
+      for (const e of p.drop) { await del('monitorEvents', e.id); n++; }
+    } catch (e) { logErr('monitor:dedupe', e); }
+  }
+  return n;
+}
+async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.externalId,x])),added=[];let updated=0;for(const x of rows){if(hashes.has(x.hash)||keys.has(monEvKey(x)))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if(x.eventType==='caseflow'&&x.externalId)flowByExt.set(x.externalId,x);added.push(x);}
+  // 04.10.2026: дубли, записанные до исправления или пришедшие обменом, удаляются
+  await monEvDedupe();
   { /* v238: УИД с сайта суда запоминается в деле при первой привязке по номеру — дальше привязка идёт по УИД */
     const learn=new Map();added.forEach(x=>{if(x.caseId&&x.caseUid&&!learn.has(x.caseId))learn.set(x.caseId,x.caseUid);});
     if(learn.size){const cs=await getAll('cases');for(const [cid,u] of learn){const c=cs.find(y=>y.id===cid);if(c&&!c.caseUid){c.caseUid=u;await put('cases',c);await crmCaseLogByNum(c.number,'flow','УИД дела записан по данным суда: '+u);}}}
@@ -6258,7 +6309,7 @@ function todayModel(d, now, hidden) {
 function todayMoneyShort(n) { n = Number(n) || 0; return n >= 1e6 ? String(Math.round(n / 1e5) / 10).replace('.', ',') + ' млн' : n >= 1000 ? Math.round(n / 1000) + ' тыс.' : String(Math.round(n)); }
 // события судов для «Сегодня»: число новых, три самых свежих новых, время последнего получения
 function todayMonModel(events) {
-  const ev = (events || []).filter(e => e && !e._deleted), fresh = ev.filter(e => e.status === 'new').sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
+  const ev = typeof monEvUnique === 'function' ? monEvUnique(events || []) : (events || []).filter(e => e && !e._deleted), fresh = ev.filter(e => e.status === 'new').sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
   return { newCount: fresh.length, fresh: fresh.slice(0, 3), last: ev.reduce((m, e) => Math.max(m, e.receivedAt || 0), 0) };
 }
 // «В работе»: дела без завершённых и архивных; сначала те, у кого назначен срок следующего действия (ближайший — первым)
@@ -6598,7 +6649,7 @@ async function openCaseSheet(id, keep) {
       `${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}`,
       `${(c.i1FilingDate || c.i1DecisionDate || c.i1Result || c.apFilingDate || c.apCourt || c.courtApp || c.csFilingDate || c.courtCass || c.judgeApp || c.judgeCass || c.fsspNo || c.ipStatus) ? sec('Инстанции', `<div class="list-rows">${row('Первая инстанция', [c.i1FilingDate ? 'подано ' + fmtDate(c.i1FilingDate) : '', c.i1DecisionDate ? 'решение ' + fmtDate(c.i1DecisionDate) : '', c.i1Result].filter(Boolean).join(' · '))}${row('Апелляция', [c.apCourt || c.courtApp, c.courtNoApp ? '№ ' + c.courtNoApp : '', c.judgeApp ? 'судья ' + c.judgeApp : '', c.apFilingDate ? 'жалоба ' + fmtDate(c.apFilingDate) : '', c.apDecisionDate ? 'определение ' + fmtDate(c.apDecisionDate) : '', c.apResult].filter(Boolean).join(' · '))}${row('Кассация', [c.courtCass, c.courtNoCass ? '№ ' + c.courtNoCass : '', c.judgeCass ? 'судья ' + c.judgeCass : '', c.csFilingDate ? 'жалоба ' + fmtDate(c.csFilingDate) : '', c.csDecisionDate ? 'определение ' + fmtDate(c.csDecisionDate) : '', c.csResult].filter(Boolean).join(' · '))}${row('Исполнение', [c.fsspNo ? 'ИП № ' + c.fsspNo : '', c.ipOsp, c.ipStatus].filter(Boolean).join(' · '))}</div>`) : ''}`,
       `${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.inn ? 'ИНН ' + p.inn : '', p.addr].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}`,
-      `${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, d.monitorEvents, d.hearings) : ''}`].join(''))}
+      `${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, typeof monEvUnique === 'function' ? monEvUnique(d.monitorEvents) : d.monitorEvents, d.hearings) : ''}`].join(''))}
     ${cardGroup('cm-money', 'Деньги: счета и расходы', [
       `${m.bills.length ? sec('Счета', `<div class="list-rows">${m.bills.map(f => { const st = finStateOf(f, localISO(new Date())), mt = FIN_STATE_META[st]; return `<button type="button" class="list-btn" onclick="openFinanceSheet('${jsq(f.id)}')"><span>${esc(f.service || BILLING_LABEL[f.billType || 'fixed'])}${f.dueDate ? `<br><span class="muted small">срок ${esc(fmtDate(f.dueDate))}</span>` : ''}</span><span class="muted">${esc(fmtMoney(f.amount))} ${badge(mt[0], mt[1])}</span></button>`; }).join('')}</div>`, m.bills.length) : ''}`,
       `${m.expenses.length ? sec('Расходы', `<div class="list-rows">${m.expenses.slice(0, 8).map(e => `<button type="button" class="list-btn" onclick="openExpenseForm('${jsq(e.id)}')"><span>${esc(e.category || 'Расход')}${e.note ? ' · ' + esc(e.note) : ''}</span><span class="muted">${esc(fmtMoney(e.amount))}${e.recoverable ? ' ' + badge(e.recovered ? 'возмещено' : 'к возмещению', e.recovered ? 'good' : 'warn') : ''}</span></button>`).join('')}</div>`, m.expenses.length) : ''}`,
@@ -6650,7 +6701,8 @@ function caseFeedModel(c, d, journal, now) {
     push({ key: 'd:' + (dl.id || i), date: dl.date, time: '', group: 'court', icon: 'clock-3', title: 'Срок · ' + (dl.title || 'срок'),
       sub: dl.done ? 'выполнен' : k < 0 ? 'просрочен на ' + days(-k) : k === 0 ? 'сегодня' : 'осталось ' + days(k), state: dl.done ? 'done' : (k <= 0 ? 'bad' : k <= 3 ? 'warn' : ''), fuse,
       open: `openDeadlineSheet('${jsq(c.id)}', '${jsq(dl.id || ('i:' + i))}')` }); });
-  (d.monitorEvents || []).filter(mine).forEach(e => push({ key: 'm:' + e.id, date: String(e.date || feedISO(e.receivedAt || '')).slice(0, 10), time: '', group: 'court', icon: 'landmark', title: e.title || 'Событие суда', sub: 'с сайта суда' + (e.status === 'new' ? ' · новое' : ''), open: `openMonitorEventSheet('${jsq(e.id)}')` }));
+  // 04.10.2026: одно событие суда — одной строкой (sync/monitor.js, monEvFeedList)
+  (typeof monEvFeedList === 'function' ? monEvFeedList((d.monitorEvents || []).filter(mine)) : (d.monitorEvents || []).filter(mine)).forEach(e => push({ key: 'm:' + e.id, date: String(e.date || feedISO(e.receivedAt || '')).slice(0, 10), time: '', group: 'court', icon: 'landmark', title: e.title || 'Событие суда', sub: 'с сайта суда' + (e.status === 'new' ? ' · новое' : ''), open: `openMonitorEventSheet('${jsq(e.id)}')` }));
   (d.tasks || []).filter(mine).forEach(t => push({ key: 't:' + t.id, date: t.due || feedISO(t.createdAt || ''), time: t.time || '', group: 'tasks', icon: t.done ? 'check' : 'list-checks', title: t.title || 'Задача', sub: t.done ? 'выполнена' : t.due ? 'задача' : 'задача без срока', state: t.done ? 'done' : '', open: `openTaskForm('${jsq(t.id)}')` }));
   (d.meetings || []).filter(mine).forEach(m => push({ key: 'w:' + m.id, date: m.date, time: m.time || '', group: 'tasks', icon: 'handshake', title: 'Встреча' + (m.with ? ' · ' + m.with : ''), sub: m.place || '', open: `openMeetingForm('${jsq(m.id)}')` }));
   (d.mail || []).filter(mine).forEach(x => push({ key: 'p:' + x.id, date: x.date || feedISO(x.createdAt || ''), time: '', group: 'mail', icon: 'mail', title: (x.dir === 'in' ? 'Входящее' : 'Отправление') + (x.title ? ' · ' + x.title : ''), sub: [x.status, x.barcode].filter(Boolean).join(' · '), open: `openMailSheet('${jsq(x.id)}')` }));
@@ -7528,7 +7580,7 @@ const MON_TYPE_LABEL = { hearing: 'заседание', caseflow: 'движен�
 function monPrefs() { try { const p = JSON.parse(localStorage.getItem(MON_VIEW_KEY) || '{}'); return { f: MON_FILTERS.some(x => x[0] === p.f) ? p.f : 'new' }; } catch (e) { return { f: 'new' }; } }
 function monSet(k, v) { const p = monPrefs(); p[k] = v; localStorage.setItem(MON_VIEW_KEY, JSON.stringify(p)); nav('monitoring'); }
 function monitorModel(events, cases, p) {
-  const all = (events || []).filter(e => e && !e._deleted).sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
+  const all = (typeof monEvUnique === 'function' ? monEvUnique(events || []) : (events || []).filter(e => e && !e._deleted)).sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
   const counts = { all: all.length }; ['new', 'applied', 'ignored', 'flow'].forEach(s => { counts[s] = all.filter(e => e.status === s).length; });
   const rows = all.filter(e => p.f === 'all' || e.status === p.f).map(e => ({ e, type: MON_TYPE_LABEL[e.eventType] || e.eventType || '', status: MON_STATUS_META[e.status] || [e.status || '', ''], bound: e.caseNum || '', problem: e.uidConflict ? 'УИД события не совпадает с УИД дела' : e.ambiguous ? 'подходит несколько дел — выберите вручную' : (!e.caseId && e.status === 'new' ? 'дело не найдено' : '') }));
   const offers = typeof crmFlowActOffers === 'function' ? crmFlowActOffers(cases || [], all) : [];
@@ -7843,6 +7895,8 @@ const NEXT_BOOT = {
     try { await refreshCasesCache(); } catch (e) { logErr('next:cases-cache', e); }
     // v312: прошедшим заседаниям без результата — статус «Дата прошла» (data/hearings.js, как при запуске прежней программы)
     try { await hearingsAutoDone(); } catch (e) { logErr('next:hearings-auto', e); }
+    // 04.10.2026: дубли событий суда (одно событие, пришедшее двумя путями) удаляются (sync/monitor.js)
+    try { if (typeof monEvDedupe === 'function') await monEvDedupe(); } catch (e) { logErr('next:mon-dedupe', e); }
     syncStatusRender(); // этап 1г: состояние синхронизации в шапке — после запуска слоя данных (секреты уже прочитаны)
     UI.ready = true; await nav('today');
     window.NEXT_READY = await this.report();
