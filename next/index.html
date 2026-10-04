@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 04:54 · 1827434">
+<meta name="build" content="04.10.2026 05:22 · e963aa7">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2595,7 +2595,7 @@ async function nextServerPull() {
     if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
     if (r.empty) { SRVDB.lastErr = null; return r; }
     if (r.failed) { const msg = (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей: ' + r.failed) : 'не записано записей: ' + r.failed) + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
-    if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore));
+    if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore, r));
     localStorage.setItem('crm_next_pull_res', JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
     srvdbNote('pull');
     return r;
@@ -2699,11 +2699,14 @@ async function mergePreviewCopy() {
   catch (e) { logErr('preview:copy', e); toast('Не удалось скопировать — перепишите числа с экрана', true); }
 }
 // Правки, сделанные в новой версии после последней загрузки: они хранятся на устройстве и на сервер не уходят
-const nextLocalChanges = () => !!SRVDB.lastPull && localStorage.getItem('crm_next_pull_rev') !== syncRevision();
+// разбор GPT 04.10.2026, п. 3: точка отсчёта — последняя подтверждённая ревизия, от загрузки ИЛИ от отправки (первая отправка на пустой сервер)
+const nextLocalChanges = () => !!(SRVDB.lastPull || localStorage.getItem('crm_next_push_at')) && localStorage.getItem('crm_next_pull_rev') !== syncRevision();
 // Отметка «синхронизировано» после загрузки (разбор GPT 03.10.2026): часть записей — какой она была ДО запроса (записи слияния её не
 // двигают — putRaw), части настроек — после слияния (настройки с сервера приняты). Правка, сделанная, пока шла загрузка, сдвигает
 // отметку записей (put) — и остаётся «не отправленной».
-function syncRevisionAfterPull(before) { const a = String(before || '').split(':'), b = syncRevision().split(':'); return [a[0] || '0', b[1] || '0', b[2] || '0'].join(':'); }
+// разбор GPT 04.10.2026, п. 4: часть настроек (и защищённых доступов) берётся «после» только если они действительно пришли с сервера
+// (merged.settingsChanged / secretsChanged); иначе — «до»: настройка, изменённая во время загрузки, остаётся неотправленной
+function syncRevisionAfterPull(before, merged) { const a = String(before || '').split(':'), b = syncRevision().split(':'), m = merged || {}; return [a[0] || '0', (m.settingsChanged ? b[1] : a[1]) || '0', (m.secretsChanged ? b[2] : a[2]) || '0'].join(':'); }
 // Отключить сервер в новой версии: адрес, код, пароль и отметки удаляются; база на устройстве остаётся
 function nextServerForget() {
   SRV.url = ''; SRV.secret = ''; CLOUD.pass = '';
@@ -2985,15 +2988,16 @@ async function openPushConfirm(res) {
   openSheet('Отправка на сервер', `<div class="list-rows"><div><span>Уйдёт на сервер</span><span class="muted">${res.empty ? 'вся база этого устройства (на сервере базы ещё нет)' : 'новых ' + m.toServer.add + ' · изменённых ' + m.toServer.upd + ' · удалённых ' + m.toServer.del}</span></div>
       <div><span>Сначала придёт с сервера</span><span class="muted">новых ${m.toDevice.add} · изменённых ${m.toDevice.upd}</span></div>
       <div><span>Правились с обеих сторон</span><span class="muted">${conf}</span></div></div>
-    ${oldTooBig ? `<div class="info-box warning" id="push-old-toobig">База со сжатием — ${esc(mbText(size.effective))}: это больше предела функции (3,5 МБ). Прежняя программа не сможет ни получить её с сервера, ни отправить — работайте в новой версии на всех устройствах (она передаёт базу через хранилище).</div>` : ''}
+    ${oldTooBig ? `<div class="info-box warning" id="push-old-toobig">База со сжатием — ${esc(mbText(size.effective))}: это больше предела функции (3,5 МБ). Прежняя программа не сможет ни получить её с сервера, ни отправить — работайте в новой версии на всех устройствах (она передаёт базу через хранилище).
+      <label class="check" style="margin-top:8px"><input type="checkbox" id="push-old-off"${localStorage.getItem('crm_next_old_off') === '1' ? ' checked' : ''} onchange="pushOldOff(this.checked)"><span>Прежней программой я больше не пользуюсь ни на одном устройстве</span></label></div>` : ''}
     ${size && size.blobs && size.blobs.count ? `<div class="info-box" id="push-blobs">Файлы документов: ${size.blobs.count} (${esc(mbText(size.blobs.bytes))}). ${size.snap ? (size.blobs.pending ? 'В хранилище отдельно уйдут ' + size.blobs.pending + ' — один раз, в снимке их больше не будет.' : 'Все уже в хранилище отдельно, в снимке их нет.') : 'Идут внутри снимка (сервер старше 180).'}</div>` : ''}
     ${recompress ? `<div class="info-box" id="push-recompress">База на сервере хранится без сжатия. Эта отправка заменит её сжатой: ${esc(mbText(size.zipRequest))} вместо ${esc(mbText(size.request))}.${toS ? '' : ' Новых данных для сервера при этом нет.'} Остальные устройства, получив сжатую базу, перейдут на сжатие сами.</div>` : ''}
     ${conf ? `<div class="info-box warning">Записей, которые правились и здесь, и на другом устройстве: ${conf}. Программа объединит их по полям. Посмотрите выбор в «Проверить слияние» — после отправки он попадёт на сервер.</div>` : ''}
-    <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}После отправки прежняя программа получит эти изменения при своей следующей синхронизации. Прежний снимок базы сервер хранит в истории.</div>
+    <div class="info-box${first ? ' warning' : ''}">${first ? 'Это первая отправка из новой версии. Перед ней снимите копию базы в прежней программе. ' : ''}${oldTooBig ? '' : 'После отправки прежняя программа получит эти изменения при своей следующей синхронизации. '}Прежний снимок базы сервер хранит в истории.</div>
     ${oldRisk ? `<div class="info-box warning" id="push-oldrisk">${size.willZip ? 'База уйдёт на сервер сжатой (' + esc(mbText(size.effective)) + '). Прежняя программа до версии 314 сжатую базу не прочтёт — её синхронизация остановится.' : 'После этой отправки база на сервере станет ' + esc(mbText(size.effective)) + '. Прежняя программа версии 312 получит её, но записать обратно не сможет: её предел — ' + esc(mbText(size.oldLimit)) + '.'} Отправляйте только после обновления прежней программы до версии ${size.needOld} на всех устройствах.
       <label class="check" style="margin-top:8px"><input type="checkbox" id="push-old313" onchange="pushOldOk(this.checked, ${size.needOld})"><span>Прежняя программа на всех моих устройствах — версии ${size.needOld} или новее</span></label></div>` : ''}
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
-    <div class="form-actions"><button type="button" class="button primary" id="push-go"${oldRisk ? ' disabled' : ''} onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+    <div class="form-actions"><button type="button" class="button primary" id="push-go"${oldRisk || (oldTooBig && localStorage.getItem('crm_next_old_off') !== '1') ? ' disabled' : ''} onclick="pushNow()">${icon('send')}Отправить на сервер</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
   return res;
 }
 // п. 3.1: состояние каждого этапа — пройден / идёт / остановилась здесь / ждёт / не понадобился
@@ -3015,7 +3019,10 @@ function pushStagesRender() {
   const el = document.getElementById('push-stages'); if (!el || !PUSH_RUN) return;
   el.innerHTML = pushStagesHtml(PUSH_RUN, Date.now()) + (PUSH_RUN.done ? `<p class="small muted">Всё за ${Math.max(1, Math.round((Date.now() - PUSH_RUN.start) / 1000))} с</p>` : '');
 }
-function pushOldOk(v, ver) { if (v) localStorage.setItem('crm_next_oldver', String(ver || 313)); else { localStorage.removeItem('crm_next_oldver'); localStorage.removeItem('crm_next_old313'); } const b = document.getElementById('push-go'); if (b) b.disabled = !v; }
+function pushOldOk(v, ver) { if (v) localStorage.setItem('crm_next_oldver', String(ver || 313)); else { localStorage.removeItem('crm_next_oldver'); localStorage.removeItem('crm_next_old313'); } pushGoUpdate(); }
+// п. 3.4: отметка «прежней программой больше не пользуюсь» — без неё база больше предела функции не отправляется ни вручную, ни автообменом
+function pushOldOff(v) { if (v) localStorage.setItem('crm_next_old_off', '1'); else localStorage.removeItem('crm_next_old_off'); pushGoUpdate(); }
+function pushGoUpdate() { const b = document.getElementById('push-go'); if (!b) return; const o = document.getElementById('push-old313'), f = document.getElementById('push-old-off'); b.disabled = (!!o && !o.checked) || (!!f && !f.checked); }
 async function pushNow() {
   const b = document.getElementById('push-go'); if (b) { if (b.disabled) return; b.disabled = true; }
   // п. 3.1: этапы — вверху листа, чтобы и ход, и место сбоя было видно без прокрутки (жалоба 02.10.2026 на ошибку внизу)
@@ -3158,6 +3165,9 @@ async function nextAutoPush(reason) {
   // защита прежней программы — та же, что у кнопки: нужная версия должна быть подтверждена
   let size = null; try { size = await dbSizeNow(); } catch (e) { logErr('auto:size', e); }
   if (size && size.needOld > oldVerOk()) { NEXT_AUTO.dirty = true; srvdbNote('err', 'автообмен остановлен: прежняя программа на других устройствах должна быть не ниже ' + size.needOld + ' — подтвердите это в «Отправить изменения на сервер»'); return { ok: false, error: 'oldver' }; }
+  // п. 3.4 плана (разбор GPT 04.10.2026, п. 8): база больше предела функции — прежняя программа её не получит; автообмен не переводит общую
+  // базу за этот предел молча — нужна ручная отправка с отметкой «прежней программой больше не пользуюсь»
+  if (size && size.snap && size.fitsFn === false && localStorage.getItem('crm_next_old_off') !== '1') { NEXT_AUTO.dirty = true; srvdbNote('err', 'автообмен остановлен: база больше предела прежней программы (3,5 МБ) — она не сможет её получить. Отправьте вручную («Синхронизация», шаг 4) и отметьте, что прежней программой больше не пользуетесь'); return { ok: false, blocked: true }; }
   NEXT_AUTO.dirty = false;
   // вливание с сервера тоже пишет в базу и зовёт srvdbTouch — без этой проверки два устройства гоняли бы базу по кругу
   if (!nextLocalChanges()) return { ok: true, skipped: true };
@@ -3182,7 +3192,7 @@ async function nextAutoPull(force) {
       const r = await srvdbMergeSnapshot(g, true);
       if (!r.ok) { srvdbNote('err', nextSrvError(r)); return r; }
       if (r.failed) { srvdbNote('err', (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
-      if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore)); srvdbNote('pull');
+      if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore, r)); srvdbNote('pull');
       if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
     } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
   }
