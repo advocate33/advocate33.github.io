@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 04:15 · 874e066">
+<meta name="build" content="04.10.2026 04:54 · 1827434">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4409,9 +4409,9 @@ function shellRender() {
   // Поэтому: событие от уже снова открытого листа пропускается; запись истории снимается в момент закрытия (sheetHistDrop);
   // свой возврат по истории помечается и в popstate пропускается.
   // Esc: закрытие — через closeSheet, чтобы сработала защита формы (п. 1.1)
-  d.addEventListener('cancel', e => { e.preventDefault(); closeSheet(); });
+  d.addEventListener('cancel', e => { e.preventDefault(); closeSheet(false, true); });
   // в Chrome «cancel» на Esc приходит не всегда (нужна активация пользователем) — перехват клавиши надёжнее
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheetIsOpen() && !e.defaultPrevented) { e.preventDefault(); closeSheet(); } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheetIsOpen() && !e.defaultPrevented) { e.preventDefault(); closeSheet(false, true); } });
   d.addEventListener('close', () => { if (d.open) return; sheetHistDrop(); const side = document.getElementById('side'), box = document.getElementById('sheetContent'); if (UI.moving || (side && !side.hidden && box && box.parentNode === side)) return; UI.stack = []; UI.cur = null; });
   themeToggleRender();
   topbarMeasure(); // высота шапки — в переменную для боковой панели (как v308 в прежней программе)
@@ -4421,6 +4421,8 @@ function topbarMeasure() { try { const t = document.querySelector('.topbar'); if
 window.addEventListener('resize', () => topbarMeasure());
 // «Назад» телефона и браузера закрывает открытый лист, а не уходит со страницы
 window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; return; } if (UI.hist) { UI.hist = false; const d = document.getElementById('sheet');
+  // разбор GPT 04.10.2026, п. 2: «Назад» телефона, пока идёт запись, — лист остаётся до исхода записи
+  if (d && d.open && typeof guardWriteInProgress === 'function' && guardWriteInProgress()) { try { history.pushState({ nextSheet: 1 }, ''); UI.hist = true; } catch (e) { logErr('sheet:history', e); } toast('Идёт сохранение — подождите секунду'); return; }
   // п. 1.1: «Назад» при незавершённой форме — лист остаётся, запись истории возвращается, показан выбор
   if (d && d.open && typeof guardDirty === 'function' && guardDirty()) { try { history.pushState({ nextSheet: 1 }, ''); UI.hist = true; } catch (e) { logErr('sheet:history', e); } guardPrompt('close'); return; }
   if (d && d.open) d.close(); } });
@@ -4431,7 +4433,7 @@ async function nav(id) {
   if (!NAV_ITEMS.some(i => i.id === id)) id = 'today';
   // незавершённая форма в боковой панели — сначала её судьба, потом смена раздела (разбор GPT 03.10.2026: раньше раздел и подсветка
   // менялись до проверки, и при отказе программа считала активным другой раздел)
-  { const side0 = document.getElementById('side'); if (side0 && !side0.hidden && !closeSheet()) return; }
+  { const side0 = document.getElementById('side'); if (side0 && !side0.hidden && !closeSheet(false, true)) return; }
   // п. 1.6 (03.10.2026): позиция прокрутки уходящего экрана запоминается (страница прокручивается окном — html и body не контейнеры, урок 30)
   const prevScreen = UI.screen; if (UI.ready && document.getElementById('scr-' + prevScreen)) navScrollSave(prevScreen);
   UI.screen = id;
@@ -4504,8 +4506,8 @@ function sheetPlace(entry) {
 }
 function sheetShow() {
   const box = document.getElementById('sheetContent'); if (!box || !UI.cur) return;
-  const back = UI.stack.length ? `<button type="button" class="icon-button" aria-label="Назад" onclick="sheetBack()">${icon('arrow-left')}</button>` : '';
-  box.innerHTML = `<div class="modal-head"><div class="split" style="justify-content:flex-start;gap:4px">${back}<h2 id="sheetTitle">${esc(UI.cur.title)}</h2></div>${iconBtn('Закрыть', 'closeSheet()', 'x')}</div><div class="modal-content">${UI.cur.body}</div>`;
+  const back = UI.stack.length ? `<button type="button" class="icon-button" aria-label="Назад" onclick="sheetBack(false, true)">${icon('arrow-left')}</button>` : '';
+  box.innerHTML = `<div class="modal-head"><div class="split" style="justify-content:flex-start;gap:4px">${back}<h2 id="sheetTitle">${esc(UI.cur.title)}</h2></div>${iconBtn('Закрыть', 'closeSheet(false, true)', 'x')}</div><div class="modal-content">${UI.cur.body}</div>`;
   const d = document.getElementById('sheet'); if (d) d.scrollTop = 0;
   if (typeof guardArm === 'function') guardArm(); // п. 1.1: защита незавершённой формы
 }
@@ -4517,9 +4519,9 @@ function sheetFreeze() {
   box.querySelectorAll('select').forEach(el => Array.from(el.options).forEach(o => { if (o.selected) o.setAttribute('selected', ''); else o.removeAttribute('selected'); }));
   UI.cur.body = box.innerHTML;
 }
-function sheetBack(force) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('back')) return false; UI.cur = UI.stack.pop() || null; if (!UI.cur) closeSheet(true); else sheetPlace(UI.cur); return true; }
+function sheetBack(force, byUser) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('back', byUser)) return false; UI.cur = UI.stack.pop() || null; if (!UI.cur) closeSheet(true); else sheetPlace(UI.cur); return true; }
 function sheetHistDrop() { if (UI.hist) { UI.hist = false; UI.skipPop = (UI.skipPop || 0) + 1; history.back(); } }
-function closeSheet(force) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('close')) return false; const d = document.getElementById('sheet'), side = document.getElementById('side'); UI.stack = []; UI.cur = null; if (d && d.open) { sheetHistDrop(); d.close(); } if (side && !side.hidden) { side.hidden = true; document.getElementById('work-grid').classList.remove('has-side'); } return true; }
+function closeSheet(force, byUser) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('close', byUser)) return false; const d = document.getElementById('sheet'), side = document.getElementById('side'); UI.stack = []; UI.cur = null; if (d && d.open) { sheetHistDrop(); d.close(); } if (side && !side.hidden) { side.hidden = true; document.getElementById('work-grid').classList.remove('has-side'); } return true; }
 
 // ── сообщение внизу экрана ──
 let _toastTimer = 0;
@@ -4576,8 +4578,15 @@ const GUARD_DRAFT_KEY = 'crm_next_draft', GUARD_DRAFT_TTL = 24 * 3600000;
 // saving — время нажатия «Сохранить»/«Удалить»: пока запись идёт, закрытие листа (успех) разрешено; ошибка записи (fErr, сообщение об
 // ошибке) сбрасывает отметку — защита и черновик остаются (разбор GPT 03.10.2026: раньше защита снималась до результата записи)
 const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0 };
-const GUARD_SAVE_MS = 20000;
+const GUARD_SAVE_MS = 20000, GUARD_START_MS = 1500;
 function guardSaving() { return !!SHEET_GUARD.saving && Date.now() - SHEET_GUARD.saving < GUARD_SAVE_MS; }
+// разбор GPT 04.10.2026, пп. 2 и 7: «идёт запись» — пока в базу действительно пишется (незавершённые put/putRaw/del) или первые 1,5 с после
+// нажатия (обработчик ещё читает и проверяет). Предупреждение формы («время занято — нажмите ещё раз») записи не начинает: через 1,5 с
+// повторное нажатие и закрытие работают как обычно
+const GUARD_WRITES = { n: 0 };
+function guardWriteInProgress() { return guardSaving() && (GUARD_WRITES.n > 0 || Date.now() - SHEET_GUARD.saving < GUARD_START_MS); }
+{ const wrap = f => async function (...a) { GUARD_WRITES.n++; try { return await f.apply(this, a); } finally { GUARD_WRITES.n--; } };
+  if (typeof put === 'function') put = wrap(put); if (typeof putRaw === 'function') putRaw = wrap(putRaw); if (typeof del === 'function') del = wrap(del); }
 function guardSaveFailed() { SHEET_GUARD.saving = 0; }
 function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions'); }
 // значения всех полей формы одной строкой — для сравнения
@@ -4602,7 +4611,14 @@ function guardArm() {
     box.addEventListener('input', guardOnInput, true); box.addEventListener('change', guardOnInput, true);
     // сохранить/удалить — намеренный выход: защита снимается до того, как обработчик закроет лист
     // «Сохранить» и «Удалить» — отметка «идёт запись»; защита и черновик снимаются, только когда лист закрылся или сменился (успех)
-    box.addEventListener('click', e => { const b = e.target && e.target.closest && e.target.closest('.form-actions .button'); if (b && !b.closest('.guard-box') && (b.classList.contains('primary') || b.classList.contains('danger'))) SHEET_GUARD.saving = Date.now(); }, true);
+    // разбор GPT 04.10.2026, пп. 2 и 7: «Удалить», открывающее подтверждение (openDeleteSheet, …Ask), — не запись; повторное «Сохранить», пока
+    // запись идёт, не запускает вторую (иначе дубль записи или перезапись результата)
+    box.addEventListener('click', e => {
+      const b = e.target && e.target.closest && e.target.closest('.form-actions .button'); if (!b || b.closest('.guard-box')) return;
+      const isSave = b.classList.contains('primary') && !!b.closest('.save-bar'), opener = /openDeleteSheet|Ask\(/.test(b.getAttribute('onclick') || '');
+      if (isSave && guardWriteInProgress()) { e.preventDefault(); e.stopImmediatePropagation(); toast('Сохраняю — подождите'); return; }
+      if (isSave || (b.classList.contains('danger') && !opener)) SHEET_GUARD.saving = Date.now();
+    }, true);
   }
 }
 function guardDirty() { return SHEET_GUARD.armed && guardIsForm() && guardFormState() !== SHEET_GUARD.snap; }
@@ -4616,8 +4632,15 @@ function guardDraftSave() {
 function guardDraftDrop() { try { localStorage.removeItem(GUARD_DRAFT_KEY); } catch (e) { logErr('guard:draft', e); } }
 function guardDraftGet() { try { const d = JSON.parse(localStorage.getItem(GUARD_DRAFT_KEY) || 'null'); return d && d.body && Date.now() - (d.at || 0) < GUARD_DRAFT_TTL ? d : null; } catch (e) { return null; } }
 // попытка закрыть: true — можно закрывать; false — показан выбор, лист остаётся
-function guardBeforeClose(how) {
-  if (guardSaving()) { guardDisarm(true); SHEET_GUARD.saving = 0; return true; }
+function guardBeforeClose(how, byUser) {
+  if (guardSaving()) {
+    // закрывает сам обработчик после успешной записи — защита и черновик больше не нужны
+    if (!byUser) { guardDisarm(true); SHEET_GUARD.saving = 0; return true; }
+    // закрывает пользователь (×, ←, Esc, «Назад»), пока запись идёт, — ждём её исхода (при ошибке введённое иначе пропало бы)
+    if (guardWriteInProgress()) { toast('Идёт сохранение — подождите секунду'); return false; }
+    // записи нет (форма показала предупреждение и ждёт) — обычная проверка изменений ниже
+    SHEET_GUARD.saving = 0;
+  }
   if (!guardDirty()) return true;
   guardPrompt(how); return false;
 }
@@ -4896,6 +4919,8 @@ async function formBusy(kind, item, boxId, formId) {
   const box = document.getElementById(boxId);
   if (!found.length || _busyAck === key) { _busyAck = ''; if (box) box.hidden = true; return false; }
   _busyAck = key;
+  // запись не состоялась — форма ждёт повторного «Сохранить»: отметка «идёт запись» снимается сразу (ui/guard.js)
+  if (typeof guardSaveFailed === 'function') guardSaveFailed();
   if (box) { box.hidden = false; box.innerHTML = `<b>Время занято.</b> ${found.map(f => esc(f.text)).join('<br>')}<br>Измените время или нажмите «Сохранить» ещё раз, если это не ошибка.`; box.scrollIntoView({ block: 'nearest' }); }
   return true;
 }
@@ -5054,8 +5079,10 @@ async function saveCaseForm(id) {
     const taken = agreementNoTakenBy(allCases, r.obj.agreementNo, id || null);
     if (taken) { fErr('Номер соглашения ' + r.obj.agreementNo + ' уже занят делом ' + (taken.number || '') + (taken.client ? ' (' + taken.client + ')' : '') + (taken._deleted ? ' — дело в корзине' : '') + '. Укажите другой номер или нажмите «Авто» на вкладке «Соглашение»'); return; }
   }
+  // разбор GPT 04.10.2026, п. 5: сообщение об ошибке — по фактически выполненным шагам
+  let clientSaved = false;
   try {
-    if (r.newClient) await put('clients', r.newClient);
+    if (r.newClient) { await put('clients', r.newClient); clientSaved = true; }
     if (r.clientUpd) await put('clients', r.clientUpd);
     addCaseHistoryEvent(r.obj, 'status', (prev && prev.status) || '', r.obj.status || '', id ? 'form' : 'created');
     addCaseHistoryEvent(r.obj, 'stage', (prev && prev.stage) || '', r.obj.stage || '', id ? 'form' : 'created');
@@ -5063,7 +5090,7 @@ async function saveCaseForm(id) {
     const msgs = typeof nextActDeadlines === 'function' ? nextActDeadlines(r.obj, prev) : [];
     if (msgs && msgs.length) addCaseHistoryEvent(r.obj, 'deadline', '', msgs.join(' | '), id ? 'form' : 'created');
     await put('cases', r.obj);
-  } catch (e) { logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (r.newClient ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
+  } catch (e) { logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (clientSaved ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
   await refreshCasesCache(); toast(id ? 'Дело сохранено' : 'Дело создано');
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
