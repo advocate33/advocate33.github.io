@@ -13,12 +13,14 @@
 
    При выходе новой версии приложения поднимите число в CACHE.
 */
-const CACHE = 'crm-next-v90'; // новая версия: свой кэш, область /next/
-const CACHE_PREFIX = 'crm-next-v'; // удаляем только СВОИ старые кэши — кэши прежней версии на том же сайте не трогаем
+const CACHE = 'crm-next-v91'; // новая версия: свой кэш, область /next/
+const CACHE_PREFIX = CACHE.replace(/\d+$/, ''); // crm-next-v… в /next/, crm-main-v… на основном адресе: удаляем только СВОИ старые кэши — чужие на том же сайте не трогаем
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
 const BASE = new URL('./', self.location).pathname;
 const START_URLS = [BASE, BASE + 'index.html'];
+// основной адрес (переход, п. 10): у /old/ (прежняя программа) и /next/ свои sw; раздача dist/ и apps/ — всегда из сети, без кэша
+const FOREIGN_DIRS = BASE === '/' ? ['/old/', '/next/', '/next-gpt/', '/dist/', '/apps/'] : [];
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
@@ -63,6 +65,7 @@ self.addEventListener('fetch', (e) => {
 
   const url = new URL(req.url);
   const sameOrigin = url.origin === self.location.origin;
+  if (sameOrigin && FOREIGN_DIRS.some((d) => url.pathname.startsWith(d))) return;
 
   const isNavigation =
     req.mode === 'navigate' ||
