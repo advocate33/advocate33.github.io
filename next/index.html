@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="04.10.2026 21:12 · 604b172">
+<meta name="build" content="04.10.2026 21:54 · 8ae0dfd">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -482,6 +482,16 @@ button.agenda-row:hover{background:var(--surface2)}
 
 /* инструкция и соглашение (план перехода, п. 9, 04.10.2026) */
 .help-text h3{font-size:1rem;margin:14px 0 6px}.help-text p,.help-text li{line-height:1.55}.help-text p{margin:0 0 10px}.help-text ol,.help-text ul,.eula-list{margin:6px 0 10px 20px;padding:0}.help-text li,.eula-list li{margin:3px 0}
+
+/* защита входа (план перехода, п. 10, 04.10.2026): экран блокировки — во весь экран, в верхнем слое */
+.lock-screen{border:0;padding:0;margin:0;width:100%;max-width:100%;height:100%;max-height:100%;background:var(--bg);color:var(--text)}
+.lock-screen::backdrop{background:var(--bg)}
+.lock-box{min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px 16px}
+.lock-title{font-size:1.25rem;font-weight:650}.lock-sub{color:var(--text-muted)}.lock-err{min-height:1.4em;color:var(--bad);text-align:center}
+.lock-dots{display:flex;gap:12px}.lock-dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--accent)}.lock-dot.on{background:var(--accent)}
+.lock-pad{display:grid;grid-template-columns:repeat(3,72px);gap:14px}
+.lock-key{width:72px;height:72px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--text);font-size:1.5rem;cursor:pointer}
+.lock-key.fn{font-size:1rem;display:grid;place-items:center}.lock-key:active{background:var(--accent-soft)}
 
 </style>
 </head>
@@ -3621,6 +3631,69 @@ function openDevRemindSheet(mode, msg) {
     <p class="small muted" style="margin-top:8px">Просроченный срок напоминает раз в день; задача — в её время (без времени — в 9:00); встреча — за 2 часа. Настройка «за сколько» общая для ваших устройств.</p>`, mode || (sheetIsOpen() ? true : undefined));
 }
 
+// ▼▼▼ sync/appupd.js
+// ═══ sync/appupd.js — обновление приложений для Android и компьютера (план перехода, п. 10; решение пользователя 04.10.2026) ═══
+// Перенесено из прежней программы (v286, v306): программа сверяет версию приложения-оболочки (мост AndroidApp.appVersion / CRMDesktop.version)
+// с dist/apps.json на раздаче и показывает на «Сегодня» карточку «Доступно обновление» с «Обновить» и «Позже»; в Настройках — ручная проверка
+// и версия приложения. Без перехода оболочки после замены программы на новую версию потеряли бы обновление изнутри. Адрес apps.json — от корня
+// сайта (из /next/ относительный путь вёл бы в /next/dist). В браузере (без оболочки) проверки нет: программа обновляется сама.
+const APPUPD = { man: null, upd: null, missing: null, checked: false };
+function appEnv() { if (typeof AndroidApp !== 'undefined' && AndroidApp) return 'android'; if (typeof window !== 'undefined' && window.CRMDesktop) return 'windows'; return ''; }
+function appVersionNow() {
+  try { if (appEnv() === 'android') return typeof AndroidApp.appVersion === 'function' ? String(AndroidApp.appVersion() || '') : ''; if (appEnv() === 'windows') return String(window.CRMDesktop.version || ''); } catch (e) { logErr('appupd:version', e); }
+  return '';
+}
+function verCmp(a, b) { const pa = String(a || '0').split('.').map(x => parseInt(x, 10) || 0), pb = String(b || '0').split('.').map(x => parseInt(x, 10) || 0); for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d > 0 ? 1 : -1; } return 0; }
+// что предложить: старая оболочка без appVersion — версия неизвестна, предложение тоже показывается (как в прежней программе)
+function appUpdModel(man, env, cur) {
+  const m = man && man[env]; if (!m || !m.version || !m.url) return null;
+  return !cur || verCmp(m.version, cur) > 0 ? { env, cur, version: m.version, url: m.url, notes: Array.isArray(m.notes) ? m.notes.slice(0, 5) : [], size: m.sizeMb || '' } : null;
+}
+async function appUpdFetch() { try { const r = await fetch(location.origin + '/dist/apps.json', { cache: 'no-store' }); if (!r.ok) return null; APPUPD.man = await r.json(); return APPUPD.man; } catch (e) { logErr('appupd:fetch', e); return null; } }
+// файл обновления на своём сайте должен существовать (04.10.2026: в apps.json — Android 1.5, а apps/CRM_Advokata.apk на сайте нет, 404 —
+// карточка вела бы на несуществующий файл); файл на другом адресе не проверяется (запрос туда закрыт политикой CSP)
+async function appUpdFileOk(url) {
+  try { if (new URL(url, location.href).origin !== location.origin) return true; const r = await fetch(url, { method: 'HEAD', cache: 'no-store' }); return r.ok; } catch (e) { logErr('appupd:head', e); return false; }
+}
+async function appUpdResolve(man, env) {
+  const u = man ? appUpdModel(man, env, appVersionNow()) : null; APPUPD.missing = null;
+  if (u && !(await appUpdFileOk(u.url))) { APPUPD.missing = u; return null; }
+  return u;
+}
+async function appUpdCheck(force) {
+  const env = appEnv(); if (!env) return null;
+  if (APPUPD.checked && !force) return APPUPD.upd;
+  APPUPD.checked = true; const man = await appUpdFetch(); APPUPD.upd = await appUpdResolve(man, env); return APPUPD.upd;
+}
+// карточка на «Сегодня» (скрывается до следующей версии — «Позже»)
+async function appUpdBox() {
+  let u = null; try { u = await appUpdCheck(); } catch (e) { logErr('appupd:box', e); } if (!u || localStorage.getItem('crm_appupd_skip') === u.version) return '';
+  const what = u.env === 'android' ? 'приложения для Android' : 'приложения для компьютера';
+  return `<section class="panel t-license" id="app-upd"><div class="panel-title"><h2>Обновление ${esc(what)}: ${esc(u.version)}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="appUpdSkip('${jsq(u.version)}')">Позже</button></div></div>
+    <div class="lic-body"><p class="small">${u.cur ? 'У вас ' + esc(u.cur) + '. ' : 'Версия вашего приложения неизвестна — вероятно, оно старое. '}${u.notes.length ? 'Что нового: ' + esc(u.notes.join('; ')) + '.' : ''} Данные не затрагиваются: обновление ставится поверх.</p>
+    <div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary small-btn" id="app-upd-go" onclick="appUpdInstall()">${icon('cloud-download', 'icon-sm')}Обновить</button></div></div></section>`;
+}
+function appUpdSkip(v) { localStorage.setItem('crm_appupd_skip', v); toast('Напомню о следующей версии'); nav('today'); }
+function appUpdInstall() {
+  const u = APPUPD.upd; if (!u) return;
+  try {
+    if (u.env === 'android') { if (typeof AndroidApp.installUpdate === 'function') { AndroidApp.installUpdate(u.url); toast('Скачиваю обновление…'); } else if (typeof AndroidApp.openUrl === 'function') AndroidApp.openUrl(u.url); else window.open(u.url, '_blank', 'noopener'); }
+    else if (u.env === 'windows') { if (typeof window.CRMDesktop.installUpdate === 'function') { toast('Скачиваю установщик…'); Promise.resolve(window.CRMDesktop.installUpdate(u.url)).then(() => toast('Установщик запущен — следуйте его шагам')).catch(e => { logErr('appupd:install', e); toast('Не удалось скачать установщик: ' + ((e && e.message) || e), true); }); } else window.open(u.url, '_blank', 'noopener'); }
+  } catch (e) { logErr('appupd:install', e); toast('Не удалось начать обновление: ' + ((e && e.message) || e), true); }
+}
+// Настройки → «Проверить обновления»
+async function appUpdCheckManual() {
+  localStorage.removeItem('crm_appupd_skip');
+  const env = appEnv();
+  if (!env) { toast('Вы в браузере: программа обновляется сама при открытии (полоса «Доступна новая версия»), приложения — в самих приложениях'); return; }
+  const man = await appUpdFetch(); if (!man || !man[env]) { toast('На раздаче нет сведений о версии приложения — попробуйте позже', true); return; }
+  APPUPD.checked = true; APPUPD.upd = await appUpdResolve(man, env);
+  if (APPUPD.missing) { toast(`На сайте указана версия ${APPUPD.missing.version}, но файла обновления по адресу нет — обновление пока недоступно`, true); return; }
+  toast(APPUPD.upd ? `Доступно обновление ${APPUPD.upd.version} — карточка на «Сегодня»` : `У вас ${appVersionNow() || 'неизвестная версия'}, на раздаче ${man[env].version} — обновление не требуется`);
+  if (APPUPD.upd) { closeSheet(true); nav('today'); }
+}
+function appVersionLine() { const env = appEnv(); return env ? (env === 'android' ? 'Приложение для Android ' : 'Приложение для компьютера ') + (appVersionNow() || '(версия неизвестна)') : 'Браузер'; }
+
 // ▼▼▼ sync/files.js
 // ═══ sync/files.js — копии базы в файл и обмен через файл (этап 4, часть 4) ═══
 // Файл копии — тот же зашифрованный контейнер, что уходит на сервер (core/crypto.js): его читает и прежняя программа
@@ -4751,7 +4824,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -5098,7 +5171,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Размер текста</p>${choice(UI_FONT_SIZES.map(f => [f[0], f[2]]), size, 'setFontSize')}
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     <div class="section-label">Данные</div>
-    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
       <button type="button" class="list-btn" onclick="openMonitorSettingsSheet()"><span>Мониторинг судов</span><span class="muted">${!SRV.url ? 'сервер не подключён' : crmCollectorSrvCfg().url ? 'сбор в облаке настроен' : 'сбор в облаке не настроен'}</span></button>
@@ -5111,7 +5184,7 @@ async function openSettingsSheet(sub) {
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
-    <div class="info-box">Остальные настройки (PIN-код; учёт устройств лицензии) ещё переносятся и пока действуют в прежней программе.</div>`, sub);
+    <div class="info-box">Учёт устройств на сервере лицензий пока ведёт прежняя программа: новая версия проверяет пропуск на этом устройстве.</div>`, sub);
 }
 // журнал ошибок: что сломалось, где и когда — чтобы прислать разработчику; «Скопировать» собирает текст для чата
 function errlogText() { return errLogGet().slice().reverse().map(r => `${new Date(r.t).toLocaleString('ru-RU')} · ${r.ver || ''} · ${r.where || ''}: ${r.msg || ''}${r.extra ? ' · ' + r.extra : ''}${r.stack ? '\n    ' + r.stack : ''}`).join('\n'); }
@@ -6632,9 +6705,11 @@ SCREENS.today = async function () {
   // на телефоне порядок блоков задаёт tokens.css: важное → ближайшее заседание → план дня → события судов → далее → в работе
   // очередь 4: напоминание о продлении лицензии — за 30, 7, 1 день; скрывается до следующей ступени (ui/license.js)
   const licBox = typeof licRenewBox === 'function' ? await licRenewBox() : '';
+  // план перехода, п. 10 (04.10.2026): обновление приложения-оболочки (sync/appupd.js); в браузере — пусто
+  const appBox = typeof appUpdBox === 'function' ? await appUpdBox() : '';
   // решение пользователя 04.10.2026: дела, где данные выше стадии, — поднять по подтверждению (data/stageauto.js)
   const stageBox = typeof stageLagBox === 'function' ? await stageLagBox() : '';
-  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${licBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
+  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${licBox}${appBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
   return out;
 };
 
@@ -8859,6 +8934,148 @@ function openEulaSheet(mandatory) {
 // при запуске: не принято на этом устройстве (или вышла новая редакция) — лист соглашения
 function eulaGate() { if (!eulaAccepted()) { openEulaSheet(true); return false; } return true; }
 
+// ▼▼▼ security/lockui.js
+// ═══ security/lockui.js — защита входа (план перехода, п. 10; решение пользователя 04.10.2026) ═══
+// Без этого модуля после перехода PIN-код прежней программы не действовал бы: программа открывалась бы без PIN, а секреты, закрытые PIN-кодом,
+// не читались бы. Перенесено из прежней программы («Защита входа», v292 — слой секретов на PIN): экран блокировки с цифрами, PIN из 6 цифр,
+// после 5 ошибок — пауза от 30 секунд до 5 минут, вход по отпечатку или Face ID (WebAuthn), повторная блокировка после минуты в фоне,
+// автоблокировка при бездействии, секреты можно закрыть PIN-кодом. Хэш PIN и ключи — security/secrets.js (общий модуль): PIN в открытом виде
+// не хранится. Ключи те же (crm_lock_*, crm_sec_pin, crm_autolock_min) — PIN, заданный в прежней программе, действует и здесь.
+// Экран блокировки — <dialog> в верхнем слое; лист, открытый при заблокированном экране, его не перекрывает (обёртка openSheet).
+const LOCK_UI = { locked: false, buf: '', bgAt: 0, autoT: 0 };
+function lockEl() {
+  let d = document.getElementById('lockScreen'); if (d) return d;
+  d = document.createElement('dialog'); d.id = 'lockScreen'; d.className = 'lock-screen'; d.setAttribute('aria-label', 'Вход по PIN-коду');
+  d.innerHTML = '<div class="lock-box"><div class="lock-title">CRM Адвоката</div><div class="lock-sub" id="lockSub"></div><div class="lock-dots" id="lockDots"></div><div class="lock-pad" id="lockPad"></div><div class="lock-err" id="lockErr" role="alert"></div></div>';
+  d.addEventListener('cancel', e => e.preventDefault()); document.body.appendChild(d); return d;
+}
+function lockDots() { const el = document.getElementById('lockDots'); if (el) el.innerHTML = Array.from({ length: LOCK.length }, (_, i) => `<span class="lock-dot${i < LOCK_UI.buf.length ? ' on' : ''}"></span>`).join(''); }
+function lockErrShow(msg) { const el = document.getElementById('lockErr'); if (el) el.textContent = msg || ''; }
+function lockShow() {
+  if (!LOCK.enabled) return false;
+  const d = lockEl(); LOCK_UI.locked = true; LOCK_UI.buf = '';
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', LOCK.bio ? 'bio' : '', '0', 'del'];
+  document.getElementById('lockPad').innerHTML = keys.map(k => k === '' ? '<span></span>' : k === 'bio' ? `<button type="button" class="lock-key fn" id="lock-bio" aria-label="Вход по отпечатку" onclick="lockPress('bio')">${icon('shield-check')}</button>` : k === 'del' ? `<button type="button" class="lock-key fn" id="lock-del" aria-label="Стереть" onclick="lockPress('del')">${icon('arrow-left')}</button>` : `<button type="button" class="lock-key" id="lock-k${k}" onclick="lockPress('${k}')">${k}</button>`).join('');
+  document.getElementById('lockSub').textContent = `Введите PIN-код (${LOCK.length} цифр)`; lockErrShow('');
+  if (d.open) d.close(); d.showModal(); lockDots();
+  if (LOCK.bio) setTimeout(() => { lockTryBio().catch(e => logErr('lock:bio', e)); }, 300);
+  return true;
+}
+function lockOpenNow() { LOCK_UI.locked = false; LOCK_UI.buf = ''; const d = document.getElementById('lockScreen'); if (d && d.open) d.close(); lockArm(); }
+async function lockPress(key) {
+  lockErrShow('');
+  if (key === 'del') { LOCK_UI.buf = LOCK_UI.buf.slice(0, -1); lockDots(); return; }
+  if (key === 'bio') { await lockTryBio(); return; }
+  const blocked = Number(localStorage.getItem('crm_lock_blocked') || 0);
+  if (blocked > Date.now()) { lockErrShow(`Слишком много попыток. Повторите через ${Math.ceil((blocked - Date.now()) / 1000)} с`); return; }
+  if (LOCK_UI.buf.length >= LOCK.length) return;
+  LOCK_UI.buf += key; lockDots();
+  if (LOCK_UI.buf.length < LOCK.length) return;
+  const pin = LOCK_UI.buf; LOCK_UI.buf = '';
+  if (await lockVerify(pin)) {
+    localStorage.removeItem('crm_lock_fails'); localStorage.removeItem('crm_lock_blocked');
+    try { if (typeof secretsUnlockPin === 'function' && await secretsUnlockPin(pin) && typeof syncStatusRender === 'function') syncStatusRender(); } catch (e) { logErr('lock:secrets', e); }
+    lockOpenNow(); return;
+  }
+  const fails = Number(localStorage.getItem('crm_lock_fails') || 0) + 1; localStorage.setItem('crm_lock_fails', String(fails));
+  if (fails >= 5) { const sec = Math.min(300, 30 * Math.pow(2, Math.floor((fails - 5) / 2))); localStorage.setItem('crm_lock_blocked', String(Date.now() + sec * 1000)); lockErrShow(`Слишком много попыток. Пауза ${sec} с`); }
+  else lockErrShow(`Неверный PIN-код · осталось попыток: ${5 - fails}`);
+  lockDots();
+}
+// ── отпечаток / Face ID (WebAuthn) — как в прежней программе ──
+async function bioAvailable() { try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; } }
+async function bioRegister() {
+  if (!await bioAvailable()) { toast('Вход по отпечатку на этом устройстве недоступен', true); return false; }
+  try {
+    const cred = await navigator.credentials.create({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: 'CRM Адвоката' }, user: { id: new TextEncoder().encode(deviceId()), name: 'advocate', displayName: 'Адвокат' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], authenticatorSelection: { userVerification: 'required', authenticatorAttachment: 'platform' }, timeout: 30000 } });
+    if (cred) { localStorage.setItem('crm_lock_bio_id', bufToB64(cred.rawId)); LOCK.bio = true; if (secPinOn()) { await secretsPinToggle(false); toast('Секреты теперь защищены ключом устройства: при входе по отпечатку PIN не вводится'); } return true; }
+  } catch (e) { logErr('lock:bio-register', e); }
+  toast('Не удалось включить вход по отпечатку', true); return false;
+}
+async function bioVerify() {
+  const id = localStorage.getItem('crm_lock_bio_id'); if (!id) return false;
+  try { return !!(await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: b64ToBuf(id) }], userVerification: 'required', timeout: 30000 } })); } catch (e) { return false; }
+}
+async function lockTryBio() { if (!LOCK.bio || !LOCK_UI.locked) return; const sub = document.getElementById('lockSub'); if (sub) sub.textContent = 'Подтвердите вход…'; if (await bioVerify()) lockOpenNow(); else if (sub) sub.textContent = `Введите PIN-код (${LOCK.length} цифр)`; }
+// ── повторная блокировка: минута в фоне; бездействие дольше выбранного ──
+function lockArm() {
+  clearTimeout(LOCK_UI.autoT); const min = Number(localStorage.getItem('crm_autolock_min') || 0);
+  if (LOCK.enabled && min > 0 && !LOCK_UI.locked) LOCK_UI.autoT = setTimeout(lockShow, min * 60000);
+}
+function lockStart() {
+  document.addEventListener('visibilitychange', () => {
+    if (!LOCK.enabled) return;
+    if (document.visibilityState === 'hidden') LOCK_UI.bgAt = Date.now();
+    else if (LOCK_UI.bgAt && Date.now() - LOCK_UI.bgAt > 60000 && !LOCK_UI.locked) lockShow();
+  });
+  ['pointerdown', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, () => { if (!LOCK_UI.locked) lockArm(); }, { passive: true }));
+  if (LOCK.enabled) lockShow(); else lockArm();
+}
+// лист, открытый при заблокированном экране (соглашение, сообщение обмена), не перекрывает экран блокировки
+if (typeof openSheet === 'function') {
+  const lockOpenSheetBase = openSheet;
+  openSheet = function () { const r = lockOpenSheetBase.apply(this, arguments); if (LOCK_UI.locked) { const d = document.getElementById('lockScreen'); if (d && d.open) { d.close(); d.showModal(); } } return r; };
+}
+// ── установка, смена, отключение ──
+async function lockSetPin(pin) {
+  const salt = bufToB64(crypto.getRandomValues(new Uint8Array(16))), iterations = 310000, hash = await lockHashPin(pin, salt, iterations);
+  localStorage.setItem('crm_lock_salt', salt); localStorage.setItem('crm_lock_hash', hash); localStorage.setItem('crm_lock_len', String(pin.length)); localStorage.setItem('crm_lock_iter', String(iterations)); localStorage.setItem('crm_lock_on', '1');
+  if (typeof bumpSecrets === 'function') bumpSecrets(['crm_lock_on', 'crm_lock_hash', 'crm_lock_salt', 'crm_lock_len', 'crm_lock_iter']);
+  if (secPinOn()) { localStorage.removeItem('crm_sec_pin_salt'); await secretsPinToggle(true, pin); }
+}
+async function lockDisable() {
+  if (secPinOn()) { try { await secretsPinToggle(false); } catch (e) { logErr('lock:secrets', e); } }
+  ['crm_lock_on', 'crm_lock_salt', 'crm_lock_hash', 'crm_lock_len', 'crm_lock_iter', 'crm_lock_bio', 'crm_lock_bio_id', 'crm_lock_fails', 'crm_lock_blocked'].forEach(k => localStorage.removeItem(k));
+  if (typeof bumpSecrets === 'function') bumpSecrets(['crm_lock_on', 'crm_lock_hash', 'crm_lock_salt', 'crm_lock_len', 'crm_lock_iter']);
+  clearTimeout(LOCK_UI.autoT);
+}
+async function openSecuritySheet(mode, msg) {
+  const bio = await bioAvailable(), on = LOCK.enabled, auto = Number(localStorage.getItem('crm_autolock_min') || 0);
+  const state = on ? ['good', 'PIN-код установлен: программа спрашивает его при открытии и после минуты в фоне'] : ['', 'Защита входа выключена'];
+  openSheet('Защита входа', `<div class="status-line ${state[0]}" id="lock-state" role="status">${icon(on ? 'shield-check' : 'circle-alert')}<span>${esc(state[1])}</span></div>
+    ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="lock-msg">${esc(msg.text)}</div>` : ''}
+    <p class="small muted">PIN-код закрывает программу от постороннего на этом устройстве. Он не хранится в открытом виде — только защищённый хэш. Это блокировка экрана; данные на сервере и в копиях зашифрованы отдельно — паролем шифрования.</p>
+    ${on ? `${bio ? `<label class="check"><input type="checkbox" id="lock-bio-cb"${LOCK.bio ? ' checked' : ''} onchange="lockBioToggle(this)"><span>Вход по отпечатку или Face ID</span></label>` : '<p class="small muted">Вход по отпечатку на этом устройстве недоступен.</p>'}
+      ${LOCK.bio ? '' : `<label class="check"><input type="checkbox" id="lock-secpin"${secPinOn() ? ' checked' : ''} onchange="lockSecPinToggle(this)"><span>Закрыть PIN-кодом и секреты (код сервера, пароль шифрования, ключи)</span></label>`}
+      <div class="form-grid">${fSelect('lock-auto', 'Автоблокировка при бездействии', String(auto), [['0', 'Выключена'], ['1', 'Через 1 минуту'], ['3', 'Через 3 минуты'], ['5', 'Через 5 минут'], ['10', 'Через 10 минут']])}</div>
+      <div class="form-actions"><button type="button" class="button" id="lock-change" onclick="openPinSetup()">${icon('pencil')}Изменить PIN-код</button><button type="button" class="button danger push-right" id="lock-off" onclick="lockOffAsk()">${icon('x')}Отключить защиту</button></div>`
+    : `<div class="form-actions"><button type="button" class="button primary" id="lock-set" onclick="openPinSetup()">${icon('shield-check')}Установить PIN-код</button></div>`}`, mode || (sheetIsOpen() ? true : undefined));
+  const sel = document.getElementById('lock-auto'); if (sel) sel.addEventListener('change', () => { localStorage.setItem('crm_autolock_min', sel.value); lockArm(); toast(sel.value === '0' ? 'Автоблокировка выключена' : 'Автоблокировка: через ' + sel.value + ' мин бездействия'); });
+}
+function openPinSetup(first) {
+  openSheet(first ? 'Повторите PIN-код' : 'Придумайте PIN-код', `<p class="small muted">${first ? 'Введите тот же PIN-код ещё раз.' : 'Ровно 6 цифр. Запомните его: без PIN-кода программу на этом устройстве не открыть (данные на сервере и в копии — останутся).'}</p>
+    <div class="form-grid">${wide(fInput('pin-input', 'PIN-код', '', 'type="password" inputmode="numeric" maxlength="6" pattern="[0-9]*" autocomplete="new-password"'))}</div>
+    ${fSaveBar(`pinSetupNext(${first ? `'${jsq(first)}'` : "''"})`, first ? 'Установить' : 'Далее')}`, 'replace');
+  setTimeout(() => { const el = document.getElementById('pin-input'); if (el) el.focus(); }, 80);
+}
+async function pinSetupNext(first) {
+  const v = fv('pin-input').trim();
+  if (!/^\d{6}$/.test(v)) { fErr('PIN-код — ровно 6 цифр'); return; }
+  if (!first) { openPinSetup(v); return; }
+  if (v !== first) { openPinSetup(); toast('PIN-коды не совпали — придумайте и повторите заново', true); return; }
+  try { await lockSetPin(v); } catch (e) { logErr('lock:set', e); fErr('Не удалось сохранить PIN-код: ' + ((e && e.message) || 'ошибка')); return; }
+  openSecuritySheet('replace', { text: 'PIN-код установлен. Программа спросит его при следующем открытии.' });
+}
+function lockOffAsk() {
+  openSheet('Отключить защиту входа?', `<p>Программа перестанет спрашивать PIN-код на этом устройстве. Секреты, закрытые PIN-кодом, останутся защищены ключом устройства.</p>
+    <div class="form-actions"><button type="button" class="button danger" id="lock-off-go" onclick="lockOffGo()">${icon('x')}Отключить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
+}
+async function lockOffGo() { await lockDisable(); openSecuritySheet('replace', { text: 'Защита входа отключена' }); }
+async function lockBioToggle(cb) { if (cb.checked) { if (!(await bioRegister())) cb.checked = false; } else { LOCK.bio = false; localStorage.removeItem('crm_lock_bio_id'); } openSecuritySheet('replace'); }
+async function lockSecPinToggle(cb) {
+  if (!cb.checked) { await secretsPinToggle(false); openSecuritySheet('replace', { text: 'Секреты защищены только ключом устройства' }); return; }
+  openSheet('Закрыть секреты PIN-кодом', `<p class="small muted">Введите текущий PIN-код: им будут закрыты код сервера, пароль шифрования и ключи. Без PIN-кода они не прочитаются.</p>
+    <div class="form-grid">${wide(fInput('secpin-input', 'Текущий PIN-код', '', 'type="password" inputmode="numeric" maxlength="6" autocomplete="current-password"'))}</div>
+    ${fSaveBar('lockSecPinGo()', 'Закрыть секреты')}`, 'replace');
+}
+async function lockSecPinGo() {
+  const pin = fv('secpin-input').trim();
+  if (!(await lockVerify(pin))) { fErr('PIN-код не подходит'); return; }
+  try { await secretsPinToggle(true, pin); } catch (e) { logErr('lock:secpin', e); fErr('Не удалось: ' + ((e && e.message) || 'ошибка')); return; }
+  openSecuritySheet('replace', { text: 'Секреты закрыты PIN-кодом' });
+}
+
 // ▼▼▼ screens/monitoring.js
 // ═══ screens/monitoring.js — экран «Суды и мониторинг» (этап 4, часть 1) ═══
 // Логика — sync/monitor.js (v312). Здесь: получение событий с личного сервера по кнопке, список событий с фильтрами,
@@ -9182,7 +9399,10 @@ const NEXT_BOOT = {
   },
   async start() {
     if (!NEXT_NS.ok) { this.say('Изоляция от прежней версии не сработала (' + NEXT_NS.why + ') — программа остановлена, данные не тронуты.', true); return; }
-    shellRender(); nav('today');
+    shellRender();
+    // план перехода, п. 10 (04.10.2026): PIN-код — до того, как на экране появятся данные (security/lockui.js)
+    try { if (typeof lockStart === 'function') lockStart(); } catch (e) { logErr('lock:start', e); }
+    nav('today');
     try { await dataInit(); } catch (e) { logErr('next:init', e); this.say('Сбой запуска слоя данных: ' + ((e && e.message) || e), true); return; }
     try { await refreshCasesCache(); } catch (e) { logErr('next:cases-cache', e); }
     // v312: прошедшим заседаниям без результата — статус «Дата прошла» (data/hearings.js, как при запуске прежней программы)
