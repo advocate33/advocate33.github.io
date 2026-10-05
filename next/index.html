@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="05.10.2026 19:22 · 53f3d23">
+<meta name="build" content="05.10.2026 21:28 · 7650b83">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4675,8 +4675,13 @@ const ycB64url = buf => bufToB64(buf).replace(/\+/g, '-').replace(/\//g, '_').re
 function ycAccessKind(tok) {
   const t = String(tok || '').trim(); if (!t) return '';
   if (t.startsWith('{')) { try { const j = JSON.parse(t); return j && j.private_key && j.service_account_id && j.id ? 'key' : 'bad-key'; } catch (e) { return 'bad-key'; } }
-  if (/^t1\./.test(t)) return 'iam'; if (/^y0_/.test(t)) return 'oauth'; return 'unknown';
+  if (/^t1\./.test(t)) return 'iam'; if (/^y0_/.test(t)) return 'oauth';
+  // снимок пользователя 05.10.2026: вставлен только закрытый ключ (строки PEM без JSON) — нужны ещё идентификаторы ключа и сервисного аккаунта
+  if (/BEGIN PRIVATE KEY|^[A-Za-z0-9+\/=\s]{200,}$/.test(t)) return 'pem';
+  return 'unknown';
 }
+// голый ключ + идентификаторы → тот же JSON, что в скачанном файле
+function ycKeyFromPem(pem, keyId, saId) { const body = String(pem || '').replace(/PLEASE DO NOT REMOVE[^\n]*\n?/g, '').trim(); return { id: String(keyId || '').trim(), service_account_id: String(saId || '').trim(), private_key: /BEGIN PRIVATE KEY/.test(body) ? body : '-----BEGIN PRIVATE KEY-----\n' + body + '\n-----END PRIVATE KEY-----' }; }
 async function ycJwtFromKey(key, now) {
   const pem = String(key.private_key).split('\n').filter(l => !/PLEASE DO NOT REMOVE|-----/.test(l)).join('').replace(/\s+/g, '');
   const pk = await crypto.subtle.importKey('pkcs8', b64ToBuf(pem), { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']);
@@ -4692,6 +4697,7 @@ async function ycAccess(tok) {
     const iam = (await ycApi('POST', YC.iamToken, null, { jwt })).iamToken; if (!iam) throw new Error('Облако не выдало IAM-токен по ключу сервисного аккаунта'); return iam; }
   if (kind === 'oauth') { let j; try { j = await ycApi('POST', YC.iamToken, null, { yandexPassportOauthToken: t }); } catch (e) { if (/not supported for IAM token exchange|issued after/i.test(String(e && e.message))) throw new Error('Яндекс Облако с 1 июня 2026 года не принимает новые строки «y0_…». Используйте ключ сервисного аккаунта (способ 1) или IAM-токен из yc CLI (способ 2)'); throw e; }
     if (!j.iamToken) throw new Error('не удалось получить IAM-токен — проверьте строку доступа'); return j.iamToken; }
+  if (kind === 'pem') throw new Error('Вставлен только закрытый ключ. Нужен файл ключа целиком (в нём есть id, service_account_id и private_key) — в консоли: сервисный аккаунт → «Создать новый ключ» → «Создать авторизованный ключ» → «Скачать файл с ключами». Либо впишите ниже идентификатор ключа и идентификатор сервисного аккаунта');
   if (kind === 'bad-key') throw new Error('Похоже на файл ключа, но в нём нет полей id, service_account_id и private_key — нужен авторизованный ключ сервисного аккаунта');
   throw new Error('Не похоже ни на ключ сервисного аккаунта ({…}), ни на IAM-токен (t1.…), ни на строку доступа (y0_…)');
 }
@@ -4814,9 +4820,13 @@ function openYcSetupSheet(sub) {
       <p class="small muted">Сервер создаётся в <b>вашем</b> Яндекс Облаке — автор программы к нему доступа не имеет. Он нужен для синхронизации компьютера и телефона, мониторинга судов, ленты календаря и снимков базы.</p>
       <div class="info-box" id="cloud-browser">Мастер, который создаёт сервер сам, работает в приложении «CRM Адвоката» для компьютера: браузер не пускает запросы к Яндекс Облаку. В этом окне — что сделать по шагам.</div>
       ${need}
-      <div class="section-label">Как создать сервер</div><ol class="steps-list">
+      <div class="section-label">Без приложения: ИИ-помощник консоли Облака создаёт сервер сам</div>
+      <p class="small muted">В консоли console.yandex.cloud вверху есть «Чат с AI». Скопируйте запрос, вставьте в чат и подтверждайте шаги; в конце помощник покажет адрес сервера и секретный код — впишите их в «Синхронизацию» (шаг 1) вместе с паролем шифрования. Коды — секрет: очистите чат помощника после настройки.</p>
+      <div class="form-grid">${wide(fInput('cloud-bucket', 'Имя бакета для запроса (латиница, цифры, дефис)', 'crm-' + ycRand(8), 'autocomplete="off" spellcheck="false"'))}</div>
+      <div class="form-actions" style="margin:0 0 10px"><button type="button" class="button primary" id="cloud-ai-all" onclick="ycCopyPrompt('all')">${icon('files')}Скопировать запрос для ИИ-помощника</button></div>
+      <div class="section-label">Или в приложении для компьютера (мастер)</div><ol class="steps-list">
         <li>Скачайте и установите приложение для компьютера (файл CRM_Advokata_Setup.exe). Windows может спросить, доверять ли файлу, — это установщик программы с сайта advocate33.github.io.<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APP_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать установщик</a></div></li>
-        <li>В приложении: Настройки → «Синхронизация устройств» → «Свой сервер одной кнопкой». Нажмите ссылку «страницу получения токена», войдите тем же аккаунтом Яндекса, скопируйте строку, начинающуюся с «y0_», вставьте в мастер → «Подключиться к Облаку». <b>Эту строку никому не пересылайте, включая автора.</b></li>
+        <li>В приложении: Настройки → «Свой сервер в Яндекс Облаке» → шаг 1: ключ сервисного аккаунта (инструкция и запрос для ИИ-помощника консоли — в самом мастере) → «Подключиться к Облаку».</li>
         <li>Выберите «новый каталог «crm»», оставьте предложенное имя бакета и все галочки → «Развернуть». Мастер работает 3–7 минут и пишет, что делает. В конце — «Сервер работает» и адреса.</li>
         <li>Вернитесь сюда: «Синхронизация» → шаг 1 — впишите адрес сервера и секретный код (их показывает лист «Личный сервер» в приложении) и пароль шифрования → «Сохранить и проверить связь». Должно ответить: «Связь есть: сервер версии …».</li>
         <li>Шаг 4 «Отправить изменения на сервер» — база этого устройства уйдёт на сервер зашифрованной. Затем на телефоне — те же адрес, код и пароль.</li></ol>
@@ -4841,8 +4851,12 @@ function openYcSetupSheet(sub) {
       <li>Выполните <b>yc iam create-token</b>, скопируйте строку «t1.…» и вставьте в поле ниже. Она действует 12 часов.</li></ol></details>
     <details class="help-text"><summary><b>Способ 3 — прежняя строка «y0_…»</b> (только если получена до 1 июня 2026 года)</summary>
       <p>Если у вас сохранилась такая строка, вставьте её. Новую получить нельзя: Облако её не примет.</p></details>
-    <p class="small muted">Нажмите «Получить строку доступа», войдите аккаунтом Яндекса, где создано облако, скопируйте строку, начинающуюся с «y0_», и вставьте сюда. Строка нужна только на время работы мастера и никуда не сохраняется. <b>Никому её не пересылайте, включая автора.</b></p>
+    <details class="help-text"><summary><b>Способ 4 — попросить ИИ-помощника консоли Облака</b> (кнопка «Чат с AI» вверху консоли)</summary>
+      <p>Скопируйте запрос, вставьте его в чат помощника в консоли и выполните, что он попросит. В конце он покажет содержимое файла ключа — вставьте его целиком в поле ниже. <b>Закрытый ключ — секрет:</b> после развёртывания удалите ключ в консоли (сервисный аккаунт → ключи) и очистите чат помощника («Удалить сейчас»).</p>
+      <div class="form-actions" style="margin:0 0 8px"><button type="button" class="button small-btn" id="cloud-ai-key" onclick="ycCopyPrompt('key')">${icon('files', 'icon-sm')}Скопировать запрос для ИИ-помощника</button></div></details>
+    <p class="small muted">Вставленное нужно только на время работы мастера. <b>Никому не пересылайте ключ и токены, включая автора.</b></p>
     <div class="form-grid"><label class="field wide"><span>Ключ сервисного аккаунта (содержимое файла), IAM-токен или строка y0_</span><textarea id="cloud-oauth" rows="4" autocomplete="off" spellcheck="false" placeholder="{ &quot;id&quot;: …, &quot;service_account_id&quot;: …, &quot;private_key&quot;: … }  или  t1.…  или  y0_…"></textarea></label></div>
+    <div class="form-grid" id="cloud-key-ids" hidden>${fInput('cloud-key-id', 'Идентификатор ключа (id)', '', 'autocomplete="off" spellcheck="false" placeholder="aje…"')}${fInput('cloud-sa-id', 'Идентификатор сервисного аккаунта', '', 'autocomplete="off" spellcheck="false" placeholder="aje…"')}</div>
     <p class="small muted">Вставленное используется только сейчас и нигде не сохраняется.</p>
     <div class="form-actions"><button type="button" class="button primary" id="cloud-connect" onclick="ycConnect()">${icon('shield-check')}Подключиться к Облаку</button></div>
     <div id="cloud-where"><div class="section-label step-label">Шаг 2. Облако и каталог</div><p class="small muted">Станет доступно после шага 1.</p></div>
@@ -4856,13 +4870,28 @@ function openYcSetupSheet(sub) {
     <div id="cloud-log" aria-live="polite">${ycStepsHtml()}</div>
     <div id="cloud-result"></div>`, sub);
 }
+// готовые запросы для ИИ-помощника консоли Облака: ключ сервисного аккаунта для мастера; весь сервер без приложения (путь В)
+function ycAiPrompt(kind) {
+  if (kind === 'key') return 'Создай в этом облаке сервисный аккаунт с именем crm-admin. Назначь ему на уровне облака (не каталога) роль admin. Создай для него авторизованный ключ (authorized key, не API-ключ и не статический) и покажи содержимое файла ключа целиком в формате JSON с полями id, service_account_id и private_key — я вставлю его в программу. Если для какого-то шага нужно моё подтверждение — спроси.';
+  return ['Помоги развернуть в этом облаке личный сервер программы «CRM Адвоката». Нужно сделать по порядку и в конце показать итог.',
+    '1. Создай каталог crm (если его нет).',
+    '2. В каталоге crm создай бакет Object Storage с именем ' + (fv('cloud-bucket') || 'crm-' + ycRand(8)) + ' (закрытый доступ, класс STANDARD, версионирование включено).',
+    '3. Создай сервисный аккаунт crm-server с ролями storage.editor и serverless.functions.invoker на каталог crm.',
+    '4. Создай функцию Cloud Functions с именем crm-bridge, среда nodejs22, точка входа index.handler, таймаут 300 секунд, память 256 МБ, сервисный аккаунт crm-server, публичный вызов (serverless.functions.invoker для allUsers). Код функции — файл index.js, содержимое возьми по адресу ' + YC_DIST() + '/loader-bridge-index.js. Переменные окружения: BUCKET = имя бакета из шага 2; SECRET = придумай случайную строку из 32 латинских букв и цифр и покажи её мне; UPDATE_URL = ' + YC_DIST() + '.',
+    '5. Создай функцию collector-sud: nodejs22, index.handler, таймаут 600 секунд, 256 МБ, тот же сервисный аккаунт, публичный вызов; код — файл index.js по адресу ' + YC_DIST() + '/loader-collector-index.js. Переменные: BRIDGE_URL = ссылка для вызова функции crm-bridge; BRIDGE_SECRET = тот же SECRET; SECRET = ещё одна случайная строка из 32 знаков (покажи её); UPDATE_URL = ' + YC_DIST() + '.',
+    '6. Создай таймер-триггер collector-timer для функции collector-sud с cron-выражением «30 4,12 ? * * *» (07:30 и 15:30 по Москве), сервисный аккаунт crm-server.',
+    '7. В конце покажи отдельными строками: ссылку для вызова crm-bridge, SECRET сервера, ссылку для вызова collector-sud, SECRET коллектора. Если что-то не получилось — скажи, какой шаг и почему.'].join('\n');
+}
+async function ycCopyPrompt(kind) { const t = ycAiPrompt(kind); try { await navigator.clipboard.writeText(t); toast('Запрос скопирован — вставьте его в чат ИИ-помощника консоли Облака'); } catch (e) { logErr('yc:copy', e); openSheet('Запрос для ИИ-помощника', `<p class="small muted">Выделите текст и скопируйте вручную.</p><textarea rows="12" readonly style="width:100%">${esc(t)}</textarea>`, true); } }
 async function ycConnect() {
-  const tok = fv('cloud-oauth').trim(), where = document.getElementById('cloud-where');
+  let tok = fv('cloud-oauth').trim(); const where = document.getElementById('cloud-where');
+  // голый ключ + идентификаторы (снимок пользователя 05.10.2026): собирается тот же JSON, что в файле; без идентификаторов — поля открываются и объясняются
+  if (ycAccessKind(tok) === 'pem') { const ids = document.getElementById('cloud-key-ids'); if (ids) ids.hidden = false; const kid = fv('cloud-key-id').trim(), sid = fv('cloud-sa-id').trim(); if (kid && sid) tok = JSON.stringify(ycKeyFromPem(tok, kid, sid)); }
   if (!tok) { fErr('Вставьте ключ сервисного аккаунта, IAM-токен или строку доступа — см. способы выше'); return; }
   const b = document.getElementById('cloud-connect'); if (b) b.disabled = true;
   where.innerHTML = '<p class="small muted">Подключаюсь…</p>';
   try {
-    YC_SESS.iam = await ycAccess(tok);
+    YC_SESS.iam = await ycAccess(tok); YC_SESS.tok = tok;
     YC_SESS.clouds = await ycList(YC.clouds, 'clouds', YC_SESS.iam);
     if (!YC_SESS.clouds.length) { where.innerHTML = '<div class="info-box warning">В аккаунте нет облаков. Откройте console.yandex.cloud — облако создаётся при первом входе.</div>'; return; }
     YC_SESS.folders = await ycList(YC.folders + '?cloudId=' + YC_SESS.clouds[0].id, 'folders', YC_SESS.iam);
@@ -4889,7 +4918,7 @@ async function ycRunWizard() {
   const logEl = () => document.getElementById('cloud-log');
   const log = t => { YC_SESS.log.push(t); const el = logEl(); if (el) el.innerHTML = ycStepsHtml(); };
   try {
-    const res = await ycDeploy({ oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: !!(document.getElementById('cloud-gw') || {}).checked, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
+    const res = await ycDeploy({ oauth: YC_SESS.tok || oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: !!(document.getElementById('cloud-gw') || {}).checked, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
     log('Записываю настройки в программу и проверяю связь…');
     const ok = await ycApply(res);
     // токен Облака после развёртывания больше не нужен — из памяти убирается
@@ -9375,10 +9404,12 @@ const HELP_SECTIONS = [
 <li>Пароль шифрования базы: придумайте заранее (не короче 12 знаков) и запишите на бумаге. Он нигде не хранится и не восстанавливается; тот же пароль вводится на каждом устройстве.</li></ol>
 <h3>Путь А. Мастер «Свой сервер в Яндекс Облаке» (приложение для компьютера)</h3>
 <ol><li>Установите приложение для компьютера (CRM_Advokata_Setup.exe с сайта программы). Windows может спросить разрешение — установщик подписан не магазином, это ожидаемо.</li>
-<li>В приложении: Настройки → «Свой сервер в Яндекс Облаке». Шаг 1 — доступ к Облаку. С 1 июня 2026 года Облако не принимает новые строки «y0_…», поэтому проще всего ключ сервисного аккаунта: в консоли Облака слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; затем вверху выберите само облако → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» → скачайте файл, откройте его в «Блокноте», скопируйте всё и вставьте в поле мастера. Нажмите «Подключиться к Облаку» — появятся облако и каталог.</li>
+<li>В приложении: Настройки → «Свой сервер в Яндекс Облаке». Шаг 1 — доступ к Облаку. С 1 июня 2026 года Облако не принимает новые строки «y0_…», поэтому проще всего ключ сервисного аккаунта: либо скажите ИИ-помощнику консоли (запрос — в мастере, «Способ 4»), либо сами: в консоли Облака слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; затем вверху выберите само облако → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» → скачайте файл, откройте его в «Блокноте», скопируйте всё и вставьте в поле мастера. Нажмите «Подключиться к Облаку» — появятся облако и каталог. Вставлять нужно файл целиком (в нём есть id и service_account_id); если скопирован только закрытый ключ, мастер попросит два идентификатора. Закрытый ключ — секрет: после развёртывания удалите его в консоли.</li>
 <li>Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки (шлюз для ленты календаря, коллектор судов, сбор по расписанию) → «Развернуть». Мастер создаёт сервисный аккаунт для функций, бакет, функции crm-bridge и collector-sud с таймером; ход виден по шагам. Обычно 2–4 минуты.</li>
 <li>В конце мастер покажет адрес сервера и секретный код и сам впишет их в «Синхронизацию»; введите пароль шифрования → «Сохранить и проверить связь». Ключ crm-admin после этого можно удалить в консоли.</li></ol>
-<h3>Путь Б. Вручную в консоли Облака (если приложения для компьютера нет)</h3>
+<h3>Путь Б. ИИ-помощник консоли Облака (без приложения)</h3>
+<p>В консоли console.yandex.cloud вверху есть «Чат с AI» — он умеет создавать ресурсы сам. Настройки → «Свой сервер в Яндекс Облаке» → «Скопировать запрос для ИИ-помощника» → вставьте в чат и подтверждайте шаги. В конце помощник покажет адрес сервера и секретный код — впишите их в «Синхронизацию» вместе с паролем шифрования. Коды и ключи — секрет: после настройки очистите чат помощника («Удалить сейчас»).</p>
+<h3>Путь В. Вручную в консоли Облака</h3>
 <ol><li>Консоль → «Object Storage» → «Создать бакет»: имя латиницей (например, crm-ваша-фамилия), остальное по умолчанию.</li>
 <li>«Сервисные аккаунты» → «Создать» → имя crm-server → роли <b>storage.editor</b> и <b>serverless.functions.invoker</b>.</li>
 <li>Скачайте с сайта программы файл <b>dist/loader-bridge-index.js</b> — это загрузчик: он сам берёт код сервера с сайта программы и обновляет его. Консоль → «Cloud Functions» → «Создать функцию» → имя <b>crm-bridge</b> → среда Node.js → «Редактор»: вставьте содержимое файла в index.js, точка входа <b>index.handler</b>, таймаут 300 с, память 256 МБ, сервисный аккаунт crm-server. Переменные окружения: <b>SECRET</b> — придуманный вами секретный код (длинный, латиницей и цифрами), <b>BUCKET</b> — имя бакета, <b>UPDATE_URL</b> — https://advocate33.github.io/dist. «Создать версию».</li>
