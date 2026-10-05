@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="05.10.2026 09:55 · bf5488f">
+<meta name="build" content="05.10.2026 13:24 · eafdf1e">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4611,6 +4611,35 @@ const YC = {
 };
 const ycSupported = () => !!(desktopApp() && typeof desktopApp().ycHttp === 'function');
 const ycSleep = ms => new Promise(r => setTimeout(r, ms));
+// ── доступ к Облаку (05.10.2026): три вида строки доступа → IAM-токен ──
+// Яндекс Облако с 01.06.2026 не принимает новые OAuth-токены Яндекс ID (прежние действуют до истечения года). Поэтому принимается:
+// 1) авторизованный ключ сервисного аккаунта — файл JSON { id, service_account_id, private_key } → JWT (PS256, kid, iss, aud, iat, exp ≤ 1 ч) →
+//    POST iam/v1/tokens { jwt } (документация iam/operations/iam-token/create-for-sa); 2) IAM-токен «t1.…» из yc CLI (yc iam create-token, 12 ч);
+// 3) строка «y0_…» — обмен как раньше. Что это, определяется по виду строки (ycAccessKind); ничего из этого не сохраняется.
+const ycB64url = buf => bufToB64(buf).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function ycAccessKind(tok) {
+  const t = String(tok || '').trim(); if (!t) return '';
+  if (t.startsWith('{')) { try { const j = JSON.parse(t); return j && j.private_key && j.service_account_id && j.id ? 'key' : 'bad-key'; } catch (e) { return 'bad-key'; } }
+  if (/^t1\./.test(t)) return 'iam'; if (/^y0_/.test(t)) return 'oauth'; return 'unknown';
+}
+async function ycJwtFromKey(key, now) {
+  const pem = String(key.private_key).split('\n').filter(l => !/PLEASE DO NOT REMOVE|-----/.test(l)).join('').replace(/\s+/g, '');
+  const pk = await crypto.subtle.importKey('pkcs8', b64ToBuf(pem), { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']);
+  const iat = Math.floor((now || Date.now()) / 1000), enc = o => ycB64url(new TextEncoder().encode(JSON.stringify(o)));
+  const head = enc({ typ: 'JWT', alg: 'PS256', kid: key.id }) + '.' + enc({ iss: key.service_account_id, aud: YC.iamToken, iat, exp: iat + 3600 });
+  const sig = await crypto.subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, pk, new TextEncoder().encode(head));
+  return head + '.' + ycB64url(sig);
+}
+async function ycAccess(tok) {
+  const t = String(tok || '').trim(), kind = ycAccessKind(t);
+  if (kind === 'iam') return t;
+  if (kind === 'key') { let jwt; try { jwt = await ycJwtFromKey(JSON.parse(t)); } catch (e) { logErr('yc:jwt', e); throw new Error('ключ сервисного аккаунта не прочитан: ' + ((e && e.message) || 'неверный файл') + ' — нужен авторизованный ключ (не API-ключ и не статический)'); }
+    const iam = (await ycApi('POST', YC.iamToken, null, { jwt })).iamToken; if (!iam) throw new Error('Облако не выдало IAM-токен по ключу сервисного аккаунта'); return iam; }
+  if (kind === 'oauth') { let j; try { j = await ycApi('POST', YC.iamToken, null, { yandexPassportOauthToken: t }); } catch (e) { if (/not supported for IAM token exchange|issued after/i.test(String(e && e.message))) throw new Error('Яндекс Облако с 1 июня 2026 года не принимает новые строки «y0_…». Используйте ключ сервисного аккаунта (способ 1) или IAM-токен из yc CLI (способ 2)'); throw e; }
+    if (!j.iamToken) throw new Error('не удалось получить IAM-токен — проверьте строку доступа'); return j.iamToken; }
+  if (kind === 'bad-key') throw new Error('Похоже на файл ключа, но в нём нет полей id, service_account_id и private_key — нужен авторизованный ключ сервисного аккаунта');
+  throw new Error('Не похоже ни на ключ сервисного аккаунта ({…}), ни на IAM-токен (t1.…), ни на строку доступа (y0_…)');
+}
 async function ycApi(method, url, token, body) {
   const r = await desktopApp().ycHttp(method, url, token || null, body === undefined ? null : JSON.stringify(body));
   let j = null; try { j = r.body ? JSON.parse(r.body) : {}; } catch (e) { j = { raw: r.body }; }
@@ -4632,8 +4661,7 @@ async function ycDeploy(o, log) {
   const res = {};
   // 1. токен доступа к Облаку
   log('Вход в Яндекс Облако…');
-  const iam = (await ycApi('POST', YC.iamToken, null, { yandexPassportOauthToken: o.oauth })).iamToken;
-  if (!iam) throw new Error('не удалось получить IAM-токен — проверьте OAuth-токен');
+  const iam = o.iam || await ycAccess(o.oauth);
   // 2. каталог
   let folderId = o.folderId;
   if (!folderId) {
@@ -4745,10 +4773,22 @@ function openYcSetupSheet(sub) {
   openSheet('Свой сервер в Яндекс Облаке', `${status}
     <p class="small muted">Всё создаётся в <b>вашем</b> Яндекс Облаке: личный сервер (синхронизация, лента календаря, снимки базы) и коллектор судов с таймером. Автор программы к нему доступа не имеет.</p>
     ${need}
-    <div class="section-label step-label">Шаг 1. Строка доступа к Облаку</div>
+    <div class="section-label step-label">Шаг 1. Доступ к Облаку</div>
+    <div class="info-box">С 1 июня 2026 года Яндекс Облако не принимает новые строки «y0_…» (прежние, полученные раньше, действуют до конца своего года). Подойдёт любой из трёх вариантов — вставьте его в поле ниже.</div>
+    <details class="help-text" open><summary><b>Способ 1 — ключ сервисного аккаунта</b> (всё делается в консоли Облака, без установки программ)</summary>
+      <ol><li>Откройте <b>console.yandex.cloud</b>, войдите аккаунтом, где создано облако.</li>
+      <li>Слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b> → «Создать».</li>
+      <li>Вверху выберите само облако (не каталог) → вкладка «Права доступа» → «Назначить роли» → найдите <b>crm-admin</b> → роль <b>admin</b> → «Сохранить». Без этой роли мастер не сможет создать каталог и функции.</li>
+      <li>Снова «Сервисные аккаунты» → <b>crm-admin</b> → «Создать новый ключ» → <b>«Создать авторизованный ключ»</b> (не API-ключ и не статический) → «Скачать файл с ключами».</li>
+      <li>Откройте скачанный файл в «Блокноте», выделите всё (Ctrl+A), скопируйте (Ctrl+C) и вставьте в поле ниже. После развёртывания ключ можно удалить в консоли.</li></ol></details>
+    <details class="help-text"><summary><b>Способ 2 — IAM-токен из yc CLI</b> (если умеете работать с командной строкой)</summary>
+      <ol><li>Установите Yandex Cloud CLI (yandex.cloud/ru/docs/cli/quickstart), выполните <b>yc init</b> — вход через браузер.</li>
+      <li>Выполните <b>yc iam create-token</b>, скопируйте строку «t1.…» и вставьте в поле ниже. Она действует 12 часов.</li></ol></details>
+    <details class="help-text"><summary><b>Способ 3 — прежняя строка «y0_…»</b> (только если получена до 1 июня 2026 года)</summary>
+      <p>Если у вас сохранилась такая строка, вставьте её. Новую получить нельзя: Облако её не примет.</p></details>
     <p class="small muted">Нажмите «Получить строку доступа», войдите аккаунтом Яндекса, где создано облако, скопируйте строку, начинающуюся с «y0_», и вставьте сюда. Строка нужна только на время работы мастера и никуда не сохраняется. <b>Никому её не пересылайте, включая автора.</b></p>
-    <div class="form-actions" style="margin:0 0 8px"><a class="button small-btn" id="cloud-token-link" href="${YC.oauthLink}" target="_blank" rel="noopener">${icon('shield-check', 'icon-sm')}Получить строку доступа</a></div>
-    <div class="form-grid">${wide(fInput('cloud-oauth', 'Строка доступа (OAuth-токен)', '', 'type="password" autocomplete="off" spellcheck="false" placeholder="y0_…"'))}</div>
+    <div class="form-grid"><label class="field wide"><span>Ключ сервисного аккаунта (содержимое файла), IAM-токен или строка y0_</span><textarea id="cloud-oauth" rows="4" autocomplete="off" spellcheck="false" placeholder="{ &quot;id&quot;: …, &quot;service_account_id&quot;: …, &quot;private_key&quot;: … }  или  t1.…  или  y0_…"></textarea></label></div>
+    <p class="small muted">Вставленное используется только сейчас и нигде не сохраняется.</p>
     <div class="form-actions"><button type="button" class="button primary" id="cloud-connect" onclick="ycConnect()">${icon('shield-check')}Подключиться к Облаку</button></div>
     <div id="cloud-where"><div class="section-label step-label">Шаг 2. Облако и каталог</div><p class="small muted">Станет доступно после шага 1.</p></div>
     <div class="section-label step-label">Шаг 3. Что создать</div>
@@ -4763,11 +4803,11 @@ function openYcSetupSheet(sub) {
 }
 async function ycConnect() {
   const tok = fv('cloud-oauth').trim(), where = document.getElementById('cloud-where');
-  if (!tok) { fErr('Вставьте строку доступа, начинающуюся с «y0_»'); return; }
+  if (!tok) { fErr('Вставьте ключ сервисного аккаунта, IAM-токен или строку доступа — см. способы выше'); return; }
   const b = document.getElementById('cloud-connect'); if (b) b.disabled = true;
   where.innerHTML = '<p class="small muted">Подключаюсь…</p>';
   try {
-    YC_SESS.iam = (await ycApi('POST', YC.iamToken, null, { yandexPassportOauthToken: tok })).iamToken;
+    YC_SESS.iam = await ycAccess(tok);
     YC_SESS.clouds = await ycList(YC.clouds, 'clouds', YC_SESS.iam);
     if (!YC_SESS.clouds.length) { where.innerHTML = '<div class="info-box warning">В аккаунте нет облаков. Откройте console.yandex.cloud — облако создаётся при первом входе.</div>'; return; }
     YC_SESS.folders = await ycList(YC.folders + '?cloudId=' + YC_SESS.clouds[0].id, 'folders', YC_SESS.iam);
@@ -4776,7 +4816,7 @@ async function ycConnect() {
       <div class="field"><label for="cloud-folder">Каталог</label><select id="cloud-folder">${ycFolderOptions()}</select></div></div>
       <p class="small muted">Лучше отдельный каталог «crm»: в нём будет только сервер программы.</p>`;
     const go = document.getElementById('cloud-go'); if (go) go.disabled = false;
-  } catch (e) { logErr('yc:connect', e); where.innerHTML = `<div class="info-box warning">Не удалось подключиться: ${esc(e.message)}. Проверьте, что строка скопирована целиком и начинается с «y0_»; строка действует год — при сомнении получите новую.</div>`; }
+  } catch (e) { logErr('yc:connect', e); where.innerHTML = `<div class="info-box warning">Не удалось подключиться: ${esc(e.message)}. Проверьте, что вставлено целиком: ключ — весь файл, токен — вся строка; IAM-токен действует 12 часов, строка y0_ — до конца года выдачи год — при сомнении получите новую.</div>`; }
   finally { if (b) b.disabled = false; }
 }
 function ycFolderOptions() { return YC_SESS.folders.map(f => `<option value="${esc(f.id)}"${f.name === 'crm' ? ' selected' : ''}>${esc(f.name)}</option>`).join('') + `<option value=""${YC_SESS.folders.some(f => f.name === 'crm') ? '' : ' selected'}>＋ новый каталог «crm»</option>`; }
@@ -4794,7 +4834,7 @@ async function ycRunWizard() {
   const logEl = () => document.getElementById('cloud-log');
   const log = t => { YC_SESS.log.push(t); const el = logEl(); if (el) el.innerHTML = ycStepsHtml(); };
   try {
-    const res = await ycDeploy({ oauth, cloudId, folderId, folderName: 'crm', bucket, withGateway: !!(document.getElementById('cloud-gw') || {}).checked, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
+    const res = await ycDeploy({ oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: !!(document.getElementById('cloud-gw') || {}).checked, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
     log('Записываю настройки в программу и проверяю связь…');
     const ok = await ycApply(res);
     // токен Облака после развёртывания больше не нужен — из памяти убирается
