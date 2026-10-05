@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="05.10.2026 15:39 · dc8a647">
+<meta name="build" content="05.10.2026 17:31 · 428d3d7">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2469,10 +2469,12 @@ getOne = function (store, id) {
 // Разбор GPT 05.10.2026, п. 4: несколько записей — одной транзакцией (всё или ничего): дело с новым доверителем и событиями журнала,
 // дело с заседаниями, задачами и встречами при удалении в корзину и возврате. Каждая запись получает те же отметки, что в put (caseId,
 // _upd, _device, метки полей по прежней версии из той же транзакции); opts.expect = { store, id, upd, ack } — проверка версии одной записи
-// (как formRecPut). Хуки «после записи» (стадия, напоминания) вызывают сами места использования.
+// (как formRecPut); opts.expect — одно ожидание или список (разбор GPT 05.10.2026 (2), п. 2: дело и карточка доверителя — каждая со своей
+// версией). Элемент списка может нести третьим членом функцию-правку: cur => obj — тогда записывается свежая запись из транзакции с
+// применённой правкой, а не копия, прочитанная заранее (п. 6: корзина). Хуки «после записи» (стадия, напоминания) вызывают места использования.
 function putMany(list, opts) {
   const items = (list || []).filter(x => x && x[1] && x[1].id != null); if (!items.length) return Promise.resolve(true);
-  const stores = [...new Set(items.map(x => x[0]))], ex = opts && opts.expect;
+  const stores = [...new Set(items.map(x => x[0]))], exList = opts && opts.expect ? (Array.isArray(opts.expect) ? opts.expect : [opts.expect]) : [];
   let stamp = Math.max(Date.now(), Math.min(Number(localStorage.getItem('crm_last_write_stamp') || 0), Date.now() + 86400000) + 1);
   for (const [store, obj] of items) {
     if (store !== 'cases' && obj.caseNum && !obj.caseId && typeof CASES_BY_NUM === 'object' && CASES_BY_NUM[obj.caseNum]) obj.caseId = CASES_BY_NUM[obj.caseNum].id;
@@ -2483,10 +2485,12 @@ function putMany(list, opts) {
     let done = false; const finish = (ok, e) => { if (done) return; done = true; if (ok) res(true); else rej(e); };
     let t; try { t = db.transaction(stores, 'readwrite'); } catch (e) { storageWriteError(e); finish(false, new Error('Не удалось сохранить: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
     const next = i => {
-      if (i >= items.length) return; const [store, obj] = items[i], os = t.objectStore(store), g = os.get(obj.id);
+      if (i >= items.length) return; const [store, obj0, patch] = items[i], os = t.objectStore(store), g = os.get(obj0.id);
       g.onsuccess = () => {
-        const cur = g.result || null;
-        if (ex && ex.store === store && ex.id === obj.id && cur) { const now = cur._upd || 0; if (now !== ex.upd && now !== ex.ack) { const msg = typeof formRecConflictText === 'function' && ex.snap ? formRecConflictText(ex, cur, obj) : 'Запись изменили, пока она была открыта — откройте заново'; ex.ack = now; finish(false, new Error(msg)); try { t.abort(); } catch (e) { /* штатно */ } return; } }
+        const cur = g.result || null; let obj = obj0;
+        if (typeof patch === 'function') { obj = patch(cur || obj0); if (!obj) { next(i + 1); return; } obj._upd = obj0._upd; obj._device = obj0._device; items[i][1] = obj; }
+        const ex = exList.find(x => x && x.store === store && x.id === obj.id);
+        if (ex && cur) { const now = cur._upd || 0; if (now !== ex.upd && now !== ex.ack) { const msg = typeof formRecConflictText === 'function' && ex.snap ? formRecConflictText(ex, cur, obj) : 'Запись изменили, пока она была открыта — откройте заново'; ex.ack = now; finish(false, new Error(msg)); try { t.abort(); } catch (e) { /* штатно */ } return; } }
         try { fieldStamps(obj, cur, obj._upd); } catch (e) { logErr('putMany:stamps', e); }
         os.put(obj); next(i + 1);
       };
@@ -2497,6 +2501,19 @@ function putMany(list, opts) {
     t.onerror = () => { if (!done) storageWriteError(t.error); finish(false, new Error('Не удалось сохранить: ' + ((t.error && t.error.message) || 'ошибка хранилища'))); };
     t.onabort = () => finish(false, new Error('Не удалось сохранить: транзакция прервана'));
   });
+}
+// Разбор GPT 05.10.2026 (2), п. 5: снимок базы (копия, отправка, размер) читался по таблицам порознь — запись между чтениями давала смесь
+// состояний. Теперь все хранилища читаются одной транзакцией readonly — снимок согласован на один момент.
+if (typeof collectAll === 'function') {
+  collectAll = function () {
+    return new Promise((res, rej) => {
+      const data = {}; let t; try { t = db.transaction(STORES, 'readonly'); } catch (e) { rej(new Error('Не удалось прочитать базу: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
+      for (const s of STORES) { const r = t.objectStore(s).getAll(); r.onsuccess = () => { data[s] = r.result || []; if (MERGE_SEEN.on) for (const x of data[s]) if (x && x.id != null && !MERGE_SEEN.upd.has(mergeSeenKey(s, x.id))) MERGE_SEEN.upd.set(mergeSeenKey(s, x.id), x._upd || 0); }; }
+      t.oncomplete = () => res({ _fmt: SYNC_FMT, _ver: DB_VER, _exportedAt: Date.now(), data, settings: collectSettings() });
+      t.onerror = () => rej(new Error('Не удалось прочитать базу: ' + ((t.error && t.error.message) || 'ошибка чтения')));
+      t.onabort = () => rej(new Error('Не удалось прочитать базу: чтение прервано'));
+    });
+  };
 }
 // запись одной записи с проверкой версии — для действий вне формы (платёж, рассрочка, выставление счёта): expectUpd — версия, которую читали
 function putChecked(store, obj, expectUpd) { return putMany([[store, obj]], { expect: { store, id: obj.id, upd: expectUpd || 0, ack: null } }); }
@@ -3093,7 +3110,10 @@ const CONFLICT_FIELDS = { number: 'Номер дела', client: 'Доверит
   court: 'Суд', courtNo: '№ в суде', judge: 'Судья', room: 'Зал', date: 'Дата', time: 'Время', result: 'Результат', comment: 'Примечание', note: 'Заметка',
   nextAction: 'Следующее действие', nextActionDue: 'Срок следующего действия', waitingFor: 'Ожидаем', opponent: 'Противная сторона', title: 'Название',
   due: 'Срок', priority: 'Приоритет', done: 'Выполнено', amount: 'Сумма', paid: 'Оплачено', name: 'Имя', phone: 'Телефон', email: 'Почта', address: 'Адрес',
-  caseNum: 'Дело', archived: 'В архиве', deadlines: 'Сроки', participants: 'Участники', payments: 'Платежи' };
+  caseNum: 'Дело', archived: 'В архиве', deadlines: 'Сроки', participants: 'Участники', payments: 'Платежи',
+  // 05.10.2026: поля доверителя, счёта и заседания — чтобы конфликт назывался по-русски, а не «служебных полей: N»
+  addr: 'Адрес', zip: 'Индекс', inn: 'ИНН', ogrn: 'ОГРН', kpp: 'КПП', type: 'Тип', role: 'Роль', note: 'Заметка', comment: 'Примечание', service: 'Услуга', billType: 'Тип расчёта', dueDate: 'Срок оплаты', plan: 'График платежей', pending: 'Условный счёт',
+  judge: 'Судья', room: 'Зал', result: 'Результат', time: 'Время', date: 'Дата', court: 'Суд', with: 'С кем', place: 'Место', clientAddr: 'Адрес доверителя', clientInn: 'ИНН доверителя', closedAt: 'Дата завершения', docsPath: 'Папка документов', docsUrl: 'Папка в облаке' };
 // Журнал коллизий — просмотр: что разошлось при слиянии и какое значение оставлено. Возврат значения — с этапа 2.
 function showConflictsSheet() {
   const log = syncConflicts().slice().reverse();
@@ -5206,7 +5226,12 @@ applyTheme(); applyFontSettings(); // до первой отрисовки — �
 // Черновик: пока форма изменена, её разметка со значениями (как sheetFreeze) и заголовок хранятся в localStorage (один черновик,
 // сутки); после сохранения, удаления или «Закрыть без сохранения» черновик стирается. При запуске с черновиком на экране —
 // полоска «Незавершённая форма «…» — Открыть / Удалить».
-const GUARD_DRAFT_KEY = 'crm_next_draft', GUARD_DRAFT_TTL = 24 * 3600000;
+// разбор GPT 05.10.2026 (2), п. 7: черновиков несколько — по одному на форму (ключ — функция открытия и её аргументы), список crm_next_drafts,
+// до 10 штук, 7 дней; crm_next_draft — самый свежий (для совместимости). П. 4: запись черновика возвращает результат.
+const GUARD_DRAFT_KEY = 'crm_next_draft', GUARD_DRAFTS_KEY = 'crm_next_drafts', GUARD_DRAFT_TTL = 7 * 24 * 3600000, GUARD_DRAFT_MAX = 10;
+function guardDraftKeyOf(d) { return d && d.open ? d.open.fn + ':' + (d.open.args || []).join('\u0001') : 'title:' + ((d && d.title) || ''); }
+function guardDraftsAll() { let a = []; try { a = JSON.parse(localStorage.getItem(GUARD_DRAFTS_KEY) || '[]'); } catch (e) { a = []; } if (!Array.isArray(a)) a = []; const now = Date.now(); return a.filter(d => d && d.body && now - (d.at || 0) < GUARD_DRAFT_TTL).sort((x, y) => (y.at || 0) - (x.at || 0)); }
+function guardDraftsWrite(list) { const a = list.slice().sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, GUARD_DRAFT_MAX); localStorage.setItem(GUARD_DRAFTS_KEY, JSON.stringify(a)); if (a.length) localStorage.setItem(GUARD_DRAFT_KEY, JSON.stringify(a[0])); else localStorage.removeItem(GUARD_DRAFT_KEY); }
 // saving — время нажатия «Сохранить»/«Удалить»: пока запись идёт, закрытие листа (успех) разрешено; ошибка записи (fErr, сообщение об
 // ошибке) сбрасывает отметку — защита и черновик остаются (разбор GPT 03.10.2026: раньше защита снималась до результата записи)
 const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0, busy: null, slowT: 0 };
@@ -5243,7 +5268,7 @@ function formRecConflictText(r, cur, obj) {
   const keys = Object.keys(Object.assign({}, r.snap, cur)).filter(k => !k.startsWith('_') && k !== 'updatedAt' && k !== 'createdAt' && JSON.stringify(r.snap[k]) !== JSON.stringify(cur[k]));
   const named = keys.filter(k => typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]), other = keys.length - named.length;
   const parts = named.slice(0, 5).map(k => CONFLICT_FIELDS[k] + ': ваше «' + formRecVal(mine[k]) + '», с другого устройства «' + formRecVal(cur[k]) + '»');
-  if (named.length > 5) parts.push('ещё ' + (named.length - 5) + ' ' + plural(named.length - 5, 'поле', 'поля', 'полей')); if (other) parts.push('служебных полей: ' + other);
+  if (named.length > 5) parts.push('ещё ' + (named.length - 5) + ' ' + plural(named.length - 5, 'поле', 'поля', 'полей')); if (other) parts.push('ещё ' + other + ' ' + plural(other, 'поле', 'поля', 'полей') + ' без названия');
   return 'Пока форма была открыта, эту запись изменили на другом устройстве или в другой вкладке' + (parts.length ? '. ' + parts.join('; ') : '') + '. «Сохранить» ещё раз — записать вашу версию поверх; «Отмена» и открыть заново — увидеть новые данные';
 }
 // устойчивый id новой записи на время жизни формы: повтор «Сохранить» после сбоя не создаёт вторую запись (разбор GPT 04.10.2026 (вечер), п. 1)
@@ -5302,16 +5327,21 @@ function guardFormFields() {
   return out;
 }
 function guardDraftSave() {
-  if (!guardDirty() || !UI.cur) return;
+  if (!guardDirty() || !UI.cur) return false;
   try { sheetFreeze(); const tab = document.querySelector('#cx-tabs [aria-pressed="true"]');
     // разбор GPT 05.10.2026, п. 1: версия записи на момент открытия — при восстановлении сверяется с текущей (чужая правка не затирается молча)
     const rec = UI.cur.rec ? { store: UI.cur.rec.store, id: UI.cur.rec.id, upd: UI.cur.rec.upd, snap: UI.cur.rec.snap } : null;
-    localStorage.setItem(GUARD_DRAFT_KEY, JSON.stringify({ title: UI.cur.title, body: UI.cur.body, at: Date.now(), screen: UI.screen, open: guardFormOpener(), fields: guardFormFields(), tab: tab ? tab.dataset.tab : '', rec })); } catch (e) { logErr('guard:draft', e); }
+    const d = { title: UI.cur.title, body: UI.cur.body, at: Date.now(), screen: UI.screen, open: guardFormOpener(), fields: guardFormFields(), tab: tab ? tab.dataset.tab : '', rec }, key = guardDraftKeyOf(d); UI.cur.draftKey = key;
+    guardDraftsWrite([d, ...guardDraftsAll().filter(x => guardDraftKeyOf(x) !== key)]); return true; } catch (e) { logErr('guard:draft', e); return false; }
 }
 // предложение GPT «Смартфон»: уход со страницы (переключение приложений, клавиатура свернула окно) — черновик пишется сразу, не дожидаясь паузы ввода
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && SHEET_GUARD.armed) { clearTimeout(SHEET_GUARD.timer); try { guardDraftSave(); } catch (e) { logErr('guard:draft', e); } } });
-function guardDraftDrop() { try { localStorage.removeItem(GUARD_DRAFT_KEY); } catch (e) { logErr('guard:draft', e); } }
-function guardDraftGet() { try { const d = JSON.parse(localStorage.getItem(GUARD_DRAFT_KEY) || 'null'); return d && d.body && Date.now() - (d.at || 0) < GUARD_DRAFT_TTL ? d : null; } catch (e) { return null; } }
+// снимается черновик текущей формы (по её ключу); ключ — из кнопки «Сохранить» открытого листа или запомненный при записи черновика
+function guardDraftDrop(key) {
+  try { const k = key || (UI.cur && UI.cur.draftKey) || (guardIsForm() ? guardDraftKeyOf({ open: guardFormOpener(), title: UI.cur && UI.cur.title }) : ''); if (!k) return;
+    guardDraftsWrite(guardDraftsAll().filter(x => guardDraftKeyOf(x) !== k)); if (UI.cur && UI.cur.draftKey === k) UI.cur.draftKey = ''; } catch (e) { logErr('guard:draft', e); }
+}
+function guardDraftGet(key) { const all = guardDraftsAll(); return key ? (all.find(x => guardDraftKeyOf(x) === key) || null) : (all[0] || null); }
 // попытка закрыть: true — можно закрывать; false — показан выбор, лист остаётся
 function guardBeforeClose(how, byUser) {
   if (guardSaving()) {
@@ -5343,11 +5373,13 @@ function guardChoose(what) {
 }
 // полоска о черновике на экране (после запуска): открыть или удалить
 function guardDraftBar() {
-  const d = guardDraftGet(); if (!d) return '';
-  return `<div class="draft-bar" id="draft-bar">${icon('pencil', 'icon-sm')}<span>Незавершённая форма «${esc(d.title)}» от ${esc(new Date(d.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span><div class="actions">${btn('Открыть', 'guardDraftOpen()', 'small-btn primary', 'pencil')}${btn('Удалить', 'guardDraftDiscard()', 'small-btn', 'trash-2')}</div></div>`;
+  const all = guardDraftsAll(); if (!all.length) return '';
+  // чем отличается черновик от такого же по названию: первое заполненное поле (название, номер, доверитель, услуга)
+  const hint = d => { const f = (d.fields || []).find(x => x && /-(title|number|client|service|name|with|barcode|subject)$/.test(x.id) && String(x.value || '').trim()); return f ? ' — ' + esc(String(f.value).trim().slice(0, 40)) : ''; };
+  return all.slice(0, 5).map((d, i) => { const k = guardDraftKeyOf(d); return `<div class="draft-bar" id="${i ? 'draft-bar-' + i : 'draft-bar'}">${icon('pencil', 'icon-sm')}<span>Незавершённая форма «${esc(d.title)}»${hint(d)} от ${esc(new Date(d.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))} · сохранена на этом устройстве</span><div class="actions">${btn('Открыть', `guardDraftOpen('${jsq(k)}')`, 'small-btn primary', 'pencil')}${btn('Удалить', `guardDraftDiscard('${jsq(k)}')`, 'small-btn', 'x')}</div></div>`; }).join('') + (all.length > 5 ? `<p class="small muted">И ещё ${all.length - 5} — откроются после этих.</p>` : '');
 }
-async function guardDraftOpen() {
-  const d = guardDraftGet(); if (!d) { toast('Черновика уже нет'); return; }
+async function guardDraftOpen(key) {
+  const d = guardDraftGet(key); if (!d) { toast('Черновика уже нет'); return; }
   let restored = false;
   if (d.open && typeof window[d.open.fn] === 'function') {
     try { await window[d.open.fn](...d.open.args); restored = sheetIsOpen() && guardIsForm(); } catch (e) { logErr('guard:draft-open', e); }
@@ -5365,8 +5397,8 @@ async function guardDraftOpen() {
       } }
   }
   if (!restored) { openSheet(d.title, d.body); toast('Запись изменилась или удалена — показаны только введённые значения'); }
-  if (UI.cur) { UI.cur.guardSnap = ''; SHEET_GUARD.snap = ''; SHEET_GUARD.armed = true; } /* снимок пустой — форма считается изменённой, пока не сохранена */ }
-function guardDraftDiscard() { guardDraftDrop(); const b = document.getElementById('draft-bar'); if (b) b.remove(); toast('Черновик удалён'); }
+  if (UI.cur) { UI.cur.guardSnap = ''; SHEET_GUARD.snap = ''; SHEET_GUARD.armed = true; UI.cur.draftKey = guardDraftKeyOf(d); } /* снимок пустой — форма считается изменённой, пока не сохранена */ }
+function guardDraftDiscard(key) { guardDraftDrop(key || guardDraftKeyOf(guardDraftGet() || {})); toast('Черновик удалён'); if (UI.ready && !sheetIsOpen()) nav(UI.screen); }
 
 // ▼▼▼ ui/sheets.js
 // ═══ ui/sheets.js — служебные листы (этап 1б) ═══
@@ -5696,6 +5728,8 @@ async function openCaseForm(id, full) {
   openSheet(id ? 'Правка дела' : 'Новое дело', body, id ? true : 'panel');
   // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
   if (prev && typeof formRecMark === 'function') formRecMark('cases', prev);
+  // разбор GPT 05.10.2026 (2), п. 2: карточка доверителя, чьи реквизиты показаны в форме, — тоже запись с версией на момент открытия
+  { const cl0 = prev && prev.clientId ? FORM_CLIENTS_BY_ID[prev.clientId] : null; if (UI.cur) UI.cur.clientRec = cl0 ? { store: 'clients', id: cl0.id, upd: cl0._upd || 0, snap: JSON.parse(JSON.stringify(cl0)), ack: null } : null; }
   { const ci = document.getElementById('cf-client'); if (ci && c.clientId) ci.dataset.pickedId = c.clientId; }
   partyPrefillBind();
   caseGroupsBind(true);
@@ -5796,8 +5830,9 @@ async function saveCaseForm(id) {
     // решение пользователя 04.10.2026: правка добавила данные более высокой инстанции — стадия поднимается (data/stageauto.js)
     stageUp = typeof caseStageAutoForm === 'function' ? caseStageAutoForm(prev, r.obj, await getAll('hearings')) : null;
     if (typeof caseCourtAddrFill === 'function') caseCourtAddrFill(r.obj, prev);
-    if (batch) { const rec = typeof formRecFor === 'function' ? formRecFor('cases', r.obj) : null; const list = []; if (r.newClient) list.push(['clients', r.newClient]); if (r.clientUpd) list.push(['clients', r.clientUpd]); list.push(['cases', r.obj]); for (const ev of CASE_EVENTS_BATCH.list) list.push(['caseEvents', ev]); CASE_EVENTS_BATCH.list = null;
-      await putMany(list, rec ? { expect: rec } : undefined); if (typeof devrAlarms === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }
+    if (batch) { const rec = typeof formRecFor === 'function' ? formRecFor('cases', r.obj) : null; const list = []; const expect = []; if (rec) expect.push(rec);
+      if (r.clientUpd && UI.cur && UI.cur.clientRec && UI.cur.clientRec.id === r.clientUpd.id) expect.push(UI.cur.clientRec); if (r.newClient) list.push(['clients', r.newClient]); if (r.clientUpd) list.push(['clients', r.clientUpd]); list.push(['cases', r.obj]); for (const ev of CASE_EVENTS_BATCH.list) list.push(['caseEvents', ev]); CASE_EVENTS_BATCH.list = null;
+      await putMany(list, expect.length ? { expect } : undefined); if (typeof devrAlarms === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }
     else await put('cases', r.obj);
   } catch (e) { CASE_EVENTS_BATCH.list = null; logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (clientSaved ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
   await refreshCasesCache(); toast((id ? 'Дело сохранено' : 'Дело создано') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
@@ -6487,7 +6522,8 @@ async function deleteConfirmed(store, id) {
   try {
     // разбор GPT 05.10.2026, п. 4: дело и связанные записи уходят в корзину одной транзакцией (всё или ничего)
     if (store === 'cases' && withLinked && typeof putMany === 'function') { const d = {}; for (const st of DELETE_LINKED) d[st] = await getAll(st); const p = deletePlan(store, rec, d); const list = [];
-      for (const st of DELETE_LINKED) for (const r of p.linked[st]) list.push([st, deleteMark(r, at, id)]); list.push([store, { ...rec, _deleted: true, _deletedAt: at }]); await putMany(list);
+      // разбор GPT 05.10.2026 (2), п. 6: отметки ставятся на свежую запись из транзакции, а не на копию, прочитанную заранее
+      for (const st of DELETE_LINKED) for (const r of p.linked[st]) list.push([st, { id: r.id }, cur => deleteMark(cur, at, id)]); list.push([store, { id: rec.id }, cur => ({ ...cur, _deleted: true, _deletedAt: at })]); await putMany(list);
       if (typeof devrAlarms === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }
     else { if (store === 'cases' && withLinked) { const d = {}; for (const st of DELETE_LINKED) d[st] = await getAll(st); const p = deletePlan(store, rec, d); for (const st of DELETE_LINKED) for (const r of p.linked[st]) await put(st, deleteMark(r, at, id)); } await del(store, id); }
     // журнал дела — для заседания и задачи, как при их сохранении; встречи v310 в журнал дела не пишет
@@ -6512,7 +6548,7 @@ async function openTrashSheet(sub) {
 }
 async function trashRestore(store, id) {
   const raw = await trashRaw(), set = restoreSet(store, id, raw); if (!set.length) { toast('Запись не найдена', true); return; }
-  try { if (typeof putMany === 'function') await putMany(set); else for (const [st, rec] of set) await put(st, rec); } catch (e) { logErr('trash:restore', e); toast('Не удалось вернуть: ' + ((e && e.message) || 'сбой записи'), true); return; }
+  try { if (typeof putMany === 'function') await putMany(set.map(([st, rec]) => [st, { id: rec.id }, cur => { const o = { ...cur }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; return o; }])); else for (const [st, rec] of set) await put(st, rec); } catch (e) { logErr('trash:restore', e); toast('Не удалось вернуть: ' + ((e && e.message) || 'сбой записи'), true); return; }
   await refreshCasesCache();
   const rec = set[0][1], twin = store === 'cases' && rec.number ? (await getAll('cases')).find(c => c.id !== rec.id && c.number === rec.number) : null;
   toast(twin ? 'Возвращено. Номер ' + rec.number + ' есть ещё у одного дела — проверьте' : 'Возвращено' + (set.length > 1 ? ': запись и связанных с ней — ' + (set.length - 1) : ''), !!twin);
@@ -8206,7 +8242,8 @@ async function finRetainerNext(id) {
   const root = f.retainerOf || f.id, period = String(f.nextDue || addMonthsLocalISO(f.createdAt || todayISO(), 1)).slice(0, 7);
   const dup = (await getAll('finance')).find(x => x && !x._deleted && x.id !== f.id && (x.retainerOf === root || x.id === root) && String(x.createdAt || '').slice(0, 7) === period);
   if (dup) { toast('Счёт за ' + period.split('-').reverse().join('.') + ' уже выставлен — открываю его'); finReopen(dup.id); return; }
-  const obj = { ...f, retainerOf: root, id: uid('Ф'), paid: 0, status: 'Не оплачено', payments: [], plan: undefined, createdAt: f.nextDue || addMonthsLocalISO(f.createdAt || todayISO(), 1), paidAt: '', dueDate: f.dueDate ? addMonthsLocalISO(f.dueDate, 1) : '' }; obj.nextDue = addMonthsLocalISO(obj.createdAt, 1);
+  // разбор GPT 05.10.2026 (2), п. 3: id счёта за период — устойчивый («соглашение + период»): одновременное действие с двух вкладок или устройств даёт одну запись
+  const obj = { ...f, retainerOf: root, id: root + '@' + period, paid: 0, status: 'Не оплачено', payments: [], plan: undefined, createdAt: f.nextDue || addMonthsLocalISO(f.createdAt || todayISO(), 1), paidAt: '', dueDate: f.dueDate ? addMonthsLocalISO(f.dueDate, 1) : '' }; obj.nextDue = addMonthsLocalISO(obj.createdAt, 1);
   if (typeof demoAllow === 'function' && !(await demoAllow('finance'))) return;
   try { await put('finance', obj); } catch (e) { logErr('finance:retainer', e); toast('Не удалось создать счёт', true); return; }
   toast('Счёт за ' + fmtDate(obj.createdAt) + ' создан'); finReopen(obj.id);
@@ -8229,11 +8266,14 @@ async function openPayForm(finId, payId) {
     ${fSelect('py-method', 'Способ', pm ? (pm.method || '') : (localStorage.getItem('crm_pay_method') || 'cash'), [['cash', 'Наличные'], ['bank', 'Безнал'], ['card', 'Карта / СБП'], ['', 'Не указан']])}${fInput('py-note', 'Заметка', pm ? pm.note : '', 'autocomplete="off" placeholder="аванс, вторая часть…"')}
   </div>${fSaveBar(`savePayForm('${jsq(finId)}', '${jsq(payId || '')}')`, 'Записать платёж', payId ? `payRemove('${jsq(finId)}', '${jsq(payId)}')` : '')}`;
   openSheet(pm ? 'Платёж' : 'Оплата по счёту', body, true);
+  // разбор GPT 05.10.2026 (2), п. 1: при правке платежа счёт отмечается на момент открытия — чужая правка этого платежа не затирается молча
+  if (pm && typeof formRecMark === 'function') formRecMark('finance', f);
 }
 async function savePayForm(finId, payId) {
   const f = await getOne('finance', finId); if (!f) { toast('Счёт не найден', true); return; }
   // разбор GPT 05.10.2026, п. 2: запись — с проверкой версии счёта в одной транзакции (formRecMark → formRecPut); изменили между чтением и записью — отказ, повтор читает заново
-  if (typeof formRecMark === 'function') formRecMark('finance', f);
+  // новый платёж — версия на момент записи (чужой новый платёж не повод для отказа: он уже в перечитанном счёте); правка — версия на момент открытия
+  if (!payId && typeof formRecMark === 'function') formRecMark('finance', f);
   const r = formModelPayment(f, { sum: fv('py-sum'), at: fv('py-at'), method: fv('py-method'), note: fv('py-note') }, payId, Date.now()); if (r.error) { fErr(r.error); return; }
   if (r.obj.payments.length && fv('py-method')) localStorage.setItem('crm_pay_method', fv('py-method'));
   try { await put('finance', r.obj); } catch (e) { logErr('finance:pay', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
@@ -9924,7 +9964,10 @@ function nextUpdateReload() { if (NEXT_UPDATE.done) return; NEXT_UPDATE.done = t
 // разбор GPT 05.10.2026, п. 7: обновление ждёт, пока завершится запись из формы; незавершённая форма уходит в черновик до перезагрузки
 async function nextUpdateApply() {
   if (typeof guardWriteInProgress === 'function' && guardWriteInProgress()) { toast('Сохраняю — обновлю после записи'); try { if (SHEET_GUARD.busy) await SHEET_GUARD.busy; } catch (e) { logErr('update:wait', e); } }
-  if (typeof guardDirty === 'function' && guardDirty()) { try { guardDraftSave(); toast('Незавершённая форма сохранена в черновик — после обновления откройте её на «Сегодня»'); } catch (e) { logErr('update:draft', e); } }
+  // разбор GPT 05.10.2026 (2), п. 4: черновик не записался (хранилище переполнено или закрыто) — обновление не запускается, введённое остаётся на экране
+  if (typeof guardDirty === 'function' && guardDirty()) { let saved = false; try { saved = guardDraftSave(); } catch (e) { logErr('update:draft', e); }
+    if (!saved) { toast('Черновик записать не удалось — сохраните форму, затем нажмите «Обновить» ещё раз', true); nextUpdateOffer(); return; }
+    toast('Незавершённая форма сохранена в черновик — после обновления откройте её на «Сегодня»'); }
   const w = NEXT_UPDATE.reg && NEXT_UPDATE.reg.waiting; NEXT_UPDATE.asked = true; nextUpdateLater();
   if (!w) { nextUpdateReload(); return; }
   w.postMessage({ type: 'SKIP_WAITING' }); setTimeout(nextUpdateReload, 3000);
