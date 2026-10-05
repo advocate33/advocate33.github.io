@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="05.10.2026 17:31 · 428d3d7">
+<meta name="build" content="05.10.2026 19:22 · 53f3d23">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -3443,11 +3443,18 @@ async function nextBlobDecrypt(buf, pass) {
   const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64ToBuf(meta.iv) }, key, u8.subarray(4 + hl));
   return new Blob([pt], { type: meta.mime || 'application/octet-stream' });
 }
-// файлы, которых ещё нет в хранилище: есть docBlobs, у версии нет cloudAt
+// Разбор GPT 05.10.2026 (3), п. 2: отметка «в хранилище» привязана к серверу (cloudSrv — адрес) и к паролю шифрования (cloudKey — первые
+// 16 знаков sha256 пароля): сменили сервер или пароль — файл считается не загруженным и уходит заново (и остаётся в снимке); чтение файла,
+// зашифрованного прежним паролем, объясняет причину. Записи без cloudSrv (загружены до этого выпуска) — заново на текущий сервер один раз.
+const nextBlobSrv = () => String(SRV.url || '').trim().replace(/\/+$/, '');
+async function nextBlobKey(pass) { const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('blob-key:' + String(pass || ''))); return Array.from(new Uint8Array(h)).slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join(''); }
+function nextBlobHere(v, srv, key) { return !!(v && v.cloudAt && v.cloudId && v.cloudSrv === srv && (!v.cloudKey || v.cloudKey === key)); }
+// файлы, которых ещё нет в хранилище ЭТОГО сервера под ТЕКУЩИМ паролем
 async function nextBlobsPending() {
+  const srv = nextBlobSrv(), key = await nextBlobKey(SRVDB.pass);
   const vers = await getAll('docVersions'), byId = {}; vers.forEach(v => { if (v) byId[v.id] = v; });
   const blobs = await getAllRaw('docBlobs');
-  return blobs.filter(b => b && b.data && !b._deleted && !(byId[b.id] && byId[b.id].cloudAt)).map(b => ({ blob: b, ver: byId[b.id] || null }));
+  return blobs.filter(b => b && b.data && !b._deleted && !nextBlobHere(byId[b.id], srv, key)).map(b => ({ blob: b, ver: byId[b.id] || null }));
 }
 // положить недостающие файлы в хранилище (во время отправки — NEXT_PUSH.on); результат — числа для подтверждения
 async function nextBlobsPush() {
@@ -3463,7 +3470,7 @@ async function nextBlobsPush() {
       if (!j || !j.ok) { failed++; errors.push(nextSrvError(j)); continue; }
       const r = await fetch(j.url, { method: 'PUT', body: enc, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
       if (!r.ok) { failed++; errors.push('хранилище: HTTP ' + r.status); continue; }
-      x.ver.cloudId = cloudId; x.ver.cloudAt = Date.now(); x.ver.cloudSize = enc.size; await put('docVersions', x.ver); uploaded++;
+      x.ver.cloudId = cloudId; x.ver.cloudAt = Date.now(); x.ver.cloudSize = enc.size; x.ver.cloudSrv = nextBlobSrv(); x.ver.cloudKey = await nextBlobKey(SRVDB.pass); await put('docVersions', x.ver); uploaded++;
     } catch (e) { logErr('blobs:push', e); failed++; errors.push(String(e && e.message || e).slice(0, 80)); }
   }
   return { ok: true, uploaded, failed, total: list.length, errors: errors.slice(0, 3) };
@@ -3473,7 +3480,7 @@ async function collectForSync() {
   const d = await collectAll();
   d._blobsOmitted = 0;
   if (typeof nextSnapKnown === 'function' && nextSnapKnown() === true && d.data && Array.isArray(d.data.docBlobs) && d.data.docBlobs.length) {
-    const cloud = new Set((d.data.docVersions || []).filter(v => v && v.cloudAt && v.cloudId).map(v => v.id));
+    const srv = nextBlobSrv(), key = await nextBlobKey(SRVDB.pass), cloud = new Set((d.data.docVersions || []).filter(v => nextBlobHere(v, srv, key)).map(v => v.id));
     const keep = d.data.docBlobs.filter(b => !(b && cloud.has(b.id)));
     d._blobsOmitted = d.data.docBlobs.length - keep.length;
     if (keep.length) d.data.docBlobs = keep; else delete d.data.docBlobs;
@@ -3481,10 +3488,24 @@ async function collectForSync() {
   return d;
 }
 // файл версии с другого устройства: из хранилища → docBlobs; возвращает dataUrl или ''
+// Разбор GPT 05.10.2026 (3), п. 1: перед полной копией файлы, которых нет на этом устройстве, подкачиваются из хранилища; итог — сколько
+// документов, сколько файлов в копии, сколько отсутствует (и почему)
+async function nextBlobsFetchMissing(onProgress) {
+  const vers = (await getAll('docVersions')).filter(v => v && !v._deleted), blobs = new Set((await getAllRaw('docBlobs')).filter(b => b && b.data && !b._deleted).map(b => b.id));
+  const missing = vers.filter(v => !blobs.has(v.id)); const res = { total: vers.length, have: vers.length - missing.length, fetched: 0, failed: 0, why: [] };
+  for (const v of missing) {
+    if (!v.cloudId) { res.failed++; res.why.push('файла нет ни на устройстве, ни в хранилище'); continue; }
+    if (!SRV.url || !SRVDB.pass) { res.failed++; res.why.push('сервер не подключён'); continue; }
+    try { if (await nextBlobFetch(v.id)) res.fetched++; else { res.failed++; res.why.push('хранилище не отдало файл'); } } catch (e) { logErr('blobs:fetch', e); res.failed++; res.why.push(String((e && e.message) || e).slice(0, 80)); }
+    if (onProgress) onProgress(res);
+  }
+  res.have += res.fetched; return res;
+}
 async function nextBlobFetch(versionId) {
   const v = await getOne('docVersions', versionId); if (!v) return '';
   const local = await getOne('docBlobs', versionId); if (local && local.data) return local.data;
   if (!v.cloudId || !SRV.url || !SRVDB.pass) return '';
+  if (v.cloudKey && v.cloudKey !== await nextBlobKey(SRVDB.pass)) throw new Error('Файл в хранилище зашифрован прежним паролем шифрования — верните прежний пароль в «Синхронизации» или откройте файл на устройстве, где он есть');
   const j = await srvCall('blobget', { id: v.cloudId }); if (!j || !j.ok) return '';
   const r = await fetch(j.url, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (!r.ok) return '';
   const blob = await nextBlobDecrypt(await r.arrayBuffer(), SRVDB.pass), dataUrl = await nextBlobToDataUrl(blob);
@@ -3879,12 +3900,13 @@ async function backupPreviewModel(text, pass) {
 }
 let BACKUP_PENDING = null;
 function openBackupSheet(sub) {
-  const last = Number(localStorage.getItem('crm_next_backup_at') || 0);
+  const last = Number(localStorage.getItem('crm_next_backup_at') || 0), checked = Number(localStorage.getItem('crm_next_backup_checked') || 0);
   openSheet('Копии базы', `<p class="small muted">Копия — один зашифрованный файл со всей базой. Его можно хранить отдельно, перенести на другое устройство или открыть в прежней программе («Восстановить из файла»). Без пароля копии файл не открыть — запишите пароль отдельно.</p>
     <div class="section-label step-label">Сохранить копию в файл</div>
     <div class="form-grid">${fInput('bk-p1', 'Пароль копии, не короче 8 знаков', '', 'type="password" autocomplete="new-password"')}${fInput('bk-p2', 'Пароль ещё раз', '', 'type="password" autocomplete="new-password"')}</div>
     <div class="form-actions"><button type="button" class="button primary" id="bk-save" onclick="backupSaveNow()">${icon('hard-drive')}Сохранить копию</button></div>
-    ${last ? `<p class="small muted">Последняя копия с этого устройства: ${esc(new Date(last).toLocaleString('ru-RU'))}.</p>` : ''}
+    <p class="small muted" id="bk-files"></p>
+    ${last ? `<p class="small muted">Последнее скачивание копии с этого устройства: ${esc(new Date(last).toLocaleString('ru-RU'))}${checked ? '; последняя проверенная копия (открыта и расшифрована): ' + esc(new Date(checked).toLocaleString('ru-RU')) : ''}.</p>` : ''}
     <div class="section-label step-label">Загрузить из файла</div>
     <p class="small muted">Записи из файла добавятся к базе и обновят более старые; ничего не стирается. Сначала программа покажет, что изменится.</p>
     <div class="form-grid"><label class="field wide"><span>Файл копии (.crm)</span><input type="file" id="bk-file" accept=".crm,.json,application/json,application/octet-stream"></label>${wide(fInput('bk-pass', 'Пароль копии', '', 'type="password" autocomplete="off"'))}</div>
@@ -3896,11 +3918,16 @@ async function backupSaveNow() {
   const bad = backupPassCheck(fv('bk-p1'), fv('bk-p2')); if (bad) { fErr(bad); return null; }
   const b = document.getElementById('bk-save'); if (b) b.disabled = true;
   try {
+    // разбор GPT 05.10.2026 (3), п. 1: полная копия — с файлами документов: недостающие подкачиваются из хранилища, итог называется
+    let files = null; if (typeof nextBlobsFetchMissing === 'function') { try { files = await nextBlobsFetchMissing(r => { const el = document.getElementById('bk-files'); if (el) el.textContent = 'Подкачиваю файлы документов… ' + (r.fetched + r.failed) + ' из ' + (r.total - (r.have - r.fetched)); }); } catch (e) { logErr('backup:files', e); } }
     const text = await encryptDump(await collectAll(), fv('bk-p1')), name = backupFileName('kopiya');
     if (!fileSave(name, text)) { fErr('Браузер не дал сохранить файл. Попробуйте в другом браузере или на компьютере'); return null; }
     localStorage.setItem('crm_next_backup_at', String(Date.now()));
-    toast('Копия сохранена: ' + name + ' — файл в папке загрузок'); fErr('');
-    return { name, bytes: text.length };
+    // п. 5: нажатие на ссылку скачивания — не подтверждение, что файл сохранён; честная формулировка и итог по файлам
+    const filesText = files && files.total ? ` Документов: ${files.total}, файлов в копии: ${files.have}` + (files.failed ? `, не хватает: ${files.failed} (${[...new Set(files.why)].join('; ')})` : '') + '.' : '';
+    const el = document.getElementById('bk-files'); if (el) el.textContent = filesText.trim();
+    toast('Скачивание копии запущено: ' + name + ' — проверьте файл в папке загрузок.' + filesText); fErr('');
+    return { name, bytes: text.length, files };
   } catch (e) { logErr('backup:save', e); fErr('Копия не создана: ' + String((e && e.message) || e).slice(0, 100)); return null; }
   finally { if (b) b.disabled = false; }
 }
@@ -3913,7 +3940,7 @@ async function backupCheckFile() {
   toast('Проверяю файл…');
   const m = await backupPreviewModel(text, fv('bk-pass'));
   if (m.error) { fErr(m.error); return m; }
-  fErr(''); BACKUP_PENDING = m;
+  fErr(''); BACKUP_PENDING = m; localStorage.setItem('crm_next_backup_checked', String(Date.now()));
   if (box) box.innerHTML = `<div class="info-box" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.</div>
     <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
     <div class="form-actions">${m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}</div>`;
@@ -3921,7 +3948,10 @@ async function backupCheckFile() {
 }
 async function backupApply() {
   const m = BACKUP_PENDING; if (!m || !m.parsed) return null;
+  // разбор GPT 05.10.2026 (3), п. 4: загрузка из файла — та же очередь, что обмен с сервером: одновременно два слияния не идут
+  if (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) { fErr('Идёт обмен с сервером — дождитесь его окончания и нажмите ещё раз'); return null; }
   const b = document.getElementById('bk-apply'); if (b) { if (b.disabled) return null; b.disabled = true; }
+  if (typeof NEXT_SYNC === 'object') { NEXT_SYNC.busy = true; if (typeof syncStatusRender === 'function') syncStatusRender(); }
   try {
     const r = await mergeIncoming(m.parsed, false);
     if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
@@ -3931,6 +3961,7 @@ async function backupApply() {
     closeSheet(); if (UI.ready) nav(UI.screen);
     return r;
   } catch (e) { logErr('backup:apply', e); fErr('Загрузка не выполнена: ' + String((e && e.message) || e).slice(0, 100)); if (b) b.disabled = false; return null; }
+  finally { if (typeof NEXT_SYNC === 'object') { NEXT_SYNC.busy = false; if (typeof syncStatusRender === 'function') syncStatusRender(); } }
 }
 // снимок с сервера — в файл: это та же зашифрованная база; пароль к файлу — пароль шифрования синхронизации
 async function srvSnapshotSave(ver) {
@@ -9768,9 +9799,19 @@ async function caseFetchCard(caseId, opts) {
   }
   if (done.length) {
     // автоприменение событий могло изменить дело — поля карточки переносятся в свежую запись (v266)
-    const fresh = (await getOne('cases', caseId)) || c;
-    for (const k of Object.keys(c)) if (c[k] !== undefined && (JSON.stringify(before[k]) !== JSON.stringify(c[k]) || fresh[k] === undefined || fresh[k] === '' || fresh[k] === null) && k !== 'participants') fresh[k] = c[k];
-    fresh.participants = c.participants; addCaseHistoryEvent(fresh, 'courtCard', '', done.join('; '), 'monitor');
+    // разбор GPT 05.10.2026 (3), п. 3: пока шёл запрос, дело могли изменить (другое устройство, обмен): с сайта переносятся только изменённые
+    // коллектором поля и только туда, где пользователь за это время ничего не менял; иначе — в «на разбор»; участники объединяются по имени,
+    // свежие (в т. ч. правленные пользователем) главнее
+    const fresh = (await getOne('cases', caseId)) || c, kept = [];
+    for (const k of Object.keys(c)) { if (k === 'participants' || c[k] === undefined || k.startsWith('_')) continue;
+      const changedByCard = JSON.stringify(before[k]) !== JSON.stringify(c[k]), emptyNow = fresh[k] === undefined || fresh[k] === '' || fresh[k] === null;
+      if (!changedByCard && !emptyNow) continue;
+      const userChanged = JSON.stringify(fresh[k]) !== JSON.stringify(before[k]) && !emptyNow;
+      if (userChanged) { kept.push(k); ask.push({ field: k, val: c[k], label: (typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]) || k, was: fresh[k] }); continue; }
+      fresh[k] = c[k]; }
+    { const seen = new Map(); for (const p of [...(Array.isArray(fresh.participants) ? fresh.participants : []), ...(Array.isArray(c.participants) ? c.participants : [])]) { if (!p) continue; const key = crmMonNorm(p.name || ''); if (!seen.has(key)) seen.set(key, p); } fresh.participants = [...seen.values()]; }
+    if (kept.length) logErr('case:card', new Error('поля, изменённые во время запроса, не перезаписаны: ' + kept.join(', ')));
+    addCaseHistoryEvent(fresh, 'courtCard', '', done.join('; '), 'monitor');
     try { await put('cases', fresh); } catch (e) { logErr('case:card', e); toast('Данные с сайта суда получены, но записать их в дело не удалось', true); return null; }
     await crmCaseLogByNum(c.number, 'flow', 'С сайта суда: ' + done.join('; '));
   }
