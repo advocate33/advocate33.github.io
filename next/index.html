@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="05.10.2026 00:38 · 0f68ddc">
+<meta name="build" content="05.10.2026 07:48 · fbbe258">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2458,6 +2458,26 @@ function formRecPut(store, obj, r) {
   });
 }
 if (typeof put === 'function') { const putPlain = put; put = function (store, obj, ...rest) { const r = typeof formRecFor === 'function' ? formRecFor(store, obj) : null; return r ? formRecPut(store, obj, r) : putPlain.call(this, store, obj, ...rest); }; }
+// Аудит 05.10.2026: отметка «Дата прошла» при запуске (data/hearings.js, v312) писала прошедшие заседания по одному — на базе с сотнями
+// прошедших заседаний первый запуск занимал больше 10 секунд. Та же логика, но записи идут пачками по 40 одновременно, правило стадии на
+// это время выключено (смена статуса данных инстанции не добавляет). Проверка: next_37_audit1.js, замер — tools/perf (аудит 05.10.2026).
+if (typeof hearingsAutoDone === 'function') {
+  hearingsAutoDone = async function () {
+    const today = todayISO(), hs = await getAll('hearings'), seen = (typeof localStorage !== 'undefined' && localStorage.getItem('crm_pastnoresult_seen')) || '';
+    const todo = [];
+    for (const h of hs) {
+      if (!h.date || h.date >= today) continue;
+      if (h.status === 'Проведено' && h.autoDone && !h.result && h.date > seen) { h.status = 'Дата прошла'; todo.push(h); continue; }
+      if (h.status === 'Проведено' || h.status === 'Отменено' || h.status === 'Дата прошла') continue;
+      h.status = 'Дата прошла'; h.autoDone = Date.now(); todo.push(h);
+    }
+    const stage = typeof STAGE_AUTO === 'object' && STAGE_AUTO; const was = stage ? stage.busy : false; if (stage) stage.busy = true;
+    try { for (let i = 0; i < todo.length; i += 40) await Promise.all(todo.slice(i, i + 40).map(h => put('hearings', h))); }
+    finally { if (stage) stage.busy = was; }
+    if (todo.length && typeof icsTouch === 'function') icsTouch();
+    return todo.length;
+  };
+}
 // текст о неполном слиянии: записи, изменённые во время обмена, называются отдельно (их не «не удалось записать» — их не тронули нарочно)
 function mergeFailText(r, plain) {
   if (r && r.raced && r.raced >= r.failed) return 'записи изменились на этом устройстве во время обмена (' + r.raced + ') — объединятся при повторе';
@@ -2582,8 +2602,14 @@ function caseStageAutoForm(prev, obj, hearings) {
 }
 // запись заседания или дела в другом месте (мониторинг, «Данные с сайта суда», форма заседания): добавила данные — стадия поднимается сама
 const STAGE_AUTO = { busy: false };
+const STAGE_CASE_FIELDS = ['court', 'apCourt', 'courtApp', 'courtCass', 'courtNoApp', 'courtNoCass', 'courtNoVs', 'linkApp', 'linkCass', 'linkNadzor', 'linkVs', 'nzNo', 'stage', 'status', 'stageAutoSkip', 'archived'];
 async function stageAutoAfterWrite(store, obj, prev) {
   try {
+    // аудит 05.10.2026: запись заседания, не менявшая суд и инстанцию (например, «Дата прошла» при запуске для сотен прошедших заседаний),
+    // отсекается ДО чтения всех дел и заседаний — иначе на большой базе запуск занимал десятки секунд (N² чтений)
+    if (store === 'hearings' && prev && prev.stage === obj.stage && prev.court === obj.court && !prev._deleted) return;
+    // то же для дела: поля, по которым определяется инстанция, не изменились — читать заседания незачем (миграция связей при запуске пишет все дела)
+    if (store === 'cases' && prev && !prev._deleted && STAGE_CASE_FIELDS.every(k => (prev[k] || '') === (obj[k] || ''))) return;
     const c = store === 'cases' ? await getOne('cases', obj.id) : (obj.caseId ? await getOne('cases', obj.caseId) : (await getAll('cases')).find(x => x.number === obj.caseNum));
     if (!c) return;
     const hs = await getAll('hearings');
@@ -2928,7 +2954,7 @@ async function openMergePreviewSheet(res) {
     <div class="info-box${v.kind === 'warn' ? ' warning' : ''}" id="mp-verdict">${esc(v.text)}</div>
     <div class="section-label">С сервера на это устройство</div>${dev || '<p class="small muted">Новых данных на сервере нет.</p>'}
     <div class="section-label">С этого устройства на сервер</div>${srv || '<p class="small muted">На сервере есть всё, что есть на устройстве.</p>'}
-    <p class="small muted">Совпадающих записей: ${m.same}. На сервер изменения уходят только по кнопке «Отправить изменения на сервер».</p>
+    <p class="small muted">Совпадающих записей: ${m.same}. На сервер изменения уходят по кнопке «Отправить изменения на сервер» или сами, если включён автообмен (шаг 5).</p>
     ${res.conflictsTotal ? `<div class="section-label">Правились с обеих сторон · ${res.conflictsTotal}</div>${conf}${res.conflictsTotal > (res.conflicts || []).length ? `<p class="small muted">Показаны первые ${(res.conflicts || []).length}.</p>` : ''}` : ''}
     <div class="form-actions"><button type="button" class="button" id="mp-copy" onclick="mergePreviewCopy()">${icon('files', 'icon-sm')}Скопировать итог (только числа)</button></div>
     <p class="small muted">В скопированном итоге нет ни имён, ни номеров дел — его можно переслать разработчику.</p>`, sheetIsOpen() ? true : undefined);
@@ -2943,6 +2969,7 @@ async function mergePreviewCopy() {
 // разбор GPT 04.10.2026, п. 3: точка отсчёта — последняя подтверждённая ревизия, от загрузки ИЛИ от отправки (первая отправка на пустой сервер)
 // предложение GPT 04.10.2026 «Диагностика»: одной строкой в «О программе» — последняя подтверждённая отправка и есть ли неотправленные правки
 function syncDiagLine() {
+  if (typeof secretsStale === 'function' && secretsStale()) return 'секреты закрыты прежним PIN-кодом — Настройки → «Защита входа»';
   if (!nextSrvConfigured()) return 'сервер не подключён';
   const at = Number(localStorage.getItem('crm_next_push_at') || 0), rev = localStorage.getItem('crm_next_pull_rev') || '';
   return (at ? 'последняя подтверждённая отправка ' + new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'отправки ещё не было') + (rev ? ' · версия на сервере ' + String(rev).slice(0, 12) : '') + (nextLocalChanges() ? ' · есть неотправленные правки' : ' · неотправленных правок нет');
@@ -4865,7 +4892,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openPlannedSheet('note')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -5301,7 +5328,7 @@ async function openSyncSheet(sub, msg) {
   openSheet('Синхронизация', `
     <div class="status-line ${m.cls}" id="sync-state" role="status">${icon(m.icon)}<span>${esc(m.title)}</span></div>
     ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="sync-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
-    <p class="small muted">${NEXT_ROOT ? 'Программа читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5).' : 'Новая версия читает базу с вашего личного сервера, а отправляет изменения только по кнопке (шаг 4) — сама ничего не отправляет. Прежняя программа работает как раньше.'}</p>
+    <p class="small muted">${NEXT_ROOT ? 'Программа читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5).' : 'Новая версия читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5). Прежняя программа работает как раньше.'}</p>
     ${step(1, 'Подключить сервер', checked)}
     <p class="small muted">Адрес и секретный код — те же, что в прежней программе: «Синхронизация» → «Личный сервер». Пароль шифрования — тот, которым прежняя программа шифрует базу при синхронизации. Сервер пароля не знает: без него базу не прочитать.</p>
     <div class="form-grid">
@@ -5349,9 +5376,13 @@ async function syncPullNow() {
     : r.empty ? { text: 'На сервере базы пока нет — загружать нечего.' }
     : { text: 'База загружена: новых записей — ' + r.added + ', обновлено — ' + r.updated + (r.conflicts ? ', коллизий — ' + r.conflicts : '') + '.' });
 }
+// аудит 05.10.2026: подтверждение — листом, а не системным confirm (урок 57)
 function syncForget() {
-  if (!confirm('Отключить сервер в новой версии? Адрес, код и пароль будут удалены отсюда. Записи на устройстве и база на сервере останутся.')) return;
-  nextServerForget(); openSyncSheet('replace', { text: 'Сервер отключён.' });
+  openSheet('Отключить сервер?', `<p>Адрес, код и пароль будут удалены ${NEXT_ROOT ? 'с этого устройства' : 'из новой версии'}. Записи на устройстве и база на сервере останутся.</p>
+    <div class="form-actions"><button type="button" class="button danger" id="sync-forget-go" onclick="syncForgetGo()">${icon('x')}Отключить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
+}
+function syncForgetGo() {
+  nextServerForget(); sheetBack(true); openSyncSheet('replace', { text: 'Сервер отключён.' });
 }
 const STORE_TITLES = { cases: 'Дела', clients: 'Доверители', hearings: 'Заседания', tasks: 'Задачи', finance: 'Финансовые записи', documents: 'Документы' };
 
@@ -5368,10 +5399,6 @@ function openCreateSheet() {
   openSheet('Создать', `<div class="more-grid">${CREATE_ITEMS.map(([t, fn, ico], i) => `<button type="button" class="more-tile" id="create-${i}" onclick="createPick(${i})">${icon(ico)}<span>${esc(t)}</span></button>`).join('')}</div>`);
 }
 function createPick(i) { const it = CREATE_ITEMS[i]; if (!it || typeof window[it[1]] !== 'function') return; closeSheet(); window[it[1]](); }
-function openPlannedSheet(kind) {
-  const t = { task: ['Новая задача', 'форма задачи с делом, сроком и напоминанием'], event: ['Новое событие', 'форма заседания или встречи с проверкой занятости'], note: ['Быстрая запись', 'запись голосом или текстом с подсказкой типа'] }[kind] || ['Действие', ''];
-  openSheet(t[0], `<p>Будет: ${esc(t[1])}.</p><div class="info-box">Эта возможность ещё переносится. Пока создавайте записи в прежней программе — они появятся здесь после загрузки базы с сервера.</div>`);
-}
 
 // Поиск по делам и доверителям (только показ; переход в карточку — с этапа 1в)
 async function openSearchSheet(q) {
@@ -7710,6 +7737,8 @@ async function openPoaForm(id, preset) {
     <label class="check wide"><input type="checkbox" id="po-revoked"${v.revoked ? ' checked' : ''}><span>Доверенность отозвана</span></label></div>
     ${fSaveBar(`savePoaForm('${jsq(id || '')}')`, 'Сохранить', id ? `openDeleteSheet('poa', '${jsq(id)}')` : '')}`, sheetIsOpen() ? true : undefined);
   const ci = document.getElementById('po-client'); if (ci && cl) ci.dataset.pickedId = cl.id;
+  // аудит 05.10.2026: запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
+  if (p && typeof formRecMark === 'function') formRecMark('poa', p);
 }
 function poaYears(n) {
   const base = fv('po-issued'); if (!base) { toast('Сначала укажите дату совершения', true); return; }
@@ -9246,11 +9275,32 @@ async function lockDisable() {
   if (typeof bumpSecrets === 'function') bumpSecrets(['crm_lock_on', 'crm_lock_hash', 'crm_lock_salt', 'crm_lock_len', 'crm_lock_iter']);
   clearTimeout(LOCK_UI.autoT);
 }
+// аудит 05.10.2026: секреты закрыты прежним PIN-кодом (PIN сменили на другом устройстве, хэш пришёл с настройками) — перенос на текущий
+// PIN формой (secretsRecoverOldPin прежней программы использует prompt — урок 57)
+function secretsStale() { return !!(typeof _sec === 'object' && _sec && _sec.pending); }
+function openSecretsRecover() {
+  openSheet('Открыть секреты прежним PIN-кодом', `<p class="small muted">Код сервера, пароль шифрования и ключи на этом устройстве закрыты прежним PIN-кодом — тем, что действовал до смены. Введите его и текущий PIN: секреты будут перенесены на текущий.</p>
+    <div class="form-grid">${wide(fInput('rec-old', 'Прежний PIN-код', '', 'type="password" inputmode="numeric" maxlength="8" autocomplete="off"'))}${wide(fInput('rec-new', 'Текущий PIN-код', '', 'type="password" inputmode="numeric" maxlength="8" autocomplete="off"'))}</div>${fSaveBar('secretsRecoverGo()', 'Перенести')}`, true);
+}
+async function secretsRecoverGo() {
+  if (!secretsStale()) { toast('Секреты уже открыты'); sheetBack(true); return; }
+  const oldPin = fv('rec-old').trim(), newPin = fv('rec-new').trim();
+  if (!oldPin || !newPin) { fErr('Введите оба PIN-кода'); return; }
+  if (!(await lockVerify(newPin))) { fErr('Текущий PIN-код не подходит'); return; }
+  try {
+    const kOld = await secPinKey(oldPin); const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(_sec.pending.iv) }, kOld, new Uint8Array(_sec.pending.ct));
+    _sec.map = JSON.parse(new TextDecoder().decode(pt)) || {}; _sec.pending = null;
+    localStorage.removeItem('crm_sec_pin_salt'); _sec.pinKey = await secPinKey(newPin); await secretsPersist(); localStorage.removeItem('crm_sec_pin_stale');
+  } catch (e) { logErr('lock:recover', e); fErr('Прежний PIN-код не подошёл — секреты остались закрытыми'); return; }
+  if (typeof syncStatusRender === 'function') syncStatusRender();
+  sheetBack(true); openSecuritySheet('replace', { text: 'Секреты перенесены на текущий PIN-код' });
+}
 async function openSecuritySheet(mode, msg) {
   const bio = await bioAvailable(), on = LOCK.enabled, auto = Number(localStorage.getItem('crm_autolock_min') || 0);
   const state = on ? ['good', 'PIN-код установлен: программа спрашивает его при открытии и после минуты в фоне'] : ['', 'Защита входа выключена'];
   openSheet('Защита входа', `<div class="status-line ${state[0]}" id="lock-state" role="status">${icon(on ? 'shield-check' : 'circle-alert')}<span>${esc(state[1])}</span></div>
     ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="lock-msg">${esc(msg.text)}</div>` : ''}
+    ${secretsStale() ? `<div class="info-box warning" id="lock-stale">Секреты на этом устройстве закрыты прежним PIN-кодом: код сервера, пароль шифрования и ключи не читаются. <button type="button" class="text-button" id="lock-recover" onclick="openSecretsRecover()">Открыть прежним PIN-кодом</button></div>` : ''}
     <p class="small muted">PIN-код закрывает программу от постороннего на этом устройстве. Он не хранится в открытом виде — только защищённый хэш. Это блокировка экрана; данные на сервере и в копиях зашифрованы отдельно — паролем шифрования.</p>
     ${on ? `${bio ? `<label class="check"><input type="checkbox" id="lock-bio-cb"${LOCK.bio ? ' checked' : ''} onchange="lockBioToggle(this)"><span>Вход по отпечатку или Face ID</span></label>` : '<p class="small muted">Вход по отпечатку на этом устройстве недоступен.</p>'}
       ${LOCK.bio ? '' : `<label class="check"><input type="checkbox" id="lock-secpin"${secPinOn() ? ' checked' : ''} onchange="lockSecPinToggle(this)"><span>Закрыть PIN-кодом и секреты (код сервера, пароль шифрования, ключи)</span></label>`}
@@ -9558,7 +9608,7 @@ function openMonitorSettingsSheet(mode) {
     <p>Программа следит за делами на сайтах судов: функция-коллектор в вашем Яндекс Облаке по таймеру (утром и днём) обходит ссылки на дела, собирает назначенные заседания, результаты и движение дела, и кладёт их на ваш личный сервер. Кнопка «Получить события» на экране «Суды и мониторинг» забирает их в программу. Заседания и даты актов применяются к делам сами, когда нет сомнений; спорное остаётся на разбор. Данные судов — не истина: сроки всегда подтверждаете вы.</p>
     <div class="section-label">Как подключить, один раз</div>
     <div class="info-box"><b>Шаг 1. Личный сервер.</b> Он уже нужен для синхронизации: Синхронизация → «Подключить сервер» (адрес функции crm-bridge и секретный код). События коллектора хранятся на нём.</div>
-    <div class="info-box"><b>Шаг 2. Функция-коллектор в Яндекс Облаке.</b> Если вы разворачивали сервер мастером «Свой сервер одной кнопкой» в прежней программе, коллектор уже создан — адрес и секрет те же, что были в прежней программе (Настройки → Мониторинг → «Сбор в облаке»). Иначе: Яндекс Облако → Functions → создать функцию <b>collector-sud</b> (Node.js) из файла <b>collector-sud.mjs</b> — он лежит на сайте программы в разделе dist; переменные окружения: <b>BRIDGE_URL</b> — адрес вашего сервера crm-bridge, точно как в листе «Синхронизация»; <b>BRIDGE_SECRET</b> — секретный код этого сервера; <b>SECRET</b> — секрет самого коллектора (придумайте — его вводите ниже); таймер-триггер два раза в день. Мастер, который делает это за вас, появится в новой версии позже.</div>
+    <div class="info-box"><b>Шаг 2. Функция-коллектор в Яндекс Облаке.</b> Если вы разворачивали сервер мастером «Свой сервер в Яндекс Облаке» (Настройки; в прежней программе — «Свой сервер одной кнопкой»), коллектор уже создан — адрес и секрет мастер показал в конце. Иначе: Яндекс Облако → Functions → создать функцию <b>collector-sud</b> (Node.js) из файла <b>collector-sud.mjs</b> — он лежит на сайте программы в разделе dist; переменные окружения: <b>BRIDGE_URL</b> — адрес вашего сервера crm-bridge, точно как в листе «Синхронизация»; <b>BRIDGE_SECRET</b> — секретный код этого сервера; <b>SECRET</b> — секрет самого коллектора (придумайте — его вводите ниже); таймер-триггер два раза в день. Всё это делает мастер «Свой сервер в Яндекс Облаке» в Настройках (в приложении для компьютера).</div>
     <div class="form-grid">${wide(fInput('col-url', 'Адрес функции коллектора', col.url, 'type="url" autocomplete="off" placeholder="https://functions.yandexcloud.net/…"'))}${wide(fInput('col-secret', 'Секрет коллектора (переменная SECRET функции collector-sud)', col.secret, 'type="password" autocomplete="off"'))}</div>
     <div class="form-actions" style="margin-top:8px">${btn('Сохранить', 'monitorCollectorSave()', 'primary', 'check')}${btn('Проверить', 'monitorCollectorStatus(true)', '', 'refresh-cw')}</div>
     <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Затем «Отправить список дел» ниже; при добавлении новых дел повторяйте.</div>
