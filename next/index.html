@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="05.10.2026 21:28 · 7650b83">
+<meta name="build" content="07.10.2026 18:11 · b63d5be">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2557,6 +2557,55 @@ function mergeFailText(r, plain) {
   return plain;
 }
 
+// ▼▼▼ next/errlog.js
+// ═══ next/errlog.js — журнал ошибок без рекурсии, с резервом в памяти (разбор GPT 06.10.2026, п. 7) ═══
+// logErr прежней программы (core/errors.js, перенесён дословно) при отказе localStorage (переполнено, закрыто в приватном окне) звал сам
+// себя из своего же catch — при устойчивом отказе это рекурсия до переполнения стека вместо записи об исходной ошибке, и исключение
+// улетало в вызвавший код (обработчик ошибки сам становился источником ошибки). Здесь функция объявляется заново (в одном скрипте
+// действует последнее объявление): 1) повторного входа нет (ERRLOG_BUSY); 2) при отказе хранилища запись ложится в резервный журнал
+// в памяти (ERRLOG_MEM, последние ERRLOG_MAX), а сам отказ — одной строкой ERRLOG_FAIL со счётчиком; «Журнал ошибок» показывает и их
+// (errLogGet); 3) при следующей удачной записи резерв переносится в хранилище; 4) logErr никогда не бросает. Отдельный модуль
+// (не next/fixes.js): тесты, загружающие fixes.js в песочницу, подменяют logErr своей заглушкой.
+const ERRLOG_MEM = []; let ERRLOG_BUSY = false, ERRLOG_FAIL = null;
+function errMemPush(rec) { ERRLOG_MEM.push(rec); if (ERRLOG_MEM.length > ERRLOG_MAX) ERRLOG_MEM.splice(0, ERRLOG_MEM.length - ERRLOG_MAX); }
+function errRecOf(where, e, extra) {
+  const msg = e == null ? '' : (e && e.message) ? e.message : String(e);
+  if (!msg && !where) return null;
+  const stack = (e && e.stack) ? String(e.stack).split('\n').slice(0, 4).join(' | ').slice(0, 600) : '';
+  return { t: Date.now(), ver: typeof APP_VER === 'string' ? APP_VER : '', where: String(where || ''), msg: msg.slice(0, 300), stack, extra: extra ? String(extra).slice(0, 200) : undefined };
+}
+function logErr(where, e, extra) {
+  let rec = null; try { rec = errRecOf(where, e, extra); } catch (x) { rec = { t: Date.now(), where: String(where || ''), msg: 'ошибка не описана' }; }
+  if (!rec) return;
+  // вложенный вызов (из самого журнала) — только в память, без второго захода в хранилище
+  if (ERRLOG_BUSY) { try { errMemPush(rec); } catch (x) { /* штатно: даже резерв недоступен — ошибка не должна ронять вызвавший код */ } return; }
+  ERRLOG_BUSY = true;
+  try {
+    let log = []; try { log = JSON.parse(localStorage.getItem('crm_errlog') || '[]'); } catch (x) { /* v285: не JSON — штатно */ }
+    if (!Array.isArray(log)) log = [];
+    // резерв из памяти и запись об отказе хранилища — впереди новой записи; очищаются только после удачной записи в хранилище
+    for (const m of ERRLOG_MEM) log.push(m);
+    if (ERRLOG_FAIL) log.push(ERRLOG_FAIL);
+    // повтор той же ошибки подряд — счётчик у последней записи об ошибке (строка об отказе хранилища не в счёт)
+    let last = null; for (let i = log.length - 1; i >= 0; i--) if (log[i] && log[i].where !== 'errlog') { last = log[i]; break; }
+    let added = rec;
+    if (last && last.msg === rec.msg && last.where === rec.where && rec.t - last.t < 5000) { last.n = (last.n || 1) + 1; last.t = rec.t; added = ERRLOG_MEM.includes(last) ? null : rec; } else log.push(rec);
+    try { localStorage.setItem('crm_errlog', JSON.stringify(log.slice(-ERRLOG_MAX))); ERRLOG_MEM.length = 0; ERRLOG_FAIL = null; }
+    catch (x) {
+      // хранилище отказало — запись в память, отказ — одной строкой со счётчиком; повторного вызова logErr здесь нет
+      if (added) errMemPush(added);
+      const w = 'журнал ошибок не записан в хранилище: ' + String((x && x.message) || x).slice(0, 120);
+      ERRLOG_FAIL = { t: Date.now(), ver: rec.ver, where: 'errlog', msg: w, n: ERRLOG_FAIL ? (ERRLOG_FAIL.n || 1) + 1 : 1 };
+    }
+  } catch (x) { try { errMemPush(rec); } catch (y) { /* штатно */ } }
+  finally { ERRLOG_BUSY = false; }
+}
+function errLogGet() {
+  let l = []; try { l = JSON.parse(localStorage.getItem('crm_errlog') || '[]'); } catch (e) { l = []; }
+  if (!Array.isArray(l)) l = [];
+  return ERRLOG_MEM.length || ERRLOG_FAIL ? [...l, ...ERRLOG_MEM, ...(ERRLOG_FAIL ? [ERRLOG_FAIL] : [])].slice(-ERRLOG_MAX) : l;
+}
+
 // ▼▼▼ data/numbering.js
 // ═══ data/numbering.js — автонумерация дел и соглашений (поручение пользователя 03.10.2026) ═══
 // Правила — как в прежней программе (v312 nextCaseNo / nextAgreementNo): номер дела «Д-N/ГГГГ» — первый свободный N текущего года
@@ -3413,9 +3462,12 @@ async function openSrvHistorySheet(res) {
 // при открытии (nextBlobFetch) и кладётся в docBlobs.
 // Имя объекта в хранилище — латиницей (сервер принимает только [A-Za-z0-9_-]): идентификаторы версий «ВЕР-…» кириллические,
 // поэтому cloudId = 'v-' + 32 знака sha256 от id версии (урок 13).
+// Разбор GPT 06.10.2026, п. 2: имя зависит и от поколения пароля (key — отпечаток пароля, nextBlobKey). После смены пароля файл уходит
+// под НОВЫМ именем, а объект, зашифрованный прежним паролем, остаётся: старый снимок базы ссылается на него по своему cloudId и
+// открывается прежним паролем. Без key — прежняя схема (имена, выданные до этого выпуска, хранятся в записях и читаются как есть).
 const BLOB_UPLOAD_MAX = 50 * 1048576;
-async function nextBlobCloudId(versionId) {
-  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(versionId)));
+async function nextBlobCloudId(versionId, key) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(versionId) + (key ? '|' + key : '')));
   return 'v-' + Array.from(new Uint8Array(h)).slice(0, 16).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 function nextDataUrlToBlob(dataUrl) {
@@ -3465,12 +3517,12 @@ async function nextBlobsPush() {
       if (!x.ver) { failed++; errors.push('у файла нет версии документа'); continue; } // файл-сирота — остаётся в снимке
       const file = nextDataUrlToBlob(x.blob.data); if (!file) { failed++; errors.push('файл не прочитан'); continue; }
       if (file.size > BLOB_UPLOAD_MAX) { failed++; errors.push('файл больше 50 МБ'); continue; }
-      const cloudId = await nextBlobCloudId(x.ver.id), enc = await nextBlobEncrypt(file, SRVDB.pass);
+      const key = await nextBlobKey(SRVDB.pass), cloudId = await nextBlobCloudId(x.ver.id, key), enc = await nextBlobEncrypt(file, SRVDB.pass);
       const j = await nextSrvPost('blobput', { id: cloudId, size: enc.size });
       if (!j || !j.ok) { failed++; errors.push(nextSrvError(j)); continue; }
       const r = await fetch(j.url, { method: 'PUT', body: enc, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
       if (!r.ok) { failed++; errors.push('хранилище: HTTP ' + r.status); continue; }
-      x.ver.cloudId = cloudId; x.ver.cloudAt = Date.now(); x.ver.cloudSize = enc.size; x.ver.cloudSrv = nextBlobSrv(); x.ver.cloudKey = await nextBlobKey(SRVDB.pass); await put('docVersions', x.ver); uploaded++;
+      x.ver.cloudId = cloudId; x.ver.cloudAt = Date.now(); x.ver.cloudSize = enc.size; x.ver.cloudSrv = nextBlobSrv(); x.ver.cloudKey = key; await put('docVersions', x.ver); uploaded++;
     } catch (e) { logErr('blobs:push', e); failed++; errors.push(String(e && e.message || e).slice(0, 80)); }
   }
   return { ok: true, uploaded, failed, total: list.length, errors: errors.slice(0, 3) };
@@ -3552,13 +3604,16 @@ async function nextAutoPush(reason) {
 // проверка сервера: другая версия — получить и влить; затем отправить своё, если есть
 async function nextAutoPull(force) {
   if (!nextAutoOn() || NEXT_SYNC.busy) return null;
-  const v = await srvCall('dbver');
-  if (!v || !v.ok) { srvdbNote('err', nextSrvError(v)); return v; }
-  if (v.ver && (force || Number(v.ver) !== SRVDB.ver)) {
-    NEXT_SYNC.busy = true; syncStatusRender();
-    // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
-    const hadLocal = nextLocalChanges(), revBefore = syncRevision();
-    try {
+  // разбор GPT 06.10.2026, п. 1: занятость берётся ДО первого сетевого запроса. Раньше она ставилась после ответа dbver — пока ответ
+  // ждали, могла начаться отправка или загрузка из файла, и два слияния шли бы одновременно с общим MERGE_SEEN
+  NEXT_SYNC.busy = true; syncStatusRender();
+  let v = null;
+  try {
+    v = await srvCall('dbver');
+    if (!v || !v.ok) { srvdbNote('err', nextSrvError(v)); return v; }
+    if (v.ver && (force || Number(v.ver) !== SRVDB.ver)) {
+      // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
+      const hadLocal = nextLocalChanges(), revBefore = syncRevision();
       const g = await nextDbGet();
       if (!g || !g.ok) { srvdbNote('err', nextSrvError(g)); return g; }
       const r = await srvdbMergeSnapshot(g, true);
@@ -3566,8 +3621,8 @@ async function nextAutoPull(force) {
       if (r.failed) { srvdbNote('err', (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
       if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore, r)); srvdbNote('pull');
       if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
-    } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
-  }
+    }
+  } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
   if (NEXT_AUTO.dirty || nextLocalChanges()) srvdbTouch();
   return v;
 }
@@ -3866,6 +3921,33 @@ function appVersionLine() { const env = appEnv(); return env ? (env === 'android
 // Загрузка из файла — всегда объединение с предпросмотром: записи добавляются и обновляются, ничего не стирается.
 // Секреты (коды, токены) из файла в новую версию не применяются.
 const BACKUP_MIN_PASS = 8;
+// Разбор GPT 06.10.2026, п. 6: пределы восстановления — как в прежней программе (v294/v301): на телефоне разбор большого файла обрушит
+// вкладку — 120 МБ; на компьютере — 400 МБ; больше 50 МБ — предупреждение. Раньше здесь стояли безусловные 60 МБ, а копия
+// создавалась без предела — программа могла сделать копию, которую сама не откроет.
+const BACKUP_MOBILE_MAX = 120 * 1048576, BACKUP_MAX = 400 * 1048576, BACKUP_WARN = 50 * 1048576;
+function backupIsMobile() { return (typeof AndroidApp !== 'undefined') || /Android|iPhone|iPad|Mobile/i.test((typeof navigator === 'object' && navigator.userAgent) || ''); }
+const backupMb = n => Math.round(Number(n || 0) / 1048576);
+// можно ли восстановить файл такого размера здесь: '' — да, иначе текст отказа
+function backupSizeCheck(bytes, mobile) {
+  if (bytes > BACKUP_MAX) return `Файл ${backupMb(bytes)} МБ — больше предела 400 МБ. Восстановление возможно по частям (снимки на сервере)`;
+  if (mobile && bytes > BACKUP_MOBILE_MAX) return `Файл ${backupMb(bytes)} МБ — на телефоне восстановить нельзя (предел 120 МБ). Загрузите его на компьютере: телефон получит данные по синхронизации`;
+  return '';
+}
+// статус полноты копии по файлам документов — пишется в саму копию (_files) и показывается при проверке файла
+function backupFilesStatus(files) {
+  if (!files) return { state: 'unknown', text: 'полнота копии по файлам документов не проверена' };
+  if (files.error) return { state: 'unknown', text: 'полнота копии по файлам документов не проверена: ' + files.error };
+  if (!files.total) return { state: 'full', text: 'документов с файлами нет' };
+  if (files.failed) return { state: 'partial', text: `копия неполная: файлов ${files.have} из ${files.total}, не хватает ${files.failed}` + (files.why && files.why.length ? ' (' + [...new Set(files.why)].join('; ') + ')' : '') };
+  return { state: 'full', text: `копия полная: файлов ${files.have} из ${files.total}` };
+}
+// размер копии словами: укладывается ли в пределы восстановления
+function backupSizeNote(bytes) {
+  if (bytes > BACKUP_MAX) return `Копия ${backupMb(bytes)} МБ — больше предела восстановления 400 МБ: целиком программа её не откроет. Уменьшите базу (файлы документов) или храните снимки на сервере`;
+  if (bytes > BACKUP_MOBILE_MAX) return `Копия ${backupMb(bytes)} МБ — на телефоне такую не восстановить (предел 120 МБ), только на компьютере`;
+  if (bytes > BACKUP_WARN) return `Копия ${backupMb(bytes)} МБ — восстановление займёт несколько минут`;
+  return '';
+}
 function backupPassCheck(p1, p2) {
   if (String(p1 || '').length < BACKUP_MIN_PASS) return 'Пароль копии — не короче ' + BACKUP_MIN_PASS + ' знаков';
   if (p2 !== undefined && p1 !== p2) return 'Пароли не совпадают';
@@ -3896,7 +3978,9 @@ async function backupPreviewModel(text, pass) {
   if (!checked.ok) return { error: checked.error };
   const dry = await mergeIncoming(JSON.parse(JSON.stringify(checked.parsed)), false, { dryRun: true });
   const per = []; for (const st of STORES) { const n = (checked.parsed.data[st] || []).length; if (n) per.push({ store: st, title: PREVIEW_TITLES[st] || st, count: n }); }
-  return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0 };
+  // статус полноты, записанный при создании копии (_files; validateBackup его отбрасывает, поэтому читается из исходного разбора)
+  const files = parsed && parsed._files && typeof parsed._files === 'object' ? { state: String(parsed._files.state || 'unknown'), text: String(parsed._files.text || '').slice(0, 300), total: Number(parsed._files.total || 0), have: Number(parsed._files.have || 0), missing: Number(parsed._files.missing || 0) } : null;
+  return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files };
 }
 let BACKUP_PENDING = null;
 function openBackupSheet(sub) {
@@ -3919,15 +4003,19 @@ async function backupSaveNow() {
   const b = document.getElementById('bk-save'); if (b) b.disabled = true;
   try {
     // разбор GPT 05.10.2026 (3), п. 1: полная копия — с файлами документов: недостающие подкачиваются из хранилища, итог называется
-    let files = null; if (typeof nextBlobsFetchMissing === 'function') { try { files = await nextBlobsFetchMissing(r => { const el = document.getElementById('bk-files'); if (el) el.textContent = 'Подкачиваю файлы документов… ' + (r.fetched + r.failed) + ' из ' + (r.total - (r.have - r.fetched)); }); } catch (e) { logErr('backup:files', e); } }
-    const text = await encryptDump(await collectAll(), fv('bk-p1')), name = backupFileName('kopiya');
+    // разбор GPT 06.10.2026, п. 6: сбой подкачки — не «молча», а статус «полнота не проверена» с причиной (пишется и в копию)
+    let files = null; if (typeof nextBlobsFetchMissing === 'function') { try { files = await nextBlobsFetchMissing(r => { const el = document.getElementById('bk-files'); if (el) el.textContent = 'Подкачиваю файлы документов… ' + (r.fetched + r.failed) + ' из ' + (r.total - (r.have - r.fetched)); }); } catch (e) { logErr('backup:files', e); files = { error: String((e && e.message) || e).slice(0, 100) }; } }
+    const st = backupFilesStatus(files), dump = await collectAll();
+    dump._files = { state: st.state, text: st.text, at: Date.now(), total: files && files.total || 0, have: files && files.have || 0, missing: files && files.failed || 0 };
+    const text = await encryptDump(dump, fv('bk-p1')), name = backupFileName('kopiya');
     if (!fileSave(name, text)) { fErr('Браузер не дал сохранить файл. Попробуйте в другом браузере или на компьютере'); return null; }
     localStorage.setItem('crm_next_backup_at', String(Date.now()));
     // п. 5: нажатие на ссылку скачивания — не подтверждение, что файл сохранён; честная формулировка и итог по файлам
     const filesText = files && files.total ? ` Документов: ${files.total}, файлов в копии: ${files.have}` + (files.failed ? `, не хватает: ${files.failed} (${[...new Set(files.why)].join('; ')})` : '') + '.' : '';
-    const el = document.getElementById('bk-files'); if (el) el.textContent = filesText.trim();
-    toast('Скачивание копии запущено: ' + name + ' — проверьте файл в папке загрузок.' + filesText); fErr('');
-    return { name, bytes: text.length, files };
+    const sizeNote = backupSizeNote(text.length), status = st.text.charAt(0).toUpperCase() + st.text.slice(1) + '.' + (sizeNote ? ' ' + sizeNote + '.' : '');
+    const el = document.getElementById('bk-files'); if (el) el.textContent = (filesText.trim() + ' ' + status).trim();
+    toast('Скачивание копии запущено: ' + name + ' — проверьте файл в папке загрузок.' + filesText + ' ' + status, st.state !== 'full' || !!sizeNote); fErr('');
+    return { name, bytes: text.length, files, status: st.state, sizeNote };
   } catch (e) { logErr('backup:save', e); fErr('Копия не создана: ' + String((e && e.message) || e).slice(0, 100)); return null; }
   finally { if (b) b.disabled = false; }
 }
@@ -3935,13 +4023,16 @@ async function backupCheckFile() {
   const inp = document.getElementById('bk-file'), box = document.getElementById('bk-preview'), file = inp && inp.files && inp.files[0];
   BACKUP_PENDING = null; if (box) box.innerHTML = '';
   if (!file) { fErr('Выберите файл копии'); return null; }
-  if (file.size > 60 * 1048576) { fErr('Файл больше 60 МБ — такой объём загружайте на компьютере в прежней программе'); return null; }
+  { const bad = backupSizeCheck(Number(file.size || 0), backupIsMobile()); if (bad) { fErr(bad); return null; } }
   let text; try { text = await file.text(); } catch (e) { logErr('backup:read', e); fErr('Файл не прочитан'); return null; }
   toast('Проверяю файл…');
   const m = await backupPreviewModel(text, fv('bk-pass'));
   if (m.error) { fErr(m.error); return m; }
   fErr(''); BACKUP_PENDING = m; localStorage.setItem('crm_next_backup_checked', String(Date.now()));
-  if (box) box.innerHTML = `<div class="info-box" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.</div>
+  // разбор GPT 06.10.2026, п. 6: статус полноты из самой копии и предупреждение о большом файле
+  const filesNote = m.files && m.files.text ? ' ' + m.files.text.charAt(0).toUpperCase() + m.files.text.slice(1) + '.' : (m.files === null ? ' Полнота копии по файлам документов не записана (копия прежней программы или старого выпуска).' : '');
+  const bigNote = file.size > BACKUP_WARN ? ` Файл большой — ${backupMb(file.size)} МБ: объединение займёт несколько минут.` : '';
+  if (box) box.innerHTML = `<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}</div>
     <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
     <div class="form-actions">${m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}</div>`;
   return m;
@@ -5740,6 +5831,8 @@ function formModelHearing(v, prev) {
 // full: все поля вкладками (ui/caseform.js); иначе — краткая форма этапа 2а. Выбор запоминается (crm_case_brief, как v282);
 // новое дело — кратко. Вкладки зависят от вида дела и переключаются при смене вида без потери введённого.
 async function openCaseForm(id, full) {
+  // разбор GPT 06.10.2026, п. 4: обычное открытие формы сбрасывает перенос значений между «Кратко» и «Все поля» (caseFormReopen)
+  if (!(CASE_FORM_CARRY && CASE_FORM_CARRY.reopen)) CASE_FORM_CARRY = null;
   const prev = id ? await getOne('cases', id) : null; if (id && !prev) { toast('Дело не найдено', true); return; }
   const c = prev || {}, clients = await getAll('clients');
   // автонумерация (03.10.2026): новому делу — следующий свободный номер дела и номер соглашения; оба можно править
@@ -5835,11 +5928,29 @@ function caseGroupsBind(open) {
   caseGroupsRefresh(open);
 }
 function caseFormMode(id, full) { localStorage.setItem(CASE_FORM_BRIEF_KEY, full ? '0' : '1'); caseFormReopen(id, full); }
-// перерисовать форму, не теряя введённое: значения переносятся по id полей; лист под формой (карточка) остаётся в стеке
+// перерисовать форму, не теряя введённое; лист под формой (карточка) остаётся в стеке.
+// Разбор GPT 06.10.2026, п. 4 (раньше переносились только значения полей, которые есть в новой разметке): 1) поля вкладок, которых в
+// краткой форме нет, держатся в CASE_FORM_CARRY, пока форма открыта, — «Все поля → Кратко → Все поля» их не теряет; 2) выбранный id
+// доверителя (однофамильцы) переносится вместе с текстом, а набранное заново имя не получает id из записи; 3) версия записи на момент
+// ПЕРВОГО открытия (проверка «изменили на другом устройстве», ui/guard.js) переносится — повторное открытие её не обновляет, иначе
+// чужая правка затёрлась бы молча.
+let CASE_FORM_CARRY = null;
+function caseFormCarryTake(fields) {
+  const out = {}; for (const f of fields || []) { if (!f || !f.id) continue; const el = document.getElementById(f.id); if (!el || !('value' in el) || el.tagName === 'BUTTON') continue;
+    if (f.checked !== undefined) el.checked = f.checked; else el.value = f.value; if (f.picked) el.dataset.pickedId = f.picked; else delete el.dataset.pickedId; out[f.id] = f; }
+  return out;
+}
 async function caseFormReopen(id, full) {
-  const vals = {}; document.querySelectorAll('#sheetContent [id^="cf-"], #sheetContent [id^="cx-"]').forEach(el => { if ('value' in el) vals[el.id] = el.value; });
-  UI.cur = UI.stack.length ? UI.stack.pop() : null; await openCaseForm(id, full);
-  for (const [k, v] of Object.entries(vals)) { const el = document.getElementById(k); if (el && 'value' in el && el.tagName !== 'BUTTON') el.value = v; }
+  const key = String(id || ''), carry = (CASE_FORM_CARRY && CASE_FORM_CARRY.id === key && CASE_FORM_CARRY.fields) || {};
+  const fields = typeof guardFormFields === 'function' ? guardFormFields() : [];
+  for (const f of fields) if (f && f.id && (/^c[fx]-/.test(f.id))) carry[f.id] = f;
+  const rec = UI.cur && UI.cur.rec, clientRec = UI.cur && UI.cur.clientRec;
+  UI.cur = UI.stack.length ? UI.stack.pop() : null;
+  CASE_FORM_CARRY = { id: key, fields: carry, reopen: true };
+  try { await openCaseForm(id, full); } finally { if (CASE_FORM_CARRY) CASE_FORM_CARRY.reopen = false; }
+  caseFormCarryTake(Object.values(carry));
+  if (rec && UI.cur && UI.cur.rec && UI.cur.rec.store === rec.store && UI.cur.rec.id === rec.id) UI.cur.rec = rec;
+  if (clientRec && UI.cur && UI.cur.clientRec && UI.cur.clientRec.id === clientRec.id) UI.cur.clientRec = clientRec;
   caseTabsRefresh(); caseKoapHint();
   caseGroupsRefresh(true);
 }
@@ -6167,9 +6278,12 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
   document.addEventListener('focusin', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { comboCloseAll(t); comboRender(t); } });
   document.addEventListener('click', e => {
     const t = e.target, item = t.closest && t.closest('.combo-item');
-    if (item) { const input = item.closest('.combo').querySelector('input[data-combo],input[data-addr]'); if (item.dataset.zip && input.dataset.zipFor) { const z = document.getElementById(input.dataset.zipFor); if (z) z.value = item.dataset.zip; } comboPick(input, item.dataset.v || '', item.dataset.id || ''); return; }
+    // 07.10.2026: список и кнопка лежат внутри <label> поля. Chromium 141+: если нажатая строка списка исчезает из разметки во время
+    // обработки нажатия (comboClose очищает список), браузер считает нажатие «по подписи» и сам нажимает на поле — поле получает фокус,
+    // список открывается снова со строкой «Добавить». preventDefault отменяет это поведение подписи (у кнопок type="button" своего действия нет).
+    if (item) { e.preventDefault(); const input = item.closest('.combo').querySelector('input[data-combo],input[data-addr]'); if (item.dataset.zip && input.dataset.zipFor) { const z = document.getElementById(input.dataset.zipFor); if (z) z.value = item.dataset.zip; } comboPick(input, item.dataset.v || '', item.dataset.id || ''); return; }
     const tg = t.closest && t.closest('.combo-toggle');
-    if (tg) { const input = document.getElementById(tg.dataset.for); if (!input) return; const m = comboMenu(input); if (m && !m.hidden) comboClose(input); else { comboCloseAll(input); comboRender(input); input.focus(); } return; }
+    if (tg) { e.preventDefault(); const input = document.getElementById(tg.dataset.for); if (!input) return; const m = comboMenu(input); if (m && !m.hidden) comboClose(input); else { comboCloseAll(input); comboRender(input); input.focus(); } return; }
     if (!(t.closest && t.closest('.combo'))) comboCloseAll(null);
   });
   document.addEventListener('keydown', e => {
@@ -9810,6 +9924,19 @@ async function caseCardReplace(i) {
   await refreshCasesCache(); a.replaced = true; toast('Заменено — ' + a.label + ': ' + a.val);
   const b = document.getElementById('card-ask-' + i); if (b) { b.disabled = true; b.textContent = 'Заменено'; }
 }
+// Перенос полей карточки суда в свежую запись дела (чистая функция, разбор GPT 06.10.2026, п. 5). before — дело до запроса, c — дело с
+// применённой карточкой, fresh — дело из базы после запроса (его могли изменить на другом устройстве или очистить в форме).
+// Переносятся только поля, изменённые коллектором, и только если за время запроса пользователь их не трогал; очистка поля — полноценное
+// изменение: такое поле идёт «на разбор» (ask) и не перезаписывается. Участники объединяются по имени, свежие главнее. Правит fresh.
+function caseCardMergeFields(before, c, fresh) {
+  const kept = [], ask = [], same = (a, b) => JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+  for (const k of Object.keys(c)) { if (k === 'participants' || c[k] === undefined || k.startsWith('_')) continue;
+    if (same(before[k], c[k])) continue;
+    if (!same(fresh[k], before[k])) { kept.push(k); ask.push({ field: k, val: c[k], label: (typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]) || k, was: fresh[k] === undefined ? '' : fresh[k] }); continue; }
+    fresh[k] = c[k]; }
+  { const seen = new Map(); for (const p of [...(Array.isArray(fresh.participants) ? fresh.participants : []), ...(Array.isArray(c.participants) ? c.participants : [])]) { if (!p) continue; const key = crmMonNorm(p.name || ''); if (!seen.has(key)) seen.set(key, p); } fresh.participants = [...seen.values()]; }
+  return { fresh, kept, ask };
+}
 async function caseFetchCard(caseId, opts) {
   opts = opts || {};
   const cfg = crmCollectorSrvCfg();
@@ -9833,14 +9960,9 @@ async function caseFetchCard(caseId, opts) {
     // разбор GPT 05.10.2026 (3), п. 3: пока шёл запрос, дело могли изменить (другое устройство, обмен): с сайта переносятся только изменённые
     // коллектором поля и только туда, где пользователь за это время ничего не менял; иначе — в «на разбор»; участники объединяются по имени,
     // свежие (в т. ч. правленные пользователем) главнее
-    const fresh = (await getOne('cases', caseId)) || c, kept = [];
-    for (const k of Object.keys(c)) { if (k === 'participants' || c[k] === undefined || k.startsWith('_')) continue;
-      const changedByCard = JSON.stringify(before[k]) !== JSON.stringify(c[k]), emptyNow = fresh[k] === undefined || fresh[k] === '' || fresh[k] === null;
-      if (!changedByCard && !emptyNow) continue;
-      const userChanged = JSON.stringify(fresh[k]) !== JSON.stringify(before[k]) && !emptyNow;
-      if (userChanged) { kept.push(k); ask.push({ field: k, val: c[k], label: (typeof CONFLICT_FIELDS === 'object' && CONFLICT_FIELDS[k]) || k, was: fresh[k] }); continue; }
-      fresh[k] = c[k]; }
-    { const seen = new Map(); for (const p of [...(Array.isArray(fresh.participants) ? fresh.participants : []), ...(Array.isArray(c.participants) ? c.participants : [])]) { if (!p) continue; const key = crmMonNorm(p.name || ''); if (!seen.has(key)) seen.set(key, p); } fresh.participants = [...seen.values()]; }
+    const fresh = (await getOne('cases', caseId)) || c;
+    // разбор GPT 06.10.2026, п. 5: очищенное пользователем поле — тоже изменение (раньше пустое поле получало старое значение обратно)
+    const cm = caseCardMergeFields(before, c, fresh), kept = cm.kept; ask.push(...cm.ask);
     if (kept.length) logErr('case:card', new Error('поля, изменённые во время запроса, не перезаписаны: ' + kept.join(', ')));
     addCaseHistoryEvent(fresh, 'courtCard', '', done.join('; '), 'monitor');
     try { await put('cases', fresh); } catch (e) { logErr('case:card', e); toast('Данные с сайта суда получены, но записать их в дело не удалось', true); return null; }
