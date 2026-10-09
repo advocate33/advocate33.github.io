@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="09.10.2026 11:37 · 821a6c6+">
+<meta name="build" content="09.10.2026 15:46 · 0b91502+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4944,6 +4944,18 @@ function kadProtoResultModel(res, link) {
   if (!s.blocked && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
   lines.push({ kind: 'hint', text: 'Пробная версия: в дело ничего не записано. Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
   return { lines, bad: s.blocked || s.textLen < 800, summary: s };
+}
+// «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
+// такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
+function kadCardLine(stage) {
+  return (stage ? stage + ': ' : '') + 'ссылка ведёт на КАД Арбитр — коллектор в облаке этот сайт не читает (сайт не отдаёт карточку скриптам). ' +
+    (kadProtoSupported() ? 'Нажмите «Карточка КАД» в деле.' : 'Карточку читает приложение для Android 1.6 и новее: кнопка «Карточка КАД» в деле (пробная версия).');
+}
+// ссылки дела делятся на «КАД» и «сайт суда»; stages — строки CASE_LINK_STAGES, у которых ссылка заполнена
+function kadSplitStages(c, stages) {
+  const kad = [], site = [];
+  for (const st of stages || []) (c && kadHostOk(c[st[0]]) ? kad : site).push(st);
+  return { kad, site };
 }
 function kadProtoLast() { return lsJSON(KAD_PROTO_LAST, null); }
 // запуск чтения: окно открывает приложение; результат придёт в window.__kadResult
@@ -10183,16 +10195,18 @@ function courtNameSame(a, b) { const x = crmMonNorm(a), y = crmMonNorm(b); retur
 const CASE_LINK_STAGES = [['link', 'Первая инстанция', '', 'courtNo'], ['linkApp', 'Апелляция', 'App', 'courtNoApp'], ['linkCass', 'Кассация', 'Cass', 'courtNoCass']];
 let CASE_CARD_ASK = null;
 function caseCardResultModel(r) {
-  r = r || {}; const done = r.done || [], diff = r.diff || [], errs = r.errs || [], ask = r.ask || [], lines = [];
+  r = r || {}; const done = r.done || [], diff = r.diff || [], errs = r.errs || [], ask = r.ask || [], kad = r.kad || [], lines = [];
   if (done.length) lines.push({ kind: 'done', text: 'Записано в дело: ' + done.join('; ') + '.' });
-  else if (!errs.length && !ask.length && !diff.length && !r.cfgErr) lines.push({ kind: 'info', text: 'Новых данных нет: пустых полей, которые можно заполнить с сайта суда, в деле не осталось.' });
+  else if (!errs.length && !ask.length && !diff.length && !r.cfgErr && !kad.length) lines.push({ kind: 'info', text: 'Новых данных нет: пустых полей, которые можно заполнить с сайта суда, в деле не осталось.' });
   if (r.evCount) lines.push({ kind: 'info', text: 'Событий суда получено: ' + r.evCount + ' — они в разделе «Мониторинг».' });
   diff.forEach(t => lines.push({ kind: 'diff', text: 'Расхождение: ' + t + '. В деле оставлено прежнее значение — исправьте в форме дела, если верны данные сайта.' }));
   if (r.cfgErr) lines.push({ kind: 'err', text: 'Карточку не прочитать: ' + String(r.cfgErr).replace(/[.\s]+$/, '') + '.' });
   errs.forEach(t => lines.push({ kind: 'err', text: 'Не прочитано — ' + t + '.' }));
+  // ссылка на КАД: не ошибка коллектора, а другой путь — своя строка, общие советы к ней не относятся (урок 99)
+  kad.forEach(st => lines.push({ kind: 'diff', text: typeof kadCardLine === 'function' ? kadCardLine(st) : st + ': ссылка ведёт на КАД Арбитр — коллектор в облаке этот сайт не читает.' }));
   if (errs.length && !r.cfgErr) lines.push({ kind: 'hint', text: 'Что проверить: ссылка в форме дела открывает страницу именно этого дела на сайте суда; коллектор настроен (Настройки → «Мониторинг судов» → «Проверить»). Сайты судов часто отвечают медленно — повторите позже.' });
-  const toastText = done.length ? 'С сайта суда: ' + done.join('; ') : r.cfgErr ? 'Коллектор настроен неверно — причина в листе' : errs.length ? 'Карточку дела прочитать не удалось' : 'Новых данных на сайте суда нет';
-  return { lines, ask, plain: !diff.length && !errs.length && !ask.length && !r.cfgErr, toast: toastText, bad: (!!errs.length || !!r.cfgErr) && !done.length };
+  const toastText = done.length ? 'С сайта суда: ' + done.join('; ') : r.cfgErr ? 'Коллектор настроен неверно — причина в листе' : (kad.length && !errs.length) ? 'Ссылка ведёт на КАД Арбитр — коллектор его не читает, причина в листе' : errs.length ? 'Карточку дела прочитать не удалось' : 'Новых данных на сайте суда нет';
+  return { lines, ask, plain: !diff.length && !errs.length && !ask.length && !r.cfgErr && !kad.length, toast: toastText, bad: (!!errs.length || !!r.cfgErr || !!kad.length) && !done.length };
 }
 function openCaseCardResult(caseId, res) {
   const m = caseCardResultModel(res); CASE_CARD_ASK = { caseId, items: m.ask };
@@ -10224,11 +10238,23 @@ function caseCardMergeFields(before, c, fresh) {
 }
 async function caseFetchCard(caseId, opts) {
   opts = opts || {};
+  const c = await getOne('cases', caseId); if (!c) return null;
+  const allStages = CASE_LINK_STAGES.filter(([f]) => c[f]);
+  if (!allStages.length) { if (!opts.silent) toast('В деле нет ссылки на сайт суда — добавьте её в форме дела', true); return null; }
+  // ссылки на КАД Арбитр коллектору не отправляются — сайт не отдаёт карточку скриптам (урок 99); в приложении для Android
+  // их читает окно «Карточка КАД» (sync/kadproto.js), и кнопка «Данные с сайта суда» ведёт туда же
+  const split = typeof kadSplitStages === 'function' ? kadSplitStages(c, allStages) : { kad: [], site: allStages };
+  const stages = split.site, kadStages = split.kad.map(st => st[1]);
+  if (!stages.length) {
+    if (opts.silent) return null;
+    if (typeof kadProtoSupported === 'function' && kadProtoSupported()) return kadProtoRead(caseId);
+    await openCaseSheet(caseId);
+    openCaseCardResult(caseId, { done: [], diff: [], errs: [], ask: [], evCount: 0, cfgErr: '', kad: kadStages });
+    toast('Ссылка ведёт на КАД Арбитр — коллектор его не читает, причина в листе', true);
+    return null;
+  }
   const cfg = crmCollectorSrvCfg();
   if (!cfg.url || !cfg.secret) { if (!opts.silent) toast('Карточку дела читает коллектор судов. Укажите его адрес и секрет: Настройки → «Мониторинг судов»', true); return null; }
-  const c = await getOne('cases', caseId); if (!c) return null;
-  const stages = CASE_LINK_STAGES.filter(([f]) => c[f]);
-  if (!stages.length) { if (!opts.silent) toast('В деле нет ссылки на сайт суда — добавьте её в форме дела', true); return null; }
   const fb = document.getElementById('case-card-fetch'); if (fb && !opts.silent) fb.disabled = true;
   if (!opts.silent) toast('Читаю карточку дела на сайте суда — это может занять до минуты…');
   const before = JSON.parse(JSON.stringify(c)), done = [], diff = [], errs = [], ask = []; let evCount = 0, cfgErr = '';
@@ -10254,7 +10280,7 @@ async function caseFetchCard(caseId, opts) {
     await crmCaseLogByNum(c.number, 'flow', 'С сайта суда: ' + done.join('; '));
   }
   await refreshCasesCache();
-  const out = { done, diff, errs, ask, evCount, cfgErr }, m = caseCardResultModel(out);
+  const out = { done, diff, errs, ask, evCount, cfgErr, kad: kadStages }, m = caseCardResultModel(out);
   const shown = sheetIsOpen() && UI.cur && UI.cur.caseId === caseId;
   if (opts.silent) {
     if (done.length) { toast(m.toast); if (shown) await openCaseSheet(caseId); }
