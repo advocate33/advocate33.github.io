@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="07.10.2026 18:11 · b63d5be">
+<meta name="build" content="09.10.2026 07:28 · 7ad1a2f">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4264,7 +4264,7 @@ async function mailRefresh(only) {
 // caseUid, crmNumber, court, raw, hash, caseId, caseNum, status new|flow|applied|ignored, actApplied/actSkip, receivedAt).
 // Привязка к делу (crmMonBind): УИД → номер CRM от коллектора → номер в суде (единственное совпадение). Автоприменение
 // (crmMonAutoApply): заседания создаются/переносятся/дополняются, даты актов записываются в пустые поля дела, сроки считаются.
-// Получение событий — только по кнопке: srvCall('eventsget') личного сервера (коллектор кладёт их туда по таймеру).
+// Получение событий — srvCall('eventsget') личного сервера (коллектор кладёт их туда по таймеру): по кнопке и, с 09.10.2026, само (sync/monauto.js).
 function navBadgeRefresh() {}
 // прежний интерфейс перерисовывал свои экраны сам; часть вызовов в v312 без проверки typeof — заглушки обязательны (урок 57)
 function renderCases() {}
@@ -4303,7 +4303,13 @@ function crmMonBind(cases,e){
 // Событие приходит двумя путями: в ответе коллектора на «Собрать сейчас» (источник «Коллектор судов») и при чтении событий с личного
 // сервера («Личный сервер»); с обменом — ещё и записанное прежней программой. Хэш события включает источник, поэтому одно и то же
 // заседание записывалось дважды. Ключ события — те же поля без источника; движение дела сводится по externalId без источника.
-function monEvKey(e) { return [e.eventType || '', e.externalId || '', crmMonNorm(e.title), e.date || '', crmMonNorm(e.courtNo), crmMonNorm(e.caseUid)].join('|'); }
+// 09.10.2026 (снимок дела Д-57/2026): одно и то же заседание стояло в ленте дважды — коллекторы разных версий писали его разными словами
+// («… — Каб. №310» и «…, зал каб. 310»), а ключ включал текст. Для заседания с внешним id (у коллектора он — дело, дата, время) текст в
+// ключ не входит: заседание одно, его описание берётся последнее. Для движения и уведомлений текст остаётся в ключе: у них один id на день.
+// описание заседания: главнее то, в котором есть результат («…: Заседание отложено»); при равенстве — последнее полученное
+function monHearRes(e) { return !!(e && typeof crmMonHearingBits === 'function' && crmMonHearingBits({ title: e.title || '' }).result); }
+function monHearBest(list) { return (list || []).reduce((m, e) => (!m ? e : (monHearRes(e) !== monHearRes(m) ? (monHearRes(e) ? e : m) : ((e.receivedAt || 0) >= (m.receivedAt || 0) ? e : m))), null); }
+function monEvKey(e) { const hear = (e.eventType || '') === 'hearing' && e.externalId; return [e.eventType || '', e.externalId || '', hear ? '' : crmMonNorm(e.title), e.date || '', crmMonNorm(e.courtNo), crmMonNorm(e.caseUid)].join('|'); }
 const MON_DUP_RANK = { applied: 4, ignored: 3, flow: 2, new: 1 };
 const MON_DUP_FIELDS = ['status', 'appliedAction', 'appliedAt', 'appliedRecordId', 'actApplied', 'actSkip', 'autoSkip'];
 // группы одинаковых событий: остаётся запись с меньшим id — выбор не зависит от состояния, и два устройства, убирая дубли каждое у
@@ -4320,6 +4326,8 @@ function monEvDupPlan(list) {
     let changed = false;
     if (best !== g[0]) { for (const f of MON_DUP_FIELDS) if (best[f] !== undefined && keep[f] !== best[f]) { keep[f] = best[f]; changed = true; } }
     if (!keep.caseId) { const b = g.find(e => e.caseId); if (b) { keep.caseId = b.caseId; keep.caseNum = b.caseNum; changed = true; } }
+    // заседание: описание — из последней полученной копии (новый коллектор пишет точнее), отметки применения — как выше
+    if ((keep.eventType || '') === 'hearing') { const newest = monHearBest(g); if (newest && newest.title && newest.title !== keep.title) { keep.title = newest.title; keep.raw = newest.raw; keep.hash = newest.hash; changed = true; } }
     plan.push({ keep, changed, drop });
   }
   return plan;
@@ -4348,7 +4356,9 @@ async function monEvDedupe() {
   }
   return n;
 }
-async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.externalId,x])),added=[];let updated=0;for(const x of rows){if(hashes.has(x.hash)||keys.has(monEvKey(x)))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if(x.eventType==='caseflow'&&x.externalId)flowByExt.set(x.externalId,x);added.push(x);}
+// 09.10.2026: то же заседание (ключ без текста, monEvKey), но описание другое — обновляется текст записи, дубль не создаётся; применённое
+// событие снова становится новым: сайт мог дописать результат («Заседание отложено») — автоприменение перенесёт его в заседание (пропуск пользователя autoSkip держится)
+async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.externalId,x])),hearByKey=new Map(live.filter(x=>x.eventType==='hearing'&&x.externalId).map(x=>[monEvKey(x),x])),added=[];let updated=0;for(const x of rows){if(!hashes.has(x.hash)&&x.eventType==='hearing'&&x.externalId&&hearByKey.has(monEvKey(x))){const prevH=hearByKey.get(monEvKey(x));if(prevH.title!==x.title&&!(monHearRes(prevH)&&!monHearRes(x))){prevH.title=x.title;prevH.raw=x.raw;prevH.hash=x.hash;prevH.receivedAt=Date.now();if(prevH.status==='applied'&&!prevH.autoSkip)prevH.status='new';await put('monitorEvents',prevH);hashes.add(x.hash);updated++;}continue;}if(hashes.has(x.hash)||keys.has(monEvKey(x)))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if(x.eventType==='caseflow'&&x.externalId)flowByExt.set(x.externalId,x);if(x.eventType==='hearing'&&x.externalId)hearByKey.set(monEvKey(x),x);added.push(x);}
   // 04.10.2026: дубли, записанные до исправления или пришедшие обменом, удаляются
   await monEvDedupe();
   { /* v238: УИД с сайта суда запоминается в деле при первой привязке по номеру — дальше привязка идёт по УИД */
@@ -4710,6 +4720,166 @@ async function crmCollectorSendLinks() {
   // ответ словами — по тому, кто ответил (crmCollectorWhy, screens/monitoring.js)
   const why = typeof crmCollectorWhy === 'function' ? crmCollectorWhy(r) : { text: r.err || (r.j && r.j.error) || 'HTTP ' + r.http };
   toast('Список дел не отправлен: ' + why.text, true);
+}
+
+// ▼▼▼ sync/monauto.js
+// ═══ sync/monauto.js — события судов без кнопок (решение пользователя 09.10.2026, снимки дела Д-57/2026) ═══
+// До этого выпуска цепочка «сайт суда → программа» имела два ручных звена: список дел уходил коллектору только кнопкой «Отправить
+// список дел», а события с личного сервера забирались только кнопкой «Получить события» — заседание, собранное коллектором по
+// таймеру, лежало на сервере, пока пользователь не зайдёт в «Суды и мониторинг». Теперь:
+// 1) получение с личного сервера — само: при открытии программы, при возврате в неё, при появлении сети и раз в 30 минут (один
+//    лёгкий запрос eventsget к своему серверу, сайты судов с устройства не трогаются); применение — как раньше (crmMonAutoApply);
+// 2) список дел уходит коллектору сам: после сохранения дела (ссылка, номер, стадия, статус) и при запуске, если перечень дел со
+//    ссылками изменился с прошлой отправки (отпечаток перечня в crm_mon_links_sig); секрет и адрес — те же, что в настройках;
+// 3) одна кнопка «Обновить с сайтов судов» (monRefreshAll): сбор в облаке по всем делам → получение → применение, с ходом выполнения;
+//    «Данные с сайта суда» в карточке остаётся для одного дела.
+// Общая часть получения (monPullCore) одна и для кнопки «Получить события» (screens/monitoring.js), и для автоматики (урок 2).
+const MON_PULL_KEY = 'crm_mon_pull_auto';   // '0' — автоматическое получение выключено; по умолчанию включено
+const MON_PULL_AT = 'crm_mon_pull_at';      // время последнего удачного получения событий с сервера
+const MON_PULL_NEW = 'crm_mon_pull_new';    // сколько новых событий пришло при последнем получении
+const MON_PULL_ERR = 'crm_mon_pull_err';    // { at, msg } — последняя ошибка автоматического получения
+const MON_LINKS_SIG = 'crm_mon_links_sig';  // отпечаток перечня дел со ссылками, отправленного коллектору
+const MON_LINKS_AT = 'crm_mon_links_at';    // время последней удачной отправки списка дел
+const MON_PULL_MS = 30 * 60000;             // период проверки при открытой программе
+const MON_PULL_MIN_GAP = 10 * 60000;        // возврат в приложение и появление сети — не чаще раза в 10 минут
+const MON_LINKS_DELAY = 8000;               // после сохранения дела список уходит через 8 секунд (несколько правок подряд — один запрос)
+const MON_AUTO = { loop: null, busy: false, lastTry: 0, linksTimer: null, linksBusy: false, refreshing: false };
+const monPullAutoOn = () => localStorage.getItem(MON_PULL_KEY) !== '0';
+const monPullReady = () => !!(SRV.url && SRV.secret);
+const monPullLastAt = () => Number(localStorage.getItem(MON_PULL_AT) || 0);
+const monPullLastErr = () => lsJSON(MON_PULL_ERR, null);
+const monLinksLastAt = () => Number(localStorage.getItem(MON_LINKS_AT) || 0);
+function monPullSetAuto(on) { localStorage.setItem(MON_PULL_KEY, on ? '1' : '0'); if (on) monAutoStart(); else { clearInterval(MON_AUTO.loop); MON_AUTO.loop = null; } }
+// ── получение событий с личного сервера: одна общая часть для кнопки и автоматики ──
+// Возвращает { ok, added, applied, total } или { ok:false, error } (error — словами). Пишет в базу только события и то, что применяет
+// crmMonAutoApply; при занятой очереди обмена (NEXT_SYNC.busy) не пишет — повторит позже.
+async function monPullCore() {
+  if (!monPullReady()) return { ok: false, error: 'личный сервер не подключён — Настройки → «Мониторинг судов» или Синхронизация' };
+  if (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) return { ok: false, error: 'идёт обмен с сервером — повторю позже', busy: true };
+  const j = await srvCall('eventsget');
+  if (!j || !j.ok) return { ok: false, error: !j ? 'нет связи с личным сервером' : (j.error === 'auth' ? 'неверный секретный код сервера' : 'сервер: ' + (j.error || 'ошибка')) };
+  const raw = Array.isArray(j.events) ? j.events : [];
+  let added = 0, applied = null;
+  if (raw.length) {
+    const rows = await crmMonNormalizeRows(raw, 'Личный сервер');
+    const before = (await getAllRaw('monitorEvents')).length;
+    await crmMonPersist(rows, { quiet: true });
+    added = (await getAllRaw('monitorEvents')).length - before;
+    if (crmMonAutoOn()) { try { applied = await crmMonAutoApply(null); } catch (e) { logErr('monitor:auto', e); } }
+    await refreshCasesCache();
+  }
+  localStorage.setItem(MON_PULL_AT, String(Date.now())); localStorage.setItem(MON_PULL_NEW, String(added)); localStorage.removeItem(MON_PULL_ERR);
+  return { ok: true, added, applied, total: raw.length };
+}
+const monAppliedCount = n => n ? (n.hearings + n.moved + n.updated + n.acts) : 0;
+// тихое получение по расписанию: без всплывающих сообщений; ошибка — в строку состояния «Сегодня» и в журнал; экран перерисовывается,
+// только если что-то пришло и не открыт лист (как у автообмена, урок 71)
+async function monPullQuiet(reason) {
+  if (!monPullAutoOn() || !monPullReady() || MON_AUTO.busy) return null;
+  MON_AUTO.busy = true; MON_AUTO.lastTry = Date.now();
+  try {
+    const r = await monPullCore();
+    if (!r.ok) { if (!r.busy) { localStorage.setItem(MON_PULL_ERR, JSON.stringify({ at: Date.now(), msg: r.error })); logErr('monitor:autopull', new Error(r.error + ' (' + (reason || '') + ')')); } return r; }
+    if (r.added && typeof UI === 'object' && UI.ready && !sheetIsOpen()) nav(UI.screen);
+    return r;
+  } catch (e) { logErr('monitor:autopull', e); localStorage.setItem(MON_PULL_ERR, JSON.stringify({ at: Date.now(), msg: String((e && e.message) || e).slice(0, 120) })); return null; }
+  finally { MON_AUTO.busy = false; }
+}
+// при возврате в приложение и появлении сети — не чаще раза в 10 минут
+function monPullMaybe(reason) { if (Date.now() - MON_AUTO.lastTry < MON_PULL_MIN_GAP) return null; return monPullQuiet(reason); }
+function monAutoStart() {
+  clearInterval(MON_AUTO.loop); MON_AUTO.loop = null;
+  if (!monPullAutoOn()) return false;
+  MON_AUTO.loop = setInterval(() => { if (document.visibilityState === 'visible') monPullQuiet('по расписанию').catch(e => logErr('monitor:autopull', e)); }, MON_PULL_MS);
+  monPullQuiet('при открытии').catch(e => logErr('monitor:autopull', e));
+  monLinksSync(false).catch(e => logErr('monitor:links', e));
+  return true;
+}
+// ── список дел коллектору — сам ──
+// Отпечаток перечня: что именно видит коллектор (номер, УИД, стадия, номера в судах, ссылки) — изменился → отправить.
+async function monLinksPackQuiet() {
+  const all = await getAll('cases');
+  const cases = all.filter(c => c && !c._deleted && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено' && (c.link || c.linkApp || c.linkCass));
+  const rows = cases.map(c => ({
+    number: c.number || '', uid: c.caseUid || '', stage: c.stage || '',
+    courtNo: c.courtNo || '', courtNoApp: c.courtNoApp || '', courtNoCass: c.courtNoCass || '',
+    links: [
+      c.link ? { stage: 'Первая инстанция', courtNo: c.courtNo || '', url: c.link } : null,
+      c.linkApp ? { stage: 'Апелляция', courtNo: c.courtNoApp || '', url: c.linkApp } : null,
+      c.linkCass ? { stage: 'Кассация', courtNo: c.courtNoCass || '', url: c.linkCass } : null
+    ].filter(Boolean)
+  })).sort((a, b) => String(a.number).localeCompare(String(b.number)));
+  const sig = await crmMonHash(JSON.stringify(rows));
+  return { pack: rows.length ? { format: 'crm-advokat-links', version: 1, exportedAt: new Date().toISOString(), cases: rows } : null, sig, count: rows.length };
+}
+// force — отправить, даже если перечень не менялся (кнопка). Возвращает { sent, count } или { skipped, why }
+async function monLinksSync(force) {
+  const cfg = crmCollectorSrvCfg();
+  if (!cfg.url || !cfg.secret) return { skipped: true, why: 'коллектор не настроен' };
+  if (typeof monColIsBridge === 'function' && monColIsBridge(cfg.url, SRV.url)) return { skipped: true, why: 'в поле коллектора адрес сервера' };
+  if (MON_AUTO.linksBusy) return { skipped: true, why: 'уже отправляется' };
+  MON_AUTO.linksBusy = true;
+  try {
+    const p = await monLinksPackQuiet();
+    if (!p.pack) return { skipped: true, why: 'нет дел со ссылками' };
+    if (!force && localStorage.getItem(MON_LINKS_SIG) === p.sig) return { skipped: true, why: 'перечень не менялся', count: p.count };
+    const r = await crmCollectorCall({ action: 'linksput', links: p.pack }, 20000);
+    if (r && r.j && r.j.ok) { localStorage.setItem(MON_LINKS_SIG, p.sig); localStorage.setItem(MON_LINKS_AT, String(Date.now())); return { sent: true, count: p.count }; }
+    const why = r && typeof crmCollectorWhy === 'function' ? (crmCollectorWhy(r) || {}).text : ''; const msg = why || (r && (r.err || (r.j && r.j.error))) || 'коллектор не ответил';
+    logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true };
+  } finally { MON_AUTO.linksBusy = false; }
+}
+// после сохранения дела (ui/forms.js): через 8 секунд, одним запросом на несколько правок подряд
+function monLinksTouch() {
+  clearTimeout(MON_AUTO.linksTimer);
+  MON_AUTO.linksTimer = setTimeout(() => { monLinksSync(false).catch(e => logErr('monitor:links', e)); }, MON_LINKS_DELAY);
+}
+// ── одна кнопка: сбор в облаке по всем делам → получение → применение ──
+// Ход — в элементе #mon-refresh-state (если он есть на экране) и всплывающими сообщениями; кнопка не нажимается дважды.
+function monRefreshState(text) { const el = document.getElementById('mon-refresh-state'); if (el) { el.textContent = text || ''; el.hidden = !text; } }
+async function monRefreshAll() {
+  if (MON_AUTO.refreshing) { toast('Обновление уже идёт — дождитесь окончания'); return null; }
+  const cfg = crmCollectorSrvCfg(), out = { collected: null, pulled: null };
+  if (!monPullReady()) { toast('Подключите личный сервер: Настройки → «Мониторинг судов» или Синхронизация', true); return null; }
+  MON_AUTO.refreshing = true;
+  const b = document.getElementById('mon-refresh'); if (b) b.disabled = true;
+  try {
+    if (cfg.url && cfg.secret) {
+      // перед сбором коллектор получает свежий перечень дел — иначе новое дело со ссылкой он не обойдёт
+      const ls = await monLinksSync(false); if (ls.failed) toast('Список дел коллектору не отправлен: ' + ls.why + ' — сбор пойдёт по прежнему списку', true);
+      monRefreshState('Обхожу сайты судов — до 8 минут, не закрывайте страницу…'); toast('Обновление с сайтов судов запущено — это может занять несколько минут');
+      const r = await crmCollectorCall({ action: 'collect' }, 590000);
+      if (!r) { monRefreshState(''); return null; }
+      if (r.err) { toast('Сбор не выполнен: ' + r.err, true); monRefreshState('Сбор не выполнен: ' + r.err); out.collected = { ok: false, error: r.err }; }
+      else if (r.j && !('ok' in r.j && (r.j.collectorVer || r.j.stateText))) { const why = typeof crmCollectorWhy === 'function' ? crmCollectorWhy(r) : null; const t = (why && why.text) || 'коллектор ответил неожиданно'; toast('Сбор не запущен: ' + t, true); monRefreshState('Сбор не запущен: ' + t); out.collected = { ok: false, error: t }; }
+      else { out.collected = r.j; if (typeof monCollectorHintRender === 'function') monCollectorHintRender(r.j); }
+    } else {
+      toast('Коллектор в облаке не настроен — заберу только то, что уже есть на сервере');
+    }
+    monRefreshState('Получаю события с личного сервера…');
+    const p = await monPullCore(); out.pulled = p;
+    if (!p.ok) { toast('События не получены: ' + p.error, true); monRefreshState('События не получены: ' + p.error); return out; }
+    const n = monAppliedCount(p.applied), col = out.collected && out.collected.ok ? `сайты судов: событий ${out.collected.events ?? 0}, новых ${out.collected.added ?? 0}; ` : '';
+    const msg = col + (p.added ? `в программу пришло новых: ${p.added}` : 'новых событий в программе нет') + (n ? ` · применено: заседаний ${p.applied.hearings + p.applied.moved + p.applied.updated}, дат актов ${p.applied.acts}` : '');
+    toast('Обновлено. ' + msg.charAt(0).toUpperCase() + msg.slice(1)); monRefreshState('');
+    if (typeof UI === 'object' && UI.ready) nav(UI.screen);
+    return out;
+  } catch (e) { logErr('monitor:refresh', e); toast('Обновление не выполнено: ' + String((e && e.message) || e).slice(0, 100), true); monRefreshState(''); return out; }
+  finally { MON_AUTO.refreshing = false; const b2 = document.getElementById('mon-refresh'); if (b2) b2.disabled = false; }
+}
+// строка состояния для «Сегодня» и настроек: когда проверяли, что пришло, что не так
+function monPullStatusText() {
+  const at = monPullLastAt(), err = monPullLastErr(), fmt = t => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  if (!monPullReady()) return 'Личный сервер не подключён — события судов не приходят';
+  if (!monPullAutoOn()) return 'Автоматическое получение выключено' + (at ? ' · последняя проверка ' + fmt(at) : '');
+  if (err && (!at || err.at > at)) return 'Проверка не удалась ' + fmt(err.at) + ': ' + err.msg;
+  if (!at) return 'Проверяется при открытии и раз в 30 минут · ещё не проверялось';
+  const n = Number(localStorage.getItem(MON_PULL_NEW) || 0);
+  return 'Проверено ' + fmt(at) + (n ? ' · новых: ' + n : '') + ' · следующая проверка через 30 минут';
+}
+if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { const p = monPullMaybe('при возврате'); if (p && p.catch) p.catch(e => logErr('monitor:autopull', e)); } });
+  window.addEventListener('online', () => { const p = monPullMaybe('сеть появилась'); if (p && p.catch) p.catch(e => logErr('monitor:autopull', e)); });
 }
 
 // ▼▼▼ sync/ycdeploy.js
@@ -6009,6 +6179,8 @@ async function saveCaseForm(id) {
   await refreshCasesCache(); toast((id ? 'Дело сохранено' : 'Дело создано') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
+  // 09.10.2026: перечень дел со ссылками у коллектора обновляется сам (sync/monauto.js) — иначе новое дело он не обойдёт
+  if (typeof monLinksTouch === 'function') monLinksTouch();
   closeSheet(); await nav('cases'); openCaseSheet(r.obj.id);
 }
 
@@ -7139,7 +7311,9 @@ SCREENS.today = async function () {
   let monBox = '';
   try {
     const ev = (await getAll('monitorEvents')).filter(e => e && !e._deleted), mm = todayMonModel(ev);
-    if (ev.length) monBox = `<section class="panel t-mon"><div class="panel-title"><h2>События судов ${mm.newCount ? badge(String(mm.newCount), 'warn') : ''}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="nav('monitoring')">Все события${icon('chevron-right', 'icon-sm')}</button></div></div>${mm.fresh.map(e => `<div class="imp-row"><button type="button" class="imp-main" onclick="openMonitorEventSheet('${jsq(e.id)}')"><span class="task-title">${esc(e.title || 'Событие суда')}</span><span class="task-sub">${esc([e.caseNum, e.date ? fmtDate(e.date) : ''].filter(Boolean).join(' · '))}</span></button></div>`).join('')}<p class="panel-foot">${mm.newCount ? (mm.newCount > mm.fresh.length ? 'Ещё ' + (mm.newCount - mm.fresh.length) + ' — в разделе «Суды и мониторинг». ' : 'Требуют разбора. ') : 'Новых событий нет. '}${mm.last ? 'Проверено ' + new Date(mm.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</p></section>`;
+    // 09.10.2026: блок виден и без событий, когда сервер подключён, — с состоянием автоматического получения и кнопкой «Обновить» (sync/monauto.js)
+    const autoOk = typeof monPullReady === 'function' && monPullReady();
+    if (ev.length || autoOk) monBox = `<section class="panel t-mon"><div class="panel-title"><h2>События судов ${mm.newCount ? badge(String(mm.newCount), 'warn') : ''}</h2><div class="panel-tools">${autoOk ? `<button type="button" class="text-button" id="today-mon-refresh" onclick="monRefreshAll()">${icon('refresh-cw', 'icon-sm')}Обновить</button>` : ''}<button type="button" class="text-button" onclick="nav('monitoring')">Все события${icon('chevron-right', 'icon-sm')}</button></div></div>${mm.fresh.map(e => `<div class="imp-row"><button type="button" class="imp-main" onclick="openMonitorEventSheet('${jsq(e.id)}')"><span class="task-title">${esc(e.title || 'Событие суда')}</span><span class="task-sub">${esc([e.caseNum, e.date ? fmtDate(e.date) : ''].filter(Boolean).join(' · '))}</span></button></div>`).join('')}<p class="panel-foot">${mm.newCount ? (mm.newCount > mm.fresh.length ? 'Ещё ' + (mm.newCount - mm.fresh.length) + ' — в разделе «Суды и мониторинг». ' : 'Требуют разбора. ') : 'Новых событий нет. '}${typeof monPullStatusText === 'function' ? esc(monPullStatusText()) : (mm.last ? 'Проверено ' + new Date(mm.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')}</p></section>`;
   } catch (e) { logErr('today:monitor', e); }
   // «В работе»: дела с ближайшим следующим действием
   const work = todayWorkModel(d.cases, today);
@@ -9545,7 +9719,7 @@ const HELP_SECTIONS = [
 <li>В программе: Настройки → «Мониторинг судов» → <b>адрес функции коллектора</b> (не адрес сервера — это разные функции) и <b>секрет коллектора</b> (переменная SECRET коллектора, не код сервера) → «Сохранить» → «Проверить доставку на сервер»: коллектор должен ответить, что видит сервер.</li>
 <li>В каждом деле укажите ссылку на карточку дела на сайте суда: форма дела → «Все поля» → вкладка инстанции → поле ссылки (адрес из строки браузера на странице дела: «Движение дела»). Либо «Данные с сайта суда» в карточке дела — программа прочитает судью, номер и УИД.</li></ol>
 <h3>Как пользоваться</h3>
-<ul><li>«Суды и мониторинг» → «Получить события» — новые события по делам. «Собрать сейчас» — внеплановый сбор.</li>
+<ul><li>События приходят сами: при открытии программы, при возвращении в неё и раз в 30 минут (на «Сегодня» — когда проверено и когда следующая проверка). Коллектор обходит сайты по расписанию (утром и днём); «Обновить с сайтов судов» в «Судах и мониторинге» или «Обновить» на «Сегодня» — обойти прямо сейчас, это несколько минут; «Получить события» — только забрать то, что коллектор уже собрал. Перечень дел со ссылками уходит коллектору сам после сохранения дела.</li>
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
@@ -9802,7 +9976,7 @@ function monitorModel(events, cases, p) {
 // состояние настройки: сервер / коллектор в облаке / автоприменение
 function monitorSettingsState(srvUrl, col, autoOn) {
   const out = [];
-  out.push(srvUrl ? 'Личный сервер подключён — события забираются с него по кнопке «Получить события».' : 'Личный сервер не подключён (Синхронизация → «Подключить сервер») — события брать неоткуда.');
+  out.push(srvUrl ? (typeof monPullAutoOn === 'function' && !monPullAutoOn() ? 'Личный сервер подключён — события забираются с него только по кнопке (автоматическое получение выключено).' : 'Личный сервер подключён — события забираются с него сами при открытии программы и раз в 30 минут.') : 'Личный сервер не подключён (Синхронизация → «Подключить сервер») — события брать неоткуда.');
   out.push(col && col.url && col.secret ? 'Сбор в облаке настроен: адрес и секрет функции коллектора заданы.' : 'Сбор в облаке не настроен — укажите адрес и секрет функции коллектора ниже (шаг 2).');
   out.push(autoOn ? 'Данные суда применяются автоматически (заседания и даты актов), спорное — остаётся на разбор.' : 'Автоприменение выключено — каждое событие разбирается вручную.');
   return { lines: out, ready: !!srvUrl && !!(col && col.url && col.secret) };
@@ -9986,22 +10160,17 @@ function monCollectorHintRender(j) { const box = document.getElementById('col-sr
   let main = h; for (const t of tips) main = main.replace(' ' + t, '').replace(t, '');
   const tail = tips.length && / Остальные события доставлены\.$/.test(main) ? 'Остальные события доставлены.' : ''; if (tail) main = main.replace(/ Остальные события доставлены\.$/, '');
   box.innerHTML = `<div>${esc(main)}</div>` + (tips.length ? `<ul style="margin:6px 0 0 18px;padding:0">${tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '') + (tail ? `<div style="margin-top:6px">${tail}</div>` : '') + (fix.length ? `<div class="form-actions" style="margin:8px 0 0">${fix.map(x => `<button type="button" class="button small-btn" onclick="openCaseSheet('${jsq(x.id)}')">${icon('briefcase-business', 'icon-sm')}Открыть ${esc(x.number)}</button>`).join('')}</div>` : ''); box.hidden = !h; }
-// получить события с личного сервера (коллектор кладёт их туда): только по кнопке
+// получить события с личного сервера (коллектор кладёт их туда): по кнопке; с 09.10.2026 то же делает автоматика (sync/monauto.js)
+// кнопка «Получить события»: та же общая часть, что у автоматического получения (sync/monauto.js, monPullCore), плюс сообщения
 async function monitorPull() {
   if (!SRV.url) { toast('Подключите личный сервер: Настройки → «Мониторинг судов» или Синхронизация', true); return null; }
   toast('Запрашиваю события с сервера…');
-  const j = await srvCall('eventsget');
-  if (!j || !j.ok) { toast(!j ? 'Нет связи с личным сервером' : (j.error === 'auth' ? 'Неверный секретный код сервера' : 'Сервер: ' + (j.error || 'ошибка')), true); return null; }
-  const raw = Array.isArray(j.events) ? j.events : [];
-  if (!raw.length) { toast('На сервере пока нет событий — коллектор ещё не собирал или список дел не отправлен'); nav('monitoring'); return { added: 0, updated: 0 }; }
-  const rows = await crmMonNormalizeRows(raw, 'Личный сервер');
-  const before = (await getAllRaw('monitorEvents')).length;
-  await crmMonPersist(rows, { quiet: true });
-  const after = (await getAllRaw('monitorEvents')).length, added = after - before;
-  let n = null; if (crmMonAutoOn()) { try { n = await crmMonAutoApply(null); } catch (e) { logErr('monitor:auto', e); } }
-  await refreshCasesCache();
-  toast(added ? `Получено новых событий: ${added}` + (n && (n.hearings + n.updated + n.moved + n.acts) ? ` · применено: заседаний ${n.hearings + n.moved + n.updated}, дат актов ${n.acts}` : '') : 'Новых событий нет — всё уже получено');
-  nav('monitoring'); return { added, applied: n };
+  const p = await monPullCore();
+  if (!p.ok) { toast(p.error.charAt(0).toUpperCase() + p.error.slice(1), true); return null; }
+  if (!p.total) { toast('На сервере пока нет событий — коллектор ещё не собирал или список дел не отправлен'); nav('monitoring'); return { added: 0, updated: 0 }; }
+  const n = p.applied;
+  toast(p.added ? `Получено новых событий: ${p.added}` + (n && (n.hearings + n.updated + n.moved + n.acts) ? ` · применено: заседаний ${n.hearings + n.moved + n.updated}, дат актов ${n.acts}` : '') : 'Новых событий нет — всё уже получено');
+  nav('monitoring'); return { added: p.added, applied: n };
 }
 SCREENS.monitoring = async function () {
   const p = monPrefs(), m = monitorModel(await getAll('monitorEvents'), await getAll('cases'), p); await refreshCasesCache();
@@ -10010,8 +10179,13 @@ SCREENS.monitoring = async function () {
   const hint = st.ready ? '' : `<div class="info-box">${esc(st.lines[0])} ${esc(st.lines[1])} Как настроить — Настройки → «Мониторинг судов».</div>`;
   const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done"><button type="button" class="button small-btn primary" onclick="monOfferApply('${jsq(o.e.id)}')">${icon('check', 'icon-sm')}Записать</button><button type="button" class="button small-btn" onclick="monOfferSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
   const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openMonitorEventSheet('${jsq(r.e.id)}')"><span><span class="task-title">${esc(r.e.title || 'Событие')}</span><span class="task-sub">${esc([r.type, r.e.date ? fmtDate(r.e.date) : '', r.e.court, r.e.courtNo ? '№ ' + r.e.courtNo : '', r.bound ? 'дело ' + r.bound : '', r.problem].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status[0], r.status[1])}${r.problem && r.e.status === 'new' ? badge('нужен разбор', 'bad') : ''}</span></button>`).join('');
-  return pageHead('Суды и мониторинг', m.last ? 'последнее получение ' + new Date(m.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'события с сайтов судов', btn('Получить события', 'monitorPull()', 'primary', 'cloud-download') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
-    hint + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел и кладёт события на ваш сервер; кнопка «Получить события» забирает их сюда. Как настроить — Настройки → «Мониторинг судов».', btn('Получить события', 'monitorPull()', 'primary', 'cloud-download'))}</section>`;
+  // 09.10.2026: одна кнопка «Обновить с сайтов судов» — сбор в облаке по всем делам, получение, применение (sync/monauto.js);
+  // «Получить события» — только то, что уже лежит на сервере (быстро, сайты судов не трогаются); состояние автоматики — подзаголовком
+  const sub = typeof monPullStatusText === 'function' ? monPullStatusText() : (m.last ? 'последнее получение ' + new Date(m.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'события с сайтов судов');
+  const refreshBtn = `<button type="button" class="button primary" id="mon-refresh" onclick="monRefreshAll()"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? ' disabled' : ''}>${icon('refresh-cw')}Обновить с сайтов судов</button>`;
+  return pageHead('Суды и мониторинг', sub, refreshBtn + btn('Получить события', 'monitorPull()', '', 'cloud-download') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
+    `<div class="status-line" id="mon-refresh-state"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? '' : ' hidden'}>${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? 'Обхожу сайты судов — до 8 минут, не закрывайте страницу…' : ''}</div>` +
+    hint + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел по расписанию и кладёт события на ваш сервер; программа забирает их сама при открытии и раз в 30 минут. «Обновить с сайтов судов» — обойти сайты прямо сейчас. Как настроить — Настройки → «Мониторинг судов».', m.counts.all ? '' : btn('Обновить с сайтов судов', 'monRefreshAll()', 'primary', 'refresh-cw'))}</section>`;
 };
 // ── карточка события ──
 async function openMonitorEventSheet(id, mode) {
@@ -10060,18 +10234,22 @@ function openMonitorSettingsSheet(mode) {
   const col = crmCollectorSrvCfg(), auto = crmMonAutoOn(), st = monitorSettingsState(SRV.url, col, auto);
   openSheet('Мониторинг судов', `
     <div class="status-line ${st.ready ? 'good' : ''}" id="mon-state">${esc(st.lines.join(' '))}</div>
-    <p>Программа следит за делами на сайтах судов: функция-коллектор в вашем Яндекс Облаке по таймеру (утром и днём) обходит ссылки на дела, собирает назначенные заседания, результаты и движение дела, и кладёт их на ваш личный сервер. Кнопка «Получить события» на экране «Суды и мониторинг» забирает их в программу. Заседания и даты актов применяются к делам сами, когда нет сомнений; спорное остаётся на разбор. Данные судов — не истина: сроки всегда подтверждаете вы.</p>
+    <p>Программа следит за делами на сайтах судов: функция-коллектор в вашем Яндекс Облаке по таймеру (утром и днём) обходит ссылки на дела, собирает назначенные заседания, результаты и движение дела, и кладёт их на ваш личный сервер. Программа забирает их сама — при открытии, при возвращении в неё и раз в 30 минут; «Обновить с сайтов судов» на экране «Суды и мониторинг» обходит сайты прямо сейчас. Заседания и даты актов применяются к делам сами, когда нет сомнений; спорное остаётся на разбор. Данные судов — не истина: сроки всегда подтверждаете вы.</p>
     <div class="section-label">Как подключить, один раз</div>
     <div class="info-box"><b>Шаг 1. Личный сервер.</b> Он уже нужен для синхронизации: Синхронизация → «Подключить сервер» (адрес функции crm-bridge и секретный код). События коллектора хранятся на нём.</div>
     <div class="info-box"><b>Шаг 2. Функция-коллектор в Яндекс Облаке.</b> Если вы разворачивали сервер мастером «Свой сервер в Яндекс Облаке» (Настройки; в прежней программе — «Свой сервер одной кнопкой»), коллектор уже создан — адрес и секрет мастер показал в конце. Иначе: Яндекс Облако → Functions → создать функцию <b>collector-sud</b> (Node.js) из файла <b>collector-sud.mjs</b> — он лежит на сайте программы в разделе dist; переменные окружения: <b>BRIDGE_URL</b> — адрес вашего сервера crm-bridge, точно как в листе «Синхронизация»; <b>BRIDGE_SECRET</b> — секретный код этого сервера; <b>SECRET</b> — секрет самого коллектора (придумайте — его вводите ниже); таймер-триггер два раза в день. Всё это делает мастер «Свой сервер в Яндекс Облаке» в Настройках (в приложении для компьютера).</div>
     <div class="form-grid">${wide(fInput('col-url', 'Адрес функции коллектора', col.url, 'type="url" autocomplete="off" placeholder="https://functions.yandexcloud.net/…"'))}${wide(fInput('col-secret', 'Секрет коллектора (переменная SECRET функции collector-sud)', col.secret, 'type="password" autocomplete="off"'))}</div>
     <div class="form-actions" style="margin-top:8px">${btn('Сохранить', 'monitorCollectorSave()', 'primary', 'check')}${btn('Проверить', 'monitorCollectorStatus(true)', '', 'refresh-cw')}</div>
-    <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Затем «Отправить список дел» ниже; при добавлении новых дел повторяйте.</div>
+    <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Перечень дел со ссылками уходит коллектору сам — после сохранения дела и при открытии программы; «Отправить список дел» ниже — чтобы отправить немедленно.</div>
+    <p class="small muted" id="mon-links-state">${typeof monLinksLastAt === 'function' && monLinksLastAt() ? 'Список дел уходит коллектору сам после сохранения дела; последняя отправка ' + esc(new Date(monLinksLastAt()).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })) + '.' : 'Список дел уходит коллектору сам после сохранения дела со ссылкой и при открытии программы, если перечень изменился.'}</p>
     <div class="form-actions">${btn('Отправить список дел', 'crmCollectorSendLinks()', '', 'arrow-right')}${btn('Собрать сейчас', 'monitorCollectorRun()', '', 'cloud-download')}</div>
     <div class="status-line" id="col-srv-status">${col.url && col.secret ? 'Серверный сбор: нажмите «Проверить»' : 'Серверный сбор: укажите адрес и секрет функции.'}</div>
     <div class="info-box warning" id="col-srv-hint" hidden></div>
     <div class="form-actions" style="margin-top:8px">${btn('Проверить доставку на сервер', 'monBridgeCheck()', '', 'shield-check')}</div>
     <div class="info-box" id="col-bridge" hidden></div>
+    <div class="section-label">Как события попадают в программу</div>
+    <label class="check"><input type="checkbox" id="mon-pull-auto"${typeof monPullAutoOn === 'function' && monPullAutoOn() ? ' checked' : ''} onchange="monPullSetAuto(this.checked); toast(this.checked ? 'События будут приходить сами: при открытии программы, при возврате в неё и раз в 30 минут' : 'Автоматическое получение выключено — только по кнопкам'); openMonitorSettingsSheet('replace')"><span>Получать события с сервера автоматически — при открытии программы, при возврате в неё и раз в 30 минут</span></label>
+    <p class="small muted" id="mon-pull-state">${typeof monPullStatusText === 'function' ? esc(monPullStatusText()) : ''}</p>
     <div class="section-label">Как применяются данные</div>
     <label class="check"><input type="checkbox" id="mon-auto"${auto ? ' checked' : ''} onchange="localStorage.setItem('crm_mon_auto', this.checked ? '1' : '0'); toast(this.checked ? 'Данные суда применяются автоматически' : 'Автоприменение выключено — события разбираются вручную')"><span>Применять данные суда автоматически: заседания создаются, переносятся и дополняются; дата акта записывается, если поле в деле пустое. Спорное — на разбор.</span></label>
     <div class="info-box">Если события не приходят: проверьте, что «Собрать сейчас» отвечает без ошибки (403 — неверный секрет, 404 — неверный адрес), что у дел указаны ссылки, и что список дел отправлен. Запрос к сайтам судов идёт из Облака, не с вашего устройства.</div>`, mode || true);
@@ -10142,7 +10320,9 @@ const NEXT_BOOT = {
     try { if (typeof pwaShortcut === 'function') pwaShortcut(); } catch (e) { logErr('pwa:shortcut', e); }
   },
 };
-document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() => { if (typeof nextAutoStart === 'function') setTimeout(() => { try { nextAutoStart(); } catch (e) { logErr('auto:start', e); } }, 2500); }); });
+document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() => { if (typeof nextAutoStart === 'function') setTimeout(() => { try { nextAutoStart(); } catch (e) { logErr('auto:start', e); } }, 2500);
+  // 09.10.2026: события судов с личного сервера — сами (sync/monauto.js), через 4 секунды после запуска, чтобы не мешать первому экрану
+  if (typeof monAutoStart === 'function') setTimeout(() => { try { monAutoStart(); } catch (e) { logErr('monitor:start', e); } }, 4000); }); });
 // Обновление программы (аудит 02.10.2026): новая версия service worker ждёт согласия пользователя — полоса «Доступна новая
 // версия» с кнопками «Обновить» и «Позже». Раньше программа согласия не спрашивала, и новая версия включалась только после
 // закрытия всех вкладок. «Позже» убирает полосу до следующего запуска.
