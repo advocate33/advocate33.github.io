@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="09.10.2026 07:28 · 7ad1a2f">
+<meta name="build" content="09.10.2026 11:37 · 821a6c6+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4882,6 +4882,115 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
   window.addEventListener('online', () => { const p = monPullMaybe('сеть появилась'); if (p && p.catch) p.catch(e => logErr('monitor:autopull', e)); });
 }
 
+// ▼▼▼ sync/kadproto.js
+// ═══ sync/kadproto.js — карточка дела КАД Арбитр через приложение для Android (пробная версия, решение пользователя 09.10.2026) ═══
+// Сайт kad.arbitr.ru не отдаёт карточку дела скриптам (проверка браузера), поэтому коллектор в облаке арбитражные ссылки пропускает.
+// Приложение для Android 1.6 открывает карточку в отдельном окне встроенного браузера на телефоне пользователя — от его имени, как
+// обычный просмотр, — и возвращает программе текст и структуру страницы: мост AndroidApp.kadRead(url, number, reqId), ответ приходит в
+// window.__kadResult(reqId, result). Окно изолировано от программы (нет моста, только *.arbitr.ru).
+// Пробная версия: в базу ничего не пишется. Лист показывает, что отдал сайт (найден ли номер дела, не показана ли проверка браузера,
+// структура страницы — теги, id и классы без текста), и даёт скопировать структуру для написания разбора. Разбор заседаний, движения
+// дела и документов в события мониторинга (crmMonPersist) — следующим выпуском, когда структура настоящей страницы станет известна.
+// Данные из окна КАД — чужой текст: в разметку только через esc(), ссылки не делаются кликабельными.
+const KAD_PROTO_LAST = 'crm_kad_proto_last'; // последний результат без текста страницы: { caseId, at, summary }
+const KAD_PROTO = { req: null, lastReq: null, caseId: null, link: null, timer: null };
+const KAD_PROTO_WAIT = 15 * 60000;            // окно может ждать, пока пользователь проходит проверку браузера; дольше — запрос считается забытым
+function kadProtoSupported() { return typeof AndroidApp !== 'undefined' && !!AndroidApp && typeof AndroidApp.kadRead === 'function'; }
+// ссылка ведёт на kad.arbitr.ru (только https; поддомены вида *.kad.arbitr.ru допускаются, похожие чужие адреса — нет)
+function kadHostOk(url) {
+  let u; try { u = new URL(String(url || '')); } catch (e) { return false; }
+  const h = (u.hostname || '').toLowerCase();
+  return u.protocol === 'https:' && (h === 'kad.arbitr.ru' || h.endsWith('.kad.arbitr.ru'));
+}
+// первая арбитражная ссылка дела с номером в суде той же инстанции: { url, number, stage, field }
+function kadLinkOf(c) {
+  if (!c) return null;
+  const rows = [['link', 'courtNo', 'Первая инстанция'], ['linkApp', 'courtNoApp', 'Апелляция'], ['linkCass', 'courtNoCass', 'Кассация']];
+  for (const [f, nf, stage] of rows) { const url = String(c[f] || '').trim(); if (url && kadHostOk(url)) return { url, number: String(c[nf] || '').trim(), stage, field: f }; }
+  return null;
+}
+// кнопка в карточке дела — только в приложении с мостом и только при ссылке на КАД
+function kadProtoButton(c) {
+  if (!kadProtoSupported() || !kadLinkOf(c)) return '';
+  return `<button type="button" class="button small-btn" id="case-kad-read" onclick="kadProtoRead('${jsq(c.id)}')">${icon('landmark')}Карточка КАД</button>`;
+}
+// сводка без текста страницы — её можно хранить и пересылать
+function kadProtoSummary(res) {
+  if (!res || typeof res !== 'object') return { ok: false, error: 'empty' };
+  const s = { ok: res.ok !== false, ver: res.ver || 0, href: String(res.href || ''), title: String(res.title || '').slice(0, 200), when: String(res.when || ''),
+    textLen: Number(res.textLen) || 0, number: String(res.number || ''), numberFound: res.numberFound === true ? true : res.numberFound === false ? false : null,
+    blocked: !!res.blocked, manual: !!res.manual, state: String(res.state || ''), structTotal: Number(res.structTotal) || (Array.isArray(res.struct) ? res.struct.length : 0),
+    struct: (Array.isArray(res.struct) ? res.struct : []).slice(0, 600).map(x => ({ k: String(x && x.k || '').slice(0, 160), n: Number(x && x.n) || 0, len: Number(x && x.len) || 0, kids: Number(x && x.kids) || 0 })),
+    heads: (Array.isArray(res.heads) ? res.heads : []).slice(0, 150).map(x => String(x || '').slice(0, 70)),
+    links: (Array.isArray(res.links) ? res.links : []).slice(0, 80).map(x => String(x || '').slice(0, 200)) };
+  if (res.ok === false) { s.error = String(res.error || 'error'); if (res.message) s.message = String(res.message).slice(0, 300); }
+  return s;
+}
+// строки для листа; bad — чтение не удалось
+function kadProtoResultModel(res, link) {
+  const s = kadProtoSummary(res), lines = [];
+  if (!s.ok) {
+    const why = { empty: 'Окно КАД не вернуло данных.', cancelled: 'Окно КАД закрыто без чтения.', bad_url: 'Ссылка не ведёт на kad.arbitr.ru — проверьте её в форме дела.',
+      busy: 'Окно КАД уже открыто — дождитесь результата.', launch: 'Приложение не смогло открыть окно КАД' + (s.message ? ': ' + s.message : '.') }[s.error] || ('Чтение не удалось: ' + (s.message || s.error));
+    lines.push({ kind: 'err', text: why });
+    return { lines, bad: true, summary: s };
+  }
+  if (s.blocked) lines.push({ kind: 'err', text: 'Сайт показал проверку браузера — карточка не прочитана. Откройте снова, пройдите проверку в окне и дождитесь чтения.' });
+  if (s.numberFound === true) lines.push({ kind: 'done', text: 'Номер дела «' + s.number + '» на странице найден — открылась карточка нужного дела.' });
+  else if (s.numberFound === false) lines.push({ kind: 'diff', text: 'Номер дела «' + s.number + '» на странице не найден — возможно, открылась не карточка дела (или в деле неверный номер в суде).' });
+  else lines.push({ kind: 'info', text: 'Номер дела в суде в деле не указан — совпадение не проверялось.' });
+  lines.push({ kind: 'info', text: 'Страница: текста ' + s.textLen + ' знаков; элементов структуры ' + s.structTotal + '; заголовков ' + s.heads.length + '; адресов документов и разделов ' + s.links.length + (s.manual ? '; прочитано по кнопке «Прочитать»' : '') + '.' });
+  if (link && s.href && s.href.split('#')[0] !== String(link.url || '').split('#')[0]) lines.push({ kind: 'info', text: 'Конечный адрес страницы отличается от ссылки в деле: ' + s.href });
+  if (!s.blocked && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
+  lines.push({ kind: 'hint', text: 'Пробная версия: в дело ничего не записано. Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
+  return { lines, bad: s.blocked || s.textLen < 800, summary: s };
+}
+function kadProtoLast() { return lsJSON(KAD_PROTO_LAST, null); }
+// запуск чтения: окно открывает приложение; результат придёт в window.__kadResult
+async function kadProtoRead(caseId) {
+  if (!kadProtoSupported()) { toast('Чтение карточки КАД доступно в приложении для Android 1.6 и новее', true); return null; }
+  const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return null; }
+  const l = kadLinkOf(c); if (!l) { toast('В деле нет ссылки на kad.arbitr.ru', true); return null; }
+  if (KAD_PROTO.req) { toast('Окно КАД уже открыто — дождитесь результата', true); return null; }
+  const req = 'kad-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  KAD_PROTO.req = req; KAD_PROTO.lastReq = req; KAD_PROTO.caseId = caseId; KAD_PROTO.link = l;
+  window.__kadResult = (id, res) => { kadProtoOnResult(id, res); };
+  clearTimeout(KAD_PROTO.timer);
+  KAD_PROTO.timer = setTimeout(() => { if (KAD_PROTO.req === req) { KAD_PROTO.req = null; toast('Окно КАД не ответило — результат, если придёт, будет показан', true); } }, KAD_PROTO_WAIT);
+  toast('Открываю карточку дела на сайте КАД…');
+  try { AndroidApp.kadRead(l.url, l.number || '', req); }
+  catch (e) { logErr('kad:read', e); KAD_PROTO.req = null; clearTimeout(KAD_PROTO.timer); toast('Приложение не открыло окно КАД: ' + (e && e.message || e), true); return null; }
+  return req;
+}
+function kadProtoOnResult(id, res) {
+  if (id !== KAD_PROTO.lastReq) { logErr('kad:result', new Error('ответ на чужой запрос ' + id)); return; }
+  KAD_PROTO.req = null; clearTimeout(KAD_PROTO.timer);
+  if (typeof res === 'string') { try { res = JSON.parse(res); } catch (e) { res = null; } }
+  const m = kadProtoResultModel(res, KAD_PROTO.link);
+  try { localStorage.setItem(KAD_PROTO_LAST, JSON.stringify({ caseId: KAD_PROTO.caseId, at: Date.now(), summary: m.summary })); } catch (e) { logErr('kad:store', e); }
+  KAD_PROTO.text = res && typeof res === 'object' ? String(res.text || '') : '';
+  openKadProtoSheet(KAD_PROTO.caseId, res);
+  toast(m.bad ? 'Карточка КАД не прочитана — причина в листе' : 'Карточка КАД прочитана — пробная версия, в дело не записано', m.bad);
+}
+function openKadProtoSheet(caseId, res) {
+  const m = kadProtoResultModel(res, KAD_PROTO.link), s = m.summary, text = String(res && res.text || '');
+  const box = l => `<div class="info-box${l.kind === 'diff' || l.kind === 'err' ? ' warning' : ''}">${esc(l.text)}</div>`;
+  const rows = s.struct.slice(0, 120).map(x => `<tr><td style="overflow-wrap:anywhere"><code style="white-space:normal;overflow-wrap:anywhere">${esc(x.k)}</code></td><td>${x.n}</td><td>${x.len}</td></tr>`).join('');
+  const struct = s.struct.length ? `<div class="section-label">Структура страницы (теги, id, классы)</div><div class="table-wrap"><table class="grid"><thead><tr><th>Элемент</th><th>Шт.</th><th>Знаков</th></tr></thead><tbody>${rows}</tbody></table></div>${s.struct.length > 120 ? `<p class="small muted">Показаны первые 120 из ${s.struct.length}; в копии — все.</p>` : ''}` : '';
+  const heads = s.heads.length ? `<div class="section-label">Заголовки и вкладки</div><div class="task-badges">${s.heads.map(h => `<span class="badge">${esc(h)}</span>`).join('')}</div>` : '';
+  const links = s.links.length ? `<div class="section-label">Адреса документов и разделов (без идентификаторов)</div><pre class="small" style="white-space:pre-wrap">${esc(s.links.join('\n'))}</pre>` : '';
+  const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
+  const body = m.lines.map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + struct + heads + links + txt +
+    `<div class="form-actions">${s.ok ? `<button type="button" class="button primary" id="kad-copy" onclick="kadProtoCopy()">${icon('files')}Скопировать структуру</button>` : ''}<button type="button" class="button" id="kad-retry" onclick="kadProtoRead('${jsq(caseId)}')">${icon('refresh-cw')}Повторить</button>${caseId ? `<button type="button" class="button" id="kad-back" onclick="openCaseSheet('${jsq(caseId)}')">${icon('briefcase-business')}Вернуться в дело</button>` : ''}</div>`;
+  openSheet('Карточка КАД (пробно)', body, sheetIsOpen() ? true : undefined);
+}
+async function kadProtoCopy() {
+  const last = kadProtoLast(); if (!last || !last.summary) { toast('Нечего копировать — сначала прочитайте карточку', true); return; }
+  const t = JSON.stringify({ kadProto: 1, app: 'android', at: new Date(last.at || Date.now()).toISOString(), summary: last.summary }, null, 1);
+  try { await navigator.clipboard.writeText(t); toast('Структура скопирована — вставьте её в сообщение разработчику'); }
+  catch (e) { logErr('kad:copy', e); openSheet('Структура страницы КАД', `<p class="small muted">Выделите текст и скопируйте вручную.</p><textarea rows="14" readonly style="width:100%">${esc(t)}</textarea>`, true); }
+}
+
 // ▼▼▼ sync/ycdeploy.js
 // ═══ sync/ycdeploy.js — «Свой сервер в Яндекс Облаке одной кнопкой» (план основных функций, п. 3.2; обещано 30.09.2026) ═══
 // Мастер прежней программы (v273/v275, ycDeploy) перенесён дословно: каталог → сервисный аккаунт и роли → ключ хранилища → закрытый бакет →
@@ -7550,7 +7659,7 @@ async function openCaseSheet(id, keep) {
     <div class="task-badges">${badge(c.status || 'Без статуса', c.status === 'Завершено' ? 'good' : c.status === 'Ожидание' ? 'warn' : 'accent')}${c.kind ? badge(c.kind) : ''}${c.category ? badge(c.category) : ''}${c.archived ? badge('Архив') : ''}</div>
     ${cHead.court || cHead.judge ? `<div class="case-court">${cHead.court ? `<div>${icon('landmark', 'icon-sm')}<span>${esc(cHead.court)}${c.stage && c.stage !== 'Первая инстанция' ? ' · ' + esc(String(c.stage).toLowerCase()) : ''}</span></div>` : ''}${cHead.judge ? `<div>${icon('users-round', 'icon-sm')}<span>Судья: ${esc(cHead.judge)}</span></div>` : ''}</div>` : ''}
     ${!cHead.judge && c.court ? `<div class="case-step">${icon('circle-alert', 'icon-sm')}<span>Судья не указан — ${hasLink ? 'нажмите «Данные с сайта суда»' : 'впишите в форме дела («Изменить»)'}</span></div>` : ''}
-    <div class="actions" style="margin:10px 0 8px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Контакты суда', `openCourtContacts('${jsq(c.id)}')`, 'small-btn', 'landmark')}${(c.docsPath || c.docsUrl) ? btn('Папка документов', `openCaseDocs('${jsq(c.id)}')`, 'small-btn', 'files') : ''}${hasLink ? `<button type="button" class="button small-btn" id="case-card-fetch" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button>` : ''}${cl && contactLinks(cl.phone).tel ? `<button type="button" class="button small-btn" id="case-contact" onclick="openContactSheet('${jsq(cl.id)}')">${icon('phone', 'icon-sm')}Связаться с доверителем</button>` : ''}</div>
+    <div class="actions" style="margin:10px 0 8px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Контакты суда', `openCourtContacts('${jsq(c.id)}')`, 'small-btn', 'landmark')}${(c.docsPath || c.docsUrl) ? btn('Папка документов', `openCaseDocs('${jsq(c.id)}')`, 'small-btn', 'files') : ''}${hasLink ? `<button type="button" class="button small-btn" id="case-card-fetch" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button>` : ''}${typeof kadProtoButton === 'function' ? kadProtoButton(c) : ''}${cl && contactLinks(cl.phone).tel ? `<button type="button" class="button small-btn" id="case-contact" onclick="openContactSheet('${jsq(cl.id)}')">${icon('phone', 'icon-sm')}Связаться с доверителем</button>` : ''}</div>
     ${cHead.next ? `<button type="button" class="case-next" onclick="openHearingForm('${jsq(cHead.next.id)}')">${icon('calendar-days')}<span><b>${esc(fmtDate(cHead.next.date))}${cHead.next.time ? ' · ' + esc(cHead.next.time) : ''}</b><small>Заседание${cHead.next.room ? ' · зал ' + esc(cHead.next.room) : ''} · ${esc(todayDayLabel(cHead.next.date, localISO(new Date())).toLowerCase())}</small></span>${icon('chevron-right', 'icon-sm')}</button>` : ''}
     ${c.nextAction ? `<div class="case-step${m.nextOverdue ? ' overdue' : ''}">${icon('check-check', 'icon-sm')}<span>Следующий шаг: ${esc(c.nextAction)}${c.nextActionDue ? ' — ' + esc(m.nextWhen) + ', ' + esc(fmtDate(c.nextActionDue)) : ''}</span></div>` : ''}
     ${m.fin.amount || m.fin.paid ? `<button type="button" class="case-money" onclick="caseMoneyOpen()"><span><small>Начислено</small><b>${esc(fmtMoney(m.fin.amount))}</b></span><span><small>Оплачено</small><b>${esc(fmtMoney(m.fin.paid))}</b></span><span><small>Долг</small><b class="${m.fin.debt ? 'bad' : ''}">${esc(fmtMoney(m.fin.debt))}</b></span></button>` : ''}
@@ -9712,7 +9821,7 @@ const HELP_SECTIONS = [
 <p>Строка под шапкой говорит, что с данными: «На устройстве», «Ждёт отправки», «Синхронизировано», «Обмен не удался» (с кнопкой «Повторить»). Настройки → «О программе» → «Обмен с сервером» — последняя подтверждённая отправка и есть ли неотправленные правки.</p>
 <p><b>Второе устройство (телефон):</b> откройте программу, «Синхронизация» → те же адрес, код и пароль → «Сохранить и проверить связь» → «Загрузить базу с сервера». Смена секретного кода — отдельная инструкция у автора: код меняется на сервере, во всех устройствах и в коллекторе одновременно.</p>` },
   { id: 'monitor', title: 'Мониторинг судов', html: `
-<p>Функция-коллектор в вашем облаке по расписанию (07:30 и 15:30 по Москве) открывает карточки дел на сайтах судов общей юрисдикции и арбитражных судов, сравнивает с прошлым разом и передаёт события — назначенные заседания, движение дела, даты решений и мотивированных актов — на ваш сервер. Программа забирает их оттуда.</p>
+<p>Функция-коллектор в вашем облаке по расписанию (07:30 и 15:30 по Москве) открывает карточки дел на сайтах судов общей юрисдикции (ГАС «Правосудие», суды Москвы), сравнивает с прошлым разом и передаёт события — назначенные заседания, движение дела, даты решений и мотивированных актов — на ваш сервер. Программа забирает их оттуда.</p>
 <h3>Как подключить</h3>
 <ol><li>Нужен работающий личный сервер (раздел «Синхронизация и свой сервер»).</li>
 <li>Коллектор: если сервер создавал мастер «Свой сервер в Яндекс Облаке» — функция <b>collector-sud</b> уже есть, адрес и секрет мастер показал в конце. Иначе создайте её вручную: консоль → «Cloud Functions» → «Создать функцию» → имя collector-sud → Node.js → код из файла <b>dist/loader-collector-index.js</b> с сайта программы (загрузчик сам берёт код коллектора и обновляет его), точка входа index.handler, таймаут 600 с; переменные: <b>BRIDGE_URL</b> — адрес вашего сервера (точно как в «Синхронизации»), <b>BRIDGE_SECRET</b> — секретный код сервера, <b>SECRET</b> — секрет самого коллектора (придумайте отдельный), <b>UPDATE_URL</b> — https://advocate33.github.io/dist. Функция публичная. Таймер: «Триггеры» → «Создать» → тип «Таймер» → cron-выражение <b>30 4,12 ? * * *</b> (это 07:30 и 15:30 по Москве) → функция collector-sud.</li>
@@ -9722,6 +9831,8 @@ const HELP_SECTIONS = [
 <ul><li>События приходят сами: при открытии программы, при возвращении в неё и раз в 30 минут (на «Сегодня» — когда проверено и когда следующая проверка). Коллектор обходит сайты по расписанию (утром и днём); «Обновить с сайтов судов» в «Судах и мониторинге» или «Обновить» на «Сегодня» — обойти прямо сейчас, это несколько минут; «Получить события» — только забрать то, что коллектор уже собрал. Перечень дел со ссылками уходит коллектору сам после сохранения дела.</li>
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
+<h3>Арбитражные дела (КАД Арбитр)</h3>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Пока это пробная версия: программа показывает, что отдал сайт, и в дело ничего не записывает.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
