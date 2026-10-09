@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="09.10.2026 15:46 · 0b91502+">
+<meta name="build" content="09.10.2026 18:18 · 2875e6c">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4892,6 +4892,9 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
 // структура страницы — теги, id и классы без текста), и даёт скопировать структуру для написания разбора. Разбор заседаний, движения
 // дела и документов в события мониторинга (crmMonPersist) — следующим выпуском, когда структура настоящей страницы станет известна.
 // Данные из окна КАД — чужой текст: в разметку только через esc(), ссылки не делаются кликабельными.
+// Приложение 1.8 (урок 100, 09.10.2026): первое чтение у пользователя вернуло пустое окно проверки браузера — фильтр переходов окна КАД
+// останавливал и кадр проверки. Ответ ver 2 несёт captcha/captchaEmpty (проверка по разметке), frames, frameHosts, blockedHosts, hosts
+// (имена сайтов, к которым обращалась страница) и app (версия приложения); лист при пустом окне проверки называет причину и совет.
 const KAD_PROTO_LAST = 'crm_kad_proto_last'; // последний результат без текста страницы: { caseId, at, summary }
 const KAD_PROTO = { req: null, lastReq: null, caseId: null, link: null, timer: null };
 const KAD_PROTO_WAIT = 15 * 60000;            // окно может ждать, пока пользователь проходит проверку браузера; дольше — запрос считается забытым
@@ -4922,9 +4925,22 @@ function kadProtoSummary(res) {
     blocked: !!res.blocked, manual: !!res.manual, state: String(res.state || ''), structTotal: Number(res.structTotal) || (Array.isArray(res.struct) ? res.struct.length : 0),
     struct: (Array.isArray(res.struct) ? res.struct : []).slice(0, 600).map(x => ({ k: String(x && x.k || '').slice(0, 160), n: Number(x && x.n) || 0, len: Number(x && x.len) || 0, kids: Number(x && x.kids) || 0 })),
     heads: (Array.isArray(res.heads) ? res.heads : []).slice(0, 150).map(x => String(x || '').slice(0, 70)),
-    links: (Array.isArray(res.links) ? res.links : []).slice(0, 80).map(x => String(x || '').slice(0, 200)) };
+    links: (Array.isArray(res.links) ? res.links : []).slice(0, 80).map(x => String(x || '').slice(0, 200)),
+    // приложение 1.8 (ver 2): проверка браузера по разметке, вложенные кадры и имена сайтов, к которым обращалась страница, версия приложения
+    captcha: !!res.captcha, captchaEmpty: !!res.captchaEmpty, app: String(res.app || ''), ua: String(res.ua || '').slice(0, 300),
+    frames: strList(res.frames, 20, 200), frameHosts: strList(res.frameHosts, 40, 100), blockedHosts: strList(res.blockedHosts, 40, 100), hosts: strList(res.hosts, 40, 100) };
+  // приложение 1.6–1.7 (ver 1) проверку по разметке не отличает: пустой контейнер проверки узнаётся по структуре
+  if (!s.captcha && s.struct.some(x => /captcha/i.test(x.k))) { s.captcha = true; s.captchaEmpty = s.struct.filter(x => /captcha/i.test(x.k)).every(x => !x.len && !x.kids); }
   if (res.ok === false) { s.error = String(res.error || 'error'); if (res.message) s.message = String(res.message).slice(0, 300); }
   return s;
+}
+function strList(a, n, len) { return (Array.isArray(a) ? a : []).slice(0, n).map(x => String(x || '').slice(0, len)); }
+// совет при пустом окне проверки: до 1.8 причина известна — фильтр переходов окна КАД останавливал кадр проверки (урок 100)
+function kadCaptchaEmptyLine(app) {
+  const old = !app || (typeof verCmp === 'function' && verCmp(app, '1.8') < 0);
+  return 'Сайт показал окно проверки браузера, но оно осталось пустым — проверка не загрузилась, карточка не прочитана. ' +
+    (old ? 'В приложении до 1.8 окно КАД само не пускало кадр проверки — обновите приложение: Настройки → «Проверить обновления» (или карточка на «Сегодня»).'
+      : 'Повторите чтение; если повторится — нажмите «Скопировать структуру» и пришлите разработчику: в копии есть адреса, к которым обращалась страница.');
 }
 // строки для листа; bad — чтение не удалось
 function kadProtoResultModel(res, link) {
@@ -4935,15 +4951,19 @@ function kadProtoResultModel(res, link) {
     lines.push({ kind: 'err', text: why });
     return { lines, bad: true, summary: s };
   }
-  if (s.blocked) lines.push({ kind: 'err', text: 'Сайт показал проверку браузера — карточка не прочитана. Откройте снова, пройдите проверку в окне и дождитесь чтения.' });
+  // пустое окно проверки (снимок пользователя 09.10.2026, урок 100) — своя причина и свой совет; иначе общая строка о проверке
+  const capEmpty = s.captcha && s.captchaEmpty && s.textLen < 800, blocked = s.blocked || (s.captcha && s.textLen < 800);
+  if (capEmpty) lines.push({ kind: 'err', text: kadCaptchaEmptyLine(s.app || (typeof appVersionNow === 'function' ? appVersionNow() : '')) });
+  else if (blocked) lines.push({ kind: 'err', text: 'Сайт показал проверку браузера — карточка не прочитана. Откройте снова, пройдите проверку в окне и дождитесь чтения.' });
   if (s.numberFound === true) lines.push({ kind: 'done', text: 'Номер дела «' + s.number + '» на странице найден — открылась карточка нужного дела.' });
   else if (s.numberFound === false) lines.push({ kind: 'diff', text: 'Номер дела «' + s.number + '» на странице не найден — возможно, открылась не карточка дела (или в деле неверный номер в суде).' });
-  else lines.push({ kind: 'info', text: 'Номер дела в суде в деле не указан — совпадение не проверялось.' });
-  lines.push({ kind: 'info', text: 'Страница: текста ' + s.textLen + ' знаков; элементов структуры ' + s.structTotal + '; заголовков ' + s.heads.length + '; адресов документов и разделов ' + s.links.length + (s.manual ? '; прочитано по кнопке «Прочитать»' : '') + '.' });
+  else if (s.numberFound === null) lines.push({ kind: 'info', text: 'Номер дела в суде в деле не указан — совпадение не проверялось.' });
+  lines.push({ kind: 'info', text: 'Страница: текста ' + s.textLen + ' знаков; элементов структуры ' + s.structTotal + '; заголовков ' + s.heads.length + '; адресов документов и разделов ' + s.links.length +
+    (s.frames.length ? '; вложенных кадров ' + s.frames.length : '') + (s.hosts.length ? '; сайтов, к которым обращалась страница, ' + s.hosts.length : '') + (s.manual ? '; прочитано по кнопке «Прочитать»' : '') + (s.app ? '; приложение ' + s.app : '') + '.' });
   if (link && s.href && s.href.split('#')[0] !== String(link.url || '').split('#')[0]) lines.push({ kind: 'info', text: 'Конечный адрес страницы отличается от ссылки в деле: ' + s.href });
-  if (!s.blocked && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
+  if (!blocked && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
   lines.push({ kind: 'hint', text: 'Пробная версия: в дело ничего не записано. Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
-  return { lines, bad: s.blocked || s.textLen < 800, summary: s };
+  return { lines, bad: blocked || s.textLen < 800, summary: s };
 }
 // «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
@@ -4991,8 +5011,11 @@ function openKadProtoSheet(caseId, res) {
   const struct = s.struct.length ? `<div class="section-label">Структура страницы (теги, id, классы)</div><div class="table-wrap"><table class="grid"><thead><tr><th>Элемент</th><th>Шт.</th><th>Знаков</th></tr></thead><tbody>${rows}</tbody></table></div>${s.struct.length > 120 ? `<p class="small muted">Показаны первые 120 из ${s.struct.length}; в копии — все.</p>` : ''}` : '';
   const heads = s.heads.length ? `<div class="section-label">Заголовки и вкладки</div><div class="task-badges">${s.heads.map(h => `<span class="badge">${esc(h)}</span>`).join('')}</div>` : '';
   const links = s.links.length ? `<div class="section-label">Адреса документов и разделов (без идентификаторов)</div><pre class="small" style="white-space:pre-wrap">${esc(s.links.join('\n'))}</pre>` : '';
+  // приложение 1.8: куда обращалась страница — по этим именам видно, какой кадр проверки загрузился, а какой был остановлен
+  const hostRows = [['Вложенные кадры', s.frames], ['Кадры с других сайтов', s.frameHosts], ['Переходы окна, которые были остановлены', s.blockedHosts], ['Сайты, к которым обращалась страница', s.hosts]].filter(r => r[1].length);
+  const hosts = hostRows.length ? `<div class="section-label">Куда обращалась страница (имена сайтов, без путей и идентификаторов)</div>${hostRows.map(r => `<p class="small"><b>${r[0]}:</b> ${esc(r[1].join(', '))}</p>`).join('')}` : '';
   const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
-  const body = m.lines.map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + struct + heads + links + txt +
+  const body = m.lines.map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + struct + heads + links + hosts + txt +
     `<div class="form-actions">${s.ok ? `<button type="button" class="button primary" id="kad-copy" onclick="kadProtoCopy()">${icon('files')}Скопировать структуру</button>` : ''}<button type="button" class="button" id="kad-retry" onclick="kadProtoRead('${jsq(caseId)}')">${icon('refresh-cw')}Повторить</button>${caseId ? `<button type="button" class="button" id="kad-back" onclick="openCaseSheet('${jsq(caseId)}')">${icon('briefcase-business')}Вернуться в дело</button>` : ''}</div>`;
   openSheet('Карточка КАД (пробно)', body, sheetIsOpen() ? true : undefined);
 }
