@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="10.10.2026 06:58 · 481ac69">
+<meta name="build" content="10.10.2026 20:47 · 607a2e7">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4367,7 +4367,9 @@ async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw(
   }
   { /* v239: карточки дел с сайта суда при плановом сборе — заполняем пустые поля дела */
     const cards=added.filter(x=>x.eventType==='casecard'&&x.caseId);
-    if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null;try{card=JSON.parse(x.raw||'{}').card;}catch (e) { if (typeof logErr === "function") logErr("", e); }if(!card)continue;const res=crmCaseApplyCard(c,card);if(res.done.length){addCaseHistoryEvent(c,'courtCard','',res.done.join('; '),'monitor');await put('cases',c);await crmCaseLogByNum(c.number,'flow','С сайта суда: '+res.done.join('; '));}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
+    if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null,cardSt='';try{const j=JSON.parse(x.raw||'{}');card=j.card;cardSt=String(j.st||'');}catch (e) { if (typeof logErr === "function") logErr("", e); }if(!card)continue;
+    // 10.10.2026: инстанция карточки (raw.st от коллектора и окна КАД) — поля апелляции и кассации, а не всегда первой инстанции
+    const res=crmCaseApplyCard(c,card,cardSt==='Апелляция'?'App':(cardSt==='Кассация'||cardSt==='Надзор')?'Cass':'');if(res.done.length){addCaseHistoryEvent(c,'courtCard','',res.done.join('; '),'monitor');await put('cases',c);await crmCaseLogByNum(c.number,'flow','С сайта суда: '+res.done.join('; '));}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
   }
   const okAny=added.length||updated;if(!opts.quiet)toast(okAny?`Добавлено событий: ${added.length}${updated?`, обновлено: ${updated}`:''}`:'Новых событий нет — дубликаты пропущены',!okAny);if(okAny&&crmMonAutoOn()){try{await crmMonAutoApply(null);}catch(e){console.warn('auto-apply',e);}}if(!opts.quiet){openMonitorCenter();renderDashboard();}}
 const crmMonAutoOn = () => localStorage.getItem('crm_mon_auto') !== '0';
@@ -4883,14 +4885,16 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
 }
 
 // ▼▼▼ sync/kadproto.js
-// ═══ sync/kadproto.js — карточка дела КАД Арбитр через приложение для Android (пробная версия, решение пользователя 09.10.2026) ═══
+// ═══ sync/kadproto.js — карточка дела КАД Арбитр через приложение для Android (решение пользователя 09.10.2026) ═══
 // Сайт kad.arbitr.ru не отдаёт карточку дела скриптам (проверка браузера), поэтому коллектор в облаке арбитражные ссылки пропускает.
 // Приложение для Android 1.6 открывает карточку в отдельном окне встроенного браузера на телефоне пользователя — от его имени, как
 // обычный просмотр, — и возвращает программе текст и структуру страницы: мост AndroidApp.kadRead(url, number, reqId), ответ приходит в
 // window.__kadResult(reqId, result). Окно изолировано от программы (нет моста, только *.arbitr.ru).
-// Пробная версия: в базу ничего не пишется. Лист показывает, что отдал сайт (найден ли номер дела, не показана ли проверка браузера,
-// структура страницы — теги, id и классы без текста), и даёт скопировать структуру для написания разбора. Разбор заседаний, движения
-// дела и документов в события мониторинга (crmMonPersist) — следующим выпуском, когда структура настоящей страницы станет известна.
+// Чтение (10.10.2026, шаг 1): карточка с 1.13 разбирается на поля (card, ver 6) и записывается в дело и в события мониторинга тем же путём,
+// что ответ коллектора (kadCardApply → crmMonNormalizeRows → crmMonPersist): номер в суде, судья, суд, дата поступления, категория —
+// в пустые поля дела (расхождения называются, не перезаписываются), ближайшее заседание из строки инстанции — событием «hearing»
+// (заседание создаёт автоприменение мониторинга). Стороны с ролями — с приложения 1.14 (parties); 1.13 присылает плоский список ячеек
+// без ролей — они только показываются. Лист показывает, что отдал сайт и что записано; «Скопировать структуру» — для разбора сбоев.
 // Данные из окна КАД — чужой текст: в разметку только через esc(), ссылки не делаются кликабельными.
 // Приложение 1.8 (урок 100, 09.10.2026): первое чтение у пользователя вернуло пустое окно проверки браузера — фильтр переходов окна КАД
 // останавливал и кадр проверки. Ответ ver 2 несёт captcha/captchaEmpty (проверка по разметке), frames, frameHosts, blockedHosts, hosts
@@ -4963,7 +4967,93 @@ function cardOf(c) {
   const str = v => String(v == null ? '' : v).slice(0, 300);
   return { number: str(c.number), desc: str(c.desc), category: str(c.category), date: str(c.date), dur: str(c.dur), sides: strList(c.sides, 40, 300), judges: str(c.judges), acts: str(c.acts), loading: !!c.loading,
     instances: (Array.isArray(c.instances) ? c.instances : []).slice(0, 20).map(i => ({ date: str(i && i.date).slice(0, 80), title: str(i && i.title), number: str(i && i.number).slice(0, 60), add: str(i && i.add), docs: Number(i && i.docs) || 0 })),
-    tabs: strList(c.tabs, 8, 60) };
+    tabs: strList(c.tabs, 8, 60),
+    // приложение 1.14 (ver 7): стороны с ролями по классам ячеек таблицы сторон
+    parties: Array.isArray(c.parties) ? c.parties.slice(0, 40).map(p => ({ role: str(p && p.role).slice(0, 40), name: str(p && p.name) })).filter(p => p.name) : undefined };
+}
+// ── шаг 1 плана по КАД (10.10.2026, по настоящим значениям полей ответа 1.13): карточка → дело и события мониторинга ──
+// Разбор чистый: на входе сводка (kadProtoSummary) и ссылка дела, на выходе — карточка в формате коллектора (crmCaseApplyCard:
+// number, judge, court, registered, category, parties) и ближайшее заседание из строки инстанции «Следующее заседание: ДД.ММ.ГГГГ, ЧЧ:ММ ,
+// Зал судебных заседаний № N». Ничего не додумывается: что не распознано — пусто, об этом говорит лист.
+const KAD_SIDE_HEADS = ['истцы', 'ответчики', 'третьи лица', 'иные лица', 'заявители', 'заинтересованные лица', 'должники', 'кредиторы'];
+const KAD_MONTHS = { января: 1, февраля: 2, марта: 3, апреля: 4, мая: 5, июня: 6, июля: 7, августа: 8, сентября: 9, октября: 10, ноября: 11, декабря: 12 };
+// «18 июня 2026» → 2026-06-18; «18.06.2026» — тоже
+function kadDateIso(s) {
+  s = String(s || '').trim();
+  let m = s.match(/^(\d{1,2})\s+([а-яё]+)\s+(\d{4})/i);
+  if (m && KAD_MONTHS[m[2].toLowerCase()]) return `${m[3]}-${String(KAD_MONTHS[m[2].toLowerCase()]).padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  m = s.match(/(\d{1,2})\.(\d{2})\.(\d{4})/); return m ? `${m[3]}-${m[2]}-${m[1].padStart(2, '0')}` : '';
+}
+// «АС Владимирской области Райтер-Рожкова О. Э.» → { court: 'Арбитражный суд Владимирской области', judge: 'Райтер-Рожкова О. Э.' };
+// без инициалов в конце судья не выделяется — вся строка остаётся судом (не додумывается)
+function kadJudgeSplit(s) {
+  s = String(s || '').replace(/\s+/g, ' ').trim(); if (!s) return { court: '', judge: '' };
+  const m = s.match(/^(.*?)\s*([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)*\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.)$/u);
+  const court = (m ? m[1] : s).replace(/^АС\s+/u, 'Арбитражный суд ').trim();
+  return { court, judge: m ? m[2].replace(/\.\s?([А-ЯЁ])\./u, '. $1.') : '' };
+}
+// «Следующее заседание: 24.11.2026, 10:20 , Зал судебных заседаний № 129» → { date, time, room, text } или null
+function kadNextHearing(add) {
+  const m = String(add || '').match(/Следующее заседание:\s*(\d{1,2}\.\d{2}\.\d{4})(?:\s*,?\s*(\d{1,2}:\d{2}))?(?:\s*,\s*([^\n]+))?/i);
+  if (!m) return null;
+  const date = kadDateIso(m[1]); if (!date) return null;
+  const tail = String(m[3] || '').trim(), rm = tail.match(/№\s*([0-9]{1,4}[А-Яа-яA-Za-zЁё]?)/) || tail.match(/^(?:судебн\S*\s+)?зал[аеу]?\s*([0-9]{1,4}[А-Яа-яЁё]?)/i);
+  const time = m[2] ? m[2].padStart(5, '0') : '';
+  return { date, time, room: rm ? rm[1] : '', text: tail };
+}
+// «Рассматривается в первой инстанции» → стадия; остальное — пусто
+function kadStageOf(desc) {
+  const d = String(desc || '').toLowerCase();
+  return /перв\S+ инстанц/.test(d) ? 'Первая инстанция' : /апелляц/.test(d) ? 'Апелляция' : /кассац/.test(d) ? 'Кассация' : /надзор/.test(d) ? 'Надзор' : '';
+}
+// стороны: приложение 1.14 и новее присылает parties [{role, name}] по классам ячеек; 1.13 — плоский список ячеек (заголовки колонок и
+// имена вперемешку, пустые колонки выпадают) — роли по нему не восстановить, поэтому имена только показываются, в дело не пишутся
+function kadPartiesOf(card) {
+  if (Array.isArray(card && card.parties)) return card.parties.map(p => ({ role: String(p && p.role || '').slice(0, 40), name: String(p && p.name || '').slice(0, 300) })).filter(p => p.name).slice(0, 40);
+  return null;
+}
+function kadSideNames(sides) { return (Array.isArray(sides) ? sides : []).map(s => String(s || '').trim()).filter(s => s && !KAD_SIDE_HEADS.includes(s.toLowerCase().replace(/:$/, ''))); }
+// карточка для crmCaseApplyCard + ближайшее заседание + стадия: { card, parties, sideNames, hearing, stage }
+function kadCardParse(c) {
+  const k = cardOf(c); if (!k) return null;
+  const js = kadJudgeSplit(k.judges), inst = k.instances[0] || null, parties = kadPartiesOf(c);
+  return { card: { number: k.number, uid: '', judge: js.judge, court: js.court, registered: kadDateIso(k.date), category: k.category, parties: parties || [] },
+    parties, sideNames: parties ? [] : kadSideNames(k.sides), hearing: inst ? kadNextHearing(inst.add) : null, stage: kadStageOf(k.desc) || (inst ? kadStageOf(inst.date) : '') };
+}
+// строки для crmMonNormalizeRows в формате коллектора: карточка дела (casecard) и ближайшее заседание (hearing). c — дело, link — kadLinkOf(c)
+function kadCardRows(parsed, c, link, todayIso) {
+  if (!parsed || !c) return [];
+  const st = (link && link.stage) || parsed.stage || '', no = parsed.card.number || (link && link.number) || '', url = String(link && link.url || ''), src = 'Карточка КАД (приложение)';
+  const rows = [];
+  if (parsed.card.number || parsed.card.judge || parsed.card.court || parsed.card.parties.length)
+    rows.push({ externalId: 'card:kad:' + crmMonNorm(c.number || '') + '|' + crmMonNorm(no || url) + '|' + st, title: ('Карточка дела ' + no).trim(), date: parsed.card.registered || todayIso, eventType: 'casecard',
+      courtNo: no, caseUid: '', judge: parsed.card.judge, source: src, crmNumber: c.number || '', court: parsed.card.court, raw: JSON.stringify({ card: parsed.card, st, url, sides: parsed.sideNames }) });
+  const h = parsed.hearing;
+  if (h) rows.push({ externalId: `kad|${no || c.number || url}|${h.date}|${h.time || '-'}|h`, date: h.date, eventType: 'hearing', courtNo: no, caseUid: '', judge: parsed.card.judge, source: src, crmNumber: c.number || '', court: parsed.card.court,
+    title: `Судебное заседание ${fmtDate(h.date)}${h.time ? ' в ' + h.time : ''}${h.room ? ', зал ' + h.room : ''}`, raw: `${c.number ? c.number + ' · ' : ''}${st}\n${url}\n${h.text || ''}`.trim() });
+  return rows;
+}
+// запись в дело и в события мониторинга тем же путём, что ответ коллектора (урок 2): crmMonNormalizeRows → crmMonPersist (карточка —
+// crmCaseApplyCard: пустые поля заполняются, расхождения называются; заседание — автоприменение). Возвращает отчёт для листа.
+async function kadCardApply(caseId, summary, link) {
+  const parsed = kadCardParse(summary && summary.card); if (!parsed) return null;
+  const c = await getOne('cases', caseId); if (!c) return { error: 'Дело не найдено' };
+  const rows = kadCardRows(parsed, c, link, todayISO()); if (!rows.length) return { done: [], diff: [], hearing: null, sideNames: parsed.sideNames, nothing: true };
+  const before = JSON.parse(JSON.stringify(c)), evBefore = new Set((await getAllRaw('monitorEvents')).filter(x => !x._deleted).map(x => x.externalId));
+  const norm = await crmMonNormalizeRows(rows, 'Карточка КАД');
+  await crmMonPersist(norm, { quiet: true });
+  const after = await getOne('cases', caseId), evAfter = (await getAllRaw('monitorEvents')).filter(x => !x._deleted);
+  const FIELDS = [['courtNo', 'номер дела в суде'], ['courtNoApp', 'номер дела в суде (апелляция)'], ['courtNoCass', 'номер дела в суде (кассация)'], ['judge', 'судья'], ['judgeApp', 'судья (апелляция)'], ['judgeCass', 'судья (кассация)'],
+    ['court', 'суд'], ['courtApp', 'суд (апелляция)'], ['courtCass', 'суд (кассация)'], ['i1FilingDate', 'дата поступления'], ['courtCategory', 'категория']];
+  const done = [], diff = [];
+  // даты пользователю — ДД.ММ.ГГГГ (раздел 7)
+  for (const [f, label] of FIELDS) { const a = String(after && after[f] || ''), b = String(before[f] || ''); if (a && a !== b) done.push(label + ': ' + (/Date$/.test(f) ? fmtDate(a) : a)); }
+  const pAfter = (after && after.participants || []).length, pBefore = (before.participants || []).length; if (pAfter > pBefore) done.push('участников добавлено: ' + (pAfter - pBefore));
+  const sfx = link && link.stage === 'Апелляция' ? 'App' : link && link.stage === 'Кассация' ? 'Cass' : '';
+  const chk = crmCaseApplyCard(JSON.parse(JSON.stringify(after || before)), parsed.card, sfx); diff.push(...chk.diff, ...chk.ask.map(a => a.label + ' — в деле «' + a.was + '», на сайте «' + a.val + '»'));
+  const hRow = rows.find(r => r.eventType === 'hearing'), hEv = hRow ? evAfter.find(x => x.externalId === hRow.externalId) : null;
+  const hearing = hRow ? { date: parsed.hearing.date, time: parsed.hearing.time, room: parsed.hearing.room, isNew: !evBefore.has(hRow.externalId), status: hEv ? hEv.status : '', bound: !!(hEv && hEv.caseId) } : null;
+  return { done, diff, hearing, sideNames: parsed.sideNames, stage: parsed.stage };
 }
 // признаки среды окна КАД (приложение 1.9): только логические значения и числа, имена cookie — строки
 function envOf(e) {
@@ -5017,14 +5107,16 @@ function kadProtoResultModel(res, link) {
     (s.frames.length ? '; вложенных кадров ' + s.frames.length : '') + (s.hosts.length ? '; сайтов, к которым обращалась страница, ' + s.hosts.length : '') + (s.requests.length ? '; запросов ' + s.requests.length : '') + (s.console.length ? '; сообщений консоли ' + s.console.length : '') + (s.loadErrors.length ? '; ошибок загрузки ' + s.loadErrors.length : '') + (s.errors.length ? '; ошибок сценариев страницы ' + s.errors.length : '') + (s.glue ? '; сценариев проверки разобрано ' + Object.keys(s.glue).length : '') + (s.wasmLog.length ? '; обращений wasm записано ' + s.wasmLog.length : '') + (s.manual ? '; прочитано по кнопке «Прочитать»' : '') + (s.app ? '; приложение ' + s.app : '') + '.' });
   if (link && s.href && s.href.split('#')[0] !== String(link.url || '').split('#')[0]) lines.push({ kind: 'info', text: 'Конечный адрес страницы отличается от ссылки в деле: ' + s.href });
   if (!blocked && !s.cardFound && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
-  lines.push({ kind: 'hint', text: 'Пробная версия: в дело ничего не записано. Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
+  if (!s.cardFound) lines.push({ kind: 'hint', text: 'Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
+  // разметка карточки есть, а полей нет — приложение старше 1.13: записать в дело нечего, об этом сказано прямо (урок 86)
+  else if (!s.card) lines.push({ kind: 'hint', text: 'Поля карточки (номер, судья, стороны, ближайшее заседание) присылает приложение 1.13 и новее — обновите приложение (Настройки → «Проверить обновления»), и прочитанное запишется в дело.' });
   return { lines, bad: blocked || (!s.cardFound && s.textLen < 800), summary: s };
 }
 // «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
 function kadCardLine(stage) {
   return (stage ? stage + ': ' : '') + 'ссылка ведёт на КАД Арбитр — коллектор в облаке этот сайт не читает (сайт не отдаёт карточку скриптам). ' +
-    (kadProtoSupported() ? 'Нажмите «Карточка КАД» в деле.' : 'Карточку читает приложение для Android 1.6 и новее: кнопка «Карточка КАД» в деле (пробная версия).');
+    (kadProtoSupported() ? 'Нажмите «Карточка КАД» в деле.' : 'Карточку читает приложение для Android 1.6 и новее: кнопка «Карточка КАД» в деле.');
 }
 // ссылки дела делятся на «КАД» и «сайт суда»; stages — строки CASE_LINK_STAGES, у которых ссылка заполнена
 function kadSplitStages(c, stages) {
@@ -5041,7 +5133,8 @@ async function kadProtoRead(caseId) {
   if (KAD_PROTO.req) { toast('Окно КАД уже открыто — дождитесь результата', true); return null; }
   const req = 'kad-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
   KAD_PROTO.req = req; KAD_PROTO.lastReq = req; KAD_PROTO.caseId = caseId; KAD_PROTO.link = l;
-  window.__kadResult = (id, res) => { kadProtoOnResult(id, res); };
+  // обещание возвращается наружу: тесты и живые сценарии ждут записи в дело
+  window.__kadResult = (id, res) => kadProtoOnResult(id, res).catch(e => { logErr('kad:onresult', e); });
   clearTimeout(KAD_PROTO.timer);
   KAD_PROTO.timer = setTimeout(() => { if (KAD_PROTO.req === req) { KAD_PROTO.req = null; toast('Окно КАД не ответило — результат, если придёт, будет показан', true); } }, KAD_PROTO_WAIT);
   toast('Открываю карточку дела на сайте КАД…');
@@ -5049,18 +5142,40 @@ async function kadProtoRead(caseId) {
   catch (e) { logErr('kad:read', e); KAD_PROTO.req = null; clearTimeout(KAD_PROTO.timer); toast('Приложение не открыло окно КАД: ' + (e && e.message || e), true); return null; }
   return req;
 }
-function kadProtoOnResult(id, res) {
+async function kadProtoOnResult(id, res) {
   if (id !== KAD_PROTO.lastReq) { logErr('kad:result', new Error('ответ на чужой запрос ' + id)); return; }
   KAD_PROTO.req = null; clearTimeout(KAD_PROTO.timer);
   if (typeof res === 'string') { try { res = JSON.parse(res); } catch (e) { res = null; } }
   const m = kadProtoResultModel(res, KAD_PROTO.link);
   try { localStorage.setItem(KAD_PROTO_LAST, JSON.stringify({ caseId: KAD_PROTO.caseId, at: Date.now(), summary: m.summary })); } catch (e) { logErr('kad:store', e); }
   KAD_PROTO.text = res && typeof res === 'object' ? String(res.text || '') : '';
-  openKadProtoSheet(KAD_PROTO.caseId, res);
-  toast(m.bad ? 'Карточка КАД не прочитана — причина в листе' : 'Карточка КАД прочитана — пробная версия, в дело не записано', m.bad);
+  // шаг 1 (10.10.2026): прочитанная карточка записывается в дело и в события мониторинга тем же путём, что ответ коллектора; отчёт — в лист
+  let applied = null;
+  if (!m.bad && m.summary.cardFound && m.summary.card) {
+    try { applied = await kadCardApply(KAD_PROTO.caseId, m.summary, KAD_PROTO.link); }
+    catch (e) { logErr('kad:apply', e); applied = { error: 'Запись в дело не удалась: ' + (e && e.message || e) }; }
+  }
+  KAD_PROTO.applied = applied;
+  openKadProtoSheet(KAD_PROTO.caseId, res, applied);
+  toast(m.bad ? 'Карточка КАД не прочитана — причина в листе' : applied && applied.error ? applied.error : applied && (applied.done.length || (applied.hearing && applied.hearing.isNew)) ? 'Карточка КАД прочитана — записано в дело' : 'Карточка КАД прочитана — новых данных для дела нет', m.bad || !!(applied && applied.error));
+  if (typeof UI === 'object' && UI.ready && typeof nav === 'function' && !sheetIsOpen()) nav(UI.screen);
 }
-function openKadProtoSheet(caseId, res) {
+// строки отчёта о записи для листа (applied — результат kadCardApply)
+function kadAppliedLines(a) {
+  if (!a) return [];
+  if (a.error) return [{ kind: 'err', text: a.error }];
+  const out = [];
+  if (a.done.length) out.push({ kind: 'done', text: 'В дело записано: ' + a.done.join('; ') + '.' });
+  if (a.diff.length) out.push({ kind: 'diff', text: 'Расхождения с делом (в деле оставлено как было): ' + a.diff.join('; ') + '.' });
+  if (a.hearing) out.push({ kind: a.hearing.isNew ? 'done' : 'info', text: 'Ближайшее заседание по карточке: ' + fmtDate(a.hearing.date) + (a.hearing.time ? ' в ' + a.hearing.time : '') + (a.hearing.room ? ', зал ' + a.hearing.room : '') +
+    (a.hearing.isNew ? ' — добавлено в события судов' + (a.hearing.status === 'applied' ? ' и записано в заседания дела' : a.hearing.bound ? '; запись заседания — автоприменением (Мониторинг судов)' : '; к делу не привязано — проверьте номер дела в суде') : ' — такое событие уже было') + '.' });
+  if (a.sideNames && a.sideNames.length) out.push({ kind: 'info', text: 'Стороны по карточке: ' + a.sideNames.join(' · ') + '. Роли сторон приложение 1.13 не передаёт, поэтому участники в дело не записаны — после обновления приложения до 1.14 запишутся с ролями.' });
+  if (!a.done.length && !a.diff.length && !a.hearing && !(a.sideNames && a.sideNames.length)) out.push({ kind: 'info', text: 'Новых данных для дела в карточке нет.' });
+  return out;
+}
+function openKadProtoSheet(caseId, res, applied) {
   const m = kadProtoResultModel(res, KAD_PROTO.link), s = m.summary, text = String(res && res.text || '');
+  const appliedLines = kadAppliedLines(applied === undefined ? KAD_PROTO.applied : applied);
   const box = l => `<div class="info-box${l.kind === 'diff' || l.kind === 'err' ? ' warning' : ''}">${esc(l.text)}</div>`;
   const rows = s.struct.slice(0, 120).map(x => `<tr><td style="overflow-wrap:anywhere"><code style="white-space:normal;overflow-wrap:anywhere">${esc(x.k)}</code></td><td>${x.n}</td><td>${x.len}</td></tr>`).join('');
   const struct = s.struct.length ? `<div class="section-label">Структура страницы (теги, id, классы)</div><div class="table-wrap"><table class="grid"><thead><tr><th>Элемент</th><th>Шт.</th><th>Знаков</th></tr></thead><tbody>${rows}</tbody></table></div>${s.struct.length > 120 ? `<p class="small muted">Показаны первые 120 из ${s.struct.length}; в копии — все.</p>` : ''}` : '';
@@ -5082,13 +5197,13 @@ function openKadProtoSheet(caseId, res) {
   const glueRows = s.glue ? Object.keys(s.glue).map(k => { const g = s.glue[k]; return `<p class="small"><b>${esc(k)}</b>${g.error ? ' — ' + esc(g.error) : ` (${g.len} знаков)` + (g.wbg.length ? `<br>импорты wasm: ${esc(g.wbg.join(', '))}` : '') + (g.apis.length ? `<br>обращения: ${esc(g.apis.join(', '))}` : '') + (g.calls.length ? `<br>вызовы: ${esc(g.calls.join(' '))}` : '')}</p>`; }).join('') : '';
   const facts2 = startLine + grp('Ошибки сценариев страницы (с трассировкой)', s.errors) + grp('Обращения wasm к браузеру перед ошибкой (последние)', s.wasmLog) + (glueRows ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Сценарии проверки — что они запрашивают у браузера (${Object.keys(s.glue).length})</span></summary><div class="card-more-body">${glueRows}</div></details>` : '');
   const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
-  // приложение 1.13: разобранные поля карточки — как прочитаны, без додумывания; в дело пока не пишутся
+  // приложение 1.13: разобранные поля карточки — как прочитаны, без додумывания; что из них записано в дело — строки appliedLines выше
   const c = s.card, cardRows = c ? [['Номер дела', c.number], ['Описание', c.desc], ['Категория', c.category], ['Дата', c.date], ['Срок рассмотрения', c.dur], ['Стороны', c.sides.join(' · ')], ['Судьи', c.judges], ['Акты', c.acts],
     ['Инстанции', c.instances.map(i => [i.date, i.title || i.number, i.add, i.docs ? 'документов: ' + i.docs : ''].filter(Boolean).join(' — ')).join('\n')], ['Вкладки хронологии', c.tabs.join(', ')]].filter(r => r[1]) : [];
-  const cardBox = cardRows.length ? `<div class="section-label">Карточка дела — что прочитано (пробно, в дело не записано)</div><div class="table-wrap"><table class="grid"><tbody>${cardRows.map(r => `<tr><td>${esc(r[0])}</td><td style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(r[1])}</td></tr>`).join('')}</tbody></table></div>${c.loading ? '<p class="small muted">Часть данных карточки ещё подгружалась в момент чтения.</p>' : ''}` : '';
-  const body = m.lines.map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + cardBox + struct + heads + links + hosts + facts + facts2 + txt +
+  const cardBox = cardRows.length ? `<div class="section-label">Карточка дела — что прочитано</div><div class="table-wrap"><table class="grid"><tbody>${cardRows.map(r => `<tr><td>${esc(r[0])}</td><td style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(r[1])}</td></tr>`).join('')}</tbody></table></div>${c.loading ? '<p class="small muted">Часть данных карточки ещё подгружалась в момент чтения.</p>' : ''}` : '';
+  const body = m.lines.concat(appliedLines).map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + cardBox + struct + heads + links + hosts + facts + facts2 + txt +
     `<div class="form-actions">${s.ok ? `<button type="button" class="button primary" id="kad-copy" onclick="kadProtoCopy()">${icon('files')}Скопировать структуру</button>` : ''}<button type="button" class="button" id="kad-retry" onclick="kadProtoRead('${jsq(caseId)}')">${icon('refresh-cw')}Повторить</button>${caseId ? `<button type="button" class="button" id="kad-back" onclick="openCaseSheet('${jsq(caseId)}')">${icon('briefcase-business')}Вернуться в дело</button>` : ''}</div>`;
-  openSheet('Карточка КАД (пробно)', body, sheetIsOpen() ? true : undefined);
+  openSheet('Карточка КАД', body, sheetIsOpen() ? true : undefined);
 }
 async function kadProtoCopy() {
   const last = kadProtoLast(); if (!last || !last.summary) { toast('Нечего копировать — сначала прочитайте карточку', true); return; }
@@ -9938,7 +10053,7 @@ const HELP_SECTIONS = [
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
-<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Пока это пробная версия: программа показывает, что отдал сайт, и в дело ничего не записывает.</p>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.14. Данные с сайта — справочные: проверьте их в карточке дела.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
