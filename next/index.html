@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="10.10.2026 05:50 · 46f7b7d">
+<meta name="build" content="10.10.2026 06:58 · 481ac69">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4943,13 +4943,28 @@ function kadProtoSummary(res) {
     // проверки — какие свойства браузера запрашивает wasm (импорты __wbg_…), docStart — сценарий до страницы установлен
     errors: strList(res.errors, 20, 700), start: flatOf(res.start, 60), glue: glueOf(res.glue), docStart: !!res.docStart,
     // приложение 1.11 (ver 5): обращения wasm к браузеру перед ошибкой — импорты с аргументами и результатами (последние 200)
-    wasmLog: strList(res.wasmLog, 200, 300) };
-  // приложение 1.6–1.7 (ver 1) проверку по разметке не отличает: пустой контейнер проверки узнаётся по структуре
-  if (!s.captcha && s.struct.some(x => /captcha/i.test(x.k))) { s.captcha = true; s.captchaEmpty = s.struct.filter(x => /captcha/i.test(x.k)).every(x => !x.len && !x.kids); }
+    wasmLog: strList(res.wasmLog, 200, 300),
+    // приложение 1.13 (ver 6, урок 103): разметка карточки дела найдена — проверка пройдена; окно проверки видно; разобранные поля карточки
+    cardFound: !!res.cardFound, captchaFilled: !!res.captchaFilled, card: cardOf(res.card) };
+  // ответ любой версии приложения: разметка карточки дела видна и по структуре (ответ 1.12 от 10.10.2026 нёс её при blocked:true)
+  if (!s.cardFound && s.struct.some(x => KAD_CARD_KEY_RE.test(x.k))) s.cardFound = true;
+  // приложение 1.6–1.7 (ver 1) проверку по разметке не отличает: пустой контейнер проверки узнаётся по структуре; шаблон <script> и
+  // пустой контейнер на карточке — не проверка (урок 103)
+  if (!s.captcha && !s.cardFound && s.struct.some(x => /captcha/i.test(x.k) && !/^(script|template|style|noscript)\b/.test(x.k))) { s.captcha = true; s.captchaEmpty = s.struct.filter(x => /captcha/i.test(x.k) && !/^(script|template|style|noscript)\b/.test(x.k)).every(x => !x.len && !x.kids); }
   if (res.ok === false) { s.error = String(res.error || 'error'); if (res.message) s.message = String(res.message).slice(0, 300); }
   return s;
 }
 function strList(a, n, len) { return (Array.isArray(a) ? a : []).slice(0, n).map(x => String(x || '').slice(0, len)); }
+// разметка карточки дела КАД (структура настоящей страницы, ответ пользователя 10.10.2026): шапка дела, номер, хронология
+const KAD_CARD_KEY_RE = /(^|[#.])(b-case-header|js-case-header-case_num|b-case-chrono|chrono_list_content)(\b|$)/;
+// поля карточки (приложение 1.13, card): строки обрезаются, списки ограничены; ничего не додумывается
+function cardOf(c) {
+  if (!c || typeof c !== 'object') return null;
+  const str = v => String(v == null ? '' : v).slice(0, 300);
+  return { number: str(c.number), desc: str(c.desc), category: str(c.category), date: str(c.date), dur: str(c.dur), sides: strList(c.sides, 40, 300), judges: str(c.judges), acts: str(c.acts), loading: !!c.loading,
+    instances: (Array.isArray(c.instances) ? c.instances : []).slice(0, 20).map(i => ({ date: str(i && i.date).slice(0, 80), title: str(i && i.title), number: str(i && i.number).slice(0, 60), add: str(i && i.add), docs: Number(i && i.docs) || 0 })),
+    tabs: strList(c.tabs, 8, 60) };
+}
 // признаки среды окна КАД (приложение 1.9): только логические значения и числа, имена cookie — строки
 function envOf(e) {
   if (!e || typeof e !== 'object') return null;
@@ -4987,19 +5002,23 @@ function kadProtoResultModel(res, link) {
     lines.push({ kind: 'err', text: why });
     return { lines, bad: true, summary: s };
   }
-  // пустое окно проверки (снимок пользователя 09.10.2026, урок 100) — своя причина и свой совет; иначе общая строка о проверке
-  const capEmpty = s.captcha && s.captchaEmpty && s.textLen < 800, blocked = s.blocked || (s.captcha && s.textLen < 800);
+  // пустое окно проверки (снимок пользователя 09.10.2026, урок 100) — своя причина и свой совет; иначе общая строка о проверке.
+  // Урок 103: разметка карточки дела на странице — проверка пройдена; шаблон проверки и пустой контейнер на карточке — не блокировка
+  // (приложение 1.12 присылало blocked:true для открывшейся карточки — здесь это исправляется по разметке)
+  const capEmpty = !s.cardFound && s.captcha && s.captchaEmpty && s.textLen < 800, blocked = s.captchaFilled || (!s.cardFound && (s.blocked || (s.captcha && s.textLen < 800)));
   if (capEmpty) lines.push({ kind: 'err', text: kadCaptchaEmptyLine(s.app || (typeof appVersionNow === 'function' ? appVersionNow() : '')) });
   else if (blocked) lines.push({ kind: 'err', text: 'Сайт показал проверку браузера — карточка не прочитана. Откройте снова, пройдите проверку в окне и дождитесь чтения.' });
+  else if (s.cardFound) lines.push({ kind: 'done', text: 'Карточка дела открылась и прочитана' + (s.card && s.card.number ? ': ' + s.card.number : '') + (s.card && s.card.loading ? ' (часть данных ещё подгружалась — повторите чтение, если чего-то не хватает)' : '') + '.' });
+  if (s.cardFound && !s.number && s.card && s.card.number) lines.push({ kind: 'hint', text: 'На странице номер дела «' + s.card.number + '», а в деле номер в суде не указан — впишите его в форму дела (номер в суде по инстанции), тогда программа будет сверять карточку с делом.' });
   if (s.numberFound === true) lines.push({ kind: 'done', text: 'Номер дела «' + s.number + '» на странице найден — открылась карточка нужного дела.' });
   else if (s.numberFound === false) lines.push({ kind: 'diff', text: 'Номер дела «' + s.number + '» на странице не найден — возможно, открылась не карточка дела (или в деле неверный номер в суде).' });
   else if (s.numberFound === null) lines.push({ kind: 'info', text: 'Номер дела в суде в деле не указан — совпадение не проверялось.' });
   lines.push({ kind: 'info', text: 'Страница: текста ' + s.textLen + ' знаков; элементов структуры ' + s.structTotal + '; заголовков ' + s.heads.length + '; адресов документов и разделов ' + s.links.length +
     (s.frames.length ? '; вложенных кадров ' + s.frames.length : '') + (s.hosts.length ? '; сайтов, к которым обращалась страница, ' + s.hosts.length : '') + (s.requests.length ? '; запросов ' + s.requests.length : '') + (s.console.length ? '; сообщений консоли ' + s.console.length : '') + (s.loadErrors.length ? '; ошибок загрузки ' + s.loadErrors.length : '') + (s.errors.length ? '; ошибок сценариев страницы ' + s.errors.length : '') + (s.glue ? '; сценариев проверки разобрано ' + Object.keys(s.glue).length : '') + (s.wasmLog.length ? '; обращений wasm записано ' + s.wasmLog.length : '') + (s.manual ? '; прочитано по кнопке «Прочитать»' : '') + (s.app ? '; приложение ' + s.app : '') + '.' });
   if (link && s.href && s.href.split('#')[0] !== String(link.url || '').split('#')[0]) lines.push({ kind: 'info', text: 'Конечный адрес страницы отличается от ссылки в деле: ' + s.href });
-  if (!blocked && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
+  if (!blocked && !s.cardFound && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
   lines.push({ kind: 'hint', text: 'Пробная версия: в дело ничего не записано. Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
-  return { lines, bad: blocked || s.textLen < 800, summary: s };
+  return { lines, bad: blocked || (!s.cardFound && s.textLen < 800), summary: s };
 }
 // «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
@@ -5063,7 +5082,11 @@ function openKadProtoSheet(caseId, res) {
   const glueRows = s.glue ? Object.keys(s.glue).map(k => { const g = s.glue[k]; return `<p class="small"><b>${esc(k)}</b>${g.error ? ' — ' + esc(g.error) : ` (${g.len} знаков)` + (g.wbg.length ? `<br>импорты wasm: ${esc(g.wbg.join(', '))}` : '') + (g.apis.length ? `<br>обращения: ${esc(g.apis.join(', '))}` : '') + (g.calls.length ? `<br>вызовы: ${esc(g.calls.join(' '))}` : '')}</p>`; }).join('') : '';
   const facts2 = startLine + grp('Ошибки сценариев страницы (с трассировкой)', s.errors) + grp('Обращения wasm к браузеру перед ошибкой (последние)', s.wasmLog) + (glueRows ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Сценарии проверки — что они запрашивают у браузера (${Object.keys(s.glue).length})</span></summary><div class="card-more-body">${glueRows}</div></details>` : '');
   const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
-  const body = m.lines.map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + struct + heads + links + hosts + facts + facts2 + txt +
+  // приложение 1.13: разобранные поля карточки — как прочитаны, без додумывания; в дело пока не пишутся
+  const c = s.card, cardRows = c ? [['Номер дела', c.number], ['Описание', c.desc], ['Категория', c.category], ['Дата', c.date], ['Срок рассмотрения', c.dur], ['Стороны', c.sides.join(' · ')], ['Судьи', c.judges], ['Акты', c.acts],
+    ['Инстанции', c.instances.map(i => [i.date, i.title || i.number, i.add, i.docs ? 'документов: ' + i.docs : ''].filter(Boolean).join(' — ')).join('\n')], ['Вкладки хронологии', c.tabs.join(', ')]].filter(r => r[1]) : [];
+  const cardBox = cardRows.length ? `<div class="section-label">Карточка дела — что прочитано (пробно, в дело не записано)</div><div class="table-wrap"><table class="grid"><tbody>${cardRows.map(r => `<tr><td>${esc(r[0])}</td><td style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(r[1])}</td></tr>`).join('')}</tbody></table></div>${c.loading ? '<p class="small muted">Часть данных карточки ещё подгружалась в момент чтения.</p>' : ''}` : '';
+  const body = m.lines.map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + cardBox + struct + heads + links + hosts + facts + facts2 + txt +
     `<div class="form-actions">${s.ok ? `<button type="button" class="button primary" id="kad-copy" onclick="kadProtoCopy()">${icon('files')}Скопировать структуру</button>` : ''}<button type="button" class="button" id="kad-retry" onclick="kadProtoRead('${jsq(caseId)}')">${icon('refresh-cw')}Повторить</button>${caseId ? `<button type="button" class="button" id="kad-back" onclick="openCaseSheet('${jsq(caseId)}')">${icon('briefcase-business')}Вернуться в дело</button>` : ''}</div>`;
   openSheet('Карточка КАД (пробно)', body, sheetIsOpen() ? true : undefined);
 }
