@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="10.10.2026 22:22 · 8066e04">
+<meta name="build" content="10.10.2026 22:38 · e53e6bc">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4949,7 +4949,9 @@ function kadProtoSummary(res) {
     // приложение 1.11 (ver 5): обращения wasm к браузеру перед ошибкой — импорты с аргументами и результатами (последние 200)
     wasmLog: strList(res.wasmLog, 200, 300),
     // приложение 1.13 (ver 6, урок 103): разметка карточки дела найдена — проверка пройдена; окно проверки видно; разобранные поля карточки
-    cardFound: !!res.cardFound, captchaFilled: !!res.captchaFilled, card: cardOf(res.card) };
+    cardFound: !!res.cardFound, captchaFilled: !!res.captchaFilled, card: cardOf(res.card),
+    // приложение 1.16 (ver 9): факты вкладки «Календарь» — extra (в копию структуры целиком)
+    extra: extraOf(res.extra) };
   // ответ любой версии приложения: разметка карточки дела видна и по структуре (ответ 1.12 от 10.10.2026 нёс её при blocked:true)
   if (!s.cardFound && s.struct.some(x => KAD_CARD_KEY_RE.test(x.k))) s.cardFound = true;
   // приложение 1.6–1.7 (ver 1) проверку по разметке не отличает: пустой контейнер проверки узнаётся по структуре; шаблон <script> и
@@ -5071,6 +5073,22 @@ function flatOf(o, n) {
   return out;
 }
 // разбор сценариев проверки (приложение 1.10, glue): путь → { len, wbg[], apis[], calls[] } или { error }
+// приложение 1.16 (ver 9, шаг 1б-1): факты вкладки «Календарь» и документов инстанции — структура, тексты листьев, шаблоны страницы,
+// нажатия, последняя проба, запросы после нажатия. Только известные поля и пределы; разбора нет — он пишется по этим фактам.
+function extraBlockOf(b) {
+  if (!b || typeof b !== 'object') return null;
+  return { hidden: !!b.hidden, len: Number(b.len) || 0, total: Number(b.total) || 0,
+    struct: (Array.isArray(b.struct) ? b.struct : []).slice(0, 200).map(x => ({ k: String(x && x.k || '').slice(0, 160), n: Number(x && x.n) || 0, len: Number(x && x.len) || 0, kids: Number(x && x.kids) || 0 })),
+    texts: strList(b.texts, 120, 200) };
+}
+function extraOf(e) {
+  if (!e || typeof e !== 'object') return null;
+  const tpl = {}; if (e.templates && typeof e.templates === 'object') for (const k of Object.keys(e.templates).slice(0, 10)) tpl[String(k).slice(0, 40)] = String(e.templates[k] || '').slice(0, 9000);
+  const clicked = e.clicked && typeof e.clicked === 'object' ? { tab: !!e.clicked.tab, hdr: !!e.clicked.hdr, error: e.clicked.error ? String(e.clicked.error).slice(0, 200) : undefined } : null;
+  const probe = e.probe && typeof e.probe === 'object' ? { len: Number(e.probe.len) || 0, hidden: !!e.probe.hidden, kids: Number(e.probe.kids) || 0, docsLen: Number(e.probe.docsLen) || 0, docsKids: Number(e.probe.docsKids) || 0 } : null;
+  return { ver: Number(e.ver) || 0, calendar: extraBlockOf(e.calendar), docs: extraBlockOf(e.docs), listNow: extraBlockOf(e.listNow), templates: tpl, clicked, probe,
+    requestsAfter: strList(e.requestsAfter, 80, 200), error: e.error ? String(e.error).slice(0, 300) : undefined };
+}
 function glueOf(g) {
   if (!g || typeof g !== 'object') return null;
   const out = {};
@@ -5113,7 +5131,16 @@ function kadProtoResultModel(res, link) {
   if (!s.cardFound) lines.push({ kind: 'hint', text: 'Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
   // разметка карточки есть, а полей нет — приложение старше 1.13: записать в дело нечего, об этом сказано прямо (урок 86)
   else if (!s.card) lines.push({ kind: 'hint', text: 'Поля карточки (номер, судья, стороны, ближайшее заседание) присылает приложение 1.13 и новее — обновите приложение (Настройки → «Проверить обновления»), и прочитанное запишется в дело.' });
+  // приложение 1.16: что дала вкладка «Календарь» — факт, без разбора (разбор пишется по копии структуры)
+  if (s.extra) lines.push({ kind: 'info', text: kadExtraLine(s.extra) });
   return { lines, bad: blocked || (!s.cardFound && s.textLen < 800), summary: s };
+}
+function kadExtraLine(x) {
+  if (x.error) return 'Вкладка «Календарь»: сценарий окна не выполнился — ' + x.error + '. Нажмите «Скопировать структуру» и пришлите разработчику.';
+  const c = x.calendar, cl = x.clicked || {};
+  if (!cl.tab) return 'Вкладка «Календарь» на странице не найдена — окно её не нажимало. Нажмите «Скопировать структуру» и пришлите разработчику.';
+  if (!c || c.hidden || !c.total) return 'Вкладка «Календарь» нажата, но за 10 с её содержимое не появилось' + (x.requestsAfter.length ? ' (запросов после нажатия: ' + x.requestsAfter.length + ')' : '') + '. Нажмите «Скопировать структуру» и пришлите разработчику — по шаблонам страницы разбор пишется и так.';
+  return 'Вкладка «Календарь» прочитана: элементов ' + c.total + ', строк текста ' + c.texts.length + (x.docs && x.docs.total ? '; документы инстанции: элементов ' + x.docs.total : '') + (Object.keys(x.templates).length ? '; шаблонов страницы ' + Object.keys(x.templates).length : '') + '. В дело пока не записывается — нажмите «Скопировать структуру» и пришлите разработчику: по этим фактам пишется разбор заседаний и актов.';
 }
 // «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
@@ -5199,12 +5226,16 @@ function openKadProtoSheet(caseId, res, applied) {
   const startLine = s.start ? `<p class="small muted"><b>Среда до сценариев страницы${shimList.length ? ' (заплатки: ' + esc(shimList.join(', ')) + ')' : ''}:</b> ${esc(Object.keys(s.start).filter(k => !/^shim/.test(k)).map(k => k + '=' + String(s.start[k])).join('; '))}</p>` : (s.docStart === false && s.ver >= 4 ? '<p class="small muted">Сценарий до сценариев страницы не установлен — эта версия WebView его не поддерживает.</p>' : '');
   const glueRows = s.glue ? Object.keys(s.glue).map(k => { const g = s.glue[k]; return `<p class="small"><b>${esc(k)}</b>${g.error ? ' — ' + esc(g.error) : ` (${g.len} знаков)` + (g.wbg.length ? `<br>импорты wasm: ${esc(g.wbg.join(', '))}` : '') + (g.apis.length ? `<br>обращения: ${esc(g.apis.join(', '))}` : '') + (g.calls.length ? `<br>вызовы: ${esc(g.calls.join(' '))}` : '')}</p>`; }).join('') : '';
   const facts2 = startLine + grp('Ошибки сценариев страницы (с трассировкой)', s.errors) + grp('Обращения wasm к браузеру перед ошибкой (последние)', s.wasmLog) + (glueRows ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Сценарии проверки — что они запрашивают у браузера (${Object.keys(s.glue).length})</span></summary><div class="card-more-body">${glueRows}</div></details>` : '');
+  // приложение 1.16: факты вкладки «Календарь» — свёрнутые группы (структура, тексты, документы, шаблоны по именам)
+  const x = s.extra, xb = (title, bl) => bl && (bl.struct.length || bl.texts.length) ? grp(title + ' — структура', bl.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) + grp(title + ' — тексты', bl.texts) : '';
+  const extraBox = x ? `<div class="section-label">Вкладка «Календарь» (факты, разбор ещё не написан)</div>` + xb('Вкладка «Календарь»', x.calendar) + xb('Документы инстанции', x.docs) + xb('Список инстанций после нажатия', x.listNow) +
+    (Object.keys(x.templates).length ? `<p class="small"><b>Шаблоны страницы (в копии целиком):</b> ${esc(Object.keys(x.templates).map(k => k + ' (' + x.templates[k].length + ' зн.)').join(', '))}</p>` : '') + grp('Запросы после нажатия вкладки', x.requestsAfter) : '';
   const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
   // приложение 1.13: разобранные поля карточки — как прочитаны, без додумывания; что из них записано в дело — строки appliedLines выше
   const c = s.card, cardRows = c ? [['Номер дела', c.number], ['Описание', c.desc], ['Категория', c.category], ['Дата', c.date], ['Срок рассмотрения', c.dur], ['Стороны', c.sides.join(' · ')], ['Судьи', c.judges], ['Акты', c.acts],
     ['Инстанции', c.instances.map(i => [i.date, i.title || i.number, i.add, i.docs ? 'документов: ' + i.docs : ''].filter(Boolean).join(' — ')).join('\n')], ['Вкладки хронологии', c.tabs.join(', ')]].filter(r => r[1]) : [];
   const cardBox = cardRows.length ? `<div class="section-label">Карточка дела — что прочитано</div><div class="table-wrap"><table class="grid"><tbody>${cardRows.map(r => `<tr><td>${esc(r[0])}</td><td style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(r[1])}</td></tr>`).join('')}</tbody></table></div>${c.loading ? '<p class="small muted">Часть данных карточки ещё подгружалась в момент чтения.</p>' : ''}` : '';
-  const body = m.lines.concat(appliedLines).map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + cardBox + struct + heads + links + hosts + facts + facts2 + txt +
+  const body = m.lines.concat(appliedLines).map(box).join('') + (s.href ? `<p class="small muted">Адрес: ${esc(s.href)}${s.title ? ' · ' + esc(s.title) : ''}</p>` : '') + cardBox + extraBox + struct + heads + links + hosts + facts + facts2 + txt +
     `<div class="form-actions">${s.ok ? `<button type="button" class="button primary" id="kad-copy" onclick="kadProtoCopy()">${icon('files')}Скопировать структуру</button>` : ''}<button type="button" class="button" id="kad-retry" onclick="kadProtoRead('${jsq(caseId)}')">${icon('refresh-cw')}Повторить</button>${caseId ? `<button type="button" class="button" id="kad-back" onclick="openCaseSheet('${jsq(caseId)}')">${icon('briefcase-business')}Вернуться в дело</button>` : ''}</div>`;
   openSheet('Карточка КАД', body, sheetIsOpen() ? true : undefined);
 }
