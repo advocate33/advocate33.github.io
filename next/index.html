@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="10.10.2026 22:38 · e53e6bc">
+<meta name="build" content="11.10.2026 00:14 · 75d2aff">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -5087,7 +5087,18 @@ function extraOf(e) {
   const clicked = e.clicked && typeof e.clicked === 'object' ? { tab: !!e.clicked.tab, hdr: !!e.clicked.hdr, error: e.clicked.error ? String(e.clicked.error).slice(0, 200) : undefined } : null;
   const probe = e.probe && typeof e.probe === 'object' ? { len: Number(e.probe.len) || 0, hidden: !!e.probe.hidden, kids: Number(e.probe.kids) || 0, docsLen: Number(e.probe.docsLen) || 0, docsKids: Number(e.probe.docsKids) || 0 } : null;
   return { ver: Number(e.ver) || 0, calendar: extraBlockOf(e.calendar), docs: extraBlockOf(e.docs), listNow: extraBlockOf(e.listNow), templates: tpl, clicked, probe,
-    requestsAfter: strList(e.requestsAfter, 80, 200), error: e.error ? String(e.error).slice(0, 300) : undefined };
+    requestsAfter: strList(e.requestsAfter, 80, 200), error: e.error ? String(e.error).slice(0, 300) : undefined,
+    // приложение 1.18 (extra.ver 3, шаг 1б-2а): нажатые дни календаря и пробы раскрытия документов инстанции
+    days: daysOf(e.days), requestsDays: strList(e.requestsDays, 80, 200) };
+}
+function daysOf(d) {
+  if (!d || typeof d !== 'object') return null;
+  const dayOf = x => { if (!x || typeof x !== 'object') return null; const ev = x.ev && typeof x.ev === 'object' ? x.ev : null;
+    return { day: String(x.day || '').slice(0, 12), kind: x.kind === 'future' ? 'future' : 'past', cls: String(x.cls || '').slice(0, 80), evBefore: Number(x.evBefore) || 0,
+      ev: ev ? Object.assign(extraBlockOf(ev), { links: strList(ev.links, 20, 200), shown: strList(ev.shown, 20, 120) }) : null }; };
+  return { done: !!d.done, timeout: !!d.timeout, total: Number(d.total) || 0, docsKids: Number(d.docsKids) || 0, error: d.error ? String(d.error).slice(0, 300) : undefined,
+    days: (Array.isArray(d.days) ? d.days : []).slice(0, 15).map(dayOf).filter(Boolean),
+    docsTry: (Array.isArray(d.docsTry) ? d.docsTry : []).slice(0, 6).map(t => ({ sel: String(t && t.sel || '').slice(0, 40), found: !!(t && t.found), before: Number(t && t.before) || 0, after: Number(t && t.after) || 0 })) };
 }
 function glueOf(g) {
   if (!g || typeof g !== 'object') return null;
@@ -5140,7 +5151,15 @@ function kadExtraLine(x) {
   const c = x.calendar, cl = x.clicked || {};
   if (!cl.tab) return 'Вкладка «Календарь» на странице не найдена — окно её не нажимало. Нажмите «Скопировать структуру» и пришлите разработчику.';
   if (!c || c.hidden || !c.total) return 'Вкладка «Календарь» нажата, но за 10 с её содержимое не появилось' + (x.requestsAfter.length ? ' (запросов после нажатия: ' + x.requestsAfter.length + ')' : '') + '. Нажмите «Скопировать структуру» и пришлите разработчику — по шаблонам страницы разбор пишется и так.';
-  return 'Вкладка «Календарь» прочитана: элементов ' + c.total + ', строк текста ' + c.texts.length + (x.docs && x.docs.total ? '; документы инстанции: элементов ' + x.docs.total : '') + (Object.keys(x.templates).length ? '; шаблонов страницы ' + Object.keys(x.templates).length : '') + '. В дело пока не записывается — нажмите «Скопировать структуру» и пришлите разработчику: по этим фактам пишется разбор заседаний и актов.';
+  return 'Вкладка «Календарь» прочитана: элементов ' + c.total + ', строк текста ' + c.texts.length + (x.docs && x.docs.total ? '; документы инстанции: элементов ' + x.docs.total : '') + (Object.keys(x.templates).length ? '; шаблонов страницы ' + Object.keys(x.templates).length : '') + kadDaysLine(x.days) + '. В дело пока не записывается — нажмите «Скопировать структуру» и пришлите разработчику: по этим фактам пишется разбор заседаний и актов.';
+}
+// приложение 1.18: что дали нажатия дней — факт (сколько дней отмечено, сколько нажато, у скольких появились подробности, раскрылись ли документы)
+function kadDaysLine(d) {
+  if (!d) return '; дни календаря не нажимались (нужно приложение 1.18 или новее)';
+  if (d.error) return '; дни календаря: сценарий не выполнился — ' + d.error;
+  const withEv = d.days.filter(x => x.ev && x.ev.total > 0).length, docsOk = d.docsTry.find(t => t.found && t.after > t.before);
+  return '; дней с событиями ' + d.total + ', нажато ' + d.days.length + (d.timeout ? ' (окно не дождалось остальных)' : '') + ', с подробностями ' + withEv +
+    (docsOk ? '; документы инстанции раскрылись нажатием «' + docsOk.sel + '»' : d.docsTry.length ? '; документы инстанции не раскрылись (проб нажатий: ' + d.docsTry.length + ')' : '');
 }
 // «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
@@ -5229,7 +5248,10 @@ function openKadProtoSheet(caseId, res, applied) {
   // приложение 1.16: факты вкладки «Календарь» — свёрнутые группы (структура, тексты, документы, шаблоны по именам)
   const x = s.extra, xb = (title, bl) => bl && (bl.struct.length || bl.texts.length) ? grp(title + ' — структура', bl.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) + grp(title + ' — тексты', bl.texts) : '';
   const extraBox = x ? `<div class="section-label">Вкладка «Календарь» (факты, разбор ещё не написан)</div>` + xb('Вкладка «Календарь»', x.calendar) + xb('Документы инстанции', x.docs) + xb('Список инстанций после нажатия', x.listNow) +
-    (Object.keys(x.templates).length ? `<p class="small"><b>Шаблоны страницы (в копии целиком):</b> ${esc(Object.keys(x.templates).map(k => k + ' (' + x.templates[k].length + ' зн.)').join(', '))}</p>` : '') + grp('Запросы после нажатия вкладки', x.requestsAfter) : '';
+    (Object.keys(x.templates).length ? `<p class="small"><b>Шаблоны страницы (в копии целиком):</b> ${esc(Object.keys(x.templates).map(k => k + ' (' + x.templates[k].length + ' зн.)').join(', '))}</p>` : '') + grp('Запросы после нажатия вкладки', x.requestsAfter) +
+    // приложение 1.18: по каждому нажатому дню — показанные блоки, тексты, ссылки, структура; пробы раскрытия документов; запросы за время нажатий
+    (x.days ? x.days.days.map(d => grp('День ' + d.day + (d.kind === 'future' ? ' (назначено)' : ' (прошло)') + (d.ev && d.ev.total ? '' : ' — подробностей нет'), d.ev && d.ev.total ? d.ev.shown.map(v => 'показан: ' + v).concat(d.ev.texts, d.ev.links.map(v => 'ссылка: ' + v), d.ev.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) : ['подробности дня на странице не появились'])).join('') +
+      grp('Документы инстанции — пробы нажатий', x.days.docsTry.map(t => t.sel + ': ' + (t.found ? 'нажато, элементов ' + t.before + ' → ' + t.after : 'не найдено'))) + grp('Запросы за время нажатий дней', x.requestsDays) : '') : '';
   const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
   // приложение 1.13: разобранные поля карточки — как прочитаны, без додумывания; что из них записано в дело — строки appliedLines выше
   const c = s.card, cardRows = c ? [['Номер дела', c.number], ['Описание', c.desc], ['Категория', c.category], ['Дата', c.date], ['Срок рассмотрения', c.dur], ['Стороны', c.sides.join(' · ')], ['Судьи', c.judges], ['Акты', c.acts],
@@ -5757,7 +5779,7 @@ function shellRender() {
 function topbarMeasure() { try { const t = document.querySelector('.topbar'); if (t && t.offsetHeight) document.documentElement.style.setProperty('--topbar-h', t.offsetHeight + 'px'); } catch (e) { logErr('topbar', e); } }
 window.addEventListener('resize', () => topbarMeasure());
 // «Назад» телефона и браузера закрывает открытый лист, а не уходит со страницы
-window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; return; } if (UI.hist) { UI.hist = false; const d = document.getElementById('sheet');
+window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; sheetHistWanted(); return; } if (UI.hist) { UI.hist = false; const d = document.getElementById('sheet');
   // разбор GPT 04.10.2026, п. 2: «Назад» телефона, пока идёт запись, — лист остаётся до исхода записи
   if (d && d.open && typeof guardWriteInProgress === 'function' && guardWriteInProgress()) { try { history.pushState({ nextSheet: 1 }, ''); UI.hist = true; } catch (e) { logErr('sheet:history', e); } toast('Идёт сохранение — подождите секунду'); return; }
   // п. 1.1: «Назад» при незавершённой форме — лист остаётся, запись истории возвращается, показан выбор
@@ -5839,8 +5861,13 @@ function sheetPlace(entry) {
   } finally { UI.moving = false; }
   sheetShow();
   if (host === side) { side.scrollTop = 0; return; }
-  if (!d.open) { d.showModal(); try { history.pushState({ nextSheet: 1 }, ''); UI.hist = true; } catch (e) { logErr('sheet:history', e); } }
+  // урок 106: если возврат по истории от только что закрытого листа ещё не отработал (skipPop), новая запись не кладётся сейчас —
+  // Chromium считает цель back() в момент вызова, и pushState в том же такте оставил бы программу на начальной записи; запись кладётся в popstate
+  if (!d.open) { d.showModal(); if (UI.skipPop) UI.histWant = true; else sheetHistPush(); }
 }
+function sheetHistPush() { try { history.pushState({ nextSheet: 1 }, ''); UI.hist = true; } catch (e) { logErr('sheet:history', e); } }
+// урок 106: отложенная запись истории — после того как возврат от прежнего листа отработал; лист к этому времени мог уже закрыться
+function sheetHistWanted() { if (!UI.histWant) return; UI.histWant = false; const d = document.getElementById('sheet'); if (d && d.open && !UI.hist) sheetHistPush(); }
 function sheetShow() {
   const box = document.getElementById('sheetContent'); if (!box || !UI.cur) return;
   const back = UI.stack.length ? `<button type="button" class="icon-button" aria-label="Назад" onclick="sheetBack(false, true)">${icon('arrow-left')}</button>` : '';
@@ -5857,7 +5884,7 @@ function sheetFreeze() {
   UI.cur.body = box.innerHTML;
 }
 function sheetBack(force, byUser) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('back', byUser)) return false; UI.cur = UI.stack.pop() || null; if (!UI.cur) closeSheet(true); else sheetPlace(UI.cur); return true; }
-function sheetHistDrop() { if (UI.hist) { UI.hist = false; UI.skipPop = (UI.skipPop || 0) + 1; history.back(); } }
+function sheetHistDrop() { UI.histWant = false; if (UI.hist) { UI.hist = false; UI.skipPop = (UI.skipPop || 0) + 1; history.back(); } }
 function closeSheet(force, byUser) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('close', byUser)) return false; const d = document.getElementById('sheet'), side = document.getElementById('side'); UI.stack = []; UI.cur = null; if (d && d.open) { sheetHistDrop(); d.close(); } if (side && !side.hidden) { side.hidden = true; document.getElementById('work-grid').classList.remove('has-side'); } return true; }
 
 // ── сообщение внизу экрана ──
