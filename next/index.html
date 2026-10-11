@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="11.10.2026 17:47 · 7572494">
+<meta name="build" content="11.10.2026 18:30 · dd9ddb4">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2851,7 +2851,7 @@ async function stageLagHide(id, key) {
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
 // eventsget — события судов с сервера (этап 4): чтение
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget', 'bookget'];
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget', 'bookget', 'deltaget'];
 // этап 4, часть 2в: история снимков базы на сервере 178 — чтение
 const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 // этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
@@ -2860,7 +2860,7 @@ const NEXT_PUSH = { on: false };
 // план, п. 3.3: список напоминаний (remindput) — только пока идёт передача (sync/remind.js ставит и снимает отметку)
 const NEXT_REMIND = { on: false };
 // план переноса, Б5: онлайн-запись — окна (bookpub) и ответ доверителю (bookset) только пока идёт действие sync/booking.js;
-// заявки (bookget) — чтение
+// заявки (bookget) — чтение; Д6: цепочка изменений базы (deltaget) — чтение
 const NEXT_BOOK = { on: false };
 {
   const srvCallV310 = srvCall;
@@ -2981,10 +2981,10 @@ const nextSrvChecked = () => !!SRV.url && localStorage.getItem('crm_next_srv_che
 
 // Расшифровать снимок с сервера и влить в базу новой версии
 async function srvdbMergeSnapshot(snapshot, silent) {
-  if (!snapshot || !snapshot.ok || !snapshot.exists || !snapshot.data) return { ok: true, empty: true, added: 0, updated: 0 };
-  let dump;
-  try { dump = await decryptDump(snapshot.data, SRVDB.pass); }
-  catch (e) { return { ok: false, error: nextDecryptWhy(e) }; }
+  if (!snapshot || !snapshot.ok || !snapshot.exists || (!snapshot.data && !snapshot.dump)) return { ok: true, empty: true, added: 0, updated: 0 };
+  // Д6: изменения с сервера 186 приходят уже расшифрованными и сведёнными в одну пачку (sync/delta.js)
+  let dump = snapshot.dump || null;
+  if (!dump) { try { dump = await decryptDump(snapshot.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextDecryptWhy(e) }; } }
   if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: 'format' };
   const merged = await mergeIncoming(dump, false);
   // аудит GPT 03.10.2026: при недосохранённых записях (failed) версия сервера не считается полученной — следующая проверка загрузит снова
@@ -2996,7 +2996,9 @@ async function srvdbMergeSnapshot(snapshot, silent) {
     if (UI.ready && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav(UI.screen);
   }
   if (!silent) toast('С сервера: новых записей — ' + merged.added + ', обновлено — ' + merged.updated);
-  return { ok: true, ...merged };
+  // Д6: снимок сервера (расшифрованный) нужен отправке, чтобы собрать изменения; наружу (в копию результата) не выходит
+  const res = { ok: true, ...merged }; Object.defineProperty(res, 'remoteDump', { value: snapshot.dump ? null : dump, enumerable: false });
+  return res;
 }
 
 // Загрузить базу с сервера (по кнопке). Возвращает { ok, added, updated, … } или { ok:false, error: 'текст' }.
@@ -3008,9 +3010,11 @@ async function nextServerPull() {
   // аудит GPT 03.10.2026: неотправленные правки устройства не считаются отправленными после загрузки — отметку снимает только отправка
   const hadLocal = nextLocalChanges(), revBefore = syncRevision();
   try {
-    const g = await nextDbGet();
+    // Д6: сначала одни изменения с версии устройства (sync/delta.js), при любом сомнении — снимок целиком
+    const pm = typeof nextPullMerge === 'function' ? await nextPullMerge() : null;
+    const g = pm ? pm.g : await nextDbGet();
     if (!g || !g.ok) { const msg = nextSrvError(g); srvdbNote('err', msg); return { ok: false, error: msg }; }
-    const r = await srvdbMergeSnapshot(g, true);
+    const r = pm ? pm.r : await srvdbMergeSnapshot(g, true);
     if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
     if (r.empty) { SRVDB.lastErr = null; return r; }
     if (r.failed) { const msg = (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей: ' + r.failed) : 'не записано записей: ' + r.failed) + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
@@ -3240,10 +3244,10 @@ async function nextSrvPost(action, payload, timeoutMs) {
 }
 // v180: snapput (ссылка) → PUT шифротекста в хранилище → snapcommit с размером и суммой sha256; «busy» (замок занят другим
 // устройством) — один повтор через 1–3 секунды. Возвращает ответ сервера в том же виде, что dbput ({ok, ver} | {error}).
-async function nextSnapSend(enc, baseVer) {
-  const bytesArr = new TextEncoder().encode(enc), bytes = bytesArr.length;
+async function nextSnapSend(enc, baseVer, encDelta) {
+  const bytesArr = new TextEncoder().encode(enc), bytes = bytesArr.length, dArr = encDelta ? new TextEncoder().encode(encDelta) : null;
   pushStage('upload', mbText(bytes));
-  const p = await nextSrvPost('snapput', { bytes });
+  const p = await nextSrvPost('snapput', { bytes, ...(dArr ? { deltaBytes: dArr.length } : {}) });
   if (!p || !p.ok) return p || { ok: false, error: 'network' };
   nextSnapSet(true);
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 600000);
@@ -3252,10 +3256,15 @@ async function nextSnapSend(enc, baseVer) {
     if (!r.ok) return { ok: false, error: 'хранилище не приняло снимок: HTTP ' + r.status };
   } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не загрузился за 10 минут — медленная связь, повторите' : 'хранилище недоступно (сеть или правило CORS бакета — сервер ставит его сам; если ошибка повторяется, пришлите журнал)' }; }
   finally { clearTimeout(timer); }
+  // Д6 (сервер 186): изменения — рядом со снимком; не загрузились — фиксация без них (у других устройств цепочка прервётся, они возьмут
+  // снимок целиком)
+  let deltaToken = '';
+  if (dArr && p.deltaUrl && p.deltaToken) { try { const rd = await fetch(p.deltaUrl, { method: 'PUT', body: dArr, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (rd.ok) deltaToken = p.deltaToken; } catch (e) { logErr('snap:delta', e); } }
+  const dPay = deltaToken ? { deltaToken, deltaBytes: dArr.length } : {};
   pushStage('confirm');
   let sha = ''; try { sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytesArr))).map(b => b.toString(16).padStart(2, '0')).join(''); } catch (e) { logErr('snap:sha', e); }
-  let c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha });
-  if (c && c.error === 'conflict' && c.busy) { await new Promise(res => setTimeout(res, 1000 + Math.random() * 2000)); c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha }); }
+  let c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha, ...dPay });
+  if (c && c.error === 'conflict' && c.busy) { await new Promise(res => setTimeout(res, 1000 + Math.random() * 2000)); c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha, ...dPay }); }
   if (c && !c.ok && c.error === 'size_mismatch') c.error = 'снимок в хранилище повреждён при загрузке (размер не совпал) — повторите отправку';
   if (c && !c.ok && c.error === 'sha_mismatch') c.error = 'снимок в хранилище повреждён при загрузке (контрольная сумма не совпала) — повторите отправку';
   if (c && !c.ok && c.error === 'not_uploaded') c.error = 'хранилище не получило снимок — повторите отправку';
@@ -3274,11 +3283,11 @@ async function nextServerPush() {
       pushStage('get', again ? 'повтор: другое устройство записало базу во время отправки' : null);
       const g = await nextDbGet();
       if (!g || !g.ok) return { err: nextSrvError(g) };
-      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0 }; }
-      return { ver: 0, added: 0, updated: 0 };
+      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0, remote: r.remoteDump || null }; }
+      return { ver: 0, added: 0, updated: 0, remote: null };
     };
     let blobs = null; // v8: файлы документов — отдельными объектами, один раз (sync/blobs.js)
-    const send = async baseVer => { // шаг «положить файлы, собрать, зашифровать, отправить»
+    const send = async (baseVer, remote) => { // шаг «положить файлы, собрать, зашифровать, отправить»
       NEXT_PUSH.on = true;
       try {
         if (!blobs && typeof nextBlobsPush === 'function') { pushStage('files'); try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
@@ -3289,17 +3298,20 @@ async function nextServerPush() {
         const revision = syncRevision();
         const dump = typeof collectForSync === 'function' ? await collectForSync() : await collectAll();
         const enc = await encryptDump(dump, SRVDB.pass), omitted = dump._blobsOmitted || 0;
+        // Д6: изменения этой отправки относительно снимка сервера, с которого шли (сервер 186 хранит их для других устройств)
+        let encDelta = null, deltaN = 0;
+        if (remote && typeof syncDeltaOf === 'function' && nextSnapKnown() !== false) { try { const dl = syncDeltaOf(remote, dump, baseVer); if (dl) { encDelta = await encryptDump(dl.dump, SRVDB.pass); deltaN = dl.n; } } catch (e) { logErr('push:delta', e); encDelta = null; } }
         // v180: снимок — напрямую в хранилище по подписанной ссылке; сервер старше 180 — через функцию (dbput)
-        if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted }; nextSnapSet(false); }
+        if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer, encDelta); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted, deltaN: encDelta ? deltaN : null }; nextSnapSet(false); }
         pushStage('upload', mbText(enc.length) + ' через функцию');
         return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }), omitted };
       } finally { NEXT_PUSH.on = false; }
     };
     let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
-    let sent = await send(got.ver), retried = false;
+    let sent = await send(got.ver, got.remote), retried = false;
     if (sent.j && sent.j.error === 'conflict') { // другое устройство успело записать — один повтор
       retried = true; got = await takeIn(true); if (got.err) return fail('повторное получение базы с сервера', got.err);
-      sent = await send(got.ver);
+      sent = await send(got.ver, got.remote);
     }
     const j = sent.j;
     if (!j || !j.ok) return fail('отправка', j && j.error === 'conflict' ? 'другое устройство записывает базу одновременно — повторите через минуту' : j && j.error === 'db_too_big' ? 'база больше, чем сервер принимает за один раз (3,5 МБ шифротекста)' : nextSrvError(j), !j || j.error === 'network' || /не ответил|не загрузился|недоступно/.test(String(j.error || '')));
@@ -3481,6 +3493,100 @@ async function openSrvHistorySheet(res) {
   openSheet('Снимки базы на сервере', (rows ? `<p class="small muted">Сервер хранит пять последних снимков и по одному за каждый из 14 последних дней с записями. Снимки зашифрованы паролем базы.</p><div class="list-rows">${rows}</div>` : emptyState('hard-drive', 'Снимков пока нет', 'Первый снимок появится после первой записи базы на сервер 178.')) +
     `<div class="info-box">«Скачать» сохраняет снимок файлом копии; пароль к нему — пароль шифрования синхронизации. Вернуться к снимку: в прежней программе — «Восстановить из файла»; в новой версии — «Копии базы» → «Загрузить из файла» (записи из снимка добавятся и обновят более старые, но правки, сделанные после снимка, не отменят).</div>`, sheetIsOpen() ? true : undefined);
   return res;
+}
+
+// ▼▼▼ sync/delta.js
+// ═══ sync/delta.js — обмен изменениями вместо всего снимка (план переноса 11.10.2026, пункт Д6, этап 1; сервер 186) ═══
+// Отправка: снимок по-прежнему уходит целиком (его читает прежняя программа), а рядом — ИЗМЕНЕНИЯ этой отправки: записи, которых нет
+// в снимке сервера, с которого шли, или которые в нём другие (сравнение по содержимому, порядок полей не важен), плюс настройки. Они
+// шифруются тем же паролем; сервер хранит их под номером принятой версии и номером, от которого шли.
+// Получение: устройство на версии V спрашивает цепочку изменений V → … → текущая (deltaget). Есть — скачиваются только они, сводятся
+// в одну пачку (позднее перекрывает раннее) и вливаются ОДНИМ слиянием — тем же mergeIncoming, что и весь снимок (записи, которых в
+// изменениях нет, на сервере не менялись — их слияние ничего бы не изменило). Нет цепочки (запись прежней программой, сбой, сервер
+// старше 186), изменений больше половины снимка или после слияния на устройстве записей меньше, чем в снимке отправителя
+// (база устройства неполна — например, браузер очистил хранилище) — снимок целиком, как раньше. Версия устройства сбрасывается при
+// смене сервера или пароля (ui/sheets.js) — изменения другого сервера не применяются.
+const DELTA_LAST_KEY = 'crm_next_delta_last', DELTA_SRV_KEY = 'crm_next_delta_srv', DELTA_RETRY = 24 * 3600000;
+// сравнение записей по содержимому: ключи по алфавиту на всех уровнях
+function syncStable(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return '[' + v.map(syncStable).join(',') + ']';
+  return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + syncStable(v[k])).join(',') + '}';
+}
+// изменения отправки: remote — снимок сервера, с которого шли (расшифрованный), local — отправляемый снимок. Чистая функция.
+// { dump, n } — dump того же формата, что снимок, только изменённые записи; counts — сколько записей в разделах отправляемого снимка
+function syncDeltaOf(remote, local, baseVer) {
+  if (!remote || !remote.data || !local || !local.data) return null;
+  const data = {}, counts = {}; let n = 0;
+  for (const st of Object.keys(local.data)) {
+    const rows = Array.isArray(local.data[st]) ? local.data[st] : []; counts[st] = rows.length;
+    const was = new Map(); for (const r of (Array.isArray(remote.data[st]) ? remote.data[st] : [])) if (r && r.id != null) was.set(String(r.id), syncStable(r));
+    const ch = rows.filter(r => r && r.id != null && was.get(String(r.id)) !== syncStable(r));
+    if (ch.length) { data[st] = ch; n += ch.length; }
+  }
+  return { n, dump: { _fmt: local._fmt, _ver: local._ver, _exportedAt: local._exportedAt, data, settings: local.settings || {}, _delta: { base: Number(baseVer) || 0, n, counts } } };
+}
+// цепочка изменений → одна пачка: по каждой записи — последняя; настройки и сведения — последней части. Чистая функция.
+function syncDeltaUnion(parts) {
+  const data = {}; let last = null;
+  for (const p of parts || []) {
+    if (!p || !p.data) continue; last = p;
+    for (const st of Object.keys(p.data)) { const m = data[st] || (data[st] = new Map()); for (const r of (Array.isArray(p.data[st]) ? p.data[st] : [])) if (r && r.id != null) m.set(String(r.id), r); }
+  }
+  if (!last) return null;
+  const out = {}; for (const st of Object.keys(data)) out[st] = [...data[st].values()];
+  return { _fmt: last._fmt, _ver: last._ver, _exportedAt: last._exportedAt, data: out, settings: last.settings || {}, _delta: { ...(last._delta || {}), parts: parts.length } };
+}
+function deltaLastSet(v) { try { localStorage.setItem(DELTA_LAST_KEY, JSON.stringify({ ...v, at: Date.now() })); } catch (e) { logErr('delta:last', e); } }
+function deltaLast() { return lsJSON(DELTA_LAST_KEY, null); }
+// сервер старше 186 (deltaget не знает) — не спрашивать сутки
+function deltaSrvSkip() { const v = lsJSON(DELTA_SRV_KEY, null); return !!(v && v.no && Date.now() - (v.at || 0) < DELTA_RETRY); }
+// получить изменения с версии устройства: { ok, exists, dump, ver, counts, delta, bytes } | { ok, upToDate, ver } | null — брать снимок целиком
+async function nextDbGetDelta() {
+  const since = SRVDB.ver;
+  if (!since || !SRV.url || !SRVDB.pass || typeof nextSnapKnown !== 'function' || nextSnapKnown() !== true || deltaSrvSkip()) return null;
+  let j = null; try { j = await srvCall('deltaget', { since }); } catch (e) { logErr('delta:get', e); return null; }
+  if (j && (j.error === 'unknown_action' || (j.ok && !j.gap && !Array.isArray(j.chain)))) { try { localStorage.setItem(DELTA_SRV_KEY, JSON.stringify({ no: true, at: Date.now() })); } catch (e) { logErr('delta:srv', e); } deltaLastSet({ full: true, reason: 'сервер старше 186' }); return null; }
+  if (!j || !j.ok) return null;
+  if (j.gap) { deltaLastSet({ full: true, reason: j.reason === 'large' ? 'изменений больше половины снимка' : 'цепочка изменений прервана (запись без изменений — прежней программой или сбой)' }); return null; }
+  if (!j.chain.length) return { ok: true, exists: true, upToDate: true, ver: Number(j.ver || since) };
+  const parts = []; let bytes = 0;
+  for (const d of j.chain) {
+    const f = await nextSnapFetch(d.url, d.bytes); if (!f || !f.ok) { deltaLastSet({ full: true, reason: 'изменения не скачались' }); return null; }
+    let dump = null; try { dump = await decryptDump(f.data, SRVDB.pass); } catch (e) { logErr('delta:decrypt', e); deltaLastSet({ full: true, reason: 'изменения не расшифровались' }); return null; }
+    if (!dump || dump._fmt !== SYNC_FMT || !dump.data) { deltaLastSet({ full: true, reason: 'изменения другого формата' }); return null; }
+    parts.push(dump); bytes += Number(d.bytes) || 0;
+  }
+  const dump = syncDeltaUnion(parts), last = parts[parts.length - 1]._delta || {};
+  return { ok: true, exists: true, dump, ver: Number(j.ver), counts: last.counts || null, delta: parts.length, bytes, n: Object.values(dump.data).reduce((a, r) => a + r.length, 0) };
+}
+// после слияния изменений на устройстве должно быть не меньше записей, чем в снимке отправителя; иначе база устройства неполна
+async function syncCountsShort(counts) {
+  if (!counts) return [];
+  const short = [];
+  for (const st of Object.keys(counts)) { if (!STORES.includes(st)) continue; let have = 0; try { have = (await getAllRaw(st)).length; } catch (e) { logErr('delta:count', e); return [st]; } if (have < Number(counts[st] || 0)) short.push(st); }
+  return short;
+}
+// получение для «Загрузить» и автообмена: сначала изменения, при любом сомнении — снимок целиком. { g, r } — ответ сервера и итог слияния
+async function nextPullMerge() {
+  const d = await nextDbGetDelta();
+  if (d && d.upToDate) { SRVDB.lastAt = Date.now(); return { g: d, r: { ok: true, empty: true, added: 0, updated: 0, upToDate: true } }; }
+  if (d) {
+    const r = await srvdbMergeSnapshot(d, true);
+    if (!r.ok || r.failed) return { g: d, r };
+    const short = await syncCountsShort(d.counts);
+    if (!short.length) { deltaLastSet({ full: false, parts: d.delta, n: d.n, bytes: d.bytes, ver: d.ver }); return { g: d, r: { ...r, delta: d.delta } }; }
+    deltaLastSet({ full: true, reason: 'на устройстве не хватает записей (' + short.join(', ') + ') — загружен весь снимок' });
+  }
+  const g = await nextDbGet();
+  if (!g || !g.ok) return { g, r: null };
+  return { g, r: await srvdbMergeSnapshot(g, true) };
+}
+// строка для листа «Синхронизация»
+function deltaLastText() {
+  const v = deltaLast(); if (!v) return '';
+  const when = new Date(v.at || 0).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return v.full ? 'последнее получение ' + when + ': весь снимок — ' + (v.reason || 'изменений нет на сервере') : 'последнее получение ' + when + ': только изменения — записей ' + (v.n || 0) + ' (' + (typeof mbText === 'function' ? mbText(v.bytes || 0) : (v.bytes || 0) + ' Б') + ')';
 }
 
 // ▼▼▼ sync/blobs.js
@@ -3741,9 +3847,11 @@ async function nextAutoPull(force) {
     if (v.ver && (force || Number(v.ver) !== SRVDB.ver)) {
       // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
       const hadLocal = nextLocalChanges(), revBefore = syncRevision();
-      const g = await nextDbGet();
+      // Д6: сначала одни изменения с версии устройства (sync/delta.js), при любом сомнении — снимок целиком
+      const pm = typeof nextPullMerge === 'function' ? await nextPullMerge() : null;
+      const g = pm ? pm.g : await nextDbGet();
       if (!g || !g.ok) { srvdbNote('err', nextSrvError(g)); return g; }
-      const r = await srvdbMergeSnapshot(g, true);
+      const r = pm ? pm.r : await srvdbMergeSnapshot(g, true);
       if (!r.ok) { srvdbNote('err', nextSrvError(r)); return r; }
       if (r.failed) { srvdbNote('err', (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
       if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore, r)); srvdbNote('pull');
@@ -5073,7 +5181,17 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
 const KAD_PROTO_LAST = 'crm_kad_proto_last'; // последний результат без текста страницы: { caseId, at, summary }
 const KAD_PROTO = { req: null, lastReq: null, caseId: null, link: null, timer: null };
 const KAD_PROTO_WAIT = 15 * 60000;            // окно может ждать, пока пользователь проходит проверку браузера; дольше — запрос считается забытым
-function kadProtoSupported() { return typeof AndroidApp !== 'undefined' && !!AndroidApp && typeof AndroidApp.kadRead === 'function'; }
+// Д4 (11.10.2026): окно КАД — в приложении для Android 1.6+ (мост AndroidApp) и для компьютера 1.3+ (мост CRMDesktop); ответ один и тот же —
+// window.__kadResult(reqId, объект). read/quiet возвращают то, что вернул мост (у компьютера — обещание: отказ ловит вызвавший)
+function kadBridge() {
+  if (typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.kadRead === 'function')
+    return { kind: 'android', read: (u, n, r) => AndroidApp.kadRead(u, n, r), quiet: typeof AndroidApp.kadReadQuiet === 'function' ? (u, n, r) => AndroidApp.kadReadQuiet(u, n, r) : null };
+  const D = typeof window === 'object' && window ? window.CRMDesktop : null;
+  if (D && typeof D.kadRead === 'function') return { kind: 'desktop', read: (u, n, r) => D.kadRead(u, n, r), quiet: typeof D.kadReadQuiet === 'function' ? (u, n, r) => D.kadReadQuiet(u, n, r) : null };
+  return null;
+}
+function kadProtoSupported() { return !!kadBridge(); }
+const KAD_APPS_TEXT = 'приложение для Android (1.6 и новее) или для компьютера (1.3 и новее)';
 // ссылка ведёт на kad.arbitr.ru (только https; поддомены вида *.kad.arbitr.ru допускаются, похожие чужие адреса — нет)
 function kadHostOk(url) {
   let u; try { u = new URL(String(url || '')); } catch (e) { return false; }
@@ -5481,7 +5599,7 @@ function kadDaysLine(d) {
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
 function kadCardLine(stage) {
   return (stage ? stage + ': ' : '') + 'ссылка ведёт на КАД Арбитр — коллектор в облаке этот сайт не читает (сайт не отдаёт карточку скриптам). ' +
-    (kadProtoSupported() ? 'Нажмите «Карточка КАД» в деле.' : 'Карточку читает приложение для Android 1.6 и новее: кнопка «Карточка КАД» в деле.');
+    (kadProtoSupported() ? 'Нажмите «Карточка КАД» в деле.' : 'Карточку читает ' + KAD_APPS_TEXT + ': кнопка «Карточка КАД» в деле.');
 }
 // ссылки дела делятся на «КАД» и «сайт суда»; stages — строки CASE_LINK_STAGES, у которых ссылка заполнена
 function kadSplitStages(c, stages) {
@@ -5492,7 +5610,7 @@ function kadSplitStages(c, stages) {
 function kadProtoLast() { return lsJSON(KAD_PROTO_LAST, null); }
 // запуск чтения: окно открывает приложение; результат придёт в window.__kadResult
 async function kadProtoRead(caseId) {
-  if (!kadProtoSupported()) { toast('Чтение карточки КАД доступно в приложении для Android 1.6 и новее', true); return null; }
+  if (!kadProtoSupported()) { toast('Карточку КАД читает ' + KAD_APPS_TEXT, true); return null; }
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return null; }
   const l = kadLinkOf(c); if (!l) { toast('В деле нет ссылки на kad.arbitr.ru', true); return null; }
   if (KAD_PROTO.req) { toast('Окно КАД уже открыто — дождитесь результата', true); return null; }
@@ -5504,8 +5622,9 @@ async function kadProtoRead(caseId) {
   clearTimeout(KAD_PROTO.timer);
   KAD_PROTO.timer = setTimeout(() => { if (KAD_PROTO.req === req) { KAD_PROTO.req = null; toast('Окно КАД не ответило — результат, если придёт, будет показан', true); } }, KAD_PROTO_WAIT);
   toast('Открываю карточку дела на сайте КАД…');
-  try { AndroidApp.kadRead(l.url, l.number || '', req); }
-  catch (e) { logErr('kad:read', e); KAD_PROTO.req = null; clearTimeout(KAD_PROTO.timer); toast('Приложение не открыло окно КАД: ' + (e && e.message || e), true); return null; }
+  const failed = e => { logErr('kad:read', e); if (KAD_PROTO.req === req) { KAD_PROTO.req = null; clearTimeout(KAD_PROTO.timer); } toast('Приложение не открыло окно КАД: ' + (e && e.message || e), true); };
+  try { const p = kadBridge().read(l.url, l.number || '', req); if (p && typeof p.catch === 'function') p.catch(failed); }
+  catch (e) { failed(e); return null; }
   return req;
 }
 async function kadProtoOnResult(id, res) {
@@ -5598,7 +5717,7 @@ function openKadProtoSheet(caseId, res, applied) {
 async function kadProtoCopy() {
   const last = kadProtoLast(); if (!last || !last.summary) { toast('Нечего копировать — сначала прочитайте карточку', true); return; }
   // приложение 1.19: ссылки на документы в копии — без идентификаторов (guid, длинные числа), как и остальные адреса
-  const t = JSON.stringify({ kadProto: 1, app: 'android', at: new Date(last.at || Date.now()).toISOString(), summary: last.summary }, (k, v) => k === 'href' && typeof v === 'string' ? v.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<guid>').replace(/\d{6,}/g, '<n>') : v, 1);
+  const t = JSON.stringify({ kadProto: 1, app: (kadBridge() || { kind: 'browser' }).kind, at: new Date(last.at || Date.now()).toISOString(), summary: last.summary }, (k, v) => k === 'href' && typeof v === 'string' ? v.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<guid>').replace(/\d{6,}/g, '<n>') : v, 1);
   try { await navigator.clipboard.writeText(t); toast('Структура скопирована — вставьте её в сообщение разработчику'); }
   catch (e) { logErr('kad:copy', e); openSheet('Структура страницы КАД', `<p class="small muted">Выделите текст и скопируйте вручную.</p><textarea rows="14" readonly style="width:100%">${esc(t)}</textarea>`, true); }
 }
@@ -5616,7 +5735,8 @@ async function kadProtoCopy() {
 const KAD_AUTO_KEY = 'crm_next_kad_auto', KAD_AUTO_EVERY = 6 * 3600000, KAD_AUTO_TICK = 10 * 60000, KAD_READ_WAIT = 5 * 60000;
 const CARDS_ALL = { busy: false, stop: false, log: [], auto: false, total: 0, n: 0 };
 const KAD_Q = { req: null, resolve: null, timer: null };
-function kadQuietSupported() { return typeof AndroidApp !== 'undefined' && !!AndroidApp && typeof AndroidApp.kadReadQuiet === 'function'; }
+// Д4: скрытое чтение — в приложении для Android 1.22+ и для компьютера 1.3+ (kadBridge в sync/kadproto.js)
+function kadQuietSupported() { const b = typeof kadBridge === 'function' ? kadBridge() : null; return !!(b && b.quiet); }
 function kadAutoState() { const s = lsJSON(KAD_AUTO_KEY, null) || {}; return { on: s.on !== false, last: s.last && typeof s.last === 'object' ? s.last : {}, pauseUntil: Number(s.pauseUntil) || 0, run: s.run || null }; }
 function kadAutoSave(st) { try { localStorage.setItem(KAD_AUTO_KEY, JSON.stringify(st)); } catch (e) { logErr('kadauto:save', e); } }
 function kadAutoSet(on) { const st = kadAutoState(); st.on = !!on; if (on) st.pauseUntil = 0; kadAutoSave(st); if (typeof bumpSettings === 'function') bumpSettings(); }
@@ -5649,8 +5769,9 @@ function kadReadOnce(link, quiet) {
     const req = 'kadq-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
     KAD_Q.req = req; KAD_Q.resolve = resolve; kadResultHook();
     KAD_Q.timer = setTimeout(() => { if (KAD_Q.req === req) { KAD_Q.req = null; KAD_Q.resolve = null; resolve({ ok: false, error: 'timeout' }); } }, quiet ? KAD_READ_WAIT : (typeof KAD_PROTO_WAIT === 'number' ? KAD_PROTO_WAIT : KAD_READ_WAIT));
-    try { if (quiet) AndroidApp.kadReadQuiet(link.url, link.number || '', req); else AndroidApp.kadRead(link.url, link.number || '', req); }
-    catch (e) { KAD_Q.req = null; KAD_Q.resolve = null; clearTimeout(KAD_Q.timer); resolve({ ok: false, error: 'launch', message: String((e && e.message) || e) }); }
+    const failed = e => { if (KAD_Q.req !== req) return; KAD_Q.req = null; KAD_Q.resolve = null; clearTimeout(KAD_Q.timer); resolve({ ok: false, error: 'launch', message: String((e && e.message) || e) }); };
+    try { const b = kadBridge(), p = quiet ? b.quiet(link.url, link.number || '', req) : b.read(link.url, link.number || '', req); if (p && typeof p.catch === 'function') p.catch(failed); }
+    catch (e) { failed(e); }
   });
 }
 // ответ окна → запись в дело тем же путём, что «Карточка КАД»; { ok, text, blocked }
@@ -5696,7 +5817,7 @@ async function cardsAllRun(opts) {
         }
       }
       if (x.kad) {
-        if (!quiet && !app) CARDS_ALL.log.push({ ...entry, what: 'КАД', ok: false, text: 'КАД читается только в приложении для Android' });
+        if (!quiet && !app) CARDS_ALL.log.push({ ...entry, what: 'КАД', ok: false, text: 'КАД читается только в приложении — для Android или для компьютера' });
         else if (blocked) CARDS_ALL.log.push({ ...entry, what: 'КАД', ok: false, text: 'пропущено: сайт просит проверку браузера' });
         else {
           const res = await kadReadOnce(x.kad, quiet || !!opts.auto), r = await kadApplyResult(c, x.kad, res);
@@ -5721,7 +5842,7 @@ async function cardsAllRun(opts) {
 function openCardsAllSheet() {
   return getAll('cases').then(cases => {
     const plan = cardsAllPlan(cases), kad = plan.filter(x => x.kad).length, site = plan.filter(x => x.site).length, quiet = kadQuietSupported(), app = typeof kadProtoSupported === 'function' && kadProtoSupported();
-    const how = !kad ? '' : quiet ? 'Карточки КАД читаются незаметно, по одной — до 2 минут на дело.' : app ? 'Карточки КАД: на каждое дело откроется окно КАД — дождитесь, пока оно закроется само (в приложении 1.22 и новее — незаметно).' : 'Карточки КАД в браузере не читаются — только в приложении для Android.';
+    const how = !kad ? '' : quiet ? 'Карточки КАД читаются незаметно, по одной — до 2 минут на дело.' : app ? 'Карточки КАД: на каждое дело откроется окно КАД — дождитесь, пока оно закроется само (в приложении для Android 1.22 и новее и для компьютера 1.3 и новее — незаметно).' : 'Карточки КАД в браузере не читаются — только в приложении для Android или для компьютера (1.3 и новее).';
     openSheet('Карточки всех дел', `<p class="small muted">Дел в работе со ссылкой на сайт суда: ${plan.length} (суды общей юрисдикции — ${site}, КАД — ${kad}). Программа прочитает карточку каждого по очереди и запишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». ${esc(how)}</p>
       ${plan.length ? '' : '<div class="info-box" id="cards-all-none">Читать нечего: ссылку на карточку дела на сайте суда укажите в форме дела («Все поля» → «Ссылка на дело (сайт суда)»).</div>'}
       <div class="status-line" id="cards-all-state"${CARDS_ALL.busy ? '' : ' hidden'}>${CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : ''}</div>
@@ -5733,7 +5854,7 @@ function openCardsAllSheet() {
 // строка состояния автопроверки — в настройках мониторинга
 function kadAutoStatusText() {
   const st = kadAutoState();
-  if (!kadQuietSupported()) return 'Автопроверка карточек КАД работает в приложении для Android 1.22 и новее при открытой программе.';
+  if (!kadQuietSupported()) return 'Автопроверка карточек КАД работает в приложении для Android (1.22 и новее) или для компьютера (1.3 и новее) при открытой программе.';
   if (!st.on) return 'Автопроверка карточек КАД выключена.';
   if (st.pauseUntil > Date.now()) return 'Автопроверка карточек КАД ждёт до ' + new Date(st.pauseUntil).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ': сайт попросил проверку браузера — откройте «Карточка КАД» в любом деле.';
   const r = st.run && st.run.auto ? st.run : null;
@@ -6882,6 +7003,7 @@ async function openSettingsSheet(sub) {
       <div><span>Версия</span><span class="muted">${esc(APP_VER)} · база ${esc(db ? db.name : '—')}, версия ${esc(db ? db.version : '—')}</span></div>
       <div><span>Сборка</span><span class="muted">${esc(BUILD_ID)}</span></div>
       <div><span>Обмен с сервером</span><span class="muted">${esc(typeof syncDiagLine === 'function' ? syncDiagLine() : '—')}</span></div>
+      ${typeof deltaLastText === 'function' && deltaLastText() ? `<div><span>Получение с сервера</span><span class="muted">${esc(deltaLastText())}</span></div>` : ''}
       <div><span>Правила сроков</span><span class="muted">${esc(RULES_VER)}</span></div>
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
@@ -6964,6 +7086,8 @@ async function syncSaveAndCheck() {
 async function syncApplyConnection(next, moveRes) {
   const { url, secret, pass } = next, stranded = moveRes ? 0 : (next.stranded || 0);
   if (url !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
+  // Д6: другой сервер или пароль — изменения прежнего не применяются: следующее получение — снимком целиком
+  if (url !== SRV.url || pass !== SRVDB.pass) SRVDB.ver = 0;
   SRV.url = url; if (secret !== SRV.secret) SRV.secret = secret; if (pass !== SRVDB.pass) CLOUD.pass = pass;
   const r = await nextServerCheck();
   const strandedNote = typeof blobMoveReport === 'function' ? blobMoveReport(moveRes, stranded) : '';
@@ -11466,6 +11590,7 @@ const HELP_SECTIONS = [
 <li>«Автоматический обмен» — переключатель на шаге 5, доступен после первой удачной отправки: устройство само обменивается правками раз в несколько минут и при открытии. Включите на каждом устройстве.</li>
 <li>«Размер базы» — сколько занимает снимок и помещается ли в предел Облака; сжатие включается кнопкой там же.</li></ol>
 <p>Строка под шапкой говорит, что с данными: «На устройстве», «Ждёт отправки», «Синхронизировано», «Обмен не удался» (с кнопкой «Повторить»). Настройки → «О программе» → «Обмен с сервером» — последняя подтверждённая отправка и есть ли неотправленные правки.</p>
+<p>С сервера 186 устройство, которое уже получало базу, скачивает не весь снимок, а только изменения после своей версии — это быстрее и меньше расходует связь. Весь снимок скачивается, если цепочка изменений прервана (базу отправила прежняя программа), изменений больше половины снимка, устройство получает базу впервые или сменился сервер или пароль. Что было в последний раз и почему — Настройки → «О программе» → «Получение с сервера». Отправка по-прежнему передаёт снимок целиком: прежняя программа читает только его.</p>
 <p><b>Второе устройство (телефон):</b> откройте программу, «Синхронизация» → те же адрес, код и пароль → «Сохранить и проверить связь» → «Загрузить базу с сервера». Смена секретного кода — отдельная инструкция у автора: код меняется на сервере, во всех устройствах и в коллекторе одновременно.</p>` },
   { id: 'monitor', title: 'Мониторинг судов', html: `
 <p>Функция-коллектор в вашем облаке по расписанию (07:30 и 15:30 по Москве) открывает карточки дел на сайтах судов общей юрисдикции (ГАС «Правосудие», суды Москвы), сравнивает с прошлым разом и передаёт события — назначенные заседания, движение дела, даты решений и мотивированных актов — на ваш сервер. Программа забирает их оттуда.</p>
@@ -11479,10 +11604,10 @@ const HELP_SECTIONS = [
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
 <h3>Карточки всех дел разом</h3>
-<p>«Суды и мониторинг» → «Карточки всех дел»: программа по очереди читает карточку каждого дела в работе со ссылкой на сайт суда — суды общей юрисдикции через коллектор, КАД в приложении для Android — и пишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». В листе — итог по каждому делу; «Остановить» прерывает обход после текущего дела.</p>
+<p>«Суды и мониторинг» → «Карточки всех дел»: программа по очереди читает карточку каждого дела в работе со ссылкой на сайт суда — суды общей юрисдикции через коллектор, КАД в приложении для Android или для компьютера — и пишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». В листе — итог по каждому делу; «Остановить» прерывает обход после текущего дела.</p>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
-<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.15. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
-<p>Автопроверка карточек КАД (приложение для Android 1.22 и новее): пока программа открыта, карточки дел в работе со ссылкой на КАД перечитываются сами раз в 6 часов — незаметно, по одной, и записываются в дело так же, как по кнопке «Карточка КАД». Выключатель и время последней проверки — Настройки → «Мониторинг судов». Если сайт попросит проверку браузера, автопроверка ждёт 6 часов: откройте «Карточка КАД» в любом деле и пройдите проверку — автопроверка продолжится.</p>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) и в приложении для компьютера (1.3 и новее) карточку можно прочитать: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения для Android 1.15 (в приложении для компьютера — с 1.3, всё перечисленное ниже — тоже). С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
+<p>Автопроверка карточек КАД (приложение для Android 1.22 и новее или для компьютера 1.3 и новее): пока программа открыта, карточки дел в работе со ссылкой на КАД перечитываются сами раз в 6 часов — незаметно, по одной, и записываются в дело так же, как по кнопке «Карточка КАД». Выключатель и время последней проверки — Настройки → «Мониторинг судов». Если сайт попросит проверку браузера, автопроверка ждёт 6 часов: откройте «Карточка КАД» в любом деле и пройдите проверку — автопроверка продолжится.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
