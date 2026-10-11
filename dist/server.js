@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v184: события — под замком, повреждённый файл событий сохраняется копией; замок записи базы перепроверяется перед записью (аудит 11.10.2026)
 //  v183: запись базы (dbput, snapcommit) без baseVer отклоняется — устаревший снимок не ляжет поверх нового (разбор GPT 06.10.2026, п. 8)
 //  v178: ЗАПИСЬ БАЗЫ С ПРОВЕРКОЙ ВЕРСИИ (baseVer → «conflict»), запись «всё или ничего» (файл версии — отметка «принято»),
 //  история снимков dbhist-<SECRET>/<версия>.crypt (5 последних + по одному за день на 14 дней; dbhistlist, dbhistget),
@@ -111,7 +112,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 183,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 184,
       ready: readiness()
     });
   }
@@ -130,7 +131,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 183 });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 184 });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -144,7 +145,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'dbget')  return reply(await dbGet());
     if (body.action === 'dbver')  return reply(await dbVer());
     if (body.action === 'eventsput')   return reply(await eventsPut(body.events, body.mode));   // v171
-    if (body.action === 'eventsget')   return reply({ ok: true, events: (await eventsLoad()).events });
+    if (body.action === 'eventsget')   { const st = await eventsLoad(); return reply(st.corrupt ? { ok: false, error: 'events_corrupt', note: 'файл событий на сервере повреждён — следующая доставка коллектора сохранит его копию и начнёт новый' } : { ok: true, events: st.events }); }
     if (body.action === 'eventsclear') return reply(await eventsSave({ events: [] }));
     if (body.action === 'dict_upload')  return reply(await dictUpload(body));   // v172
     if (body.action === 'dict_start')   return reply(await dictStart(body, event));
@@ -436,7 +437,7 @@ function needBaseVer(baseVer, curVer) {
   }
   return null;
 }
-async function dbPut(data, baseVer) {
+async function dbPut(data, baseVer, guard) {
   if (typeof data !== 'string' || !data.length) return { ok: false, error: 'bad_data' };
   if (data.length > 3500000) return { ok: false, error: 'db_too_big' };
   if (!process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) {
@@ -452,6 +453,9 @@ async function dbPut(data, baseVer) {
   const ver = Math.max(Date.now(), cur.ver + 1);
   const have = hist && hist.ok ? hist.items.map(x => x.ver) : null;
   const CT = 'text/plain; charset=utf-8', bad = async (what, r) => { const t = await r.text().catch(() => ''); return { ok: false, error: 's3 ' + what + r.status + ' ' + t.slice(0, 120) }; };
+  // v184: замок перепроверяется перед первой записью и перед отметкой «принято»
+  const LOST = { ok: false, error: 'lock_lost', note: 'запись шла дольше срока замка — отменена, повторите отправку' };
+  if (guard && !(await guard())) return LOST;
   if (have && cur.ver && !have.includes(cur.ver)) {
     // снимок, сделанный сервером 177 (в истории его нет), сохраняется ДО перезаписи прежнего файла; новый снимок — одновременно
     const old = await s3Get(dbKey());
@@ -468,6 +472,7 @@ async function dbPut(data, baseVer) {
     if (!r1.ok) return bad('', r1);
   }
   // отметка «принято» — последней
+  if (guard && !(await guard())) return LOST;
   const r2 = await s3Put(dbVerKey(), String(ver), CT);
   if (!r2.ok) return { ok: false, error: 's3 ver ' + r2.status };
   // лишние снимки удаляются одновременно; запись уже принята, поэтому уборка не ждётся дольше 2 секунд
@@ -535,8 +540,10 @@ async function eventsLoad() {
   const r = await s3Get(eventsKey());
   if (r.status === 404) return { events: [], updatedAt: 0 };
   if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error('s3 ' + r.status + ' ' + t.slice(0, 120)); }
-  try { const j = JSON.parse(await r.text()); return { events: Array.isArray(j.events) ? j.events : [], updatedAt: j.updatedAt || 0 }; }
-  catch (e) { return { events: [], updatedAt: 0 }; }
+  // v184: повреждённый файл — не пустой список (иначе следующая запись затёрла бы его); вызывающий решает, что делать
+  const text = await r.text();
+  try { const j = JSON.parse(text); return { events: Array.isArray(j.events) ? j.events : [], updatedAt: j.updatedAt || 0 }; }
+  catch (e) { return { events: [], updatedAt: 0, corrupt: true, text }; }
 }
 async function eventsSave(st) {
   st.updatedAt = Date.now();
@@ -559,14 +566,33 @@ function eventsMerge(existing, incoming, mode) { // чистая функция 
   if (kept.length > EV_MAX) kept = kept.sort((a, b) => (a.date || '').localeCompare(b.date || '')).slice(-EV_MAX);
   return { events: kept, added, updated, skipped };
 }
+// v184: объединение и запись событий — под своим замком; занято — повтор через случайную паузу, не дольше EV_LOCK_WAIT
+const EV_LOCK_WAIT = 8000;
 async function eventsPut(events, mode) {
   if (!Array.isArray(events)) return { ok: false, error: 'bad_events' };
   if (events.length > 3000) return { ok: false, error: 'too_many_events' };
-  const st = await eventsLoad();
-  const m = eventsMerge(st.events, events, mode === 'replace' ? 'replace' : 'merge');
-  const r = await eventsSave({ events: m.events });
-  if (!r.ok) return r;
-  return { ok: true, added: m.added, updated: m.updated, skipped: m.skipped, total: m.events.length };
+  const until = Date.now() + EV_LOCK_WAIT; let lock = null;
+  for (;;) {
+    lock = await lockAcquire(evLockPrefix());
+    if (lock.ok) break;
+    if (lock.error !== 'busy') return lock;
+    if (Date.now() >= until) return { ok: false, error: 'busy', note: 'события сейчас записывает другой запрос — повторите позже' };
+    await new Promise(res => setTimeout(res, 200 + Math.floor(Math.random() * 500)));
+  }
+  try {
+    const st = await eventsLoad(); let saved = '';
+    if (st.corrupt) {
+      // повреждённый файл сохраняется копией до записи нового списка; не сохранилась копия — запись не идёт
+      saved = eventsKey().replace(/\.json$/, '') + '.corrupt-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+      const c = await s3Put(saved, st.text, 'application/json; charset=utf-8');
+      if (!c.ok) return { ok: false, error: 'events_corrupt', note: 'файл событий повреждён, а копию сохранить не удалось (s3 ' + c.status + ') — запись не выполнена' };
+    }
+    const m = eventsMerge(st.events, events, mode === 'replace' ? 'replace' : 'merge');
+    if (!(await lockHeld(lock, evLockPrefix()))) return { ok: false, error: 'lock_lost' };
+    const r = await eventsSave({ events: m.events });
+    if (!r.ok) return r;
+    return { ok: true, added: m.added, updated: m.updated, skipped: m.skipped, total: m.events.length, ...(saved ? { corruptSaved: saved } : {}) };
+  } finally { await lockRelease(lock); }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -743,6 +769,7 @@ const SNAP_MAX = 512 * 1024 * 1024, SHA_MAX = 24 * 1024 * 1024, LOCK_TTL = 12000
 const snapPrefix = () => 'dbsnap-' + storeId() + '/';
 const snapPendingKey = token => snapPrefix() + 'pending-' + token + '.crypt';
 const lockPrefix = () => 'dblock-' + storeId() + '/';
+const evLockPrefix = () => 'evlock-' + storeId() + '/';
 const SNAP_TOKEN_RE = /^[a-f0-9]{32}$/;
 // подписанный запрос без тела: HEAD объекта, копирование внутри хранилища (x-amz-copy-source), чтение и запись правила CORS
 function s3Signed(method, key, extraHeaders, bodyStr, contentType) {
@@ -806,25 +833,36 @@ async function corsCheck() {
   return { ok: true, rule: { status: g.status, text: gt }, probe: p, enabled: p.ok, bucket: String(process.env.BUCKET || '') };
 }
 // замок записи: свой замок → список → если есть чужой живой, свой убирается и ответ busy; снятие — удаление своего замка
-async function lockAcquire() {
-  const token = crypto.randomBytes(8).toString('hex'), ts = Date.now(), mine = lockPrefix() + String(ts).padStart(14, '0') + '-' + token;
+async function lockAcquire(pfx) {
+  pfx = pfx || lockPrefix();
+  const token = crypto.randomBytes(8).toString('hex'), ts = Date.now(), mine = pfx + String(ts).padStart(14, '0') + '-' + token;
   const w = await s3Put(mine, '1', 'text/plain');
   if (!w.ok) return { ok: false, error: 's3 lock ' + w.status };
-  const r = await s3Get('?list-type=2&prefix=' + lockPrefix() + '&max-keys=1000');
+  const r = await s3Get('?list-type=2&prefix=' + pfx + '&max-keys=1000');
   if (!r.ok) { await s3Delete(mine).catch(() => {}); return { ok: false, error: 's3 lock list ' + r.status }; }
-  const keys = [...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]).filter(k => k.startsWith(lockPrefix()));
-  const alive = keys.filter(k => { const t = Number(k.slice(lockPrefix().length, lockPrefix().length + 14)); return t && ts - t < LOCK_TTL; });
+  const keys = [...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]).filter(k => k.startsWith(pfx));
+  const alive = keys.filter(k => { const t = Number(k.slice(pfx.length, pfx.length + 14)); return t && ts - t < LOCK_TTL; });
   // чужой живой замок — занято (и при одновременном приходе оба отступают: лучше два отказа, чем два победителя)
   if (alive.some(k => k !== mine)) { await s3Delete(mine).catch(() => {}); return { ok: false, error: 'busy' }; }
   // устаревшие замки (упавшая функция) убираются попутно
   keys.filter(k => !alive.includes(k)).forEach(k => s3Delete(k).catch(() => {}));
-  return { ok: true, key: mine };
+  return { ok: true, key: mine, ts, pfx };
 }
 const lockRelease = lock => (lock && lock.key ? s3Delete(lock.key).catch(() => {}) : Promise.resolve());
+// v184 (аудит 11.10.2026, п. 9): перед записью — замок всё ещё наш: ключ на месте, не старше LOCK_TTL, чужого живого нет. Сбой списка — «не наш».
+async function lockHeld(lock, pfx) {
+  if (!lock || !lock.key) return false;
+  pfx = pfx || lock.pfx || lockPrefix();
+  if (Date.now() - Number(lock.ts || 0) >= LOCK_TTL) return false;
+  const r = await s3Get('?list-type=2&prefix=' + pfx + '&max-keys=1000'); if (!r.ok) return false;
+  const now = Date.now(), keys = [...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]).filter(k => k.startsWith(pfx));
+  if (!keys.includes(lock.key)) return false;
+  return !keys.some(k => k !== lock.key && now - Number(k.slice(pfx.length, pfx.length + 14)) < LOCK_TTL);
+}
 async function dbPutLocked(data, baseVer) {
   const lock = await lockAcquire();
   if (!lock.ok) return lock.error === 'busy' ? { ok: false, error: 'conflict', busy: true } : lock;
-  try { return await dbPut(data, baseVer); } finally { await lockRelease(lock); }
+  try { return await dbPut(data, baseVer, () => lockHeld(lock)); } finally { await lockRelease(lock); }
 }
 async function snapPut(body) {
   needStorage();
@@ -864,7 +902,10 @@ async function snapCommit(body) {
     // копирование внутри хранилища — без скачивания: сначала в историю, затем в прежний файл для прежней программы (она прочитает
     // его через функцию, пока он в её пределе); порядок важен — при сбое первого прежний файл остаётся прежним
     const c0 = await s3Copy(pending, dbHistKey(ver)); if (!c0.ok) return { ok: false, error: 's3 copy hist ' + c0.status };
+    // v184: перед заменой прежнего файла и отметкой «принято» — замок всё ещё наш
+    if (!(await lockHeld(lock))) return { ok: false, error: 'lock_lost', note: 'фиксация шла дольше срока замка — отменена, повторите отправку' };
     const c1 = await s3Copy(pending, dbKey()); if (!c1.ok) return { ok: false, error: 's3 copy ' + c1.status };
+    if (!(await lockHeld(lock))) return { ok: false, error: 'lock_lost', note: 'фиксация шла дольше срока замка — отменена, повторите отправку' };
     const r2 = await s3Put(dbVerKey(), String(ver), 'text/plain; charset=utf-8');
     if (!r2.ok) return { ok: false, error: 's3 ver ' + r2.status };
     // принято; уборка — лишние снимки истории, своя заготовка, чужие незавершённые загрузки старше суток; не дольше 2 с
@@ -1050,4 +1091,4 @@ form{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:12px;ma
 }
 
 // Экспорт внутренностей для автотестов (на работу функции не влияет)
-module.exports._test = { corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
+module.exports._test = { corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };

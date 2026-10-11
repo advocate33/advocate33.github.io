@@ -24,6 +24,8 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.18: пустой перечень дел принимается (последнее дело снято с наблюдения), сбор по нему — штатно, «дел для обхода нет»;
+//         collectone для КАД говорит о СУДиДЕЛО, только если задан SUDODELO_API_KEY (аудит 11.10.2026).
 //  v3.17: номер дела ищется без различий в тире, пробелах и «№»; при расхождении названо, какой номер на странице; страница
 //         вовсе без номера дела — «не распознана», а не «другое дело».
 //  v3.16: честное состояние сбора — state: ok / partial / error и stateText; слепок прошлого прогона — только после доставки
@@ -74,7 +76,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.17';
+const COLLECTOR_VER = '3.18';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -1038,7 +1040,15 @@ async function cloudCollect(context, reason) {
   if (!rawLinks) return { ok: false, error: 'нет списка дел: пришлите его действием linksput или положите файл ' + LINKS_KEY + ' в бакет' };
   let pack = null;
   try { pack = sanitizeLinksPack(JSON.parse(rawLinks)); } catch (e) {}
-  if (!pack || !pack.cases.length) return { ok: false, error: 'список дел пуст или неверного формата (ожидается выгрузка CRM format=crm-advokat-links)' };
+  if (!pack) return { ok: false, error: 'список дел неверного формата (ожидается выгрузка CRM format=crm-advokat-links)' };
+  // v3.18: перечень пуст — дел для обхода нет: состояние ok, на сервер ничего не уходит, слепок прежний
+  if (!pack.cases.length) {
+    const status = { ok: true, state: 'ok', stateText: 'дел для обхода нет: перечень пуст (все дела сняты с наблюдения)', at: new Date().toISOString(), reason, tookMs: Date.now() - started,
+      collectorVer: COLLECTOR_VER, cases: 0, pages: 0, flowRows: 0, events: 0, sent: 0, added: 0, updated: 0, blocked: 0, kadSkipped: 0, unparsed: 0, failedCount: 0, failed: [], partial: false, changes: 0, changesList: [] };
+    try { await s3put(STATUS_KEY, JSON.stringify(status, null, 1), iam); } catch (e) { console.log('статус не записан в бакет: ' + (e.message || e)); }
+    console.log('Сбор: перечень дел пуст — обходить нечего');
+    return status;
+  }
   const cfg = fnCfg();
   if (!cfg.bridge || !cfg.secret) return { ok: false, error: 'не заданы BRIDGE_URL / BRIDGE_SECRET в переменных функции' };
   const deadline = started + (Number(ENV.BUDGET_MS) || 480000);
@@ -1111,7 +1121,8 @@ async function collectOne(body) {
   const url = String(body.url || '').trim(), courtNo = String(body.courtNo || '').trim(), number = String(body.number || '').trim(), stage = String(body.stage || 'Первая инстанция');
   const kind = hostKind(url);
   if (kind === 'bad') return { ok: false, error: 'некорректная ссылка' };
-  if (kind === 'kad') return { ok: false, error: 'КАД Арбитр: карточка читается через СУДиДЕЛО при плановом сборе' };
+  // v3.18 (урок 99): о СУДиДЕЛО — только когда ключ задан; без него называется путь, который действительно работает
+  if (kind === 'kad') return { ok: false, error: (ENV.SUDODELO_API_KEY ? 'КАД Арбитр: карточка читается через СУДиДЕЛО при плановом сборе' : 'КАД Арбитр не отдаёт карточку дела скриптам — коллектор её не читает; карточку читает приложение для Android (кнопка «Карточка КАД» в деле)') };
   const timeoutMs = Number(ENV.TIMEOUT_MS) || 25000;
   let card, page, flow, via = 'сайт суда';
   const viaAA = async () => { const j = await aaFetchCase(url, timeoutMs); const m = aaToPage(j); card = m.card; page = m.page; flow = m.flow; via = 'API Assist'; }; // v3.13
@@ -1171,7 +1182,8 @@ export async function handler(event, context) {
       }
       if (d.action === 'linksput') {
         const clean = sanitizeLinksPack(d.body.links || d.body.pack || d.body);
-        if (!clean || !clean.cases.length) return fnResp(400, { ok: false, error: 'ожидается выгрузка CRM (format=crm-advokat-links) с делами и ссылками' });
+        // v3.18: пустой список дел — тоже перечень (программа сняла с наблюдения последнее дело); неверный формат — отказ, как прежде
+        if (!clean) return fnResp(400, { ok: false, error: 'ожидается выгрузка CRM (format=crm-advokat-links) с делами и ссылками' });
         const iam = await iamToken(context);
         await s3put(LINKS_KEY, JSON.stringify(clean, null, 1), iam);
         return fnResp(200, { ok: true, cases: clean.cases.length, savedAt: new Date().toISOString() });
