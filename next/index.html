@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="11.10.2026 17:04 · 96ff7bd">
+<meta name="build" content="11.10.2026 17:47 · 7572494">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -214,7 +214,7 @@ dialog::backdrop{background:#0c183a70}
   .bottom-nav .icon{width:21px;height:21px}
   .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.stat{padding:14px}.stat-value{font-size:1.65rem}.stat-value.small-value{font-size:1.3rem}.stat-label{font-size:.75rem}
   .day-grid{gap:16px}.day-grid>.stack{display:contents}
-  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
+  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-book{order:1}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
   .panel.pad{padding:18px}.panel-title{padding:10px 8px 10px 16px}
   .imp-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main x" "done done";padding:12px 4px 12px 16px;gap:8px}
   .imp-done .button{min-height:var(--touch)}
@@ -513,6 +513,8 @@ button.agenda-row:hover{background:var(--surface2)}
 [data-swipe-fn].swipe-arm::before{color:var(--good)}
 /* Б28: поиск по настройкам */
 .set-search{margin:0 0 12px}
+/* А6: строка устройства лицензии — название и даты слева, «Отвязать» справа */
+.lic-dev{display:flex;align-items:center;justify-content:space-between;gap:12px}.lic-dev .button{flex:none}
 
 </style>
 </head>
@@ -549,6 +551,10 @@ const NEXT_NS = { ls: 'next:', idb: { crm_advocate: 'crm_advocate_next', crm_fsy
     r.call(real, NEXT_NS.ls + probe);
     const idbOk = indexedDB.open === F.open && F.open !== open;
     NEXT_NS.ok = lsOk && idbOk; if (!lsOk) NEXT_NS.why = 'localStorage не изолирован'; else if (!idbOk) NEXT_NS.why = 'IndexedDB не изолирована';
+    // А6 (11.10.2026): единственное разрешённое чтение ключа прежней программы — отпечаток устройства (одно устройство — одно место в
+    // лимите пропуска); только чтение, только этот ключ; запись и любые другие ключи прежней программы новой версии недоступны
+    const LEGACY_READ = ['crm_device_id'];
+    NEXT_NS.legacyRead = k => (LEGACY_READ.includes(k) ? g.call(real, k) : null);
   } catch (e) { NEXT_NS.ok = false; NEXT_NS.why = String((e && e.message) || e); }
 })();
 
@@ -2845,7 +2851,7 @@ async function stageLagHide(id, key) {
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
 // eventsget — события судов с сервера (этап 4): чтение
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget'];
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget', 'bookget'];
 // этап 4, часть 2в: история снимков базы на сервере 178 — чтение
 const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 // этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
@@ -2853,10 +2859,13 @@ const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 const NEXT_PUSH = { on: false };
 // план, п. 3.3: список напоминаний (remindput) — только пока идёт передача (sync/remind.js ставит и снимает отметку)
 const NEXT_REMIND = { on: false };
+// план переноса, Б5: онлайн-запись — окна (bookpub) и ответ доверителю (bookset) только пока идёт действие sync/booking.js;
+// заявки (bookget) — чтение
+const NEXT_BOOK = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on) && !(['bookpub', 'bookset'].includes(action) && NEXT_BOOK.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -3531,7 +3540,7 @@ async function nextBlobsPending() {
   return blobs.filter(b => b && b.data && !b._deleted && !nextBlobHere(byId[b.id], srv, key)).map(b => ({ blob: b, ver: byId[b.id] || null }));
 }
 // п. 6 аудита 11.10.2026: файлы, которые есть только в хранилище сервера srv под ключом key и которых нет на устройстве: при смене
-// сервера или пароля их нельзя будет открыть, пока прежнее подключение не вернут (переноса между серверами пока нет — он в плане)
+// сервера или пароля их нельзя будет открыть, пока прежнее подключение не вернут; перенос — мастер sync/blobmove.js (А5)
 async function nextBlobsStranded(srv, key) {
   const local = new Set((await getAllRaw('docBlobs')).filter(b => b && b.data && !b._deleted).map(b => b.id));
   return (await getAll('docVersions')).filter(v => v && !v._deleted && v.cloudId && !local.has(v.id) && v.cloudSrv === srv && (!key || !v.cloudKey || v.cloudKey === key)).length;
@@ -3593,6 +3602,94 @@ async function nextBlobFetch(versionId) {
   const blob = await nextBlobDecrypt(await r.arrayBuffer(), SRVDB.pass), dataUrl = await nextBlobToDataUrl(blob);
   await put('docBlobs', { id: versionId, data: dataUrl });
   return dataUrl;
+}
+
+// ▼▼▼ sync/blobmove.js
+// ═══ sync/blobmove.js — перенос файлов документов при смене сервера или пароля (план переноса 11.10.2026, пункт А5) ═══
+// Файл документа, который лежит только в хранилище сервера (без копии на устройстве), зашифрован паролем синхронизации и связан с этим
+// сервером (sync/blobs.js, cloudSrv/cloudKey). Сменили сервер или пароль — такой файл не открыть, пока прежнее подключение не вернут.
+// Мастер переноса: ПЕРЕД сменой подключения программа скачивает эти файлы на устройство прежним подключением (оно ещё действует), затем
+// меняет подключение; в новое хранилище файлы уходят при ближайшей отправке на сервер (nextBlobsPush — шаг «файлы» отправки). Отчёт:
+// скачано, не удалось (с причиной), что осталось сделать. «Файлы документов» в «Синхронизации» — та же проверка в любой момент.
+const BLOB_MOVE = { pending: null, busy: false, last: null };
+// где лежат файлы документов: на устройстве, в хранилище текущего подключения, только у другого сервера или под другим паролем, нигде
+function blobAuditModel(vers, blobs, srv, key) {
+  const local = new Set((blobs || []).filter(b => b && b.data && !b._deleted).map(b => b.id)), m = { total: 0, local: 0, here: 0, upPending: 0, fetchable: 0, otherSrv: 0, otherKey: 0, nowhere: 0, srvs: [] };
+  for (const v of vers || []) {
+    if (!v || v._deleted) continue; m.total++;
+    const has = local.has(v.id), inHere = !!(v.cloudId && v.cloudSrv === srv && (!v.cloudKey || v.cloudKey === key)) || !!(v.cloudId && !v.cloudSrv);
+    if (has) m.local++;
+    if (inHere) m.here++;
+    if (has && !inHere) m.upPending++;
+    if (!has && inHere) m.fetchable++;
+    if (!has && v.cloudId && v.cloudSrv && v.cloudSrv !== srv) { m.otherSrv++; if (!m.srvs.includes(v.cloudSrv)) m.srvs.push(v.cloudSrv); }
+    else if (!has && v.cloudId && v.cloudSrv === srv && v.cloudKey && v.cloudKey !== key) m.otherKey++;
+    if (!has && !v.cloudId) m.nowhere++;
+  }
+  return m;
+}
+async function blobAuditNow() { const srv = typeof nextBlobSrv === 'function' ? nextBlobSrv() : '', key = typeof nextBlobKey === 'function' ? await nextBlobKey(SRVDB.pass) : ''; return blobAuditModel(await getAll('docVersions'), await getAllRaw('docBlobs'), srv, key); }
+// скачать на устройство файлы, которые есть только в хранилище ТЕКУЩЕГО подключения (перед сменой — это прежнее подключение)
+async function blobMoveFetchAll(onProgress) {
+  const srv = nextBlobSrv(), key = await nextBlobKey(SRVDB.pass), local = new Set((await getAllRaw('docBlobs')).filter(b => b && b.data && !b._deleted).map(b => b.id));
+  const list = (await getAll('docVersions')).filter(v => v && !v._deleted && v.cloudId && !local.has(v.id) && (!v.cloudSrv || v.cloudSrv === srv) && (!v.cloudKey || v.cloudKey === key));
+  const res = { total: list.length, fetched: 0, failed: 0, why: [] };
+  for (const v of list) {
+    try { if (await nextBlobFetch(v.id)) res.fetched++; else { res.failed++; res.why.push('хранилище не отдало файл'); } }
+    catch (e) { logErr('blobmove:fetch', e); res.failed++; res.why.push(String((e && e.message) || e).slice(0, 100)); }
+    if (onProgress) onProgress(res);
+  }
+  return res;
+}
+const blobMoveWhy = why => [...new Set(why || [])].slice(0, 3).join('; ');
+// смена подключения из «Синхронизации»: есть файлы только у прежнего подключения — сначала спросить
+function blobMoveAsk(stranded, next) {
+  BLOB_MOVE.pending = next;
+  openSheet('Перенос файлов документов', `<div class="status-line" id="bm-state" role="status"><span>Файлов документов только в хранилище прежнего подключения: ${stranded}</span></div>
+    <p>Вы меняете ${next.url !== nextBlobSrv() ? 'сервер' : 'пароль шифрования'}. Эти файлы есть только в хранилище прежнего подключения, на этом устройстве их нет — после смены их не открыть.</p>
+    <p class="small muted">«Перенести»: программа скачает файлы на это устройство прежним подключением (оно ещё действует), затем сменит подключение. В новое хранилище файлы уйдут при ближайшей отправке на сервер — «Отправить изменения на сервер» или автообмен.</p>
+    <div class="list-rows" id="bm-log"></div>
+    <div class="form-actions"><button type="button" class="button primary" id="bm-go" onclick="blobMoveRun()">${icon('cloud-download')}Перенести</button><button type="button" class="button" id="bm-skip" onclick="blobMoveSkip()">Сменить без переноса</button><button type="button" class="button" onclick="BLOB_MOVE.pending = null; sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+}
+async function blobMoveRun() {
+  const next = BLOB_MOVE.pending; if (!next || BLOB_MOVE.busy) return null;
+  BLOB_MOVE.busy = true; const go = document.getElementById('bm-go'), skip = document.getElementById('bm-skip'); if (go) go.disabled = true; if (skip) skip.disabled = true;
+  const st = document.getElementById('bm-state');
+  let res = null;
+  try { res = await blobMoveFetchAll(r => { if (st) st.textContent = 'Скачиваю файлы прежним подключением: ' + (r.fetched + r.failed) + ' из ' + r.total + '…'; }); }
+  catch (e) { logErr('blobmove:run', e); res = { total: 0, fetched: 0, failed: 1, why: [String((e && e.message) || e)] }; }
+  finally { BLOB_MOVE.busy = false; }
+  BLOB_MOVE.last = { at: Date.now(), ...res };
+  BLOB_MOVE.pending = null; sheetBack(true);
+  return syncApplyConnection(next, res);
+}
+async function blobMoveSkip() { const next = BLOB_MOVE.pending; if (!next) return null; BLOB_MOVE.pending = null; sheetBack(true); return syncApplyConnection(next, null); }
+// отчёт словами для листа «Синхронизация» после смены подключения
+function blobMoveReport(res, stranded) {
+  if (!res) return stranded ? ' Файлов документов, которые остались только в хранилище прежнего подключения, — ' + stranded + ': их можно открыть, только вернув прежнее подключение.' : '';
+  if (!res.total) return ' Файлов только у прежнего подключения не было.';
+  return ' Файлы документов: скачано на это устройство ' + res.fetched + ' из ' + res.total + (res.failed ? ', не удалось ' + res.failed + ' (' + blobMoveWhy(res.why) + ') — они остаются только в хранилище прежнего подключения' : '') + '. В новое хранилище они уйдут при ближайшей отправке на сервер.';
+}
+// «Файлы документов» в «Синхронизации»: где что лежит и что сделать
+async function openBlobAuditSheet() {
+  let m; try { m = await blobAuditNow(); } catch (e) { logErr('blobmove:audit', e); toast('Не удалось проверить файлы — подробности в журнале ошибок', true); return; }
+  const row = (k, v, id) => `<div${id ? ` id="${id}"` : ''}><span>${esc(k)}</span><span class="muted num">${v}</span></div>`;
+  const notes = [m.upPending ? `Есть на устройстве, но ещё не в хранилище текущего сервера: ${m.upPending} — уйдут при отправке на сервер.` : '',
+    m.fetchable ? `Есть только в хранилище текущего сервера: ${m.fetchable} — можно скачать на устройство кнопкой ниже.` : '',
+    m.otherSrv ? `Только в хранилище другого сервера: ${m.otherSrv} (${m.srvs.join(', ')}) — откроются, если вернуть то подключение; чтобы перенести, подключите его, скачайте файлы и вернитесь к текущему.` : '',
+    m.otherKey ? `Зашифрованы прежним паролем: ${m.otherKey} — откроются с прежним паролем шифрования; перенос — так же, через прежний пароль.` : '',
+    m.nowhere ? `Нет ни на устройстве, ни в хранилище: ${m.nowhere} — файл был на другом устройстве и ещё не отправлен оттуда.` : ''].filter(Boolean);
+  openSheet('Файлы документов', `<p class="small muted">Где лежат файлы документов: на этом устройстве и в хранилище вашего сервера (зашифрованы паролем синхронизации).</p>
+    <div class="list-rows" id="ba-rows">${row('Документов с файлами', m.total)}${row('На этом устройстве', m.local)}${row('В хранилище текущего сервера', m.here)}</div>
+    ${notes.length ? `<ul class="small" id="ba-notes" style="margin:10px 0 0 18px;padding:0">${notes.map(t => `<li>${esc(t)}</li>`).join('')}</ul>` : '<p class="small muted" id="ba-notes">Все файлы на месте.</p>'}
+    <div class="status-line" id="ba-state" role="status" hidden></div>
+    <div class="form-actions">${m.fetchable && SRV.url && SRVDB.pass ? btn('Скачать на устройство', 'blobAuditFetch()', 'primary', 'cloud-download') : ''}${btn('Обновить', 'openBlobAuditSheet()', '', 'refresh-cw')}</div>`, sheetIsOpen() ? 'replace' : undefined);
+}
+async function blobAuditFetch() {
+  const st = document.getElementById('ba-state'); if (st) st.hidden = false;
+  const r = await blobMoveFetchAll(x => { if (st) st.textContent = 'Скачиваю: ' + (x.fetched + x.failed) + ' из ' + x.total + '…'; });
+  toast('Скачано файлов: ' + r.fetched + ' из ' + r.total + (r.failed ? ' · не удалось ' + r.failed + ': ' + blobMoveWhy(r.why) : ''), !!r.failed);
+  return openBlobAuditSheet();
 }
 
 // ▼▼▼ sync/auto.js
@@ -5573,7 +5670,7 @@ function cardsAllLogRender() {
   if (typeof document !== 'object' || !document) return;
   const box = document.getElementById('cards-all-log'); if (!box) return;
   box.innerHTML = CARDS_ALL.log.map(l => `<div><span><b>${esc(l.num)}</b>${l.client ? ' · ' + esc(l.client) : ''}<br><span class="small ${l.ok ? 'muted' : ''}">${esc(l.what)}: ${esc(l.text)}</span></span><span class="${l.ok ? 'dep-in' : 'dep-out'}">${l.ok ? 'готово' : 'нет'}</span></div>`).join('');
-  const st = document.getElementById('cards-all-state'); if (st) st.textContent = CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : (CARDS_ALL.log.length ? `Готово: ${CARDS_ALL.log.filter(l => l.ok).length} из ${CARDS_ALL.log.length}` : '');
+  const st = document.getElementById('cards-all-state'); if (st) { st.textContent = CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : (CARDS_ALL.log.length ? `Готово: ${CARDS_ALL.log.filter(l => l.ok).length} из ${CARDS_ALL.log.length}` : ''); st.hidden = !st.textContent; }
   const go = document.getElementById('cards-all-go'), stop = document.getElementById('cards-all-stop'); if (go) go.disabled = CARDS_ALL.busy; if (stop) stop.hidden = !CARDS_ALL.busy || CARDS_ALL.auto;
 }
 // Б25 и Д1: обход по очереди. opts.auto — только КАД, скрыто, без листа и без сообщений, кроме итога в настройках
@@ -5626,9 +5723,10 @@ function openCardsAllSheet() {
     const plan = cardsAllPlan(cases), kad = plan.filter(x => x.kad).length, site = plan.filter(x => x.site).length, quiet = kadQuietSupported(), app = typeof kadProtoSupported === 'function' && kadProtoSupported();
     const how = !kad ? '' : quiet ? 'Карточки КАД читаются незаметно, по одной — до 2 минут на дело.' : app ? 'Карточки КАД: на каждое дело откроется окно КАД — дождитесь, пока оно закроется само (в приложении 1.22 и новее — незаметно).' : 'Карточки КАД в браузере не читаются — только в приложении для Android.';
     openSheet('Карточки всех дел', `<p class="small muted">Дел в работе со ссылкой на сайт суда: ${plan.length} (суды общей юрисдикции — ${site}, КАД — ${kad}). Программа прочитает карточку каждого по очереди и запишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». ${esc(how)}</p>
-      <div class="status-line" id="cards-all-state">${CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : ''}</div>
+      ${plan.length ? '' : '<div class="info-box" id="cards-all-none">Читать нечего: ссылку на карточку дела на сайте суда укажите в форме дела («Все поля» → «Ссылка на дело (сайт суда)»).</div>'}
+      <div class="status-line" id="cards-all-state"${CARDS_ALL.busy ? '' : ' hidden'}>${CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : ''}</div>
       <div class="list-rows" id="cards-all-log"></div>
-      <div class="form-actions">${btn('Начать', 'cardsAllRun()', 'primary', 'refresh-cw').replace('<button ', '<button id="cards-all-go" ')}<button type="button" class="button" id="cards-all-stop" onclick="CARDS_ALL.stop = true; toast(\'Остановлю после текущего дела\')" hidden>Остановить</button></div>`, sheetIsOpen() ? true : undefined);
+      <div class="form-actions">${plan.length || CARDS_ALL.busy ? btn('Начать', 'cardsAllRun()', 'primary', 'refresh-cw').replace('<button ', '<button id="cards-all-go" ') : ''}<button type="button" class="button" id="cards-all-stop" onclick="CARDS_ALL.stop = true; toast(\'Остановлю после текущего дела\')" hidden>Остановить</button></div>`, sheetIsOpen() ? true : undefined);
     cardsAllLogRender();
   });
 }
@@ -5658,6 +5756,198 @@ function kadAutoStart() {
 // ручное «Карточка КАД»: удачное чтение — карточка дела свежая, пауза после проверки браузера снимается
 function kadAutoNoteManual(caseId, ok) { if (!ok || !caseId) return; const st = kadAutoState(); st.last[caseId] = Date.now(); st.pauseUntil = 0; kadAutoSave(st); }
 if (typeof document === 'object' && document && typeof document.addEventListener === 'function') kadAutoStart();
+
+// ▼▼▼ sync/booking.js
+// ═══ sync/booking.js — онлайн-запись на консультацию (план переноса 11.10.2026, пункт Б5; перенос v245/v248 прежней программы) ═══
+// Доверитель открывает страницу записи на вашем личном сервере (GET ?book=<publicId>), видит свободные окна и оставляет заявку.
+// Окна = дни и часы приёма минус заседания (с дорогой до суда и обратно), встречи, перерыв и нерабочие дни; публикуются на сервер
+// (bookpub — только время окон и подписи страницы, без имён и дел). Заявки забираются (bookget): заявка → обращение и встреча
+// «ждёт подтверждения»; на «Сегодня» — «Подтвердить» / «Отклонить» (bookset), доверитель видит ответ по коду заявки.
+// Настройки — те же, что в прежней программе (crm_book, синхронизируются). Пока работают обе программы, заявки забирает та, что
+// открыта; одна заявка — одна встреча: встреча и обращение получают постоянный id по заявке, слияние не даст дубля внутри новой версии.
+// Если заявку до обмена забрали обе программы (у прежней id случайный), встреч с одной заявкой две: на «Сегодня» — одна строка,
+// ответ доверителю и смена статуса — всем встречам этой заявки; ничего не удаляется само.
+const BOOK_KEY = 'crm_book', BOOK_HASH_KEY = 'crm_next_book_pubhash', BOOK_TICK = 15 * 60000;
+const BOOK = { timer: null, loop: null, busy: false };
+function bookCfg() {
+  let c = {}; try { c = JSON.parse(localStorage.getItem(BOOK_KEY) || '{}') || {}; } catch (e) { /* штатно: настройки не разобраны — значения по умолчанию */ c = {}; }
+  return Object.assign({ enabled: false, publicId: '', title: 'Запись на консультацию', address: '', phone: '', note: '', durationMin: 60, horizonDays: 14, from: '10:00', to: '18:00', breakFrom: '13:00', breakTo: '14:00', days: [1, 2, 3, 4, 5], minLeadHours: 2, topics: '', hearingMin: 60, afterCourtMin: 0, beforeCourtMin: 0, gapMin: 0, lastPoll: 0, lastPub: 0 }, c);
+}
+function bookCfgSave(c) { localStorage.setItem(BOOK_KEY, JSON.stringify(c)); if (typeof bumpSettings === 'function') bumpSettings(); }
+const bookNewId = () => Array.from(crypto.getRandomValues(new Uint8Array(12))).map(b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+function bookUrl(c) { c = c || bookCfg(); return SRV.url && c.publicId ? String(SRV.url).replace(/\/+$/, '') + '?book=' + c.publicId : ''; }
+const bookMin = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? +m[1] * 60 + +m[2] : null; };
+const bookHm = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+// свободные окна: перенос bookAvailability v245/v248 — «сейчас» параметром (урок 8)
+function bookAvailability(cfg, hearings, meetings, nowTs) {
+  const now = new Date(nowTs || Date.now()), days = [];
+  const dur = Number(cfg.durationMin) || 60, start = bookMin(cfg.from) ?? 600, end = bookMin(cfg.to) ?? 1080, b1 = bookMin(cfg.breakFrom), b2 = bookMin(cfg.breakTo);
+  const hMin = Number(cfg.hearingMin) || 60, afterC = Number(cfg.afterCourtMin) || 0, beforeC = Number(cfg.beforeCourtMin) || 0, gap = Number(cfg.gapMin) || 0;
+  const work = typeof CAL_WORK === 'object' && CAL_WORK ? CAL_WORK : new Set(), off = typeof CAL_OFF === 'object' && CAL_OFF ? CAL_OFF : new Set();
+  for (let i = 0; i < Math.min(60, Number(cfg.horizonDays) || 14); i++) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i), iso = localISO(d);
+    if (off.has(iso)) continue;
+    if (!(cfg.days || []).includes(d.getDay()) && !work.has(iso)) continue;
+    const busy = [];
+    (hearings || []).filter(h => h && !h._deleted && h.date === iso && h.status !== 'Отменено').forEach(h => {
+      const t = bookMin(h.time); if (t === null) { busy.push([0, 1440]); return; }
+      const ci = typeof courtInfoGet === 'function' ? courtInfoGet(h.court) : null, tr = ci && Number(ci.travel) > 0 ? Number(ci.travel) : 0;
+      busy.push([t - Math.max(beforeC, tr), t + hMin + Math.max(afterC, tr)]);
+    });
+    (meetings || []).filter(m => m && !m._deleted && m.date === iso && m.status !== 'Отменено' && m.bookingStatus !== 'declined').forEach(m => { const t = bookMin(m.time); if (t === null) return; busy.push([t - gap, t + (Number(m.duration) || 30) + gap]); });
+    if (b1 !== null && b2 !== null) busy.push([b1, b2]);
+    const minStart = i === 0 ? now.getHours() * 60 + now.getMinutes() + (Number(cfg.minLeadHours) || 0) * 60 : 0, slots = [];
+    for (let t = start; t + dur <= end; t += dur) { if (t < minStart) continue; if (busy.some(([a, b]) => t < b && t + dur > a)) continue; slots.push(bookHm(t)); }
+    if (slots.length) days.push({ date: iso, slots });
+  }
+  return days;
+}
+// ответ сервера словами: пояснение сервера, если есть; известные коды — по-русски; иначе — как есть
+function bookWhy(j) {
+  if (!j) return 'сервер не ответил';
+  if (j.note) return j.note;
+  return { unknown_action: 'сервер старой версии — онлайн-запись есть с версии 174, обновите сервер', not_found: 'заявка на сервере не найдена', blocked: 'запись на сервер закрыта', bookings_corrupt: 'файл заявок на сервере повреждён' }[j.error] || j.error || 'сервер не ответил';
+}
+async function bookSrv(action, payload, write) {
+  NEXT_BOOK.on = !!write;
+  try { return await srvCall(action, payload); } finally { NEXT_BOOK.on = false; }
+}
+// публикация окон; quiet — без сообщений; force — даже если окна не изменились
+async function bookPublish(quiet, force) {
+  const cfg = bookCfg(); if (!cfg.enabled) return null;
+  if (!SRV.url || !SRV.secret) { if (!quiet) toast('Подключите личный сервер: «Синхронизация» → «Подключить сервер»', true); return null; }
+  if (!cfg.publicId) { cfg.publicId = bookNewId(); bookCfgSave(cfg); }
+  const days = bookAvailability(cfg, await getAll('hearings'), await getAll('meetings'));
+  const settings = { title: cfg.title, address: cfg.address, phone: cfg.phone, note: cfg.note, durationMin: Number(cfg.durationMin) || 60, topics: String(cfg.topics || '').split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 20) };
+  const hash = JSON.stringify([cfg.publicId, settings, days]);
+  if (!force && quiet && localStorage.getItem(BOOK_HASH_KEY) === hash) return { ok: true, same: true };
+  const j = await bookSrv('bookpub', { publicId: cfg.publicId, settings, days }, true);
+  if (j && j.ok) { const c2 = bookCfg(); c2.lastPub = Date.now(); bookCfgSave(c2); localStorage.setItem(BOOK_HASH_KEY, hash); if (!quiet) toast('Опубликовано окон: ' + j.slots + ' на ' + j.days + ' ' + plural(j.days, 'день', 'дня', 'дней')); }
+  else if (!quiet) toast('Окна не опубликованы: ' + bookWhy(j), true);
+  return j;
+}
+function bookRepublishSoon() { if (!bookCfg().enabled) return; clearTimeout(BOOK.timer); BOOK.timer = setTimeout(() => bookPublish(true).catch(e => logErr('book:pub', e)), 5000); }
+// заявки → обращение и встреча (постоянные id по заявке: одна заявка — одна встреча)
+async function bookPoll(quiet) {
+  const cfg = bookCfg(); if (!cfg.enabled || !SRV.url || !SRV.secret || BOOK.busy) return 0;
+  BOOK.busy = true;
+  try {
+    const j = await bookSrv('bookget', { since: cfg.lastPoll || 0 }, false);
+    if (!j || !j.ok) { if (!quiet) toast('Заявки не получены: ' + bookWhy(j), true); return 0; }
+    // все записи, включая корзину: удалённая встреча или обращение по заявке не создаются заново
+    const meetings = await getAllRaw('meetings'), leads = await getAllRaw('leads'); let n = 0, maxTs = cfg.lastPoll || 0;
+    for (const b of j.items || []) {
+      if (!b || !b.id) continue; maxTs = Math.max(maxTs, Number(b.updatedAt || b.createdAt) || 0);
+      const same = meetings.filter(x => x.bookingId === b.id);
+      let m = same[0];
+      if (!m) {
+        if (b.status === 'declined' || b.status === 'cancelled') continue;
+        if (await getOne('meetings', 'В-book-' + b.id)) continue;
+        const phone = String(b.phone || '').replace(/\D/g, '');
+        let lead = leads.find(x => x.bookingId === b.id) || (phone ? leads.find(x => x.phone && String(x.phone).replace(/\D/g, '') === phone) : null);
+        if (lead && lead._deleted) lead = { id: lead.id };
+        if (!lead) { lead = { id: 'О-book-' + b.id, name: String(b.name || 'Без имени'), phone: String(b.phone || ''), email: '', topic: b.topic || 'Консультация', summary: b.comment || '', kind: '', status: 'Новое', source: 'Онлайн-запись', bookingId: b.id, createdAt: Date.now() }; await put('leads', lead); leads.push(lead); }
+        m = { id: 'В-book-' + b.id, date: b.date, time: b.time, duration: Number(cfg.durationMin) || 60, with: String(b.name || ''), place: cfg.address || '', note: 'Онлайн-запись, код ' + (b.code || '') + (b.topic ? ' · ' + b.topic : '') + (b.comment ? '\n' + b.comment : '') + (b.phone ? '\nТел. ' + b.phone : ''), leadId: lead.id, bookingId: b.id, bookingCode: b.code || '', bookingStatus: b.status || 'new', createdAt: Date.now() };
+        await put('meetings', m); meetings.push(m); n++;
+      } else for (const x0 of same) {
+        // перечитать перед записью: пока шёл запрос, встречу могли подтвердить или изменить (урок 78); удалённую — не трогать
+        const x = await getOne('meetings', x0.id); if (!x || x._deleted || x.bookingStatus === b.status) continue;
+        // ответ адвоката, данный позже этого состояния заявки на сервере, устаревшим ответом сервера не откатывается
+        if (Number(x.bookingSetAt) > (Number(b.updatedAt) || 0)) continue;
+        x.bookingStatus = b.status; if (b.status === 'declined' || b.status === 'cancelled') x.status = 'Отменено'; await put('meetings', x);
+      }
+    }
+    const c2 = bookCfg(); c2.lastPoll = maxTs; bookCfgSave(c2);
+    if (n) { toast('Новых записей на приём: ' + n); bookRepublishSoon(); if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }
+    else if (!quiet) toast('Новых записей нет');
+    return n;
+  } finally { BOOK.busy = false; }
+}
+// «Подтвердить» / «Отклонить» на «Сегодня» открывают лист: заметка доверителю (видна по коду заявки) или подтверждение отказа
+async function bookSetStatus(meetingId, status, go) {
+  const m = await getOne('meetings', meetingId); if (!m || !m.bookingId) { toast('Запись не найдена', true); return null; }
+  if (!go) {
+    const head = `${fmtDate(m.date)} ${m.time || ''} · ${m.with || ''}`;
+    if (status === 'confirmed') openSheet('Подтвердить запись', `<p><b>${esc(head)}</b></p><p class="small muted">Доверитель увидит подтверждение и заметку на странице записи по коду заявки.</p>${fText('bk-reply', 'Заметка доверителю (необязательно)', 'Возьмите паспорт и документы по делу', 2)}
+      <div class="form-actions"><button type="button" class="button primary" id="bk-confirm-go" onclick="bookSetStatus('${jsq(meetingId)}', 'confirmed', true)">${icon('check')}Подтвердить запись</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+    else openSheet('Отклонить запись?', `<p><b>${esc(head)}</b></p><p>Доверитель увидит отказ по коду заявки и сможет выбрать другое время; встреча получит статус «Отменено», время снова станет свободным.</p>
+      <div class="form-actions"><button type="button" class="button primary" id="bk-decline-go" onclick="bookSetStatus('${jsq(meetingId)}', 'declined', true)">Отклонить запись</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, sheetIsOpen() ? true : undefined);
+    return null;
+  }
+  const note = status === 'confirmed' ? fv('bk-reply').slice(0, 300) : '';
+  const j = await bookSrv('bookset', { id: m.bookingId, status, note }, true);
+  if (!j || !j.ok) { toast('Сервер не принял ответ: ' + bookWhy(j) + '. Встреча не изменена — повторите позже', true); return null; }
+  let all = []; try { all = (await getAll('meetings')).filter(x => x.bookingId === m.bookingId); } catch (e) { logErr('book:set-read', e); all = [m]; }
+  // время ответа — по часам сервера (updatedAt заявки), иначе по часам устройства
+  const setAt = (j.item && Number(j.item.updatedAt)) || Date.now();
+  try { for (const x of all.length ? all : [m]) { x.bookingStatus = status; x.bookingSetAt = setAt; if (status === 'declined') x.status = 'Отменено'; await put('meetings', x); } }
+  catch (e) { logErr('book:set', e); toast('Доверителю ответ отправлен, но встречу записать не удалось — откройте её и отметьте вручную', true); return null; }
+  toast(status === 'confirmed' ? 'Запись подтверждена — доверитель увидит это по коду заявки' : 'Запись отклонена — время снова свободно');
+  bookRepublishSoon();
+  // ответ отправлен и записан — лист подтверждения закрывается без вопроса о несохранённой заметке
+  if (typeof guardDisarm === 'function') guardDisarm(true);
+  if (sheetIsOpen()) closeSheet(); if (typeof UI === 'object' && UI.ready) nav(UI.screen);
+  return j;
+}
+// «Сегодня»: заявки, ждущие подтверждения
+async function bookPendingBox() {
+  if (!bookCfg().enabled) return '';
+  let ms = []; try { ms = (await getAll('meetings')).filter(m => m && m.bookingId && m.bookingStatus === 'new').sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time) || String(a.id).localeCompare(String(b.id))); } catch (e) { logErr('book:box', e); return ''; }
+  const seen = new Set(); ms = ms.filter(m => !seen.has(m.bookingId) && seen.add(m.bookingId));
+  if (!ms.length) return '';
+  return `<section class="panel t-book" id="book-pending"><div class="panel-title"><h2>Записи на приём ${badge(String(ms.length), 'accent')}</h2></div>
+    ${ms.map(m => `<div class="imp-row book-row"><button type="button" class="imp-main" onclick="openMeetingForm('${jsq(m.id)}')"><span class="task-title">${esc(fmtDate(m.date))} ${esc(m.time || '')} · ${esc(m.with || '')}</span><span class="task-sub">${esc(String(m.note || '').split('\n')[0])}</span></button>
+      <div class="imp-done"><button type="button" class="button small-btn" id="bk-ok-${esc(m.id)}" onclick="bookSetStatus('${jsq(m.id)}', 'confirmed')">${icon('check', 'icon-sm')}Подтвердить</button><button type="button" class="button small-btn" id="bk-no-${esc(m.id)}" onclick="bookSetStatus('${jsq(m.id)}', 'declined')">Отклонить</button></div></div>`).join('')}</section>`;
+}
+function openBookSheet(mode) {
+  const c = bookCfg(), url = bookUrl(c), day = (n, l) => `<label class="check" style="display:inline-flex;margin-right:12px"><input type="checkbox" class="bk-day" value="${n}"${(c.days || []).includes(n) ? ' checked' : ''}><span>${l}</span></label>`;
+  openSheet('Онлайн-запись на консультацию', `<p class="small muted">Доверитель открывает страницу записи на вашем личном сервере, видит свободные окна и оставляет заявку. Заявка становится обращением и встречей «ждёт подтверждения» — на «Сегодня» её можно подтвердить или отклонить. На сервер уходят только окна времени и подписи страницы — без имён доверителей и дел.</p>
+    ${!SRV.url ? '<div class="info-box warning">Нужен личный сервер: «Синхронизация» → «Подключить сервер».</div>' : url ? `<div class="info-box" id="bk-url">Ссылка для доверителей: <span class="addr">${esc(url)}</span> <button type="button" class="text-button" onclick="bookCopyUrl()">Скопировать</button></div>` : '<p class="small muted">Ссылка появится после первого сохранения с включённой записью.</p>'}
+    <label class="check"><input type="checkbox" id="bk-enabled"${c.enabled ? ' checked' : ''}><span>Включить онлайн-запись</span></label>
+    <div class="form-grid">${wide(fInput('bk-title', 'Заголовок страницы', c.title, 'autocomplete="off"'))}${wide(fInput('bk-address', 'Адрес приёма (видит доверитель)', c.address, 'autocomplete="off"'))}
+      ${fInput('bk-phone', 'Телефон для связи (видит доверитель)', c.phone, 'type="tel" autocomplete="off"')}${fSelect('bk-dur', 'Длительность приёма, мин', String(c.durationMin), ['30', '45', '60', '90'])}
+      ${wide(fInput('bk-note', 'Примечание на странице', c.note, 'autocomplete="off" placeholder="первая консультация — 60 минут"'))}
+      ${fInput('bk-from', 'Приём с', c.from, 'type="time"')}${fInput('bk-to', 'до', c.to, 'type="time"')}${fInput('bk-b1', 'Перерыв с', c.breakFrom, 'type="time"')}${fInput('bk-b2', 'до', c.breakTo, 'type="time"')}
+      ${fInput('bk-horizon', 'На сколько дней вперёд', c.horizonDays, 'type="number" min="3" max="60"')}${fInput('bk-lead', 'Сегодня — не ранее чем через, ч', c.minLeadHours, 'type="number" min="0" max="72"')}
+      ${fInput('bk-hmin', 'Заседание длится, мин', c.hearingMin, 'type="number" min="15" max="480" step="5"')}${fInput('bk-after', 'После заседания до приёма, мин', c.afterCourtMin, 'type="number" min="0" max="240" step="5"')}
+      ${fInput('bk-before', 'Перед заседанием (выехать), мин', c.beforeCourtMin, 'type="number" min="0" max="240" step="5"')}${fInput('bk-gap', 'Зазор между приёмами, мин', c.gapMin, 'type="number" min="0" max="120" step="5"')}
+      ${wide(fText('bk-topics', 'Темы для выбора (по одной в строке)', c.topics, 3))}</div>
+    <div class="field"><span class="small muted">Дни приёма</span><div>${day(1, 'пн')}${day(2, 'вт')}${day(3, 'ср')}${day(4, 'чт')}${day(5, 'пт')}${day(6, 'сб')}${day(0, 'вс')}</div></div>
+    <p class="small muted">Если у суда в справочнике указано время в пути и оно больше, берётся оно. Окна обновляются на сервере сами после правки заседаний и встреч.</p>
+    ${fSaveBar('bookSaveSettings()', 'Сохранить и опубликовать')}
+    <div class="form-actions">${btn('Проверить заявки', 'bookPoll(false)', '', 'refresh-cw')}</div>`, mode === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
+}
+function bookSettingsModel(v, prev) {
+  const c = { ...prev }, num = (x, lo, hi, d) => { const n = Number(x); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.round(n))) : d; };
+  c.enabled = !!v.enabled; c.title = String(v.title || '').trim() || 'Запись на консультацию'; c.address = String(v.address || '').trim(); c.phone = String(v.phone || '').trim(); c.note = String(v.note || '').trim();
+  c.durationMin = [30, 45, 60, 90].includes(Number(v.dur)) ? Number(v.dur) : 60; c.horizonDays = num(v.horizon, 3, 60, 14); c.minLeadHours = num(v.lead, 0, 72, 2);
+  for (const [k, f, d] of [['from', 'from', '10:00'], ['to', 'to', '18:00'], ['breakFrom', 'b1', ''], ['breakTo', 'b2', '']]) c[k] = /^\d{2}:\d{2}$/.test(v[f] || '') ? v[f] : d;
+  if (bookMin(c.from) >= bookMin(c.to)) return { error: 'Время приёма: «с» должно быть раньше «до»' };
+  c.hearingMin = num(v.hmin, 15, 480, 60); c.afterCourtMin = num(v.after, 0, 240, 0); c.beforeCourtMin = num(v.before, 0, 240, 0); c.gapMin = num(v.gap, 0, 120, 0);
+  c.days = (v.days || []).map(Number).filter(n => n >= 0 && n <= 6); c.topics = String(v.topics || '');
+  if (c.enabled && !c.days.length) return { error: 'Отметьте хотя бы один день приёма' };
+  return { obj: c };
+}
+async function bookSaveSettings() {
+  const v = { enabled: !!(document.getElementById('bk-enabled') || {}).checked, days: [...document.querySelectorAll('#sheetContent .bk-day:checked')].map(x => x.value) };
+  for (const k of ['title', 'address', 'phone', 'note', 'dur', 'from', 'to', 'b1', 'b2', 'horizon', 'lead', 'hmin', 'after', 'before', 'gap', 'topics']) v[k] = fv('bk-' + k);
+  const r = bookSettingsModel(v, bookCfg()); if (r.error) { fErr(r.error); return; }
+  if (r.obj.enabled && !r.obj.publicId) r.obj.publicId = bookNewId();
+  bookCfgSave(r.obj);
+  if (!r.obj.enabled) { toast('Онлайн-запись выключена: заявки больше не забираются; страница записи остаётся, новые окна на ней не появятся'); closeSheet(); return; }
+  const j = await bookPublish(false, true);
+  if (j && j.ok) openBookSheet('replace'); else fErr('Настройки сохранены, но окна не опубликованы: ' + bookWhy(j) + '. Проверьте связь в «Синхронизации».');
+}
+async function bookCopyUrl() { const u = bookUrl(); if (!u) return; try { await navigator.clipboard.writeText(u); toast('Ссылка скопирована'); } catch (e) { logErr('book:copy', e); toast('Не удалось скопировать — выделите ссылку вручную', true); } }
+// каждая запись в базу зовёт srvdbTouch (sync/auto.js, sync/remind.js): окна пересчитываются через 5 с после последней правки;
+// не изменились — на сервер ничего не уходит (bookPublish сверяет отпечаток)
+if (typeof srvdbTouch === 'function') { const srvdbTouchPrev = srvdbTouch; srvdbTouch = function () { srvdbTouchPrev(); try { bookRepublishSoon(); } catch (e) { logErr('book:touch', e); } }; }
+function bookStart() {
+  if (typeof window !== 'object' || typeof setInterval !== 'function' || BOOK.loop) return;
+  const tick = () => { if (!bookCfg().enabled || (typeof document === 'object' && document.visibilityState && document.visibilityState !== 'visible')) return; bookPoll(true).then(() => bookPublish(true)).catch(e => logErr('book:tick', e)); };
+  BOOK.loop = setInterval(tick, BOOK_TICK); setTimeout(tick, 6000);
+}
+if (typeof document === 'object' && document && typeof document.addEventListener === 'function') bookStart();
 
 // ▼▼▼ sync/ycdeploy.js
 // ═══ sync/ycdeploy.js — «Свой сервер в Яндекс Облаке одной кнопкой» (план основных функций, п. 3.2; обещано 30.09.2026) ═══
@@ -6111,7 +6401,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -6581,7 +6871,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     </div>
     <div class="section-label">Данные</div>
-    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" id="set-orders" onclick="openOrdersSheet()"><span>Журнал ордеров</span><span class="muted">выписать, найти, распечатать реестр</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
@@ -6596,7 +6886,7 @@ async function openSettingsSheet(sub) {
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
-    <div class="info-box set-block" data-words="лицензия устройства учёт учет">Учёт устройств на сервере лицензий пока ведёт прежняя программа: новая версия проверяет пропуск на этом устройстве.</div>`, sub);
+    <div class="info-box set-block" data-words="лицензия устройства учёт учет">Устройства, на которых действует пропуск, — «Лицензия» → «Устройства»: там же можно отвязать устройство, которым вы больше не пользуетесь.</div>`, sub);
 }
 // журнал ошибок: что сломалось, где и когда — чтобы прислать разработчику; «Скопировать» собирает текст для чата
 function errlogText() { return errLogGet().slice().reverse().map(r => `${new Date(r.t).toLocaleString('ru-RU')} · ${r.ver || ''} · ${r.where || ''}: ${r.msg || ''}${r.extra ? ' · ' + r.extra : ''}${r.stack ? '\n    ' + r.stack : ''}`).join('\n'); }
@@ -6656,6 +6946,7 @@ async function openSyncSheet(sub, msg) {
     ${nextLocalChanges() ? `<div class="info-box">На этом устройстве есть правки, которых нет на сервере. Они уйдут на сервер по кнопке «Отправить изменения на сервер».</div>` : ''}
     ${nConf ? `<div class="form-actions">${btn('Журнал коллизий · ' + nConf, 'showConflictsSheet()', '', 'info')}</div>` : ''}
     <div class="section-label">${NEXT_ROOT ? 'Записей в базе' : 'Записей в базе новой версии'}</div><div class="list-rows">${rows}</div>
+    ${typeof openBlobAuditSheet === 'function' && SRV.url ? `<div class="form-actions">${btn('Файлы документов', 'openBlobAuditSheet()', '', 'files')}</div>` : ''}
     ${SRV.url || SRV.secret || SRVDB.pass ? `<div class="form-actions">${btn('Отключить сервер', 'syncForget()', '', 'x')}</div><p class="small muted">Адрес, код и пароль удаляются ${NEXT_ROOT ? 'с этого устройства' : 'из новой версии'}. Загруженные записи остаются на устройстве.</p>` : ''}`, sub);
 }
 async function syncSaveAndCheck() {
@@ -6665,11 +6956,18 @@ async function syncSaveAndCheck() {
   // п. 6 аудита 11.10.2026: смена сервера или пароля — сколько файлов документов останется только у прежнего подключения
   let stranded = 0; const oldSrv = String(SRV.url || '').trim().replace(/\/+$/, '');
   if (oldSrv && typeof nextBlobsStranded === 'function' && (url.trim().replace(/\/+$/, '') !== oldSrv || pass !== SRVDB.pass)) { try { stranded = await nextBlobsStranded(oldSrv, await nextBlobKey(SRVDB.pass)); } catch (e) { logErr('sync:stranded', e); } }
+  // А5 (11.10.2026): такие файлы есть — сначала мастер переноса (скачать прежним подключением, потом сменить; sync/blobmove.js)
+  if (stranded && typeof blobMoveAsk === 'function') { blobMoveAsk(stranded, { url, secret, pass, stranded }); return; }
+  return syncApplyConnection({ url, secret, pass, stranded }, null);
+}
+// применить новое подключение и проверить связь; moveRes — итог переноса файлов (null — переноса не было)
+async function syncApplyConnection(next, moveRes) {
+  const { url, secret, pass } = next, stranded = moveRes ? 0 : (next.stranded || 0);
   if (url !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
   SRV.url = url; if (secret !== SRV.secret) SRV.secret = secret; if (pass !== SRVDB.pass) CLOUD.pass = pass;
   const r = await nextServerCheck();
-  const strandedNote = stranded ? ' Внимание: файлов документов, которые есть только в хранилище прежнего подключения и которых нет на этом устройстве, — ' + stranded + '. С новым подключением их не открыть; переноса между серверами пока нет — чтобы их сохранить, верните прежние адрес и пароль, сделайте «Копию базы» (файлы подкачаются на устройство) и только потом меняйте подключение.' : '';
-  openSyncSheet('replace', r.ok ? { text: 'Связь есть: сервер версии ' + r.srvVer + (r.cors ? (r.cors.enabled ? ', хранилище принимает снимки напрямую (правило CORS действует)' : ', хранилище НЕ принимает снимки напрямую: ответ ' + r.cors.text + ' — сервер поставит правило при первой отправке; если не поможет, пришлите этот текст') : '') + (r.dbVer ? ', база на сервере есть. Теперь шаг 2.' : ', базы на сервере пока нет.') + strandedNote, bad: !!stranded }
+  const strandedNote = typeof blobMoveReport === 'function' ? blobMoveReport(moveRes, stranded) : '';
+  openSyncSheet('replace', r.ok ? { text: 'Связь есть: сервер версии ' + r.srvVer + (r.cors ? (r.cors.enabled ? ', хранилище принимает снимки напрямую (правило CORS действует)' : ', хранилище НЕ принимает снимки напрямую: ответ ' + r.cors.text + ' — сервер поставит правило при первой отправке; если не поможет, пришлите этот текст') : '') + (r.dbVer ? ', база на сервере есть. Теперь шаг 2.' : ', базы на сервере пока нет.') + strandedNote, bad: !!stranded || !!(moveRes && moveRes.failed) }
     : { text: 'Связь не установлена: ' + r.error + '.' + strandedNote, bad: true });
 }
 async function syncPullNow() {
@@ -6734,6 +7032,7 @@ const SETTINGS_WORDS = {
   openOrdersSheet: 'ордер ордера журнал книжка бланк', openDadataSheet: 'dadata дадата инн реквизиты адрес егрюл огрн',
   openErrlogSheet: 'ошибки журнал сбой лог', openMonitorSettingsSheet: 'суд суды коллектор мониторинг кад сайт заседания события',
   openPochtaSheet: 'почта трек трек-номер отслеживание письмо отправление',
+  openBookSheet: 'запись приём прием консультация окна расписание заявка доверитель страница ссылка',
   openSyncSheet: 'синхронизация сервер обмен отправить загрузить база пароль код', openRefsSheet: 'справочники суды судьи списки праздники нерабочие дни',
   openIntegritySheet: 'проверка данных дубли ошибки номера доверители', openHelpSheet: 'инструкция помощь справка как',
 };
@@ -7868,8 +8167,8 @@ async function purgeConfirmed(store, id) {
 // Пропуск (лицензионный ключ) проверяется на этом устройстве печатями LIC_PUBS — теми же, что у прежней программы с v311 и у crm-license v3
 // (раздел 0а правил): без закрытого ключа автора пропуск подделать нельзя. Здесь только показ: лицензиат, срок, число устройств, тарифы и
 // напоминание о продлении на «Сегодня» за 30, 7 и 1 день. Деморежим — как в прежней программе (решение пользователя 04.10.2026, раздел ниже).
-// Учёт устройств на сервере лицензий не включён — отдельное решение пользователя: новая версия хранит данные отдельно, регистрация заняла бы ещё одно место.
-// Сеть не используется. Хранилище новой версии изолировано (урок 34): пропуск вводится здесь заново.
+// Учёт устройств на сервере лицензий — ui/licdev.js (А6, решение пользователя 11.10.2026): регистрация при вводе пропуска, проверка раз в сутки,
+// список устройств и отвязка. Хранилище новой версии изолировано (урок 34): пропуск вводится здесь заново.
 const LIC_PUBS = [
   {"key_ops":["verify"],"ext":true,"kty":"EC","x":"aDv-4ZFOw6bm4ZvA2qk0T3aqmzh31v31p3Rl4cicfqk","y":"nzqvX0ZuvtxYxqIHDjobiwKO_ROG2T9nokevY9pft5c","crv":"P-256"},
   {"key_ops":["verify"],"ext":true,"kty":"EC","x":"-lK5v1TDEboKEfT_TTBHOQ5yYTS9qtwz57QtqfcCuKI","y":"c7_WqZizMzYlDky2B-rYrkjNm8cyLxGRIwktt7gRxoM","crv":"P-256"},
@@ -7922,6 +8221,8 @@ function licRenewHide(stage, until) { localStorage.setItem(LIC_NAG_KEY, stage + 
 async function openLicenseSheet(sub, msg) {
   const cur = await licCurrent(), v = cur.v, today = localISO(new Date()), days = v ? licDaysLeft(v.until, today) : null;
   const state = !cur.key ? ['', 'Пропуск не введён на этом устройстве'] : !v ? ['bad', 'Пропуск не подлинный или повреждён — проверьте, что он скопирован целиком'] : v.expired ? ['bad', 'Срок лицензии истёк ' + fmtDate(v.until)]
+    // А6: решение сервера лицензий (отозван, устройство не зарегистрировано и мест нет) — главнее проверки пропуска на устройстве
+    : (typeof licBlocked === 'function' && licBlocked()) ? ['bad', 'Лицензия не действует на этом устройстве: ' + licBlockText(licBlocked())]
     : ['good', (v.until && v.until !== 'бессрочно' ? 'Лицензия действует до ' + fmtDate(v.until) + (days !== null && days <= 30 ? ' — осталось ' + days + ' ' + plural(days, 'день', 'дня', 'дней') : '') : 'Бессрочная лицензия')];
   const info = v ? `<div class="list-rows" id="lic-info"><div><span>Лицензиат</span><span class="muted">${esc(v.name || '—')}</span></div>${v.reg ? `<div><span>Рег. номер</span><span class="muted">${esc(v.reg)}</span></div>` : ''}<div><span>Срок</span><span class="muted">${v.until && v.until !== 'бессрочно' ? 'до ' + esc(fmtDate(v.until)) : 'бессрочно'}</span></div><div><span>Устройств по лицензии</span><span class="muted num">${v.limit}</span></div></div>` : '';
   openSheet('Лицензия', `<div class="status-line ${state[0]}" id="lic-state" role="status">${icon(state[0] === 'good' ? 'check' : state[0] ? 'circle-alert' : 'shield-check')}<span>${esc(state[1])}</span></div>
@@ -7937,7 +8238,7 @@ async function openLicenseSheet(sub, msg) {
     <div class="section-label step-label">Шаг 2. Вставить пропуск</div>
     <div class="field"><label for="lic-key">Пропуск (лицензионный ключ)</label><textarea id="lic-key" rows="3" autocomplete="off" spellcheck="false" placeholder="Вставьте строку из письма"></textarea></div>
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
-    <div class="form-actions"><button type="button" class="button primary" id="lic-save" onclick="licSave()">${icon('check')}Проверить и сохранить</button>${cur.key ? `<button type="button" class="button danger push-right" id="lic-remove" onclick="licRemove()">${icon('trash-2')}Удалить с этого устройства</button>` : ''}</div>`, sub);
+    <div class="form-actions"><button type="button" class="button primary" id="lic-save" onclick="licSave()">${icon('check')}Проверить и сохранить</button>${cur.key && typeof openLicDevicesSheet === 'function' ? `<button type="button" class="button" id="lic-devices" onclick="openLicDevicesSheet()">${icon('list')}Устройства</button>` : ''}${cur.key ? `<button type="button" class="button danger push-right" id="lic-remove" onclick="licRemove()">${icon('trash-2')}Удалить с этого устройства</button>` : ''}</div>`, sub);
 }
 async function licSave() {
   const key = fv('lic-key').replace(/\s+/g, '');
@@ -7945,9 +8246,13 @@ async function licSave() {
   const v = await licVerifyKey(key, localISO(new Date()));
   if (!v) { fErr('Пропуск не подлинный или скопирован не целиком: проверьте, что вставлена вся строка, с точкой посередине'); return; }
   localStorage.setItem(LIC_STORE_KEY, key); LIC_CACHE = null;
-  openLicenseSheet('replace', v.expired ? { text: 'Пропуск подлинный, но срок его истёк ' + fmtDate(v.until) + '. Он сохранён; для продления нужен новый.', bad: true } : { text: 'Пропуск сохранён: ' + (v.name || 'лицензия') + (v.until && v.until !== 'бессрочно' ? ', до ' + fmtDate(v.until) : ', бессрочно') + '.' });
+  // А6: действующий пропуск — регистрация этого устройства на сервере лицензий; без связи — при следующей проверке
+  let dev = ''; if (!v.expired && typeof licDevActivate === 'function') { const m = await licDevActivate(key);
+    dev = m.state === 'active' ? ' Устройство зарегистрировано: ' + m.devices.length + ' из ' + (m.limit || v.limit) + '.' : m.state === 'net' ? ' Сервер лицензий не ответил — устройство зарегистрируется при следующей проверке.' : ' ' + licBlockText(m.block || { status: 'device_limit', limit: m.limit }).replace(/^./, ch => ch.toUpperCase()) + '.'; }
+  openLicenseSheet('replace', v.expired ? { text: 'Пропуск подлинный, но срок его истёк ' + fmtDate(v.until) + '. Он сохранён; для продления нужен новый.', bad: true } : { text: 'Пропуск сохранён: ' + (v.name || 'лицензия') + (v.until && v.until !== 'бессрочно' ? ', до ' + fmtDate(v.until) : ', бессрочно') + '.' + dev, bad: !!(typeof licBlocked === 'function' && licBlocked()) });
 }
-function licRemove() { localStorage.removeItem(LIC_STORE_KEY); localStorage.removeItem(LIC_NAG_KEY); LIC_CACHE = null; openLicenseSheet('replace', { text: 'Пропуск удалён с этого устройства (в прежней программе он остаётся).' }); }
+// А6: удаление пропуска освобождает место устройства на сервере лицензий (без связи — пропуск всё равно удаляется)
+async function licRemove() { if (typeof licDevRelease === 'function') { try { await licDevRelease(); } catch (e) { logErr('license:release', e); } } localStorage.removeItem(LIC_STORE_KEY); localStorage.removeItem(LIC_NAG_KEY); LIC_CACHE = null; openLicenseSheet('replace', { text: 'Пропуск удалён с этого устройства (в прежней программе он остаётся).' }); }
 
 // ── деморежим (решение пользователя 04.10.2026: «как и раньше» — как в прежней программе, v311 demoAllow) ──
 // Без действующего пропуска в каждом разделе можно создать до 5 новых записей в календарный месяц; просмотр и правка не ограничены.
@@ -7959,7 +8264,8 @@ const DEMO_STORES = { cases: ['дел', 'Дела'], clients: ['участник
 const demoTs = v => typeof v === 'number' ? v : (v ? (new Date(String(v).length === 10 ? v + 'T00:00:00' : v).getTime() || 0) : 0);
 function demoMonthStart(now) { const d = new Date(now || Date.now()); d.setDate(1); d.setHours(0, 0, 0, 0); return d.getTime(); }
 async function demoUsed(store, now) { const from = demoMonthStart(now); return (await getAllRaw(store)).filter(x => x && demoTs(x.createdAt) >= from).length; }
-async function licActive() { const cur = await licCurrent(); return !!(cur.v && cur.v.ok); }
+// А6: пропуск подлинный и сервер лицензий его не отклонил (отзыв, устройство без места) — иначе деморежим, данные сохраняются
+async function licActive() { const cur = await licCurrent(); return !!(cur.v && cur.v.ok) && !(typeof licBlocked === 'function' && licBlocked()); }
 // текст отказа или '' (пропуск действует, раздел без ограничения, предел не исчерпан)
 async function demoBlockText(store, now) {
   if (!(store in DEMO_STORES) || await licActive()) return '';
@@ -7990,11 +8296,117 @@ async function demoHintFill(now) {
 }
 // лист «Лицензия»: без действующего пропуска — сколько создано в этом месяце по разделам
 async function demoInfoHtml(v, now) {
-  if (v && v.ok) return '<div class="info-box" id="lic-demo">Лицензия действует — ограничений деморежима нет. Учёт устройств на сервере лицензий в новой версии пока не включён.</div>';
+  // А6: учёт устройств включён (ui/licdev.js) — прежняя фраза об обратном снята (урок 86); отклонённый сервером пропуск — деморежим
+  if (v && v.ok && !(typeof licBlocked === 'function' && licBlocked())) return '<div class="info-box" id="lic-demo">Лицензия действует — ограничений деморежима нет.</div>';
   const rows = [];
   for (const st of Object.keys(DEMO_STORES)) { let n = 0; try { n = await demoUsed(st, now); } catch (e) { logErr('license:demo', e); } rows.push(`<div><span>${esc(DEMO_STORES[st][1])}</span><span class="muted">${n} из ${DEMO_MONTH_LIMIT}${n >= DEMO_MONTH_LIMIT ? ' · предел' : ''}</span></div>`); }
   return `<div class="info-box warning" id="lic-demo">Сейчас работает деморежим: в каждом разделе — до ${DEMO_MONTH_LIMIT} новых записей в календарный месяц. Просмотр и правка не ограничены, данные сохраняются полностью. Создано в этом месяце:</div><div class="list-rows" id="lic-demo-used">${rows.join('')}</div>`;
 }
+
+// ▼▼▼ ui/licdev.js
+// ═══ ui/licdev.js — учёт устройств лицензии на сервере лицензий автора (план переноса 11.10.2026, пункт А6) ═══
+// Как в прежней программе (v275, v302): сервер crm-license v3 ведёт список устройств пропуска — «activate» (зарегистрировать это
+// устройство), «check» (состояние пропуска и список устройств), «deactivate» (отвязать устройство). На сервер уходит только пропуск,
+// отпечаток устройства, его название, версия программы и время (раздел 1 правил, п. 4). Без связи ничего не меняется: деморежим
+// включается только по явному ответу сервера — пропуск отозван, срок истёк, устройство не зарегистрировано и места нет.
+// Отпечаток устройства — тот же, что у прежней программы на этом устройстве, если она здесь открывалась: одно устройство — одно место
+// в лимите пропуска (изоляция хранилища, урок 34, иначе дала бы новой версии второй отпечаток). Отпечаток читается, но не меняется.
+const LIC_SERVER_DEFAULT = 'https://functions.yandexcloud.net/d4e4ltdbqfuo1tdabfv9'; // crm-license, раздел 0а правил
+const LIC_BLOCK_KEY = 'crm_lic_block', LIC_CHECKED_KEY = 'crm_lic_checked_at', LIC_DEV_DAY = 24 * 3600000;
+function licServerUrl() { return localStorage.getItem('crm_lic_server') || LIC_SERVER_DEFAULT; }
+// отпечаток: прежней программы на этом устройстве (ключ без префикса изоляции, только чтение) или свой
+function licDevId() {
+  let legacy = null; try { legacy = typeof NEXT_NS === 'object' && NEXT_NS.ok && typeof NEXT_NS.legacyRead === 'function' ? NEXT_NS.legacyRead('crm_device_id') : null; } catch (e) { /* штатно: хранилище недоступно */ }
+  if (legacy && /^dev-[a-z0-9-]{6,60}$/.test(String(legacy))) return String(legacy);
+  return deviceId();
+}
+function licDevName() {
+  const ua = (typeof navigator === 'object' && navigator.userAgent) || '', app = typeof appEnv === 'function' ? appEnv() : '';
+  const os = /Android/i.test(ua) ? 'Android' : /iPhone|iPad/i.test(ua) ? 'iPhone/iPad' : /Windows/i.test(ua) ? 'Windows' : /Mac/i.test(ua) ? 'Mac' : /Linux/i.test(ua) ? 'Linux' : 'устройство';
+  return (app === 'android' ? 'Приложение для Android' : app === 'windows' ? 'Приложение для компьютера' : 'Браузер, ' + os) + ' · новая версия';
+}
+// запрос к серверу лицензий; сбой сети — { net: true }
+async function licSrvCall(action, key, extra) {
+  const url = licServerUrl(); if (!url || !key) return { net: true };
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null, t = ctrl ? setTimeout(() => ctrl.abort(), 12000) : null;
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ action, key, deviceId: licDevId(), deviceName: licDevName(), ver: typeof APP_VER === 'string' ? APP_VER : '' }, extra || {})), signal: ctrl ? ctrl.signal : undefined });
+    const j = await r.json().catch(() => null);
+    return j && typeof j === 'object' ? j : { net: true, http: r.status };
+  } catch (e) { return { net: true, error: String((e && e.message) || e) }; } finally { if (t) clearTimeout(t); }
+}
+function licBlocked() { const b = lsJSON(LIC_BLOCK_KEY, null); return b && b.status && b.status !== 'expired' ? b : null; }
+function licBlockText(b) {
+  return { revoked: 'пропуск отозван автором' + (b && b.reason ? ' (' + b.reason + ')' : ''), expired: 'срок пропуска истёк', unknown_device: 'это устройство не зарегистрировано для пропуска',
+    device_limit: 'пропуск уже действует на ' + ((b && b.limit) || 2) + ' устройствах — отвяжите одно в «Лицензия» → «Устройства»', bad_key: 'сервер не узнал пропуск' }[b && b.status] || 'сервер лицензий отклонил пропуск';
+}
+// ответ сервера → что делать: { state: 'active' | 'block' | 'limit' | 'net', devices, limit, block }
+function licSrvModel(j) {
+  if (!j || j.net) return { state: 'net' };
+  const devices = Array.isArray(j.devices) ? j.devices.map(d => ({ id: String(d.id || ''), name: String(d.name || 'устройство'), at: Number(d.at) || 0, last: Number(d.last) || 0, ver: String(d.ver || '') })) : [];
+  if (j.ok && j.status === 'active') return { state: 'active', devices, limit: Number(j.limit) || 0 };
+  if (j.status === 'device_limit') return { state: 'limit', devices, limit: Number(j.limit) || 0, block: { status: 'device_limit', limit: Number(j.limit) || 0 } };
+  if (j.status === 'unknown_device') return { state: 'unknown', devices, limit: Number(j.limit) || 0 };
+  if (j.status === 'revoked' || j.status === 'expired' || j.error === 'bad_key') return { state: 'block', devices, block: { status: j.status || j.error, reason: String(j.reason || '') } };
+  return { state: 'net', error: String(j.error || j.status || '') };
+}
+function licBlockSave(b) { if (b) localStorage.setItem(LIC_BLOCK_KEY, JSON.stringify({ ...b, at: Date.now() })); else localStorage.removeItem(LIC_BLOCK_KEY); LIC_CACHE = null; }
+// регистрация этого устройства (после ввода пропуска и при проверке, если устройство не зарегистрировано)
+async function licDevActivate(key) {
+  const m = licSrvModel(await licSrvCall('activate', key));
+  if (m.state === 'active') { licBlockSave(null); localStorage.setItem(LIC_CHECKED_KEY, String(Date.now())); }
+  else if (m.block) licBlockSave(m.block);
+  return m;
+}
+// проверка раз в сутки при запуске: отозван, истёк, устройство не зарегистрировано (тогда — попытка зарегистрировать)
+async function licDevCheck(force) {
+  const key = localStorage.getItem(LIC_STORE_KEY) || ''; if (!key) return null;
+  if (!force && Date.now() - (Number(localStorage.getItem(LIC_CHECKED_KEY)) || 0) < LIC_DEV_DAY && !licBlocked()) return null;
+  const m = licSrvModel(await licSrvCall('check', key));
+  if (m.state === 'active') { licBlockSave(null); localStorage.setItem(LIC_CHECKED_KEY, String(Date.now())); return m; }
+  if (m.state === 'unknown') return licDevActivate(key);
+  if (m.block) licBlockSave(m.block);
+  return m;
+}
+const licDevWhen = ts => ts ? new Date(ts).toLocaleDateString('ru-RU') : '—';
+async function openLicDevicesSheet(sub) {
+  const key = localStorage.getItem(LIC_STORE_KEY) || '';
+  if (!key) { toast('Сначала введите пропуск', true); return; }
+  toast('Запрашиваю список устройств…');
+  const m = licSrvModel(await licSrvCall('check', key)), me = licDevId();
+  if (m.state === 'active') { licBlockSave(null); localStorage.setItem(LIC_CHECKED_KEY, String(Date.now())); } else if (m.block) licBlockSave(m.block);
+  const rows = (m.devices || []).map(d => `<div class="lic-dev"><span><b>${esc(d.name)}</b>${d.id === me ? ' · <span class="dep-in">это устройство</span>' : ''}<br><span class="small muted">${esc('подключено ' + licDevWhen(d.at) + (d.last ? ' · последний раз ' + licDevWhen(d.last) : '') + (d.ver ? ' · версия ' + d.ver : ''))}</span></span><button type="button" class="button small-btn" onclick="licDevUnbind('${jsq(d.id)}')">${d.id === me ? 'Отвязать это' : 'Отвязать'}</button></div>`).join('');
+  const head = m.state === 'net' ? 'Сервер лицензий не ответил — список не получен. Проверьте связь и повторите.' + (m.error ? ' Ответ: ' + m.error : '')
+    : m.state === 'active' ? 'Это устройство зарегистрировано. Устройств: ' + m.devices.length + ' из ' + (m.limit || '—') + '.'
+    : m.state === 'unknown' ? 'Это устройство не зарегистрировано. Устройств: ' + m.devices.length + ' из ' + (m.limit || '—') + '.'
+    : m.state === 'limit' ? 'Мест для устройств нет: ' + m.devices.length + ' из ' + (m.limit || '—') + ' — отвяжите устройство, которым больше не пользуетесь.'
+    : licBlockText(m.block).replace(/^./, ch => ch.toUpperCase()) + '.';
+  openSheet('Устройства лицензии', `<div class="status-line ${m.state === 'active' ? 'good' : m.state === 'net' ? '' : 'bad'}" id="lic-dev-state" role="status"><span>${esc(head)}</span></div>
+    <p class="small muted">Пропуск действует на ограниченном числе устройств. Отвязанное устройство перейдёт в деморежим при следующей проверке — данные на нём сохраняются. Прежняя программа на этом же устройстве считается тем же устройством.</p>
+    ${rows ? `<div class="list-rows" id="lic-dev-rows">${rows}</div>` : ''}
+    <div class="form-actions">${m.state === 'unknown' || m.state === 'limit' ? btn('Зарегистрировать это устройство', 'licDevRegister()', 'primary', 'check') : ''}${btn('Обновить', "openLicDevicesSheet('replace')", '', 'refresh-cw')}</div>`, sub === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
+}
+async function licDevRegister() {
+  const key = localStorage.getItem(LIC_STORE_KEY) || ''; if (!key) return;
+  const m = await licDevActivate(key);
+  toast(m.state === 'active' ? 'Устройство зарегистрировано' : m.state === 'net' ? 'Сервер лицензий не ответил — повторите позже' : licBlockText(m.block || { status: 'device_limit', limit: m.limit }), m.state !== 'active');
+  openLicDevicesSheet('replace');
+}
+async function licDevUnbind(id) {
+  const key = localStorage.getItem(LIC_STORE_KEY) || ''; if (!key) return;
+  const j = await licSrvCall('deactivate', key, { deviceId: id });
+  if (!j || j.net || !j.ok) { toast('Сервер лицензий не подтвердил отвязку — повторите позже', true); return; }
+  if (id === licDevId()) { localStorage.removeItem(LIC_CHECKED_KEY); toast('Это устройство отвязано — при следующей проверке программа перейдёт в деморежим'); }
+  else toast('Устройство отвязано — его место свободно');
+  openLicDevicesSheet('replace');
+}
+// снять устройство с сервера при удалении пропуска с этого устройства (без связи — пропуск удаляется, место освободится позже вручную)
+async function licDevRelease() { const key = localStorage.getItem(LIC_STORE_KEY) || ''; if (!key) return null; const j = await licSrvCall('deactivate', key); licBlockSave(null); localStorage.removeItem(LIC_CHECKED_KEY); return j; }
+function licDevStart() {
+  if (typeof window !== 'object' || typeof setTimeout !== 'function') return;
+  setTimeout(() => { licDevCheck(false).then(m => { if (m && m.block && typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }).catch(e => logErr('license:check', e)); }, 20000);
+}
+if (typeof document === 'object' && document && typeof document.addEventListener === 'function') licDevStart();
 
 // ▼▼▼ screens/today.js
 // ═══ screens/today.js — экран «Сегодня» (этап 1б) ═══
@@ -8274,7 +8686,9 @@ SCREENS.today = async function () {
   const appBox = typeof appUpdBox === 'function' ? await appUpdBox() : '';
   // решение пользователя 04.10.2026: дела, где данные выше стадии, — поднять по подтверждению (data/stageauto.js)
   const stageBox = typeof stageLagBox === 'function' ? await stageLagBox() : '';
-  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${licBox}${appBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
+  // план переноса, Б5: заявки онлайн-записи, ждущие подтверждения (sync/booking.js)
+  const bookBox = typeof bookPendingBox === 'function' ? await bookPendingBox() : '';
+  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${bookBox}${licBox}${appBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
   return out;
 };
 
@@ -11008,7 +11422,13 @@ const HELP_SECTIONS = [
 <li>Проверка: откройте форму дела → «Все поля» → введите ИНН противной стороны → «По ИНН» — подставятся наименование и адрес. В форме доверителя — то же.</li></ol>
 <p>Сервису передаётся только то, что вы ищете (ИНН или начало адреса), и только когда вы нажимаете «По ИНН» или вводите адрес. Если подсказок нет: проверьте ключ (скопирован целиком, без пробелов) и что на dadata.ru не исчерпан дневной лимит.</p>
 <p>«Доверенности» — реестр с контролем срока. Срок не указан — доверенность действует год со дня совершения; без даты совершения она ничтожна (п. 1 ст. 186 ГК РФ). За 30 дней до окончания доверенность появляется на «Сегодня».</p>
-<p>«Обращения» — заявки до заключения соглашения: срок ответа на претензию, статус, «Создать дело» — дело и доверитель заполняются из обращения.</p>` },
+<p>«Обращения» — заявки до заключения соглашения: срок ответа на претензию, статус, «Создать дело» — дело и доверитель заполняются из обращения.</p>
+<h3>Онлайн-запись на консультацию</h3>
+<p>Доверитель открывает страницу записи на вашем личном сервере, выбирает свободное время и оставляет имя, телефон и тему. Нужен подключённый личный сервер («Синхронизация»).</p>
+<ol><li>Настройки → «Онлайн-запись на консультацию» → «Включить онлайн-запись»; укажите дни и часы приёма, перерыв, длительность, адрес и телефон, которые увидит доверитель.</li>
+<li>«Сохранить и опубликовать» — на сервер уходят только свободные окна и подписи страницы, без имён и дел. Ниже появится ссылка для доверителей — «Скопировать» и разместите её на сайте или в подписи.</li>
+<li>Проверка: откройте ссылку в браузере — должны быть видны дни и время. Заседания (с дорогой до суда и обратно) и встречи время занимают сами; окна обновляются после правок.</li></ol>
+<p>Заявки программа забирает раз в 15 минут, пока открыта (или кнопкой «Проверить заявки»): заявка становится обращением и встречей, на «Сегодня» — блок «Записи на приём» с кнопками «Подтвердить» (можно написать заметку: что взять с собой) и «Отклонить». Доверитель видит ответ на странице записи по коду заявки. Пока работают обе программы, заявку может забрать любая из них; если её успели забрать обе, на «Сегодня» она всё равно одна, а ответ меняет обе встречи.</p>` },
   { id: 'money', title: 'Финансы, отчёты, калькуляторы', html: `
 <p>«Финансы»: счета (фиксированная сумма, почасовой, гонорар успеха, абонентская плата), оплата из строки счёта, рассрочка, расходы, «Платежи» за период с итогом и «Выписка для печати».</p>
 <p>Депозит (авансы по делу): в карточке дела «Ещё: добавить в дело» → «Аванс», или группа «Деньги» → «Внести аванс» / «Списать». Остаток по делу виден там же; списание больше остатка программа записывает только после второго нажатия «Сохранить». Все остатки по делам и общий итог — «Финансы» → «Депозиты». Операции, внесённые в прежней программе, видны и здесь.</p>
@@ -11084,11 +11504,13 @@ const HELP_SECTIONS = [
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
+<p>Смена сервера или пароля шифрования: если часть файлов документов лежит только в хранилище прежнего подключения, программа предложит «Перенести» — скачает их на это устройство прежним подключением, затем сменит подключение; в новое хранилище файлы уйдут при ближайшей отправке на сервер. «Синхронизация» → «Файлы документов» показывает, где лежат файлы, и скачивает недостающие.</p>
 <p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
 <p>Настройки → «Печать и выгрузка» (или «Отчёты» → «Печать и выгрузка»): выписка поступлений для кассовой книги, реестры дел, заседаний, ордеров и доверенностей — в окне печати можно «Сохранить как PDF»; таблицы CSV для Excel по разделам.</p>
 <p>Удалённое попадает в «Корзину» (Настройки) — оттуда его можно вернуть.</p>` },
   { id: 'licence', title: 'Лицензия и соглашение', html: `
 <p>Программа предоставляется по лицензионному соглашению (публичная оферта); соглашение принимается при первом запуске. Пропуск проверяется на устройстве; на «Сегодня» — напоминание о продлении за 30, 7 и 1 день.</p>
+<p>Устройства пропуска: при вводе пропуска программа регистрирует это устройство на сервере лицензий автора (уходят только пропуск, отпечаток и название устройства, версия программы) и раз в сутки проверяет, действует ли пропуск. «Лицензия» → «Устройства» — список устройств с датами и «Отвязать»: место освобождается для нового устройства. Прежняя программа на этом же устройстве считается тем же устройством. Без связи ничего не меняется; деморежим включается только по ответу сервера — пропуск отозван или для устройства нет места.</p>
 <p>Без действующего пропуска — деморежим: до 5 новых записей в месяц в каждом разделе (дела, доверители, заседания, задачи, счета, обращения, письма); данные сохраняются полностью. Тарифы и как получить пропуск — Настройки → «Лицензия» → «Как получить ключ».</p>` },
   { id: 'trouble', title: 'Если что-то не работает', html: `
 <ul><li><b>«Нет связи с сервером»</b> — «Синхронизация» → «Сохранить и проверить связь»: программа назовёт причину. «403 / не публичная» — на странице функции в консоли включите «Публичная функция». «auth» — секретный код не совпадает с переменной SECRET функции (или в поле коллектора стоит код сервера). «Нет ответа» — адрес с опечаткой, нет интернета или мешает VPN.</li>
