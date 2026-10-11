@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="11.10.2026 00:14 · 75d2aff">
+<meta name="build" content="11.10.2026 09:14 · 79b662a">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -5043,7 +5043,9 @@ function kadCardRows(parsed, c, link, todayIso) {
 async function kadCardApply(caseId, summary, link) {
   const parsed = kadCardParse(summary && summary.card); if (!parsed) return null;
   const c = await getOne('cases', caseId); if (!c) return { error: 'Дело не найдено' };
-  const rows = kadCardRows(parsed, c, link, todayISO()); if (!rows.length) return { done: [], diff: [], hearing: null, sideNames: parsed.sideNames, nothing: true };
+  // приложение 1.19: события календаря — строки движения и заседания тем же путём
+  const calRows = kadEventsRows(parsed, summary && summary.extra && summary.extra.events, c, link, todayISO());
+  const rows = kadCardRows(parsed, c, link, todayISO()).concat(calRows); if (!rows.length) return { done: [], diff: [], hearing: null, sideNames: parsed.sideNames, nothing: true };
   const before = JSON.parse(JSON.stringify(c)), evBefore = new Set((await getAllRaw('monitorEvents')).filter(x => !x._deleted).map(x => x.externalId));
   const norm = await crmMonNormalizeRows(rows, 'Карточка КАД');
   await crmMonPersist(norm, { quiet: true });
@@ -5058,7 +5060,11 @@ async function kadCardApply(caseId, summary, link) {
   const chk = crmCaseApplyCard(JSON.parse(JSON.stringify(after || before)), parsed.card, sfx); diff.push(...chk.diff, ...chk.ask.map(a => a.label + ' — в деле «' + a.was + '», на сайте «' + a.val + '»'));
   const hRow = rows.find(r => r.eventType === 'hearing'), hEv = hRow ? evAfter.find(x => x.externalId === hRow.externalId) : null;
   const hearing = hRow ? { date: parsed.hearing.date, time: parsed.hearing.time, room: parsed.hearing.room, isNew: !evBefore.has(hRow.externalId), status: hEv ? hEv.status : '', bound: !!(hEv && hEv.caseId) } : null;
-  return { done, diff, hearing, sideNames: parsed.sideNames, stage: parsed.stage };
+  // что дали события календаря: записей движения всего и новых, заседаний по календарю всего и новых (новые — которых не было до записи)
+  const flow = calRows.filter(r => r.eventType === 'caseflow'), calH = calRows.filter(r => r.eventType === 'hearing');
+  const calendar = calRows.length ? { flow: flow.length, flowNew: flow.filter(r => !evBefore.has(r.externalId)).length, hearings: calH.length, hearingsNew: calH.filter(r => !evBefore.has(r.externalId)).length,
+    hearingsApplied: calH.filter(r => { const x = evAfter.find(y => y.externalId === r.externalId); return x && x.status === 'applied'; }).length } : null;
+  return { done, diff, hearing, sideNames: parsed.sideNames, stage: parsed.stage, calendar };
 }
 // признаки среды окна КАД (приложение 1.9): только логические значения и числа, имена cookie — строки
 function envOf(e) {
@@ -5089,7 +5095,45 @@ function extraOf(e) {
   return { ver: Number(e.ver) || 0, calendar: extraBlockOf(e.calendar), docs: extraBlockOf(e.docs), listNow: extraBlockOf(e.listNow), templates: tpl, clicked, probe,
     requestsAfter: strList(e.requestsAfter, 80, 200), error: e.error ? String(e.error).slice(0, 300) : undefined,
     // приложение 1.18 (extra.ver 3, шаг 1б-2а): нажатые дни календаря и пробы раскрытия документов инстанции
-    days: daysOf(e.days), requestsDays: strList(e.requestsDays, 80, 200) };
+    days: daysOf(e.days), requestsDays: strList(e.requestsDays, 80, 200),
+    // приложение 1.19 (extra.ver 4, шаг 1б-2б): события календаря по структуре — документы по дням и отметки заседаний
+    events: eventsOf(e.events) };
+}
+function eventsOf(x) {
+  if (!x || typeof x !== 'object') return null;
+  const str = (v, n) => String(v == null ? '' : v).slice(0, n), dayOk = d => /^\d{1,2}-\d{1,2}-\d{4}$/.test(d);
+  return { ver: Number(x.ver) || 0, blocks: Number(x.blocks) || 0, error: x.error ? str(x.error, 300) : undefined,
+    events: (Array.isArray(x.events) ? x.events : []).slice(0, 80).filter(v => v && typeof v === 'object' && dayOk(str(v.day, 12))).map(v => ({ day: str(v.day, 12), gr: Number(v.gr) || 0, level: str(v.level, 40), court: str(v.court, 120),
+      date: str(v.date, 20), type: str(v.type, 120), subject: str(v.subject, 200), result: str(v.result, 200), href: /^(https?:\/\/|\/)/.test(str(v.href, 300)) ? str(v.href, 300) : '', signed: !!v.signed })),
+    hearings: (Array.isArray(x.hearings) ? x.hearings : []).slice(0, 40).filter(v => v && dayOk(str(v.day, 12))).map(v => ({ day: str(v.day, 12), gr: Number(v.gr) || 0 })) };
+}
+// «22-6-2026» (id дня в календаре КАД) → «2026-06-22»
+function kadDayIso(d) { const m = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(String(d || '')); return m ? `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}` : ''; }
+// уровень инстанции календаря (b-day-sch-grN; шаблон calendarEvent: 1 — первая, 2 — апелляционная, 3 и 5 — кассационная, иначе надзорная)
+function kadGrStage(gr) { gr = Number(gr) || 0; return gr === 1 ? 'Первая инстанция' : gr === 2 ? 'Апелляция' : (gr === 3 || gr === 5) ? 'Кассация' : gr ? 'Надзор' : ''; }
+// строки для crmMonNormalizeRows по событиям календаря (приложение 1.19): документ дня — строка движения дела (caseflow) с видом документа,
+// видом акта и ссылкой на PDF в raw; отметка заседания (hearingDay) — заседание без времени, кроме дня ближайшего заседания из карточки
+// (он уже записан с временем и залом). Даты актов в поля дела не пишутся: словесные обозначения видов актов на КАД ещё не собраны.
+function kadEventsRows(parsed, ev, c, link, todayIso) {
+  if (!ev || !c) return [];
+  const no = (parsed && parsed.card.number) || (link && link.number) || '', url = String(link && link.url || ''), src = 'Карточка КАД (приложение)', nz = s => crmMonNorm(String(s || ''));
+  const court = (parsed && parsed.card.court) || '', rows = [], seen = new Set();
+  for (const e of ev.events || []) {
+    const date = kadDateIso(e.date) || kadDayIso(e.day); if (!date) continue;
+    const st = kadGrStage(e.gr) || (link && link.stage) || '', type = e.type || 'Документ', res = e.result && nz(e.result) !== nz(type) ? e.result : '';
+    const title = type + (res ? ': ' + res : '') + (e.subject ? ' — ' + e.subject : '');
+    const id = 'kadcal:' + nz(no || c.number) + '|' + date + '|' + nz(type) + '|' + nz(res) + '|' + nz(e.subject).slice(0, 40); if (seen.has(id)) continue; seen.add(id);
+    rows.push({ externalId: id, title, date, eventType: 'caseflow', courtNo: no, caseUid: '', judge: '', source: src, crmNumber: c.number || '', court: e.court ? kadJudgeSplit(e.court).court : court,
+      raw: JSON.stringify({ st, url, kad: 1, type, result: e.result || '', subject: e.subject || '', level: e.level || '', gr: e.gr, doc: e.href || '', signed: !!e.signed }) });
+  }
+  const next = parsed && parsed.hearing ? parsed.hearing.date : '';
+  for (const h of ev.hearings || []) {
+    const date = kadDayIso(h.day); if (!date || date === next) continue;
+    const st = kadGrStage(h.gr) || (link && link.stage) || '', id = `kad|${no || c.number || url}|${date}|-|h`; if (seen.has(id)) continue; seen.add(id);
+    rows.push({ externalId: id, date, eventType: 'hearing', courtNo: no, caseUid: '', judge: '', source: src, crmNumber: c.number || '', court, title: `Судебное заседание ${fmtDate(date)}`,
+      raw: `${c.number ? c.number + ' · ' : ''}${st}\n${url}\nПо календарю карточки КАД (без времени)`.trim() });
+  }
+  return rows;
 }
 function daysOf(d) {
   if (!d || typeof d !== 'object') return null;
@@ -5151,7 +5195,9 @@ function kadExtraLine(x) {
   const c = x.calendar, cl = x.clicked || {};
   if (!cl.tab) return 'Вкладка «Календарь» на странице не найдена — окно её не нажимало. Нажмите «Скопировать структуру» и пришлите разработчику.';
   if (!c || c.hidden || !c.total) return 'Вкладка «Календарь» нажата, но за 10 с её содержимое не появилось' + (x.requestsAfter.length ? ' (запросов после нажатия: ' + x.requestsAfter.length + ')' : '') + '. Нажмите «Скопировать структуру» и пришлите разработчику — по шаблонам страницы разбор пишется и так.';
-  return 'Вкладка «Календарь» прочитана: элементов ' + c.total + ', строк текста ' + c.texts.length + (x.docs && x.docs.total ? '; документы инстанции: элементов ' + x.docs.total : '') + (Object.keys(x.templates).length ? '; шаблонов страницы ' + Object.keys(x.templates).length : '') + kadDaysLine(x.days) + '. В дело пока не записывается — нажмите «Скопировать структуру» и пришлите разработчику: по этим фактам пишется разбор заседаний и актов.';
+  const evl = x.events ? (x.events.error ? '; события календаря: сценарий не выполнился — ' + x.events.error : '; событий календаря прочитано: документов ' + x.events.events.length + ', отметок заседаний ' + x.events.hearings.length) : '';
+  const tail = x.events && !x.events.error ? '. Документы записаны в ленту дела строками движения (см. «По календарю карточки» выше).' : '. В дело события календаря не записаны — нужно приложение 1.19 или новее (Настройки → Проверить обновления).';
+  return 'Вкладка «Календарь» прочитана: элементов ' + c.total + ', строк текста ' + c.texts.length + (x.docs && x.docs.total ? '; документы инстанции: элементов ' + x.docs.total : '') + (Object.keys(x.templates).length ? '; шаблонов страницы ' + Object.keys(x.templates).length : '') + kadDaysLine(x.days) + evl + tail;
 }
 // приложение 1.18: что дали нажатия дней — факт (сколько дней отмечено, сколько нажато, у скольких появились подробности, раскрылись ли документы)
 function kadDaysLine(d) {
@@ -5218,8 +5264,12 @@ function kadAppliedLines(a) {
   if (a.diff.length) out.push({ kind: 'diff', text: 'Расхождения с делом (в деле оставлено как было): ' + a.diff.join('; ') + '.' });
   if (a.hearing) out.push({ kind: a.hearing.isNew ? 'done' : 'info', text: 'Ближайшее заседание по карточке: ' + fmtDate(a.hearing.date) + (a.hearing.time ? ' в ' + a.hearing.time : '') + (a.hearing.room ? ', зал ' + a.hearing.room : '') +
     (a.hearing.isNew ? ' — добавлено в события судов' + (a.hearing.status === 'applied' ? ' и записано в заседания дела' : a.hearing.bound ? '; запись заседания — автоприменением (Мониторинг судов)' : '; к делу не привязано — проверьте номер дела в суде') : ' — такое событие уже было') + '.' });
+  // приложение 1.19: документы и заседания с вкладки «Календарь»
+  if (a.calendar) out.push({ kind: a.calendar.flowNew || a.calendar.hearingsNew ? 'done' : 'info', text: 'По календарю карточки: документов ' + a.calendar.flow + ' (новых записей движения дела: ' + a.calendar.flowNew + ')' +
+    (a.calendar.hearings ? '; заседаний без времени ' + a.calendar.hearings + ' (новых: ' + a.calendar.hearingsNew + ', сведено с заседаниями дела: ' + a.calendar.hearingsApplied + ')' : '') +
+    '. Даты актов в поля дела по календарю пока не пишутся — виды актов на сайте ещё не изучены; документы видны в ленте дела.' });
   if (a.sideNames && a.sideNames.length) out.push({ kind: 'info', text: 'Стороны по карточке: ' + a.sideNames.join(' · ') + '. Роли сторон в ответе приложения нет, поэтому участники в дело не записаны — нужно приложение 1.15 или новее (Настройки → Проверить обновления).' });
-  if (!a.done.length && !a.diff.length && !a.hearing && !(a.sideNames && a.sideNames.length)) out.push({ kind: 'info', text: 'Новых данных для дела в карточке нет.' });
+  if (!a.done.length && !a.diff.length && !a.hearing && !a.calendar && !(a.sideNames && a.sideNames.length)) out.push({ kind: 'info', text: 'Новых данных для дела в карточке нет.' });
   return out;
 }
 function openKadProtoSheet(caseId, res, applied) {
@@ -5251,7 +5301,10 @@ function openKadProtoSheet(caseId, res, applied) {
     (Object.keys(x.templates).length ? `<p class="small"><b>Шаблоны страницы (в копии целиком):</b> ${esc(Object.keys(x.templates).map(k => k + ' (' + x.templates[k].length + ' зн.)').join(', '))}</p>` : '') + grp('Запросы после нажатия вкладки', x.requestsAfter) +
     // приложение 1.18: по каждому нажатому дню — показанные блоки, тексты, ссылки, структура; пробы раскрытия документов; запросы за время нажатий
     (x.days ? x.days.days.map(d => grp('День ' + d.day + (d.kind === 'future' ? ' (назначено)' : ' (прошло)') + (d.ev && d.ev.total ? '' : ' — подробностей нет'), d.ev && d.ev.total ? d.ev.shown.map(v => 'показан: ' + v).concat(d.ev.texts, d.ev.links.map(v => 'ссылка: ' + v), d.ev.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) : ['подробности дня на странице не появились'])).join('') +
-      grp('Документы инстанции — пробы нажатий', x.days.docsTry.map(t => t.sel + ': ' + (t.found ? 'нажато, элементов ' + t.before + ' → ' + t.after : 'не найдено'))) + grp('Запросы за время нажатий дней', x.requestsDays) : '') : '';
+      grp('Документы инстанции — пробы нажатий', x.days.docsTry.map(t => t.sel + ': ' + (t.found ? 'нажато, элементов ' + t.before + ' → ' + t.after : 'не найдено'))) + grp('Запросы за время нажатий дней', x.requestsDays) : '') +
+    // приложение 1.19: события календаря по структуре — таблица документов (дата, инстанция, вид документа, вид акта, кто) и отметки заседаний
+    (x.events && x.events.events.length ? `<div class="section-label">События календаря (документы по дням)</div><div class="table-wrap"><table class="grid"><thead><tr><th>Дата</th><th>Инстанция</th><th>Документ</th><th>Акт</th><th>Кто</th></tr></thead><tbody>${x.events.events.map(e => `<tr><td>${esc(e.date || e.day)}</td><td>${esc(e.level || kadGrStage(e.gr))}</td><td>${esc(e.type)}</td><td>${esc(e.result)}${e.signed ? ' <span class="badge">подписан</span>' : ''}${e.href ? ' <span class="badge">PDF</span>' : ''}</td><td>${esc(e.subject)}</td></tr>`).join('')}</tbody></table></div>` : '') +
+    (x.events && x.events.hearings.length ? `<p class="small">Отметки заседаний в календаре: ${esc(x.events.hearings.map(h => fmtDate(kadDayIso(h.day)) + (kadGrStage(h.gr) ? ' (' + kadGrStage(h.gr) + ')' : '')).join(', '))}</p>` : '') : '';
   const txt = text ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Текст страницы (${text.length} знаков)</span></summary><div class="card-more-body"><p class="small muted">Это текст карточки с сайта суда — в нём данные сторон. Для разработки нужна только структура выше.</p><pre class="small" style="white-space:pre-wrap">${esc(text.slice(0, 20000))}${text.length > 20000 ? '\n…' : ''}</pre></div></details>` : '';
   // приложение 1.13: разобранные поля карточки — как прочитаны, без додумывания; что из них записано в дело — строки appliedLines выше
   const c = s.card, cardRows = c ? [['Номер дела', c.number], ['Описание', c.desc], ['Категория', c.category], ['Дата', c.date], ['Срок рассмотрения', c.dur], ['Стороны', c.sides.join(' · ')], ['Судьи', c.judges], ['Акты', c.acts],
@@ -5263,7 +5316,8 @@ function openKadProtoSheet(caseId, res, applied) {
 }
 async function kadProtoCopy() {
   const last = kadProtoLast(); if (!last || !last.summary) { toast('Нечего копировать — сначала прочитайте карточку', true); return; }
-  const t = JSON.stringify({ kadProto: 1, app: 'android', at: new Date(last.at || Date.now()).toISOString(), summary: last.summary }, null, 1);
+  // приложение 1.19: ссылки на документы в копии — без идентификаторов (guid, длинные числа), как и остальные адреса
+  const t = JSON.stringify({ kadProto: 1, app: 'android', at: new Date(last.at || Date.now()).toISOString(), summary: last.summary }, (k, v) => k === 'href' && typeof v === 'string' ? v.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<guid>').replace(/\d{6,}/g, '<n>') : v, 1);
   try { await navigator.clipboard.writeText(t); toast('Структура скопирована — вставьте её в сообщение разработчику'); }
   catch (e) { logErr('kad:copy', e); openSheet('Структура страницы КАД', `<p class="small muted">Выделите текст и скопируйте вручную.</p><textarea rows="14" readonly style="width:100%">${esc(t)}</textarea>`, true); }
 }
@@ -10114,7 +10168,7 @@ const HELP_SECTIONS = [
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
-<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.14. Данные с сайта — справочные: проверьте их в карточке дела.</p>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.15. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени; даты актов в поля дела по календарю пока не пишутся. Чтение занимает до минуты. Данные с сайта — справочные: проверьте их в карточке дела.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
