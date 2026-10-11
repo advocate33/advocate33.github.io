@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="11.10.2026 09:14 · 79b662a">
+<meta name="build" content="11.10.2026 10:37 · 63d1264">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -1608,10 +1608,12 @@ function validateBackup(parsed) {
 // ▼▼▼ data/relations.js
 // ═══ data/relations.js — перенесено из v310 без изменений (этап 1а); порядок кусков — исходный ═══
 let CASES_BY_NUM = {};
+// аудит GPT 11.10.2026, пп. 1 и 8: дела по внутренней связи (id) — при повторе номеров CASES_BY_NUM хранит только одно дело из нескольких
+let CASES_BY_ID = {};
 async function refreshCasesCache() {
   const cases = await getAll('cases');
-  CASES_BY_NUM = {};
-  cases.forEach(c => { if (c.number) CASES_BY_NUM[c.number] = c; });
+  CASES_BY_NUM = {}; CASES_BY_ID = {};
+  cases.forEach(c => { if (c.number) CASES_BY_NUM[c.number] = c; if (c && c.id) CASES_BY_ID[c.id] = c; });
   return cases;
 }
 // Однократная безопасная доводка старых записей до устойчивых связей.
@@ -3163,14 +3165,15 @@ const CONFLICT_FIELDS = { number: 'Номер дела', client: 'Доверит
   // 05.10.2026: поля доверителя, счёта и заседания — чтобы конфликт назывался по-русски, а не «служебных полей: N»
   addr: 'Адрес', zip: 'Индекс', inn: 'ИНН', ogrn: 'ОГРН', kpp: 'КПП', type: 'Тип', role: 'Роль', note: 'Заметка', comment: 'Примечание', service: 'Услуга', billType: 'Тип расчёта', dueDate: 'Срок оплаты', plan: 'График платежей', pending: 'Условный счёт',
   judge: 'Судья', room: 'Зал', result: 'Результат', time: 'Время', date: 'Дата', court: 'Суд', with: 'С кем', place: 'Место', clientAddr: 'Адрес доверителя', clientInn: 'ИНН доверителя', closedAt: 'Дата завершения', docsPath: 'Папка документов', docsUrl: 'Папка в облаке' };
-// Журнал коллизий — просмотр: что разошлось при слиянии и какое значение оставлено. Возврат значения — с этапа 2.
+// Журнал коллизий — просмотр: что разошлось при слиянии и какое значение оставлено. Кнопки «Вернуть моё» (conflictRestore прежней программы,
+// data/merge.js) нет — она в плане переноса; до неё лист не обещает того, чего нет (урок 86, сверка 11.10.2026).
 function showConflictsSheet() {
   const log = syncConflicts().slice().reverse();
   const rows = log.map(c => `<div class="conflict"><div class="task-title">${esc(c.label || c.id || 'Запись')}</div>
     <div class="task-sub">${esc(STORE_TITLES[c.store] || c.store || '')} · оставлено: ${esc(c.kept || '')}</div>
     ${(c.diff || []).slice(0, 12).map(d => `<div class="conflict-field small"><b>${esc(CONFLICT_FIELDS[d.field] || d.field)}</b><span class="muted">здесь: ${esc(d.here || '—')}</span><span class="muted">пришло: ${esc(d.there || '—')}</span><span>итог: ${esc(d.kept || '—')}</span></div>`).join('')}</div>`).join('');
   openSheet('Журнал коллизий', (rows ? `<p class="small muted">Записи, которые менялись и здесь, и на другом устройстве. Показаны последние ${log.length}.</p>${rows}
-    <div class="info-box">Вернуть своё значение в отдельном поле можно будет после включения записи на сервер.</div>
+    <div class="info-box">Чтобы вернуть своё значение, откройте запись и исправьте поле в форме — при следующем обмене оно разойдётся на остальные устройства.</div>
     <div class="form-actions">${btn('Очистить журнал', 'clearSyncConflicts()', '', 'check-check')}</div>`
     : emptyState('check-check', 'Коллизий нет', 'Сюда попадают записи, которые менялись и здесь, и на другом устройстве.')), true);
 }
@@ -3508,6 +3511,12 @@ async function nextBlobsPending() {
   const blobs = await getAllRaw('docBlobs');
   return blobs.filter(b => b && b.data && !b._deleted && !nextBlobHere(byId[b.id], srv, key)).map(b => ({ blob: b, ver: byId[b.id] || null }));
 }
+// п. 6 аудита 11.10.2026: файлы, которые есть только в хранилище сервера srv под ключом key и которых нет на устройстве: при смене
+// сервера или пароля их нельзя будет открыть, пока прежнее подключение не вернут (переноса между серверами пока нет — он в плане)
+async function nextBlobsStranded(srv, key) {
+  const local = new Set((await getAllRaw('docBlobs')).filter(b => b && b.data && !b._deleted).map(b => b.id));
+  return (await getAll('docVersions')).filter(v => v && !v._deleted && v.cloudId && !local.has(v.id) && v.cloudSrv === srv && (!key || !v.cloudKey || v.cloudKey === key)).length;
+}
 // положить недостающие файлы в хранилище (во время отправки — NEXT_PUSH.on); результат — числа для подтверждения
 async function nextBlobsPush() {
   if (typeof nextSnapKnown !== 'function' || nextSnapKnown() !== true) return { ok: true, uploaded: 0, failed: 0, total: 0, skipped: true };
@@ -3557,6 +3566,8 @@ async function nextBlobFetch(versionId) {
   const v = await getOne('docVersions', versionId); if (!v) return '';
   const local = await getOne('docBlobs', versionId); if (local && local.data) return local.data;
   if (!v.cloudId || !SRV.url || !SRVDB.pass) return '';
+  // аудит GPT 11.10.2026, п. 6: файл лежит в хранилище другого сервера — у текущего его не запрашиваем, причина названа
+  if (v.cloudSrv && v.cloudSrv !== nextBlobSrv()) throw new Error('Файл лежит в хранилище прежнего сервера (' + v.cloudSrv + '), на этом устройстве его нет. Подключите прежний сервер в «Синхронизации» и откройте файл — он сохранится на устройстве и при следующей отправке уйдёт на новый сервер');
   if (v.cloudKey && v.cloudKey !== await nextBlobKey(SRVDB.pass)) throw new Error('Файл в хранилище зашифрован прежним паролем шифрования — верните прежний пароль в «Синхронизации» или откройте файл на устройстве, где он есть');
   const j = await srvCall('blobget', { id: v.cloudId }); if (!j || !j.ok) return '';
   const r = await fetch(j.url, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (!r.ok) return '';
@@ -3935,6 +3946,7 @@ function backupSizeCheck(bytes, mobile) {
 }
 // статус полноты копии по файлам документов — пишется в саму копию (_files) и показывается при проверке файла
 function backupFilesStatus(files) {
+  if (files && files.noFiles) return { state: 'nofiles', text: 'копия без файлов документов: записи о документах в ней есть, сами файлы остались на устройстве и в хранилище сервера' };
   if (!files) return { state: 'unknown', text: 'полнота копии по файлам документов не проверена' };
   if (files.error) return { state: 'unknown', text: 'полнота копии по файлам документов не проверена: ' + files.error };
   if (!files.total) return { state: 'full', text: 'документов с файлами нет' };
@@ -3990,6 +4002,7 @@ function openBackupSheet(sub) {
     <div class="form-grid">${fInput('bk-p1', 'Пароль копии, не короче 8 знаков', '', 'type="password" autocomplete="new-password"')}${fInput('bk-p2', 'Пароль ещё раз', '', 'type="password" autocomplete="new-password"')}</div>
     <div class="form-actions"><button type="button" class="button primary" id="bk-save" onclick="backupSaveNow()">${icon('hard-drive')}Сохранить копию</button></div>
     <p class="small muted" id="bk-files"></p>
+    <div class="info-box warning" id="bk-nofiles" hidden>Эта копия больше, чем программа может открыть на этом устройстве (на телефоне — 120 МБ, на компьютере — 400 МБ). Сохраните ещё копию без файлов документов — её программа откроет; файлы останутся на устройстве и в хранилище сервера.<div class="form-actions"><button type="button" class="button" id="bk-save-nofiles" onclick="backupSaveNow(true)">${icon('hard-drive')}Сохранить копию без файлов документов</button></div></div>
     ${last ? `<p class="small muted">Последнее скачивание копии с этого устройства: ${esc(new Date(last).toLocaleString('ru-RU'))}${checked ? '; последняя проверенная копия (открыта и расшифрована): ' + esc(new Date(checked).toLocaleString('ru-RU')) : ''}.</p>` : ''}
     <div class="section-label step-label">Загрузить из файла</div>
     <p class="small muted">Записи из файла добавятся к базе и обновят более старые; ничего не стирается. Сначала программа покажет, что изменится.</p>
@@ -3998,22 +4011,25 @@ function openBackupSheet(sub) {
     <div class="form-actions"><button type="button" class="button" id="bk-check" onclick="backupCheckFile()">${icon('shield-check')}Проверить файл</button></div>
     <div id="bk-preview"></div>`, sub === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
 }
-async function backupSaveNow() {
+async function backupSaveNow(noFiles) {
   const bad = backupPassCheck(fv('bk-p1'), fv('bk-p2')); if (bad) { fErr(bad); return null; }
-  const b = document.getElementById('bk-save'); if (b) b.disabled = true;
+  const b = document.getElementById(noFiles ? 'bk-save-nofiles' : 'bk-save'); if (b) b.disabled = true;
   try {
     // разбор GPT 05.10.2026 (3), п. 1: полная копия — с файлами документов: недостающие подкачиваются из хранилища, итог называется
     // разбор GPT 06.10.2026, п. 6: сбой подкачки — не «молча», а статус «полнота не проверена» с причиной (пишется и в копию)
-    let files = null; if (typeof nextBlobsFetchMissing === 'function') { try { files = await nextBlobsFetchMissing(r => { const el = document.getElementById('bk-files'); if (el) el.textContent = 'Подкачиваю файлы документов… ' + (r.fetched + r.failed) + ' из ' + (r.total - (r.have - r.fetched)); }); } catch (e) { logErr('backup:files', e); files = { error: String((e && e.message) || e).slice(0, 100) }; } }
+    let files = noFiles ? { noFiles: true } : null; if (!noFiles && typeof nextBlobsFetchMissing === 'function') { try { files = await nextBlobsFetchMissing(r => { const el = document.getElementById('bk-files'); if (el) el.textContent = 'Подкачиваю файлы документов… ' + (r.fetched + r.failed) + ' из ' + (r.total - (r.have - r.fetched)); }); } catch (e) { logErr('backup:files', e); files = { error: String((e && e.message) || e).slice(0, 100) }; } }
     const st = backupFilesStatus(files), dump = await collectAll();
+    if (noFiles && dump.data) { delete dump.data.docBlobs; files = null; }
     dump._files = { state: st.state, text: st.text, at: Date.now(), total: files && files.total || 0, have: files && files.have || 0, missing: files && files.failed || 0 };
-    const text = await encryptDump(dump, fv('bk-p1')), name = backupFileName('kopiya');
+    const text = await encryptDump(dump, fv('bk-p1')), name = backupFileName(noFiles ? 'bez-faylov' : 'kopiya');
     if (!fileSave(name, text)) { fErr('Браузер не дал сохранить файл. Попробуйте в другом браузере или на компьютере'); return null; }
     localStorage.setItem('crm_next_backup_at', String(Date.now()));
     // п. 5: нажатие на ссылку скачивания — не подтверждение, что файл сохранён; честная формулировка и итог по файлам
     const filesText = files && files.total ? ` Документов: ${files.total}, файлов в копии: ${files.have}` + (files.failed ? `, не хватает: ${files.failed} (${[...new Set(files.why)].join('; ')})` : '') + '.' : '';
     const sizeNote = backupSizeNote(text.length), status = st.text.charAt(0).toUpperCase() + st.text.slice(1) + '.' + (sizeNote ? ' ' + sizeNote + '.' : '');
     const el = document.getElementById('bk-files'); if (el) el.textContent = (filesText.trim() + ' ' + status).trim();
+    // копия больше предела восстановления: программа её целиком не откроет — рядом кнопка копии без файлов документов, которую откроет
+    const nf = document.getElementById('bk-nofiles'); if (nf) nf.hidden = noFiles || text.length <= (backupIsMobile() ? BACKUP_MOBILE_MAX : BACKUP_MAX);
     toast('Скачивание копии запущено: ' + name + ' — проверьте файл в папке загрузок.' + filesText + ' ' + status, st.state !== 'full' || !!sizeNote); fErr('');
     return { name, bytes: text.length, files, status: st.state, sizeNote };
   } catch (e) { logErr('backup:save', e); fErr('Копия не создана: ' + String((e && e.message) || e).slice(0, 100)); return null; }
@@ -4799,7 +4815,8 @@ function monAutoStart() {
 }
 // ── список дел коллектору — сам ──
 // Отпечаток перечня: что именно видит коллектор (номер, УИД, стадия, номера в судах, ссылки) — изменился → отправить.
-async function monLinksPackQuiet() {
+// аудит GPT 11.10.2026, п. 5: отпечаток включает адрес коллектора — новому коллектору перечень уходит, даже если дела те же
+async function monLinksPackQuiet(url) {
   const all = await getAll('cases');
   const cases = all.filter(c => c && !c._deleted && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено' && (c.link || c.linkApp || c.linkCass));
   const rows = cases.map(c => ({
@@ -4811,8 +4828,9 @@ async function monLinksPackQuiet() {
       c.linkCass ? { stage: 'Кассация', courtNo: c.courtNoCass || '', url: c.linkCass } : null
     ].filter(Boolean)
   })).sort((a, b) => String(a.number).localeCompare(String(b.number)));
-  const sig = await crmMonHash(JSON.stringify(rows));
-  return { pack: rows.length ? { format: 'crm-advokat-links', version: 1, exportedAt: new Date().toISOString(), cases: rows } : null, sig, count: rows.length };
+  const sig = await crmMonHash(JSON.stringify({ u: String(url || '').trim().replace(/\/+$/, ''), rows }));
+  // п. 4: пустой перечень — тоже перечень (последнее дело снято с наблюдения); version 2 — коллектор 3.18 принимает пустой список
+  return { pack: { format: 'crm-advokat-links', version: rows.length ? 1 : 2, exportedAt: new Date().toISOString(), cases: rows }, sig, count: rows.length };
 }
 // force — отправить, даже если перечень не менялся (кнопка). Возвращает { sent, count } или { skipped, why }
 async function monLinksSync(force) {
@@ -4822,11 +4840,14 @@ async function monLinksSync(force) {
   if (MON_AUTO.linksBusy) return { skipped: true, why: 'уже отправляется' };
   MON_AUTO.linksBusy = true;
   try {
-    const p = await monLinksPackQuiet();
-    if (!p.pack) return { skipped: true, why: 'нет дел со ссылками' };
+    const p = await monLinksPackQuiet(cfg.url);
+    // перечня у коллектора ещё не было и дел со ссылками нет — отправлять нечего; был — пустой перечень снимает дела с наблюдения
+    if (!p.count && !localStorage.getItem(MON_LINKS_SIG)) return { skipped: true, why: 'нет дел со ссылками' };
     if (!force && localStorage.getItem(MON_LINKS_SIG) === p.sig) return { skipped: true, why: 'перечень не менялся', count: p.count };
     const r = await crmCollectorCall({ action: 'linksput', links: p.pack }, 20000);
-    if (r && r.j && r.j.ok) { localStorage.setItem(MON_LINKS_SIG, p.sig); localStorage.setItem(MON_LINKS_AT, String(Date.now())); return { sent: true, count: p.count }; }
+    if (r && r.j && r.j.ok) { localStorage.setItem(MON_LINKS_SIG, p.sig); localStorage.setItem(MON_LINKS_AT, String(Date.now())); return { sent: true, count: p.count, cleared: !p.count }; }
+    // коллектор 3.17 и старше пустой перечень отвергает (400 «ожидается выгрузка CRM…») — причина и действие называются прямо
+    if (!p.count && r && r.j && /ожидается выгрузка CRM/.test(String(r.j.error || ''))) { const msg = 'дел со ссылками не осталось, а коллектор этой версии не принимает пустой перечень и продолжит обходить прежние дела — обновите коллектор до 3.18'; logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true }; }
     const why = r && typeof crmCollectorWhy === 'function' ? (crmCollectorWhy(r) || {}).text : ''; const msg = why || (r && (r.err || (r.j && r.j.error))) || 'коллектор не ответил';
     logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true };
   } finally { MON_AUTO.linksBusy = false; }
@@ -5102,8 +5123,9 @@ function extraOf(e) {
 function eventsOf(x) {
   if (!x || typeof x !== 'object') return null;
   const str = (v, n) => String(v == null ? '' : v).slice(0, n), dayOk = d => /^\d{1,2}-\d{1,2}-\d{4}$/.test(d);
-  return { ver: Number(x.ver) || 0, blocks: Number(x.blocks) || 0, error: x.error ? str(x.error, 300) : undefined,
-    events: (Array.isArray(x.events) ? x.events : []).slice(0, 80).filter(v => v && typeof v === 'object' && dayOk(str(v.day, 12))).map(v => ({ day: str(v.day, 12), gr: Number(v.gr) || 0, level: str(v.level, 40), court: str(v.court, 120),
+  // приложение 1.20: событий до 200 (было 80), сверх — skipped
+  return { ver: Number(x.ver) || 0, blocks: Number(x.blocks) || 0, skipped: Number(x.skipped) || 0, error: x.error ? str(x.error, 300) : undefined,
+    events: (Array.isArray(x.events) ? x.events : []).slice(0, 200).filter(v => v && typeof v === 'object' && dayOk(str(v.day, 12))).map(v => ({ day: str(v.day, 12), gr: Number(v.gr) || 0, level: str(v.level, 40), court: str(v.court, 120),
       date: str(v.date, 20), type: str(v.type, 120), subject: str(v.subject, 200), result: str(v.result, 200), href: /^(https?:\/\/|\/)/.test(str(v.href, 300)) ? str(v.href, 300) : '', signed: !!v.signed })),
     hearings: (Array.isArray(x.hearings) ? x.hearings : []).slice(0, 40).filter(v => v && dayOk(str(v.day, 12))).map(v => ({ day: str(v.day, 12), gr: Number(v.gr) || 0 })) };
 }
@@ -5138,11 +5160,21 @@ function kadEventsRows(parsed, ev, c, link, todayIso) {
 function daysOf(d) {
   if (!d || typeof d !== 'object') return null;
   const dayOf = x => { if (!x || typeof x !== 'object') return null; const ev = x.ev && typeof x.ev === 'object' ? x.ev : null;
-    return { day: String(x.day || '').slice(0, 12), kind: x.kind === 'future' ? 'future' : 'past', cls: String(x.cls || '').slice(0, 80), evBefore: Number(x.evBefore) || 0,
+    return { day: String(x.day || '').slice(0, 12), kind: x.kind === 'future' ? 'future' : 'past', cls: String(x.cls || '').slice(0, 80), evBefore: Number(x.evBefore) || 0, waitMs: Number(x.waitMs) || 0,
       ev: ev ? Object.assign(extraBlockOf(ev), { links: strList(ev.links, 20, 200), shown: strList(ev.shown, 20, 120) }) : null }; };
-  return { done: !!d.done, timeout: !!d.timeout, total: Number(d.total) || 0, docsKids: Number(d.docsKids) || 0, error: d.error ? String(d.error).slice(0, 300) : undefined,
-    days: (Array.isArray(d.days) ? d.days : []).slice(0, 15).map(dayOf).filter(Boolean),
+  // приложение 1.20 (аудит 11.10.2026): дни — от последних, до 40; want — сколько нажималось, read — прочитано; years/yearSel — годы календаря
+  // и прочитанный год; ics — факты о выгрузке календаря сайта (CalendarExport)
+  return { done: !!d.done, timeout: !!d.timeout, total: Number(d.total) || 0, want: Number(d.want) || 0, read: Number(d.read) || 0, years: strList(d.years, 20, 10), yearSel: String(d.yearSel || '').slice(0, 10),
+    ics: icsOf(d.ics), docsKids: Number(d.docsKids) || 0, error: d.error ? String(d.error).slice(0, 300) : undefined,
+    days: (Array.isArray(d.days) ? d.days : []).slice(0, 40).map(dayOf).filter(Boolean),
     docsTry: (Array.isArray(d.docsTry) ? d.docsTry : []).slice(0, 6).map(t => ({ sel: String(t && t.sel || '').slice(0, 40), found: !!(t && t.found), before: Number(t && t.before) || 0, after: Number(t && t.after) || 0 })) };
+}
+// приложение 1.20: факты о выгрузке календаря сайта — статус, тип, длина, число событий, годы DTSTART, имена полей, строки SUMMARY (маска чисел)
+function icsOf(c) {
+  if (!c || typeof c !== 'object') return null;
+  const cnt = o => { const r = {}; if (o && typeof o === 'object') for (const k of Object.keys(o).slice(0, 40)) r[String(k).slice(0, 30)] = Number(o[k]) || 0; return r; };
+  return { found: !!c.found, status: Number(c.status) || 0, type: String(c.type || '').slice(0, 80), len: Number(c.len) || 0, vevents: Number(c.vevents) || 0, years: cnt(c.years), keys: cnt(c.keys),
+    summaries: strList(c.summaries, 10, 120), ms: Number(c.ms) || 0, error: c.error ? String(c.error).slice(0, 200) : undefined };
 }
 function glueOf(g) {
   if (!g || typeof g !== 'object') return null;
@@ -5160,6 +5192,25 @@ function kadCaptchaEmptyLine(app) {
       : 'Нажмите «Скопировать структуру» и пришлите разработчику: в копии — запросы страницы, сообщения консоли, ошибки загрузки и имена cookie (без значений).');
 }
 // строки для листа; bad — чтение не удалось
+// Аудит GPT 11.10.2026, п. 2: несовпадение номера и адреса только писалось строкой, а запись в дело шла. Теперь до записи — сверка
+// принадлежности: страница на kad.arbitr.ru; идентификатор карточки в адресе страницы тот же, что в ссылке дела (если в ссылке он есть);
+// номер дела в суде из дела совпадает с номером карточки или номером инстанции на ней (в КАД у всех инстанций номер первой; номер
+// апелляции вида 01АП-… стоит в строке инстанции), либо приложение нашло его на странице. Не совпало — в дело ничего не пишется.
+function kadGuidOf(u) { const m = String(u || '').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i); return m ? m[0].toLowerCase() : ''; }
+// номер для сравнения: латинские буквы-двойники → кириллица, без пробелов, тире, «№»
+function kadNumNorm(s) { const lat = { A: 'А', B: 'В', E: 'Е', K: 'К', M: 'М', H: 'Н', O: 'О', P: 'Р', C: 'С', T: 'Т', X: 'Х', Y: 'У' }; return String(s || '').toUpperCase().replace(/[ABEKMHOPCTXY]/g, ch => lat[ch]).replace(/[\s\u2010-\u2015\-–—№]+/g, ''); }
+function kadIdentity(s, link) {
+  if (!s || !s.cardFound) return { ok: true, why: [] };
+  const why = [];
+  if (s.href && !kadHostOk(s.href)) why.push('страница открылась не на kad.arbitr.ru (' + s.href + ')');
+  const g1 = kadGuidOf(link && link.url), g2 = kadGuidOf(s.href);
+  if (g1 && g2 && g1 !== g2) why.push('окно перешло на другую карточку: адрес страницы не совпадает со ссылкой в деле');
+  const want = String(link && link.number || '').trim(), c = s.card || null;
+  const nums = c ? [c.number].concat((c.instances || []).map(i => i && i.number)).filter(Boolean) : [];
+  if (want && nums.length && !nums.some(n => kadNumNorm(n) === kadNumNorm(want)) && s.numberFound !== true) why.push('на странице дело «' + (c.number || nums[0]) + '», а в деле номер в суде «' + want + '»');
+  else if (want && !nums.length && s.numberFound === false) why.push('номер дела «' + want + '» на странице не найден');
+  return { ok: !why.length, why };
+}
 function kadProtoResultModel(res, link) {
   const s = kadProtoSummary(res), lines = [];
   if (!s.ok) {
@@ -5176,19 +5227,23 @@ function kadProtoResultModel(res, link) {
   else if (blocked) lines.push({ kind: 'err', text: 'Сайт показал проверку браузера — карточка не прочитана. Откройте снова, пройдите проверку в окне и дождитесь чтения.' });
   else if (s.cardFound) lines.push({ kind: 'done', text: 'Карточка дела открылась и прочитана' + (s.card && s.card.number ? ': ' + s.card.number : '') + (s.card && s.card.loading ? ' (часть данных ещё подгружалась — повторите чтение, если чего-то не хватает)' : '') + '.' });
   if (s.cardFound && !s.number && s.card && s.card.number) lines.push({ kind: 'hint', text: 'На странице номер дела «' + s.card.number + '», а в деле номер в суде не указан — впишите его в форму дела (номер в суде по инстанции), тогда программа будет сверять карточку с делом.' });
+  // п. 2 аудита 11.10.2026: чужая карточка — запрет записи с причиной (вместо предупреждения)
+  const idn = kadIdentity(s, link);
+  if (!idn.ok) lines.push({ kind: 'err', text: 'Открылась карточка другого дела — в дело ничего не записано: ' + idn.why.join('; ') + '. Проверьте ссылку на КАД и номер дела в суде в форме дела и прочитайте снова.' });
   if (s.numberFound === true) lines.push({ kind: 'done', text: 'Номер дела «' + s.number + '» на странице найден — открылась карточка нужного дела.' });
+  else if (!idn.ok) { /* причина уже названа строкой выше */ }
   else if (s.numberFound === false) lines.push({ kind: 'diff', text: 'Номер дела «' + s.number + '» на странице не найден — возможно, открылась не карточка дела (или в деле неверный номер в суде).' });
   else if (s.numberFound === null) lines.push({ kind: 'info', text: 'Номер дела в суде в деле не указан — совпадение не проверялось.' });
   lines.push({ kind: 'info', text: 'Страница: текста ' + s.textLen + ' знаков; элементов структуры ' + s.structTotal + '; заголовков ' + s.heads.length + '; адресов документов и разделов ' + s.links.length +
     (s.frames.length ? '; вложенных кадров ' + s.frames.length : '') + (s.hosts.length ? '; сайтов, к которым обращалась страница, ' + s.hosts.length : '') + (s.requests.length ? '; запросов ' + s.requests.length : '') + (s.console.length ? '; сообщений консоли ' + s.console.length : '') + (s.loadErrors.length ? '; ошибок загрузки ' + s.loadErrors.length : '') + (s.errors.length ? '; ошибок сценариев страницы ' + s.errors.length : '') + (s.glue ? '; сценариев проверки разобрано ' + Object.keys(s.glue).length : '') + (s.wasmLog.length ? '; обращений wasm записано ' + s.wasmLog.length : '') + (s.manual ? '; прочитано по кнопке «Прочитать»' : '') + (s.app ? '; приложение ' + s.app : '') + '.' });
-  if (link && s.href && s.href.split('#')[0] !== String(link.url || '').split('#')[0]) lines.push({ kind: 'info', text: 'Конечный адрес страницы отличается от ссылки в деле: ' + s.href });
+  if (idn.ok && link && s.href && s.href.split('#')[0] !== String(link.url || '').split('#')[0]) lines.push({ kind: 'info', text: 'Конечный адрес страницы отличается от ссылки в деле: ' + s.href });
   if (!blocked && !s.cardFound && s.textLen < 800) lines.push({ kind: 'diff', text: 'Текста на странице очень мало — карточка, похоже, не дорисовалась. Повторите и дождитесь полной загрузки.' });
   if (!s.cardFound) lines.push({ kind: 'hint', text: 'Нажмите «Скопировать структуру» и пришлите её разработчику — по ней пишется разбор заседаний и движения дела. Текст страницы содержит данные сторон: его не пересылайте.' });
   // разметка карточки есть, а полей нет — приложение старше 1.13: записать в дело нечего, об этом сказано прямо (урок 86)
   else if (!s.card) lines.push({ kind: 'hint', text: 'Поля карточки (номер, судья, стороны, ближайшее заседание) присылает приложение 1.13 и новее — обновите приложение (Настройки → «Проверить обновления»), и прочитанное запишется в дело.' });
   // приложение 1.16: что дала вкладка «Календарь» — факт, без разбора (разбор пишется по копии структуры)
   if (s.extra) lines.push({ kind: 'info', text: kadExtraLine(s.extra) });
-  return { lines, bad: blocked || (!s.cardFound && s.textLen < 800), summary: s };
+  return { lines, bad: blocked || (!s.cardFound && s.textLen < 800), foreign: idn.ok ? null : idn.why, summary: s };
 }
 function kadExtraLine(x) {
   if (x.error) return 'Вкладка «Календарь»: сценарий окна не выполнился — ' + x.error + '. Нажмите «Скопировать структуру» и пришлите разработчику.';
@@ -5204,8 +5259,14 @@ function kadDaysLine(d) {
   if (!d) return '; дни календаря не нажимались (нужно приложение 1.18 или новее)';
   if (d.error) return '; дни календаря: сценарий не выполнился — ' + d.error;
   const withEv = d.days.filter(x => x.ev && x.ev.total > 0).length, docsOk = d.docsTry.find(t => t.found && t.after > t.before);
-  return '; дней с событиями ' + d.total + ', нажато ' + d.days.length + (d.timeout ? ' (окно не дождалось остальных)' : '') + ', с подробностями ' + withEv +
-    (docsOk ? '; документы инстанции раскрылись нажатием «' + docsOk.sel + '»' : d.docsTry.length ? '; документы инстанции не раскрылись (проб нажатий: ' + d.docsTry.length + ')' : '');
+  // приложение 1.20: полнота чтения называется прямо — сколько дней нажималось из отмеченных, какой год прочитан, что дала выгрузка календаря
+  const part = d.want && d.total > d.want ? ' (нажимались последние ' + d.want + ', более ранние не читались)' : '';
+  const yrs = d.years.length > 1 ? '; в календаре годы ' + d.years.join(', ') + ' — прочитан ' + (d.yearSel || 'один из них') + ', события других лет не прочитаны' : '';
+  const i = d.ics, iy = i ? Object.keys(i.years).sort() : [];
+  const ics = !i || !i.found ? '' : i.error ? '; выгрузка календаря сайта не получена: ' + i.error :
+    '; выгрузка календаря сайта: ответ ' + i.status + ', событий ' + i.vevents + (iy.length ? ' (' + iy.map(y => y + ' — ' + i.years[y]).join(', ') + ')' : '');
+  return '; дней с событиями ' + d.total + part + ', нажато ' + d.days.length + (d.timeout ? ' (окно не дождалось остальных)' : '') + ', с подробностями ' + withEv +
+    (docsOk ? '; документы инстанции раскрылись нажатием «' + docsOk.sel + '»' : d.docsTry.length ? '; документы инстанции не раскрылись (проб нажатий: ' + d.docsTry.length + ')' : '') + yrs + ics;
 }
 // «Данные с сайта суда» при ссылке на КАД (снимок пользователя 09.10.2026, урок 99): коллектор в облаке этот сайт не читает, поэтому
 // такие ссылки ему не отправляются; строка называет причину и нужную кнопку, а не общие советы
@@ -5246,13 +5307,13 @@ async function kadProtoOnResult(id, res) {
   KAD_PROTO.text = res && typeof res === 'object' ? String(res.text || '') : '';
   // шаг 1 (10.10.2026): прочитанная карточка записывается в дело и в события мониторинга тем же путём, что ответ коллектора; отчёт — в лист
   let applied = null;
-  if (!m.bad && m.summary.cardFound && m.summary.card) {
+  if (!m.bad && !m.foreign && m.summary.cardFound && m.summary.card) {
     try { applied = await kadCardApply(KAD_PROTO.caseId, m.summary, KAD_PROTO.link); }
     catch (e) { logErr('kad:apply', e); applied = { error: 'Запись в дело не удалась: ' + (e && e.message || e) }; }
   }
   KAD_PROTO.applied = applied;
   openKadProtoSheet(KAD_PROTO.caseId, res, applied);
-  toast(m.bad ? 'Карточка КАД не прочитана — причина в листе' : applied && applied.error ? applied.error : applied && (applied.done.length || (applied.hearing && applied.hearing.isNew)) ? 'Карточка КАД прочитана — записано в дело' : 'Карточка КАД прочитана — новых данных для дела нет', m.bad || !!(applied && applied.error));
+  toast(m.bad ? 'Карточка КАД не прочитана — причина в листе' : m.foreign ? 'Открылась карточка другого дела — в дело ничего не записано, причина в листе' : applied && applied.error ? applied.error : applied && (applied.done.length || (applied.hearing && applied.hearing.isNew)) ? 'Карточка КАД прочитана — записано в дело' : 'Карточка КАД прочитана — новых данных для дела нет', m.bad || !!(applied && applied.error));
   if (typeof UI === 'object' && UI.ready && typeof nav === 'function' && !sheetIsOpen()) nav(UI.screen);
 }
 // строки отчёта о записи для листа (applied — результат kadCardApply)
@@ -5297,10 +5358,13 @@ function openKadProtoSheet(caseId, res, applied) {
   const facts2 = startLine + grp('Ошибки сценариев страницы (с трассировкой)', s.errors) + grp('Обращения wasm к браузеру перед ошибкой (последние)', s.wasmLog) + (glueRows ? `<details class="fgroup"><summary>${icon('chevron-down', 'icon-sm')}<span>Сценарии проверки — что они запрашивают у браузера (${Object.keys(s.glue).length})</span></summary><div class="card-more-body">${glueRows}</div></details>` : '');
   // приложение 1.16: факты вкладки «Календарь» — свёрнутые группы (структура, тексты, документы, шаблоны по именам)
   const x = s.extra, xb = (title, bl) => bl && (bl.struct.length || bl.texts.length) ? grp(title + ' — структура', bl.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) + grp(title + ' — тексты', bl.texts) : '';
-  const extraBox = x ? `<div class="section-label">Вкладка «Календарь» (факты, разбор ещё не написан)</div>` + xb('Вкладка «Календарь»', x.calendar) + xb('Документы инстанции', x.docs) + xb('Список инстанций после нажатия', x.listNow) +
+  const extraBox = x ? `<div class="section-label">Вкладка «Календарь» (факты для разработки)</div>` + xb('Вкладка «Календарь»', x.calendar) + xb('Документы инстанции', x.docs) + xb('Список инстанций после нажатия', x.listNow) +
     (Object.keys(x.templates).length ? `<p class="small"><b>Шаблоны страницы (в копии целиком):</b> ${esc(Object.keys(x.templates).map(k => k + ' (' + x.templates[k].length + ' зн.)').join(', '))}</p>` : '') + grp('Запросы после нажатия вкладки', x.requestsAfter) +
     // приложение 1.18: по каждому нажатому дню — показанные блоки, тексты, ссылки, структура; пробы раскрытия документов; запросы за время нажатий
-    (x.days ? x.days.days.map(d => grp('День ' + d.day + (d.kind === 'future' ? ' (назначено)' : ' (прошло)') + (d.ev && d.ev.total ? '' : ' — подробностей нет'), d.ev && d.ev.total ? d.ev.shown.map(v => 'показан: ' + v).concat(d.ev.texts, d.ev.links.map(v => 'ссылка: ' + v), d.ev.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) : ['подробности дня на странице не появились'])).join('') +
+    (x.days ? x.days.days.map(d => grp('День ' + d.day + (d.kind === 'future' ? ' (назначено)' : ' (прошло)') + (d.ev && d.ev.total ? '' : ' — подробностей нет'), (d.ev && d.ev.total ? d.ev.shown.map(v => 'показан: ' + v).concat(d.ev.texts, d.ev.links.map(v => 'ссылка: ' + v), d.ev.struct.map(r => r.k + ' ×' + r.n + ' (' + r.len + ' зн.)')) : ['подробности дня на странице не появились']).concat(d.waitMs ? ['ожидание: ' + d.waitMs + ' мс'] : []))).join('') +
+      // приложение 1.20: выгрузка календаря сайта — без содержимого событий, только счётчики, имена полей и строки SUMMARY с маской чисел
+      (x.days.ics && x.days.ics.found ? grp('Выгрузка календаря сайта (CalendarExport)', x.days.ics.error ? ['ошибка: ' + x.days.ics.error] : ['ответ ' + x.days.ics.status + ', тип ' + (x.days.ics.type || '—') + ', ' + x.days.ics.len + ' знаков, событий ' + x.days.ics.vevents + ', ' + x.days.ics.ms + ' мс',
+        'годы: ' + (Object.keys(x.days.ics.years).sort().map(y => y + ' — ' + x.days.ics.years[y]).join(', ') || 'нет'), 'поля: ' + (Object.keys(x.days.ics.keys).map(k => k + ' ×' + x.days.ics.keys[k]).join(', ') || 'нет')].concat(x.days.ics.summaries.map(v => 'SUMMARY: ' + v))) : '') +
       grp('Документы инстанции — пробы нажатий', x.days.docsTry.map(t => t.sel + ': ' + (t.found ? 'нажато, элементов ' + t.before + ' → ' + t.after : 'не найдено'))) + grp('Запросы за время нажатий дней', x.requestsDays) : '') +
     // приложение 1.19: события календаря по структуре — таблица документов (дата, инстанция, вид документа, вид акта, кто) и отметки заседаний
     (x.events && x.events.events.length ? `<div class="section-label">События календаря (документы по дням)</div><div class="table-wrap"><table class="grid"><thead><tr><th>Дата</th><th>Инстанция</th><th>Документ</th><th>Акт</th><th>Кто</th></tr></thead><tbody>${x.events.events.map(e => `<tr><td>${esc(e.date || e.day)}</td><td>${esc(e.level || kadGrStage(e.gr))}</td><td>${esc(e.type)}</td><td>${esc(e.result)}${e.signed ? ' <span class="badge">подписан</span>' : ''}${e.href ? ' <span class="badge">PDF</span>' : ''}</td><td>${esc(e.subject)}</td></tr>`).join('')}</tbody></table></div>` : '') +
@@ -6271,11 +6335,15 @@ async function syncSaveAndCheck() {
   const url = fv('sy-url'), secret = fv('sy-secret') || SRV.secret, pass = fv('sy-pass') || SRVDB.pass;
   const bad = nextSrvUrlCheck(url) || (!secret ? 'Укажите секретный код' : '') || (!pass ? 'Укажите пароль шифрования' : '');
   if (bad) { openSyncSheet('replace', { text: bad, bad: true }); return; }
+  // п. 6 аудита 11.10.2026: смена сервера или пароля — сколько файлов документов останется только у прежнего подключения
+  let stranded = 0; const oldSrv = String(SRV.url || '').trim().replace(/\/+$/, '');
+  if (oldSrv && typeof nextBlobsStranded === 'function' && (url.trim().replace(/\/+$/, '') !== oldSrv || pass !== SRVDB.pass)) { try { stranded = await nextBlobsStranded(oldSrv, await nextBlobKey(SRVDB.pass)); } catch (e) { logErr('sync:stranded', e); } }
   if (url !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
   SRV.url = url; if (secret !== SRV.secret) SRV.secret = secret; if (pass !== SRVDB.pass) CLOUD.pass = pass;
   const r = await nextServerCheck();
-  openSyncSheet('replace', r.ok ? { text: 'Связь есть: сервер версии ' + r.srvVer + (r.cors ? (r.cors.enabled ? ', хранилище принимает снимки напрямую (правило CORS действует)' : ', хранилище НЕ принимает снимки напрямую: ответ ' + r.cors.text + ' — сервер поставит правило при первой отправке; если не поможет, пришлите этот текст') : '') + (r.dbVer ? ', база на сервере есть. Теперь шаг 2.' : ', базы на сервере пока нет.') }
-    : { text: 'Связь не установлена: ' + r.error + '.', bad: true });
+  const strandedNote = stranded ? ' Внимание: файлов документов, которые есть только в хранилище прежнего подключения и которых нет на этом устройстве, — ' + stranded + '. С новым подключением их не открыть; переноса между серверами пока нет — чтобы их сохранить, верните прежние адрес и пароль, сделайте «Копию базы» (файлы подкачаются на устройство) и только потом меняйте подключение.' : '';
+  openSyncSheet('replace', r.ok ? { text: 'Связь есть: сервер версии ' + r.srvVer + (r.cors ? (r.cors.enabled ? ', хранилище принимает снимки напрямую (правило CORS действует)' : ', хранилище НЕ принимает снимки напрямую: ответ ' + r.cors.text + ' — сервер поставит правило при первой отправке; если не поможет, пришлите этот текст') : '') + (r.dbVer ? ', база на сервере есть. Теперь шаг 2.' : ', базы на сервере пока нет.') + strandedNote, bad: !!stranded }
+    : { text: 'Связь не установлена: ' + r.error + '.' + strandedNote, bad: true });
 }
 async function syncPullNow() {
   const b = document.getElementById('sy-pull'); if (b) b.disabled = true;
@@ -6395,11 +6463,68 @@ function formModelCase(v, prev, ctx) {
     if (Object.keys(upd).length) { if (newClient) Object.assign(newClient, upd); else clientUpd = { ...clientRec, ...upd, updatedAt: Date.now() }; } }
   return { obj, newClient, clientUpd };
 }
+// Аудит GPT 11.10.2026, п. 1: форма копировала прежнюю запись вместе с caseId и меняла только номер — после выбора другого дела запись
+// числилась за двумя делами (номер — новое, внутренняя связь — прежнее), снятие выбора не очищало связь. Связь с делом — одной парой:
+// выбран номер → caseId этого дела; номер не менялся и прежняя связь ведёт на дело с этим номером (в том числе при повторе номеров) —
+// она остаётся; номер снят — оба поля пусты.
+// дело по id: CASES_BY_ID (data/relations.js); без него — поиск среди дел кэша по номерам
+function caseById(id) {
+  if (!id) return null;
+  if (typeof CASES_BY_ID === 'object' && CASES_BY_ID && CASES_BY_ID[id]) return CASES_BY_ID[id];
+  return Object.values(typeof CASES_BY_NUM === 'object' && CASES_BY_NUM ? CASES_BY_NUM : {}).find(k => k && k.id === id) || null;
+}
+function caseOfRec(x) {
+  if (!x) return null; const by = typeof CASES_BY_NUM === 'object' && CASES_BY_NUM ? CASES_BY_NUM : {};
+  if (x.caseId) { const c = caseById(x.caseId); if (c) return c; }
+  return x.caseNum ? by[x.caseNum] || null : null;
+}
+function formCaseLink(caseNum, prev) {
+  const num = String(caseNum || '').trim(); if (!num) return { caseNum: '', caseId: '' };
+  const by = typeof CASES_BY_NUM === 'object' && CASES_BY_NUM ? CASES_BY_NUM : {};
+  if (prev && prev.caseNum === num && prev.caseId) { const pc = caseById(prev.caseId); if (pc && pc.number === num) return { caseNum: num, caseId: prev.caseId }; }
+  if (by[num] && by[num].id) return { caseNum: num, caseId: by[num].id };
+  // дела с таким номером в кэше нет: прежняя связь держится, только если номер тот же
+  return { caseNum: num, caseId: prev && prev.caseNum === num ? (prev.caseId || '') : '' };
+}
+// п. 8: номер дела изменён в форме — связанные записи переходят на новый номер (как caseRelinkAfterRename прежней программы). Переходят
+// записи, у которых внутренняя связь — это дело и номер прежний (или пуст), и записи без связи с прежним номером, если этот номер больше
+// никому не принадлежит. Записи, связь и номер которых указывают на разные дела, не трогаются — их разбирает «Проверка данных».
+// Журнал дела (caseEvents) — история, не переписывается. Одна транзакция (putMany).
+const CASE_RELINK_SKIP = ['cases', 'caseEvents', 'docBlobs', 'refs', 'templates', 'workflows', 'aiSessions'];
+async function caseRelinkRenamed(myId, oldNum, newNum) {
+  if (!myId || !oldNum || !newNum || oldNum === newNum) return 0;
+  const stillUsed = (await getAll('cases')).some(x => x && !x._deleted && x.id !== myId && x.number === oldNum), list = [];
+  for (const st of (typeof STORES !== 'undefined' ? STORES : []).filter(s => !CASE_RELINK_SKIP.includes(s))) {
+    for (const r of await getAll(st)) {
+      if (!r || r._deleted || r.caseNum === newNum) continue;
+      const mine = r.caseId === myId ? (!r.caseNum || r.caseNum === oldNum) : (!r.caseId && r.caseNum === oldNum && !stillUsed);
+      if (mine) list.push([st, { ...r, caseId: myId, caseNum: newNum }]);
+    }
+  }
+  if (list.length) await putMany(list);
+  return list.length;
+}
+// Доводка уже записанных данных (раз за выпуск, при запуске): дело переименовали до этого выпуска — у связанных записей внутренняя
+// связь верная, а номер прежний, которого больше нет ни у одного дела. Такой номер заменяется номером дела по связи — это не перепривязка,
+// а исправление подписи. Записи, номер которых принадлежит другому делу, и записи со снятым номером не трогаются — их решает пользователь
+// в «Проверке данных».
+async function caseLinksHeal() {
+  const cases = (await getAll('cases')).filter(c => c && !c._deleted), byId = {}, nums = new Set(); cases.forEach(c => { byId[c.id] = c; if (c.number) nums.add(c.number); });
+  const list = [];
+  for (const st of (typeof STORES !== 'undefined' ? STORES : []).filter(s => !CASE_RELINK_SKIP.includes(s))) {
+    for (const r of await getAll(st)) {
+      if (!r || r._deleted || !r.caseId || !r.caseNum) continue; const c = byId[r.caseId];
+      if (c && c.number && r.caseNum !== c.number && !nums.has(r.caseNum)) list.push([st, { ...r, caseNum: c.number }]);
+    }
+  }
+  if (list.length) await putMany(list);
+  return list.length;
+}
 function formModelTask(v, prev) {
   const title = String(v.title || '').trim(); if (!title) return { error: 'Укажите название задачи' };
   if (v.due && !/^\d{4}-\d{2}-\d{2}$/.test(v.due)) return { error: 'Срок — в формате ДД.ММ.ГГГГ' };
   return { obj: { ...(prev || {}), id: prev ? prev.id : uid('З'), title, due: v.due || '', time: v.time || '', priority: TASK_PRIORITIES.includes(v.priority) ? v.priority : 'Средний',
-    caseNum: v.caseNum || '', note: v.note || '', done: !!(prev && prev.done), doneAt: (prev && prev.doneAt) || '', createdAt: (prev && prev.createdAt) || Date.now() } };
+    ...formCaseLink(v.caseNum, prev), note: v.note || '', done: !!(prev && prev.done), doneAt: (prev && prev.doneAt) || '', createdAt: (prev && prev.createdAt) || Date.now() } };
 }
 // Занятость времени — правила v310 (rules/busy.js, busyClashAll): один суд — 30 минут, разные суды — время в пути,
 // заседание и встреча — 30 минут и дорога до суда, две встречи — большая из длительностей. Этап 2б заменил ими
@@ -6422,7 +6547,7 @@ function formModelMeeting(v, prev) {
   if (v.time && !/^\d{1,2}:\d{2}$/.test(v.time)) return { error: 'Время — в формате ЧЧ:ММ' };
   const dur = Number(v.duration); if (v.duration !== '' && v.duration != null && !(dur >= 5 && dur <= 1440)) return { error: 'Длительность — от 5 минут до суток' };
   return { obj: { ...(prev || {}), id: prev ? prev.id : uid('В'), date: v.date, time: v.time || '', duration: dur >= 5 ? dur : SLOT_MIN, with: who,
-    place: String(v.place || '').trim(), caseNum: v.caseNum || '', note: String(v.note || '').trim(), createdAt: (prev && prev.createdAt) || Date.now() } };
+    place: String(v.place || '').trim(), ...formCaseLink(v.caseNum, prev), note: String(v.note || '').trim(), createdAt: (prev && prev.createdAt) || Date.now() } };
 }
 // Личное участие в проведённом заседании. Пользователь выбирает одно — список «Моё участие» (решение 02.10.2026: флажок
 // «Участвовал(а) лично» дублировал список и убран). Поле attended прежней программы (отчёты, старая база) заполняется само:
@@ -6435,7 +6560,7 @@ function hearingAttendedOf(v, prev) {
 function formModelHearing(v, prev) {
   if (!v.date || !/^\d{4}-\d{2}-\d{2}$/.test(v.date)) return { error: 'Укажите дату заседания' };
   if (v.time && !/^\d{1,2}:\d{2}$/.test(v.time)) return { error: 'Время — в формате ЧЧ:ММ' };
-  return { obj: { ...(prev || {}), id: prev ? prev.id : uid('С'), createdAt: (prev && prev.createdAt) || Date.now(), caseNum: v.caseNum || '', date: v.date, time: v.time || '',
+  return { obj: { ...(prev || {}), id: prev ? prev.id : uid('С'), createdAt: (prev && prev.createdAt) || Date.now(), ...formCaseLink(v.caseNum, prev), date: v.date, time: v.time || '',
     room: v.room || '', court: v.court || '', judge: v.judge || '', status: HEARING_STATUSES.includes(v.status) ? v.status : 'Назначено',
     result: v.status === 'Проведено' ? (v.result || '') : ((prev && prev.result) || ''), comment: v.comment || '',
     ...(hearingAttendedOf(v, prev) === undefined ? {} : { attended: hearingAttendedOf(v, prev) }),
@@ -6621,7 +6746,10 @@ async function saveCaseForm(id) {
       await putMany(list, expect.length ? { expect } : undefined); if (typeof devrAlarms === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }
     else await put('cases', r.obj);
   } catch (e) { CASE_EVENTS_BATCH.list = null; logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (clientSaved ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
-  await refreshCasesCache(); toast((id ? 'Дело сохранено' : 'Дело создано') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
+  await refreshCasesCache();
+  // п. 8 аудита 11.10.2026: номер дела изменён — связанные записи переходят на новый номер
+  let relinked = 0; if (prev && prev.number && r.obj.number && prev.number !== r.obj.number) { try { relinked = await caseRelinkRenamed(r.obj.id, prev.number, r.obj.number); } catch (e) { logErr('case:relink', e); toast('Дело сохранено, но связанные записи не переведены на новый номер: ' + ((e && e.message) || e) + '. Сохраните дело ещё раз', true); } }
+  toast((id ? 'Дело сохранено' : 'Дело создано') + (relinked ? ' · записей переведено на новый номер: ' + relinked : '') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
   // 09.10.2026: перечень дел со ссылками у коллектора обновляется сам (sync/monauto.js) — иначе новое дело он не обойдёт
@@ -6649,7 +6777,7 @@ async function saveTaskForm(id) {
   const v = {}; ['title', 'due', 'time', 'priority', 'caseNum', 'note'].forEach(k => { v[k] = fv('tf-' + k); });
   const r = formModelTask(v, prev); if (r.error) { fErr(r.error); return; }
   if (!id && typeof demoAllow === 'function' && !(await demoAllow('tasks'))) return;
-  try { await put('tasks', r.obj); if (r.obj.caseNum) { const c = CASES_BY_NUM[r.obj.caseNum]; if (c) addCaseHistoryEvent(c, 'task', '', (id ? 'Задача изменена: ' : 'Задача добавлена: ') + r.obj.title, 'auto'); } }
+  try { await put('tasks', r.obj); if (r.obj.caseNum) { const c = caseOfRec(r.obj); if (c) addCaseHistoryEvent(c, 'task', '', (id ? 'Задача изменена: ' : 'Задача добавлена: ') + r.obj.title, 'auto'); } }
   catch (e) { logErr('form:task', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(id ? 'Задача сохранена' : 'Задача создана'); formAfterSave(r.obj.caseNum);
 }
@@ -6682,7 +6810,7 @@ async function saveHearingForm(id) {
   await comboRememberAll(document.getElementById('sheetContent'));
   // проведённое и отменённое заседание времени не занимает — для них занятость не проверяется
   if (r.obj.status === 'Назначено' && await formBusy('hearing', r.obj, 'hf-busy', id)) return;
-  try { await put('hearings', r.obj); const c = CASES_BY_NUM[r.obj.caseNum]; if (c) addCaseHistoryEvent(c, id ? 'hearing_upd' : 'hearing', '', (id ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(r.obj.date) + (r.obj.time ? ' ' + r.obj.time : '') + (r.obj.status !== 'Назначено' ? ' · ' + r.obj.status : ''), 'auto'); }
+  try { await put('hearings', r.obj); const c = caseOfRec(r.obj); if (c) addCaseHistoryEvent(c, id ? 'hearing_upd' : 'hearing', '', (id ? 'Заседание изменено: ' : 'Заседание добавлено: ') + fmtDate(r.obj.date) + (r.obj.time ? ' ' + r.obj.time : '') + (r.obj.status !== 'Назначено' ? ' · ' + r.obj.status : ''), 'auto'); }
   catch (e) { logErr('form:hearing', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(id ? 'Заседание сохранено' : 'Заседание добавлено'); formAfterSave(r.obj.caseNum);
 }
@@ -6765,7 +6893,7 @@ function decisionDateModel(c, date, h) {
 }
 async function openAfterHearing(id, preset) {
   const h = await getOne('hearings', id); if (!h) { toast('Заседание не найдено', true); return; }
-  const c = h.caseNum ? CASES_BY_NUM[h.caseNum] : null;
+  const c = caseOfRec(h);
   const seg = [['held', 'Состоялось'], ['postponed', 'Отложено'], ['cancelled', 'Отменено']].map(([k, t]) => `<button type="button" class="button small-btn" aria-pressed="${k === (preset || 'held')}" data-v="${k}" onclick="ahPick(this)">${esc(t)}</button>`).join('');
   const quick = HEARING_QUICK.map(([w, t, text, dec], i) => `<button type="button" class="chip" onclick="ahQuick(${i})">${esc(t)}</button>`).join('');
   const body = `${caseOpenBar('', h.caseNum)}<p class="small muted">${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}${h.caseNum ? ' · ' + esc(h.caseNum) : ''}${c && c.client ? ' · ' + esc(c.client) : ''}${h.court ? ' · ' + esc(h.court) : ''}</p>
@@ -6800,14 +6928,14 @@ function ahPick(btn) { btn.parentElement.querySelectorAll('button').forEach(b =>
 async function afterHearingSave(id) {
   const h = await getOne('hearings', id); if (!h) { toast('Заседание не найдено', true); return; }
   const what = (document.querySelector('#ah-what button[aria-pressed="true"]') || {}).dataset?.v || 'held';
-  const caseObj = h.caseNum ? await getOne('cases', (CASES_BY_NUM[h.caseNum] || {}).id || '') : null;
+  const caseObj = caseOfRec(h) ? await getOne('cases', caseOfRec(h).id) : null;
   const r = afterHearingModel(h, { what, hearings: await getAll('hearings'), tasks: await getAll('tasks'), result: fv('ah-result'), next: fv('ah-next'), nextTime: fv('ah-next-time'), task: fv('ah-task'), taskDue: fv('ah-task-due'), decision: !!(document.getElementById('ah-decision') || {}).checked, participation: fv('ah-participation'), caseObj }); if (r.error) { fErr(r.error); return; }
   const made = [];
   try {
     await put('hearings', r.hearing);
     if (r.next) { const prev = await getOne('hearings', r.next.id); await put('hearings', { ...(prev || { createdAt: Date.now() }), ...r.next }); made.push((r.nextDup ? 'заседание ' + fmtDate(r.next.date) + ' уже было — дополнено' : 'заседание ' + fmtDate(r.next.date))); }
     if (r.task) { const prev = await getOne('tasks', r.task.id); await put('tasks', { ...(prev || { createdAt: Date.now(), done: false }), ...r.task }); made.push('задача'); }
-    const c = h.caseNum ? CASES_BY_NUM[h.caseNum] : null; if (c) addCaseHistoryEvent(c, 'hearing_upd', '', r.log, 'auto');
+    const c = caseOfRec(h); if (c) addCaseHistoryEvent(c, 'hearing_upd', '', r.log, 'auto');
     if (r.caseUpd && !r.caseUpd.kept) { const upd = r.caseUpd.obj; const msgs = nextActDeadlines(upd, caseObj); if (msgs.length) addCaseHistoryEvent(upd, 'deadline', '', msgs.join(' | '), 'auto'); await put('cases', upd); await refreshCasesCache(); made.push(DECISION_FIELD_LABEL[r.caseUpd.field] + ' ' + fmtDate(h.date) + (msgs.length ? ' и сроки: ' + msgs.join('; ').slice(0, 160) : '')); }
   } catch (e) { logErr('form:after', e); fErr((e && e.message) || 'Не удалось записать'); return; }
   const kept = r.caseUpd && r.caseUpd.kept ? ' В деле уже указана другая ' + DECISION_FIELD_LABEL[r.caseUpd.field] + ' (' + fmtDate(r.caseUpd.obj[r.caseUpd.field]) + ') — она сохранена, поправьте в форме дела.' : '';
@@ -7308,7 +7436,7 @@ async function deleteConfirmed(store, id) {
   const rec = await getOne(store, id); if (!rec) { toast('Запись не найдена', true); closeSheet(); return; }
   const box = document.getElementById('del-linked'), withLinked = !!(box && box.checked), at = Date.now();
   // карточка дела, из которой пришли (лист «дело → форма → удаление»): к ней вернёмся, если удаляли не само дело
-  const owner = store !== 'cases' && rec.caseNum ? CASES_BY_NUM[rec.caseNum] : null;
+  const owner = store !== 'cases' && (rec.caseId || rec.caseNum) ? (typeof caseOfRec === 'function' ? caseOfRec(rec) : CASES_BY_NUM[rec.caseNum]) : null;
   const backToCard = !!owner && UI.stack.some(e => String(e.title).startsWith(String(owner.number)));
   try {
     // разбор GPT 05.10.2026, п. 4: дело и связанные записи уходят в корзину одной транзакцией (всё или ничего)
@@ -8014,7 +8142,7 @@ async function openCaseSheet(id, keep) {
       `${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}`,
       `${(c.i1FilingDate || c.i1DecisionDate || c.i1Result || c.apFilingDate || c.apCourt || c.courtApp || c.csFilingDate || c.courtCass || c.judgeApp || c.judgeCass || c.fsspNo || c.ipStatus) ? sec('Инстанции', `<div class="list-rows">${row('Первая инстанция', [c.i1FilingDate ? 'подано ' + fmtDate(c.i1FilingDate) : '', c.i1DecisionDate ? 'решение ' + fmtDate(c.i1DecisionDate) : '', c.i1Result].filter(Boolean).join(' · '))}${row('Апелляция', [c.apCourt || c.courtApp, c.courtNoApp ? '№ ' + c.courtNoApp : '', c.judgeApp ? 'судья ' + c.judgeApp : '', c.apFilingDate ? 'жалоба ' + fmtDate(c.apFilingDate) : '', c.apDecisionDate ? 'определение ' + fmtDate(c.apDecisionDate) : '', c.apResult].filter(Boolean).join(' · '))}${row('Кассация', [c.courtCass, c.courtNoCass ? '№ ' + c.courtNoCass : '', c.judgeCass ? 'судья ' + c.judgeCass : '', c.csFilingDate ? 'жалоба ' + fmtDate(c.csFilingDate) : '', c.csDecisionDate ? 'определение ' + fmtDate(c.csDecisionDate) : '', c.csResult].filter(Boolean).join(' · '))}${row('Исполнение', [c.fsspNo ? 'ИП № ' + c.fsspNo : '', c.ipOsp, c.ipStatus].filter(Boolean).join(' · '))}</div>`) : ''}`,
       `${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.inn ? 'ИНН ' + p.inn : '', p.addr].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}`,
-      `${typeof poaBlockHtml === 'function' && (d.poa || []).some(p => p && !p._deleted && p.caseNum && p.caseNum === c.number) ? poaBlockHtml(d.poa.filter(p => p.caseNum && p.caseNum === c.number), { caseId: c.id, clientId: c.clientId || '' }) : ''}`,
+      `${typeof poaBlockHtml === 'function' && (d.poa || []).some(p => p && !p._deleted && (p.caseId ? p.caseId === c.id : (!!p.caseNum && p.caseNum === c.number))) ? poaBlockHtml(d.poa.filter(p => p && !p._deleted && (p.caseId ? p.caseId === c.id : (!!p.caseNum && p.caseNum === c.number))), { caseId: c.id, clientId: c.clientId || '' }) : ''}`,
       `${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, typeof monEvUnique === 'function' ? monEvUnique(d.monitorEvents) : d.monitorEvents, d.hearings) : ''}`].join(''))}
     ${cardGroup('cm-money', 'Деньги: счета и расходы', [
       `${m.bills.length ? sec('Счета', `<div class="list-rows">${m.bills.map(f => { const st = finStateOf(f, localISO(new Date())), mt = FIN_STATE_META[st]; return `<button type="button" class="list-btn" onclick="openFinanceSheet('${jsq(f.id)}')"><span>${esc(f.service || BILLING_LABEL[f.billType || 'fixed'])}${f.dueDate ? `<br><span class="muted small">срок ${esc(fmtDate(f.dueDate))}</span>` : ''}</span><span class="muted">${esc(fmtMoney(f.amount))} ${badge(mt[0], mt[1])}</span></button>`; }).join('')}</div>`, m.bills.length) : ''}`,
@@ -10070,11 +10198,30 @@ function integrityModel(d) {
   Object.keys(byNum).filter(n => byNum[n].length > 1).forEach(n => out.push({ type: 'Повторяющиеся номера дел', label: 'Дело ' + n, detail: 'Номер используется в ' + byNum[n].length + ' делах', open: ['openCaseSheet', byNum[n][0].id] }));
   for (const [store, title, opener] of INTEGRITY_STORES) live(d[store]).forEach(r => {
     const ref = r.caseNum || (r.caseId ? '#' + r.caseId : '');
+    // аудит 11.10.2026, п. 1: внутренняя связь — одно дело, номер — другое (форма задачи, встречи, заседания до этого выпуска) — выбор за пользователем
+    if (r.caseId && byId[r.caseId] && r.caseNum && byNum[r.caseNum] && !byNum[r.caseNum].some(c => c.id === r.caseId)) out.push({ type: 'Запись привязана к двум делам', label: title + (r.date || r.due ? ' от ' + fmtDate(r.date || r.due) : '') + (r.title || r.service ? ' · ' + (r.title || r.service) : ''), detail: 'Номер — дело ' + r.caseNum + ', внутренняя связь — дело ' + (byId[r.caseId].number || 'без номера') + '. Выберите верное', open: ['caseLinkFixOpen', store + '|' + r.id] });
+    // снятый в форме выбор дела не снимал внутреннюю связь — запись по-прежнему показывалась в деле
+    if (r.caseId && byId[r.caseId] && !r.caseNum && store !== 'finance') out.push({ type: 'Запись привязана к двум делам', label: title + (r.date || r.due ? ' от ' + fmtDate(r.date || r.due) : '') + (r.title ? ' · ' + r.title : ''), detail: 'Дело в записи не выбрано, но внутренняя связь — дело ' + (byId[r.caseId].number || 'без номера') + '. Выберите верное', open: ['caseLinkFixOpen', store + '|' + r.id] });
     if (ref && !(r.caseId && byId[r.caseId]) && !(r.caseNum && byNum[r.caseNum])) out.push({ type: 'Ссылка на дело, которого нет', label: title + (r.date || r.due ? ' от ' + fmtDate(r.date || r.due) : '') + (r.title || r.service ? ' · ' + (r.title || r.service) : ''), detail: 'Ссылается на дело «' + (r.caseNum || r.caseId) + '» — его нет в списке (удалено или номер изменён)', open: [opener, r.id] });
     if (store === 'hearings' && !/^\d{4}-\d{2}-\d{2}$/.test(r.date || '')) out.push({ type: 'Заседания без даты', label: 'Заседание · ' + (r.caseNum || 'без дела'), detail: 'У заседания нет даты', open: [opener, r.id] });
     if (store === 'finance' && !r.pending && Number(r.paid || 0) > Number(r.amount || 0) + 0.005) out.push({ type: 'Переплата по счёту', label: 'Счёт · ' + (r.client || '') + ' · ' + (r.service || ''), detail: 'Оплачено ' + fmtMoney(r.paid) + ' при сумме ' + fmtMoney(r.amount), open: [opener, r.id] });
   });
   return out;
+}
+// выбор пользователя для записи, привязанной к двум делам: оставить за делом по номеру или по внутренней связи
+async function caseLinkFixOpen(key) {
+  const [store, id] = String(key || '').split('|'); const r = store && id ? await getOne(store, id) : null; if (!r) { toast('Запись не найдена', true); return; }
+  const cases = (await getAll('cases')).filter(c => c && !c._deleted), a = cases.find(c => c.id === r.caseId), b = r.caseNum ? cases.find(c => c.number === r.caseNum) : null;
+  if (!a || (r.caseNum && (!b || a.id === b.id))) { toast('Связь записи уже согласована'); return; }
+  const what = (INTEGRITY_STORES.find(x => x[0] === store) || [, 'Запись'])[1] + (r.date || r.due ? ' от ' + fmtDate(r.date || r.due) : '') + (r.title ? ' · ' + r.title : '');
+  const opt = (c, why) => `<button type="button" class="list-btn" onclick="caseLinkFixApply('${jsq(store)}', '${jsq(id)}', '${jsq(c.id)}')"><span><b>Дело ${esc(c.number || 'без номера')}</b>${c.client ? ' · ' + esc(c.client) : ''}<br><span class="small muted">${esc(why)}</span></span>${icon('chevron-right')}</button>`;
+  openSheet('Чьё это: ' + what, `<p class="small muted">Запись числится сразу за двумя делами: так было после смены дела в форме до выпуска 11.10.2026. Выберите дело, к которому она относится, — второе её больше не покажет.</p>
+    <div class="list-rows">${b ? opt(b, 'по номеру дела в записи — обычно это выбор, сделанный последним в форме') : `<button type="button" class="list-btn" onclick="caseLinkFixApply('${jsq(store)}', '${jsq(id)}', '')"><span><b>Без дела</b><br><span class="small muted">в форме выбор дела был снят</span></span>${icon('chevron-right')}</button>`}${opt(a, 'по внутренней связи — дело, к которому запись была привязана раньше')}</div>`, sheetIsOpen() ? true : undefined);
+}
+async function caseLinkFixApply(store, id, caseId) {
+  const r = await getOne(store, id), c = caseId ? (await getAll('cases')).find(x => x && x.id === caseId) : null; if (!r || (caseId && !c)) { toast('Запись или дело не найдены', true); return; }
+  try { await put(store, { ...r, caseId: c ? c.id : '', caseNum: c ? c.number || '' : '' }); } catch (e) { logErr('integrity:link', e); toast('Не удалось записать: ' + ((e && e.message) || e), true); return; }
+  toast(c ? 'Запись оставлена за делом ' + (c.number || '') : 'Запись отвязана от дела'); closeSheet(); openIntegritySheet();
 }
 async function openIntegritySheet(mode) {
   const d = {}; for (const st of ['cases', 'clients', ...INTEGRITY_STORES.map(x => x[0])]) { try { d[st] = await getAll(st); } catch (e) { logErr('integrity:' + st, e); d[st] = []; } }
@@ -10082,7 +10229,7 @@ async function openIntegritySheet(mode) {
   const types = [...new Set(rows.map(r => r.type))];
   const body = rows.length ? types.map(t => `<div class="section-label">${esc(t)} · ${rows.filter(r => r.type === t).length}</div><div class="list-rows">${rows.filter(r => r.type === t).slice(0, 50).map(r => `<button type="button" class="list-btn" onclick="${esc(r.open[0])}('${jsq(r.open[1])}')"><span>${esc(r.label)}</span><span class="muted">${esc(r.detail)}</span></button>`).join('')}${rows.filter(r => r.type === t).length > 50 ? '<p class="small muted">Показаны первые 50</p>' : ''}</div>`).join('')
     : `<div class="status-line good" role="status">${icon('check')}<span>Неточностей не найдено</span></div>`;
-  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, переплаты, сроки и заседания без даты. Проверка ничего не меняет — откройте запись и поправьте.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
+  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты. Проверка ничего не меняет сама — откройте запись и поправьте; у записи, привязанной к двум делам, выберите верное дело.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
 }
 
 // ▼▼▼ ui/help.js
@@ -10100,7 +10247,7 @@ const HELP_SECTIONS = [
 <h3>Где что</h3>
 <p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам и доверителям и переключатель темы.</p>
 <h3>Справочники</h3>
-<p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта; у судьи — суд, кабинет, секретарь, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — праздники и перенесённые выходные для расчёта сроков. «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, переплаты, сроки без даты — и ничего не меняет сама.</p>` },
+<p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта; у судьи — суд, кабинет, секретарь, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — праздники и перенесённые выходные для расчёта сроков. «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, записи, привязанные сразу к двум делам, переплаты, сроки без даты — и ничего не меняет сама: у записи, привязанной к двум делам, вы выбираете верное дело. Если номер дела изменить в форме дела, его задачи, заседания, счета и доверенности переходят на новый номер сами.</p>` },
   { id: 'today', title: '«Сегодня» и быстрые записи', html: `
 <p>«Сегодня» показывает, что требует внимания: просроченные и ближайшие сроки, задачи, заседания без результата, подготовку к заседаниям, истекающие доверенности, события с сайтов судов. У каждой строки — действие («Выполнено», «Итог заседания») и «×»: строка скрывается на неделю. Процессуальный срок, скрытый заранее, возвращается в день срока.</p>
 <p>«План дня» — заседания, встречи и задачи со временем. «Сделать сегодня» — задачи на сегодня без времени.</p>
@@ -10168,7 +10315,7 @@ const HELP_SECTIONS = [
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
-<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.15. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени; даты актов в поля дела по календарю пока не пишутся. Чтение занимает до минуты. Данные с сайта — справочные: проверьте их в карточке дела.</p>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.15. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени; даты актов в поля дела по календарю пока не пишутся. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если в календаре несколько лет или дней больше 40, лист прямо говорит, что прочитано не всё. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
@@ -10767,6 +10914,8 @@ const NEXT_BOOT = {
     // переход (п. 10): на основном адресе данные из /next/ вливаются один раз (next/migrate.js; в сборке /next/ модуля нет)
     try { if (typeof nextMigrateFromNext === 'function') await nextMigrateFromNext(); } catch (e) { logErr('next:migrate', e); }
     try { await refreshCasesCache(); } catch (e) { logErr('next:cases-cache', e); }
+    // аудит GPT 11.10.2026, п. 8: записи на прежнем номере переименованного дела — один раз за выпуск (ui/forms.js, caseLinksHeal)
+    try { if (typeof caseLinksHeal === 'function' && localStorage.getItem('crm_next_caselink_heal') !== BUILD_ID) { const n = await caseLinksHeal(); localStorage.setItem('crm_next_caselink_heal', BUILD_ID); if (n) logErr('next:caselink-heal', new Error('номер дела обновлён в связанных записях: ' + n)); } } catch (e) { logErr('next:caselink-heal', e); }
     // v312: прошедшим заседаниям без результата — статус «Дата прошла» (data/hearings.js, как при запуске прежней программы)
     try { await hearingsAutoDone(); } catch (e) { logErr('next:hearings-auto', e); }
     // 04.10.2026: дубли событий суда (одно событие, пришедшее двумя путями) удаляются (sync/monitor.js)
