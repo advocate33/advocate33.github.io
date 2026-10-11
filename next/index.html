@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="11.10.2026 16:20 · dbf2689">
+<meta name="build" content="11.10.2026 17:04 · 96ff7bd">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -498,6 +498,21 @@ button.agenda-row:hover{background:var(--surface2)}
 .ref-row{display:flex;align-items:center;gap:8px;min-height:44px;padding:4px 0 4px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
 .ref-row[hidden]{display:none}.ref-name{flex:1;min-width:0;overflow-wrap:anywhere}.ref-tools{display:flex;align-items:center;gap:2px;flex:none}
 .ref-tools .text-button.ref-card{min-width:44px;justify-content:center}.ref-card-empty{opacity:.45}
+
+/* Б2 (11.10.2026): суммы депозита — внесение и списание */
+.dep-in{color:var(--good);font-weight:700;white-space:nowrap}.dep-out{color:var(--bad);font-weight:700;white-space:nowrap}
+
+/* Б9, Б23 (11.10.2026): строка участника в листе «Участники дела»; выбор карточки при объединении дублей — отметка слева от текста */
+.party-row{border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px 12px;margin:0 0 10px;min-width:0}
+.list-rows>.list-btn.cm-row{justify-content:flex-start;gap:12px}.cm-row input{flex:none;width:20px;height:20px;margin:0;accent-color:var(--accent)}
+
+/* Б15 (11.10.2026): смахивание строки вправо — подпись действия появляется слева, за порогом становится зелёной (ui/swipe.js) */
+[data-swipe-fn]{touch-action:pan-y;position:relative;transition:transform .18s ease}
+[data-swipe-fn].swipe-on{transition:none;z-index:1}
+[data-swipe-fn].swipe-on::before{content:attr(data-swipe-label);position:absolute;right:100%;top:0;bottom:0;width:140px;display:flex;align-items:center;justify-content:flex-end;padding-right:12px;color:var(--text-muted);font-weight:700;font-size:.875rem;white-space:nowrap}
+[data-swipe-fn].swipe-arm::before{color:var(--good)}
+/* Б28: поиск по настройкам */
+.set-search{margin:0 0 12px}
 
 </style>
 </head>
@@ -2379,6 +2394,10 @@ mergeCaseRecords = function (cur, rec, base, events) {
     for (const k of new Set([...Object.keys(cur._ch), ...Object.keys(rec._ch)])) ch[k] = Math.max(Number(cur._ch[k]) || 0, Number(rec._ch[k]) || 0);
     m._ch = ch;
   }
+  // Б9 (11.10.2026): убранный участник дела — надгробие _delItems.participants[ключ имени] (раздел 6 правил); надгробия — по максимуму,
+  // участник остаётся, только если добавлен позже удаления (addedAt)
+  const delP = {}; for (const src of [cur, rec]) { const dp = src && src._delItems && src._delItems.participants; if (dp) for (const k of Object.keys(dp)) delP[k] = Math.max(Number(delP[k]) || 0, Number(dp[k]) || 0); }
+  if (Object.keys(delP).length) { m.participants = (Array.isArray(m.participants) ? m.participants : []).filter(p => !(p && delP[crmMonNorm(p.name || '')] > (Number(p.addedAt) || 0))); m._delItems = { ...(m._delItems || {}), participants: delP }; }
   return m;
 };
 
@@ -3976,6 +3995,26 @@ function fileSave(name, text) {
     return true;
   } catch (e) { logErr('file:save', e); return false; }
 }
+// Б29 (11.10.2026): «Поделиться» — системное меню (Telegram, почта, облако): приложение для Android — мост shareBlob (с 1.22);
+// браузер — Web Share с файлом; где меню нет — файл сохраняется, и это сказано. Меню браузера открывается только сразу после нажатия:
+// если копия собиралась дольше, браузер откажет (NotAllowedError) — тогда готовый файл отдаётся отдельной кнопкой «Открыть меню»
+let BACKUP_SHARE = null;
+function textToB64(text) { const u = new TextEncoder().encode(String(text)); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+async function fileShare(name, text) {
+  if (typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.shareBlob === 'function') { try { AndroidApp.shareBlob(name, 'application/octet-stream', textToB64(text)); return 'shared'; } catch (e) { logErr('file:share:android', e); } }
+  if (typeof navigator === 'object' && navigator.canShare && typeof File === 'function') {
+    let f = null; try { f = new File([text], name, { type: 'application/octet-stream' }); } catch (e) { logErr('file:share', e); }
+    if (f && navigator.canShare({ files: [f] })) {
+      try { await navigator.share({ files: [f], title: 'Копия базы CRM Адвоката' }); return 'shared'; }
+      catch (e) { if (e && e.name === 'AbortError') return 'cancel'; if (e && e.name === 'NotAllowedError') { BACKUP_SHARE = { file: f }; return 'again'; } logErr('file:share', e); }
+    }
+  }
+  return fileSave(name, text) ? 'saved' : '';
+}
+async function backupShareAgain() {
+  const s = BACKUP_SHARE; if (!s) return; BACKUP_SHARE = null; const b = document.getElementById('bk-share-go'); if (b) b.hidden = true;
+  try { await navigator.share({ files: [s.file], title: 'Копия базы CRM Адвоката' }); toast('Копия передана в выбранное приложение'); } catch (e) { if (!(e && e.name === 'AbortError')) { logErr('file:share', e); toast('Меню «Поделиться» не открылось — сохраните копию в файл', true); } }
+}
 // что в файле и что изменится — без записи (mergeIncoming в режиме dryRun)
 async function backupPreviewModel(text, pass) {
   let head; try { head = JSON.parse(text); } catch (e) { return { error: 'Это не файл копии CRM: его не удалось прочитать' }; }
@@ -4000,7 +4039,8 @@ function openBackupSheet(sub) {
   openSheet('Копии базы', `<p class="small muted">Копия — один зашифрованный файл со всей базой. Его можно хранить отдельно, перенести на другое устройство или открыть в прежней программе («Восстановить из файла»). Без пароля копии файл не открыть — запишите пароль отдельно.</p>
     <div class="section-label step-label">Сохранить копию в файл</div>
     <div class="form-grid">${fInput('bk-p1', 'Пароль копии, не короче 8 знаков', '', 'type="password" autocomplete="new-password"')}${fInput('bk-p2', 'Пароль ещё раз', '', 'type="password" autocomplete="new-password"')}</div>
-    <div class="form-actions"><button type="button" class="button primary" id="bk-save" onclick="backupSaveNow()">${icon('hard-drive')}Сохранить копию</button></div>
+    <div class="form-actions"><button type="button" class="button primary" id="bk-save" onclick="backupSaveNow()">${icon('hard-drive')}Сохранить копию</button><button type="button" class="button" id="bk-share" onclick="backupSaveNow(false, true)">${icon('files')}Поделиться</button><button type="button" class="button" id="bk-share-go" onclick="backupShareAgain()" hidden>${icon('files')}Открыть меню «Поделиться»</button></div>
+    <p class="small muted">«Поделиться» — отправить файл копии в Telegram, почту или облако через меню телефона. Файл зашифрован паролем копии.</p>
     <p class="small muted" id="bk-files"></p>
     <div class="info-box warning" id="bk-nofiles" hidden>Эта копия больше, чем программа может открыть на этом устройстве (на телефоне — 120 МБ, на компьютере — 400 МБ). Сохраните ещё копию без файлов документов — её программа откроет; файлы останутся на устройстве и в хранилище сервера.<div class="form-actions"><button type="button" class="button" id="bk-save-nofiles" onclick="backupSaveNow(true)">${icon('hard-drive')}Сохранить копию без файлов документов</button></div></div>
     ${last ? `<p class="small muted">Последнее скачивание копии с этого устройства: ${esc(new Date(last).toLocaleString('ru-RU'))}${checked ? '; последняя проверенная копия (открыта и расшифрована): ' + esc(new Date(checked).toLocaleString('ru-RU')) : ''}.</p>` : ''}
@@ -4011,9 +4051,9 @@ function openBackupSheet(sub) {
     <div class="form-actions"><button type="button" class="button" id="bk-check" onclick="backupCheckFile()">${icon('shield-check')}Проверить файл</button></div>
     <div id="bk-preview"></div>`, sub === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
 }
-async function backupSaveNow(noFiles) {
+async function backupSaveNow(noFiles, share) {
   const bad = backupPassCheck(fv('bk-p1'), fv('bk-p2')); if (bad) { fErr(bad); return null; }
-  const b = document.getElementById(noFiles ? 'bk-save-nofiles' : 'bk-save'); if (b) b.disabled = true;
+  const b = document.getElementById(noFiles ? 'bk-save-nofiles' : share ? 'bk-share' : 'bk-save'); if (b) b.disabled = true;
   try {
     // разбор GPT 05.10.2026 (3), п. 1: полная копия — с файлами документов: недостающие подкачиваются из хранилища, итог называется
     // разбор GPT 06.10.2026, п. 6: сбой подкачки — не «молча», а статус «полнота не проверена» с причиной (пишется и в копию)
@@ -4022,7 +4062,10 @@ async function backupSaveNow(noFiles) {
     if (noFiles && dump.data) { delete dump.data.docBlobs; files = null; }
     dump._files = { state: st.state, text: st.text, at: Date.now(), total: files && files.total || 0, have: files && files.have || 0, missing: files && files.failed || 0 };
     const text = await encryptDump(dump, fv('bk-p1')), name = backupFileName(noFiles ? 'bez-faylov' : 'kopiya');
-    if (!fileSave(name, text)) { fErr('Браузер не дал сохранить файл. Попробуйте в другом браузере или на компьютере'); return null; }
+    const how = share ? await fileShare(name, text) : (fileSave(name, text) ? 'saved' : '');
+    if (!how) { fErr('Браузер не дал сохранить файл. Попробуйте в другом браузере или на компьютере'); return null; }
+    if (how === 'cancel') { toast('Отправка отменена — копия не передана'); return { name, bytes: text.length, how }; }
+    if (how === 'again') { const g = document.getElementById('bk-share-go'); if (g) g.hidden = false; fErr('Копия готова. Нажмите «Открыть меню «Поделиться»» — браузер открывает меню только сразу после нажатия'); return { name, bytes: text.length, how }; }
     localStorage.setItem('crm_next_backup_at', String(Date.now()));
     // п. 5: нажатие на ссылку скачивания — не подтверждение, что файл сохранён; честная формулировка и итог по файлам
     const filesText = files && files.total ? ` Документов: ${files.total}, файлов в копии: ${files.have}` + (files.failed ? `, не хватает: ${files.failed} (${[...new Set(files.why)].join('; ')})` : '') + '.' : '';
@@ -4030,8 +4073,8 @@ async function backupSaveNow(noFiles) {
     const el = document.getElementById('bk-files'); if (el) el.textContent = (filesText.trim() + ' ' + status).trim();
     // копия больше предела восстановления: программа её целиком не откроет — рядом кнопка копии без файлов документов, которую откроет
     const nf = document.getElementById('bk-nofiles'); if (nf) nf.hidden = noFiles || text.length <= (backupIsMobile() ? BACKUP_MOBILE_MAX : BACKUP_MAX);
-    toast('Скачивание копии запущено: ' + name + ' — проверьте файл в папке загрузок.' + filesText + ' ' + status, st.state !== 'full' || !!sizeNote); fErr('');
-    return { name, bytes: text.length, files, status: st.state, sizeNote };
+    toast((how === 'shared' ? 'Копия передана в меню «Поделиться»: ' + name + ' — выберите, куда отправить.' : (share ? 'Меню «Поделиться» на этом устройстве нет — копия сохранена в загрузки: ' + name + '. Отправьте файл вручную.' : 'Скачивание копии запущено: ' + name + ' — проверьте файл в папке загрузок.')) + filesText + ' ' + status, st.state !== 'full' || !!sizeNote); fErr('');
+    return { name, bytes: text.length, files, status: st.state, sizeNote, how };
   } catch (e) { logErr('backup:save', e); fErr('Копия не создана: ' + String((e && e.message) || e).slice(0, 100)); return null; }
   finally { if (b) b.disabled = false; }
 }
@@ -4612,8 +4655,10 @@ function crmCaseApplyCard(c, card, sfx) { // v241: sfx '' — первая ин�
   if (!sfx) { set('i1FilingDate', card.registered, 'дата поступления'); set('courtCategory', crmDecodeEntities(card.category), 'категория по классификатору суда'); }
   const client = crmMonNorm(c.client || '');
   c.participants = Array.isArray(c.participants) ? c.participants : [];
+  // Б9 (11.10.2026): участник, которого пользователь убрал из дела (надгробие), с сайта суда снова не добавляется
+  const delP = (c._delItems && c._delItems.participants) || {};
   for (const p of (card.parties || [])) {
-    if (!p || !p.name || crmMonNorm(p.name) === client) continue;
+    if (!p || !p.name || crmMonNorm(p.name) === client || delP[crmMonNorm(p.name)]) continue;
     if (c.participants.some(x => crmMonNorm(x.name) === crmMonNorm(p.name))) continue;
     c.participants.push({ name: p.name, role: p.role || 'Иное лицо', inn: '', phone: '', email: '', note: 'с сайта суда' }); done.push('участник: ' + p.name + ' (' + (p.role || '') + ')');
   }
@@ -5357,7 +5402,8 @@ async function kadProtoRead(caseId) {
   const req = 'kad-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
   KAD_PROTO.req = req; KAD_PROTO.lastReq = req; KAD_PROTO.caseId = caseId; KAD_PROTO.link = l;
   // обещание возвращается наружу: тесты и живые сценарии ждут записи в дело
-  window.__kadResult = (id, res) => kadProtoOnResult(id, res).catch(e => { logErr('kad:onresult', e); });
+  // Б25, Д1 (11.10.2026): ответы скрытого и пакетного чтения идут своим путём (sync/cardsall.js, kadResultRoute)
+  window.__kadResult = (id, res) => (typeof kadResultRoute === 'function' ? kadResultRoute(id, res) : kadProtoOnResult(id, res)).catch(e => { logErr('kad:onresult', e); });
   clearTimeout(KAD_PROTO.timer);
   KAD_PROTO.timer = setTimeout(() => { if (KAD_PROTO.req === req) { KAD_PROTO.req = null; toast('Окно КАД не ответило — результат, если придёт, будет показан', true); } }, KAD_PROTO_WAIT);
   toast('Открываю карточку дела на сайте КАД…');
@@ -5379,6 +5425,8 @@ async function kadProtoOnResult(id, res) {
     catch (e) { logErr('kad:apply', e); applied = { error: 'Запись в дело не удалась: ' + (e && e.message || e) }; }
   }
   KAD_PROTO.applied = applied;
+  // Д1: ручное чтение — отметка для автопроверки (карточка свежая; пауза после проверки браузера снимается)
+  if (typeof kadAutoNoteManual === 'function') kadAutoNoteManual(KAD_PROTO.caseId, !!(applied && !applied.error));
   openKadProtoSheet(KAD_PROTO.caseId, res, applied);
   toast(m.bad ? 'Карточка КАД не прочитана — причина в листе' : m.foreign ? 'Открылась карточка другого дела — в дело ничего не записано, причина в листе' : applied && applied.error ? applied.error : applied && (applied.done.length || (applied.hearing && applied.hearing.isNew)) ? 'Карточка КАД прочитана — записано в дело' : 'Карточка КАД прочитана — новых данных для дела нет', m.bad || !!(applied && applied.error));
   if (typeof UI === 'object' && UI.ready && typeof nav === 'function' && !sheetIsOpen()) nav(UI.screen);
@@ -5457,6 +5505,159 @@ async function kadProtoCopy() {
   try { await navigator.clipboard.writeText(t); toast('Структура скопирована — вставьте её в сообщение разработчику'); }
   catch (e) { logErr('kad:copy', e); openSheet('Структура страницы КАД', `<p class="small muted">Выделите текст и скопируйте вручную.</p><textarea rows="14" readonly style="width:100%">${esc(t)}</textarea>`, true); }
 }
+
+// ▼▼▼ sync/cardsall.js
+// ═══ sync/cardsall.js — карточки всех дел с сайтов разом (Б25) и автопроверка карточек КАД раз в 6 часов (Д1) ═══
+// Б25: «Карточки всех дел» на экране «Суды и мониторинг» — по очереди для каждого дела в работе со ссылкой на сайт суда: суды общей
+//      юрисдикции — коллектором, как «Данные с сайта суда» (caseFetchCard); КАД — в приложении для Android скрытым чтением (с 1.22) или
+//      окном КАД (1.6–1.21: окно открывается на каждое дело); в браузере КАД не читается — это сказано. Лист хода: по каждому делу — что
+//      записано, что не получилось. «Остановить» — после текущего дела.
+// Д1: в приложении для Android 1.22+ при открытой программе раз в 10 минут проверяется, есть ли дела в работе со ссылкой на КАД, карточка
+//      которых не читалась 6 часов; такие читаются скрытно по одной и записываются тем же путём, что «Карточка КАД» (kadCardApply).
+//      Выключатель — Настройки → «Мониторинг судов». Если сайт просит проверку браузера, которую надо пройти руками, автопроверка ждёт
+//      6 часов и пишет об этом; ручное чтение «Карточка КАД» в любом деле снимает паузу.
+const KAD_AUTO_KEY = 'crm_next_kad_auto', KAD_AUTO_EVERY = 6 * 3600000, KAD_AUTO_TICK = 10 * 60000, KAD_READ_WAIT = 5 * 60000;
+const CARDS_ALL = { busy: false, stop: false, log: [], auto: false, total: 0, n: 0 };
+const KAD_Q = { req: null, resolve: null, timer: null };
+function kadQuietSupported() { return typeof AndroidApp !== 'undefined' && !!AndroidApp && typeof AndroidApp.kadReadQuiet === 'function'; }
+function kadAutoState() { const s = lsJSON(KAD_AUTO_KEY, null) || {}; return { on: s.on !== false, last: s.last && typeof s.last === 'object' ? s.last : {}, pauseUntil: Number(s.pauseUntil) || 0, run: s.run || null }; }
+function kadAutoSave(st) { try { localStorage.setItem(KAD_AUTO_KEY, JSON.stringify(st)); } catch (e) { logErr('kadauto:save', e); } }
+function kadAutoSet(on) { const st = kadAutoState(); st.on = !!on; if (on) st.pauseUntil = 0; kadAutoSave(st); if (typeof bumpSettings === 'function') bumpSettings(); }
+// дела в работе со ссылкой на сайт суда: { c, kad (ссылка КАД или null), site (есть ссылка не на КАД) }
+function cardsAllPlan(cases) {
+  const out = [];
+  for (const c of cases || []) {
+    if (!c || c._deleted || c.archived || c.status === 'Завершено' || c.stage === 'Завершено') continue;
+    const stages = (typeof CASE_LINK_STAGES !== 'undefined' ? CASE_LINK_STAGES : []).filter(([f]) => c[f]);
+    const split = typeof kadSplitStages === 'function' ? kadSplitStages(c, stages) : { kad: [], site: stages };
+    const kad = typeof kadLinkOf === 'function' ? kadLinkOf(c) : null;
+    if (kad || split.site.length) out.push({ c, kad, site: split.site.length > 0 });
+  }
+  return out.sort((a, b) => String(a.c.number || '').localeCompare(String(b.c.number || ''), 'ru', { numeric: true }));
+}
+// Д1: дела со ссылкой на КАД, карточка которых не читалась KAD_AUTO_EVERY; самые давние — первыми
+function kadAutoDue(cases, st, now) {
+  return cardsAllPlan(cases).filter(x => x.kad && now - (Number(st.last[x.c.id]) || 0) >= KAD_AUTO_EVERY).sort((a, b) => (Number(st.last[a.c.id]) || 0) - (Number(st.last[b.c.id]) || 0));
+}
+// ответы окна КАД: скрытое (и пакетное) чтение — сюда, ручное «Карточка КАД» — в kadProtoOnResult
+function kadResultRoute(id, res) {
+  if (KAD_Q.req && id === KAD_Q.req) { const r = KAD_Q.resolve; KAD_Q.req = null; KAD_Q.resolve = null; clearTimeout(KAD_Q.timer); if (r) r(res); return Promise.resolve(); }
+  return typeof kadProtoOnResult === 'function' ? kadProtoOnResult(id, res) : Promise.resolve();
+}
+function kadResultHook() { if (typeof window === 'object') window.__kadResult = (id, res) => kadResultRoute(id, res).catch(e => logErr('kad:onresult', e)); }
+// одно чтение: quiet — скрытое (1.22+), иначе окно КАД; ответ — объект окна или { ok:false, error }
+function kadReadOnce(link, quiet) {
+  return new Promise(resolve => {
+    if (KAD_Q.req) { resolve({ ok: false, error: 'busy' }); return; }
+    const req = 'kadq-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+    KAD_Q.req = req; KAD_Q.resolve = resolve; kadResultHook();
+    KAD_Q.timer = setTimeout(() => { if (KAD_Q.req === req) { KAD_Q.req = null; KAD_Q.resolve = null; resolve({ ok: false, error: 'timeout' }); } }, quiet ? KAD_READ_WAIT : (typeof KAD_PROTO_WAIT === 'number' ? KAD_PROTO_WAIT : KAD_READ_WAIT));
+    try { if (quiet) AndroidApp.kadReadQuiet(link.url, link.number || '', req); else AndroidApp.kadRead(link.url, link.number || '', req); }
+    catch (e) { KAD_Q.req = null; KAD_Q.resolve = null; clearTimeout(KAD_Q.timer); resolve({ ok: false, error: 'launch', message: String((e && e.message) || e) }); }
+  });
+}
+// ответ окна → запись в дело тем же путём, что «Карточка КАД»; { ok, text, blocked }
+async function kadApplyResult(c, link, res) {
+  if (typeof res === 'string') { try { res = JSON.parse(res); } catch (e) { res = null; } }
+  if (res && res.ok === false && res.error === 'timeout') return { ok: false, text: 'окно КАД не ответило за отведённое время' };
+  const m = kadProtoResultModel(res, link);
+  if (m.bad) { const blocked = !!(m.summary && (m.summary.captchaFilled || m.summary.blocked || m.summary.captcha)); const err = (m.lines.find(l => l.kind === 'err') || {}).text || 'карточка не прочитана'; return { ok: false, blocked, text: err }; }
+  if (m.foreign) return { ok: false, text: 'открылась карточка другого дела — в дело ничего не записано (' + m.foreign.join('; ') + ')' };
+  if (!m.summary.cardFound || !m.summary.card) return { ok: false, text: 'карточка дела на странице не найдена' };
+  let a = null; try { a = await kadCardApply(c.id, m.summary, link); } catch (e) { logErr('kad:apply', e); return { ok: false, text: 'запись в дело не удалась: ' + ((e && e.message) || e) }; }
+  if (!a || a.error) return { ok: false, text: (a && a.error) || 'запись в дело не удалась' };
+  const cal = a.calendar, fresh = (cal ? cal.flowNew + cal.hearingsNew + cal.icsNew : 0) + (a.hearing && a.hearing.isNew ? 1 : 0);
+  return { ok: true, text: a.nothing ? 'прочитана, записывать нечего' : [a.done.length ? 'в дело: ' + a.done.join('; ') : 'дело без изменений', fresh ? 'новых событий: ' + fresh : '', a.diff.length ? 'расхождений: ' + a.diff.length + ' (откройте «Карточка КАД»)' : ''].filter(Boolean).join(' · ') };
+}
+function cardsAllLogRender() {
+  if (typeof document !== 'object' || !document) return;
+  const box = document.getElementById('cards-all-log'); if (!box) return;
+  box.innerHTML = CARDS_ALL.log.map(l => `<div><span><b>${esc(l.num)}</b>${l.client ? ' · ' + esc(l.client) : ''}<br><span class="small ${l.ok ? 'muted' : ''}">${esc(l.what)}: ${esc(l.text)}</span></span><span class="${l.ok ? 'dep-in' : 'dep-out'}">${l.ok ? 'готово' : 'нет'}</span></div>`).join('');
+  const st = document.getElementById('cards-all-state'); if (st) st.textContent = CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : (CARDS_ALL.log.length ? `Готово: ${CARDS_ALL.log.filter(l => l.ok).length} из ${CARDS_ALL.log.length}` : '');
+  const go = document.getElementById('cards-all-go'), stop = document.getElementById('cards-all-stop'); if (go) go.disabled = CARDS_ALL.busy; if (stop) stop.hidden = !CARDS_ALL.busy || CARDS_ALL.auto;
+}
+// Б25 и Д1: обход по очереди. opts.auto — только КАД, скрыто, без листа и без сообщений, кроме итога в настройках
+async function cardsAllRun(opts) {
+  opts = opts || {}; if (CARDS_ALL.busy) { if (!opts.auto) toast('Карточки уже читаются — дождитесь окончания'); return null; }
+  const st = kadAutoState(), now = Date.now();
+  const plan = opts.auto ? kadAutoDue(await getAll('cases'), st, now) : cardsAllPlan(await getAll('cases'));
+  if (!plan.length) { if (!opts.auto) toast('Дел в работе со ссылкой на сайт суда нет'); return { total: 0 }; }
+  const quiet = kadQuietSupported(), app = typeof kadProtoSupported === 'function' && kadProtoSupported(), col = crmCollectorSrvCfg();
+  Object.assign(CARDS_ALL, { busy: true, stop: false, log: [], auto: !!opts.auto, total: plan.length, n: 0 }); cardsAllLogRender();
+  let colErr = '', blocked = false;
+  try {
+    for (const x of plan) {
+      if (CARDS_ALL.stop) break; CARDS_ALL.n++;
+      const c = (await getOne('cases', x.c.id)) || x.c, entry = { num: c.number || 'без номера', client: c.client || '' };
+      if (x.site && !opts.auto) {
+        if (!col.url || !col.secret) CARDS_ALL.log.push({ ...entry, what: 'сайт суда', ok: false, text: 'коллектор не настроен (Настройки → «Мониторинг судов»)' });
+        else if (colErr) CARDS_ALL.log.push({ ...entry, what: 'сайт суда', ok: false, text: colErr });
+        else {
+          let out = null; try { out = await caseFetchCard(c.id, { silent: true, batch: true }); } catch (e) { logErr('cards:site', e); }
+          if (out && out.cfgErr) colErr = out.cfgErr;
+          CARDS_ALL.log.push({ ...entry, what: 'сайт суда', ok: !!out && !out.cfgErr && !out.errs.length, text: !out ? 'не прочитано' : out.cfgErr || [out.done.length ? 'в дело: ' + out.done.join('; ') : 'дело без изменений', out.evCount ? 'событий: ' + out.evCount : '', out.errs.length ? out.errs.join('; ') : '', out.diff.length + out.ask.length ? 'расхождений: ' + (out.diff.length + out.ask.length) + ' (откройте «Данные с сайта суда»)' : ''].filter(Boolean).join(' · ') });
+        }
+      }
+      if (x.kad) {
+        if (!quiet && !app) CARDS_ALL.log.push({ ...entry, what: 'КАД', ok: false, text: 'КАД читается только в приложении для Android' });
+        else if (blocked) CARDS_ALL.log.push({ ...entry, what: 'КАД', ok: false, text: 'пропущено: сайт просит проверку браузера' });
+        else {
+          const res = await kadReadOnce(x.kad, quiet || !!opts.auto), r = await kadApplyResult(c, x.kad, res);
+          if (r.ok) { const s2 = kadAutoState(); s2.last[c.id] = Date.now(); kadAutoSave(s2); }
+          if (r.blocked && (quiet || opts.auto)) blocked = true;
+          CARDS_ALL.log.push({ ...entry, what: 'КАД', ok: r.ok, text: r.text });
+        }
+      }
+      cardsAllLogRender();
+    }
+  } finally {
+    CARDS_ALL.busy = false;
+    const s3 = kadAutoState(); s3.run = { at: Date.now(), auto: !!opts.auto, total: CARDS_ALL.log.length, ok: CARDS_ALL.log.filter(l => l.ok).length, blocked, stopped: CARDS_ALL.stop };
+    if (blocked) s3.pauseUntil = Date.now() + KAD_AUTO_EVERY; kadAutoSave(s3);
+    cardsAllLogRender(); await refreshCasesCache();
+  }
+  const okN = CARDS_ALL.log.filter(l => l.ok).length;
+  if (!opts.auto) toast(`Карточки дел: прочитано ${okN} из ${CARDS_ALL.log.length}` + (blocked ? ' · КАД просит проверку браузера — откройте «Карточка КАД» в деле' : ''), okN < CARDS_ALL.log.length);
+  else if (okN && typeof UI === 'object' && UI.ready && UI.screen === 'monitoring' && !sheetIsOpen()) nav('monitoring');
+  return { total: CARDS_ALL.log.length, ok: okN, blocked };
+}
+function openCardsAllSheet() {
+  return getAll('cases').then(cases => {
+    const plan = cardsAllPlan(cases), kad = plan.filter(x => x.kad).length, site = plan.filter(x => x.site).length, quiet = kadQuietSupported(), app = typeof kadProtoSupported === 'function' && kadProtoSupported();
+    const how = !kad ? '' : quiet ? 'Карточки КАД читаются незаметно, по одной — до 2 минут на дело.' : app ? 'Карточки КАД: на каждое дело откроется окно КАД — дождитесь, пока оно закроется само (в приложении 1.22 и новее — незаметно).' : 'Карточки КАД в браузере не читаются — только в приложении для Android.';
+    openSheet('Карточки всех дел', `<p class="small muted">Дел в работе со ссылкой на сайт суда: ${plan.length} (суды общей юрисдикции — ${site}, КАД — ${kad}). Программа прочитает карточку каждого по очереди и запишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». ${esc(how)}</p>
+      <div class="status-line" id="cards-all-state">${CARDS_ALL.busy ? `Читаю карточки: ${CARDS_ALL.n} из ${CARDS_ALL.total}…` : ''}</div>
+      <div class="list-rows" id="cards-all-log"></div>
+      <div class="form-actions">${btn('Начать', 'cardsAllRun()', 'primary', 'refresh-cw').replace('<button ', '<button id="cards-all-go" ')}<button type="button" class="button" id="cards-all-stop" onclick="CARDS_ALL.stop = true; toast(\'Остановлю после текущего дела\')" hidden>Остановить</button></div>`, sheetIsOpen() ? true : undefined);
+    cardsAllLogRender();
+  });
+}
+// строка состояния автопроверки — в настройках мониторинга
+function kadAutoStatusText() {
+  const st = kadAutoState();
+  if (!kadQuietSupported()) return 'Автопроверка карточек КАД работает в приложении для Android 1.22 и новее при открытой программе.';
+  if (!st.on) return 'Автопроверка карточек КАД выключена.';
+  if (st.pauseUntil > Date.now()) return 'Автопроверка карточек КАД ждёт до ' + new Date(st.pauseUntil).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ': сайт попросил проверку браузера — откройте «Карточка КАД» в любом деле.';
+  const r = st.run && st.run.auto ? st.run : null;
+  return 'Карточки КАД проверяются сами раз в 6 часов, пока программа открыта.' + (r ? ' Последняя проверка ' + new Date(r.at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) + ': прочитано ' + r.ok + ' из ' + r.total + '.' : '');
+}
+// Д1: такт автопроверки — только в приложении со скрытым чтением, при видимой программе, когда ничего не читается
+async function kadAutoTick() {
+  if (!kadQuietSupported() || CARDS_ALL.busy || KAD_Q.req) return null;
+  if (typeof KAD_PROTO === 'object' && KAD_PROTO.req) return null;
+  if (typeof document === 'object' && document.visibilityState && document.visibilityState !== 'visible') return null;
+  const st = kadAutoState(); if (!st.on || st.pauseUntil > Date.now()) return null;
+  return cardsAllRun({ auto: true });
+}
+function kadAutoStart() {
+  if (typeof window !== 'object' || typeof setInterval !== 'function' || KAD_Q.loop) return;
+  kadResultHook();
+  KAD_Q.loop = setInterval(() => { kadAutoTick().catch(e => logErr('kadauto:tick', e)); }, KAD_AUTO_TICK);
+  setTimeout(() => { kadAutoTick().catch(e => logErr('kadauto:tick', e)); }, 90000);
+}
+// ручное «Карточка КАД»: удачное чтение — карточка дела свежая, пауза после проверки браузера снимается
+function kadAutoNoteManual(caseId, ok) { if (!ok || !caseId) return; const st = kadAutoState(); st.last[caseId] = Date.now(); st.pauseUntil = 0; kadAutoSave(st); }
+if (typeof document === 'object' && document && typeof document.addEventListener === 'function') kadAutoStart();
 
 // ▼▼▼ sync/ycdeploy.js
 // ═══ sync/ycdeploy.js — «Свой сервер в Яндекс Облаке одной кнопкой» (план основных функций, п. 3.2; обещано 30.09.2026) ═══
@@ -6302,6 +6503,56 @@ async function guardDraftOpen(key) {
   if (UI.cur) { UI.cur.guardSnap = ''; SHEET_GUARD.snap = ''; SHEET_GUARD.armed = true; UI.cur.draftKey = guardDraftKeyOf(d); } /* снимок пустой — форма считается изменённой, пока не сохранена */ }
 function guardDraftDiscard(key) { guardDraftDrop(key || guardDraftKeyOf(guardDraftGet() || {})); toast('Черновик удалён'); if (UI.ready && !sheetIsOpen()) nav(UI.screen); }
 
+// ▼▼▼ ui/swipe.js
+// ═══ ui/swipe.js — смахивание строки вправо (план переноса 11.10.2026, пункт Б15) ═══
+// Строка с data-swipe-fn (имя функции) и data-swipe-args (JSON-список аргументов) смахивается пальцем вправо: за порогом выполняется
+// действие строки — «Выполнено» у задачи и срока, «Итог заседания» у прошедшего заседания; подпись действия — data-swipe-label.
+// Только касание (мышь и перо работают кнопками), вертикальная прокрутка не мешает (touch-action: pan-y); нажатие сразу после смахивания
+// не открывает запись. Кнопка действия в строке остаётся — жест её не заменяет, а дополняет.
+const SWIPE = { el: null, id: null, x0: 0, y0: 0, dx: 0, on: false, eat: 0, bound: false };
+const SWIPE_MIN = 24;
+function swipeAttrs(fn, args, label) { return ` data-swipe-fn="${esc(fn)}" data-swipe-args="${esc(JSON.stringify(args || []))}" data-swipe-label="${esc(label || '')}"`; }
+function swipeArgs(el) { try { const a = JSON.parse(el.dataset.swipeArgs || '[]'); return Array.isArray(a) ? a : []; } catch (e) { /* штатно: испорченный атрибут — без аргументов */ return []; } }
+// порог: треть ширины строки, но не меньше 70 и не больше 110 точек
+function swipeThreshold(w) { return Math.min(110, Math.max(70, (Number(w) || 300) / 3)); }
+// решение по движению пальца: 'wait' — ещё неясно, 'scroll' — это прокрутка, 'swipe' — смахивание вправо
+function swipeIntent(dx, dy) { if (Math.abs(dy) > 12 && Math.abs(dy) >= Math.abs(dx)) return 'scroll'; if (dx >= SWIPE_MIN && dx >= Math.abs(dy) * 1.5) return 'swipe'; return 'wait'; }
+function swipeReset(el) { if (!el) return; el.style.transform = ''; el.classList.remove('swipe-on', 'swipe-arm'); }
+function swipeStart(e) {
+  if (e.pointerType !== 'touch' || SWIPE.el) return;
+  const el = e.target && e.target.closest ? e.target.closest('[data-swipe-fn]') : null; if (!el) return;
+  Object.assign(SWIPE, { el, id: e.pointerId, x0: e.clientX, y0: e.clientY, dx: 0, on: false });
+}
+function swipeMove(e) {
+  if (!SWIPE.el || e.pointerId !== SWIPE.id) return;
+  const dx = e.clientX - SWIPE.x0, dy = e.clientY - SWIPE.y0;
+  if (!SWIPE.on) { const w = swipeIntent(dx, dy); if (w === 'scroll') { SWIPE.el = null; return; } if (w === 'wait') return; SWIPE.on = true; SWIPE.el.classList.add('swipe-on'); }
+  SWIPE.dx = Math.max(0, dx); const width = SWIPE.el.offsetWidth || 300;
+  SWIPE.el.style.transform = 'translateX(' + Math.round(Math.min(SWIPE.dx, width * 0.6)) + 'px)';
+  SWIPE.el.classList.toggle('swipe-arm', SWIPE.dx >= swipeThreshold(width));
+}
+function swipeEnd(e) {
+  const el = SWIPE.el; if (!el || e.pointerId !== SWIPE.id) return; SWIPE.el = null;
+  if (!SWIPE.on) return;
+  const go = e.type === 'pointerup' && SWIPE.dx >= swipeThreshold(el.offsetWidth); SWIPE.eat = Date.now();
+  swipeReset(el);
+  if (go) swipeRun(el);
+}
+function swipeRun(el) {
+  const name = el.dataset.swipeFn, fn = typeof window === 'object' ? window[name] : null;
+  if (typeof fn !== 'function') { logErr('swipe', new Error('нет действия ' + name)); return; }
+  try { const r = fn(...swipeArgs(el)); if (r && typeof r.catch === 'function') r.catch(e => logErr('swipe:' + name, e)); } catch (e) { logErr('swipe:' + name, e); }
+}
+// нажатие, которое браузер присылает после смахивания (палец отпущен над строкой), запись не открывает
+function swipeClickEat(e) { if (SWIPE.eat && Date.now() - SWIPE.eat < 400) { SWIPE.eat = 0; e.preventDefault(); e.stopPropagation(); } }
+function swipeBind() {
+  if (SWIPE.bound || typeof document !== 'object' || typeof document.addEventListener !== 'function') return; SWIPE.bound = true;
+  document.addEventListener('pointerdown', swipeStart, { passive: true }); document.addEventListener('pointermove', swipeMove, { passive: true });
+  document.addEventListener('pointerup', swipeEnd, { passive: true }); document.addEventListener('pointercancel', swipeEnd, { passive: true });
+  document.addEventListener('click', swipeClickEat, true);
+}
+swipeBind();
+
 // ▼▼▼ ui/sheets.js
 // ═══ ui/sheets.js — служебные листы (этап 1б) ═══
 // Настройки (тема, размер и начертание шрифта, о программе), Синхронизация, Справочники (просмотр), Инструкция,
@@ -6322,18 +6573,22 @@ async function openSettingsSheet(sub) {
   const theme = localStorage.getItem('crm_theme') || 'auto', size = localStorage.getItem('crm_fontsize') || 'm', fam = localStorage.getItem('crm_fontfam') || 'golos';
   const choice = (list, cur, fn) => `<div class="choice">${list.map(([k, label]) => `<button type="button" class="button small-btn" aria-pressed="${k === cur}" onclick="${fn}('${k}')">${esc(label)}</button>`).join('')}</div>`;
   openSheet('Настройки', `
+    ${typeof settingsSearchHtml === 'function' ? settingsSearchHtml() : ''}
+    <div class="set-block" data-words="оформление тема светлая тёмная темная ночная размер текста шрифт начертание крупнее мельче">
     <div class="section-label">Оформление</div>
     <p class="small muted">Тема</p>${choice([['light', 'Светлая'], ['dark', 'Тёмная'], ['auto', 'Как в системе']], theme, 'setThemeMode')}
     <p class="small muted">Размер текста</p>${choice(UI_FONT_SIZES.map(f => [f[0], f[2]]), size, 'setFontSize')}
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
+    </div>
     <div class="section-label">Данные</div>
-    <div class="list-rows"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+      <button type="button" class="list-btn" id="set-orders" onclick="openOrdersSheet()"><span>Журнал ордеров</span><span class="muted">выписать, найти, распечатать реестр</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
       <button type="button" class="list-btn" onclick="openMonitorSettingsSheet()"><span>Мониторинг судов</span><span class="muted">${!SRV.url ? 'сервер не подключён' : crmCollectorSrvCfg().url ? 'сбор в облаке настроен' : 'сбор в облаке не настроен'}</span></button>
       <button type="button" class="list-btn" onclick="openPochtaSheet()"><span>Почта России — отслеживание</span><span class="muted">${!SRV.url ? 'сервер не подключён' : localStorage.getItem(POCHTA_READY_KEY) === '1' ? 'подключено' : localStorage.getItem(POCHTA_READY_KEY) === '0' ? 'на сервере нет параметров' : 'не проверено'}</span></button></div>
     <div class="section-label">О программе</div>
-    <div class="list-rows">
+    <div class="list-rows set-list">
       <div><span>Версия</span><span class="muted">${esc(APP_VER)} · база ${esc(db ? db.name : '—')}, версия ${esc(db ? db.version : '—')}</span></div>
       <div><span>Сборка</span><span class="muted">${esc(BUILD_ID)}</span></div>
       <div><span>Обмен с сервером</span><span class="muted">${esc(typeof syncDiagLine === 'function' ? syncDiagLine() : '—')}</span></div>
@@ -6341,7 +6596,7 @@ async function openSettingsSheet(sub) {
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
-    <div class="info-box">Учёт устройств на сервере лицензий пока ведёт прежняя программа: новая версия проверяет пропуск на этом устройстве.</div>`, sub);
+    <div class="info-box set-block" data-words="лицензия устройства учёт учет">Учёт устройств на сервере лицензий пока ведёт прежняя программа: новая версия проверяет пропуск на этом устройстве.</div>`, sub);
 }
 // журнал ошибок: что сломалось, где и когда — чтобы прислать разработчику; «Скопировать» собирает текст для чата
 function errlogText() { return errLogGet().slice().reverse().map(r => `${new Date(r.t).toLocaleString('ru-RU')} · ${r.ver || ''} · ${r.where || ''}: ${r.msg || ''}${r.extra ? ' · ' + r.extra : ''}${r.stack ? '\n    ' + r.stack : ''}`).join('\n'); }
@@ -6462,6 +6717,49 @@ async function openSearchSheet(q) {
   openSheet('Поиск: ' + q, body || emptyState('search', 'Ничего не найдено', 'Поиск идёт по номеру дела, доверителю, суду и номеру в суде.'));
   // поручение пользователя 04.10.2026: после показа результатов строка поиска очищается, клавиатура убирается (запрос — в заголовке листа)
   const inp = document.getElementById('top-search'); if (inp) { inp.value = ''; inp.blur(); }
+}
+
+// ▼▼▼ ui/setsearch.js
+// ═══ ui/setsearch.js — поиск по настройкам (план переноса 11.10.2026, пункт Б28) ═══
+// Строка «Найти настройку» вверху листа «Настройки»: пункты, в названии, пояснении или ключевых словах которых есть все введённые слова,
+// остаются, остальные прячутся; разделы без найденного — тоже. Ниже — пункты из других мест («Синхронизация», «Справочники», «Проверка
+// данных», «Инструкция»), они видны только при поиске. Ничего не найдено — сказано прямо.
+// ключевые слова — по функции, которую открывает пункт (синонимы, которыми пункт ищут, но которых нет в его названии)
+const SETTINGS_WORDS = {
+  openBackupSheet: 'копия резервная бэкап экспорт импорт файл восстановить перенести поделиться telegram телеграм',
+  openPrintSheet: 'печать реестр выписка csv excel выгрузка кассовая книга', openSecuritySheet: 'pin пин код пароль блокировка вход защита',
+  appUpdCheckManual: 'обновление версия приложение apk android андроид', openLicenseSheet: 'лицензия ключ пропуск подписка оплата тариф демо купить',
+  openRemindSheet: 'telegram телеграм бот уведомления напоминания', openDevRemindSheet: 'уведомления напоминания будильник устройство телефон',
+  openYcSetupSheet: 'сервер облако яндекс функция мастер развернуть', openTrashSheet: 'корзина удалённые удаленные восстановить вернуть',
+  openOrdersSheet: 'ордер ордера журнал книжка бланк', openDadataSheet: 'dadata дадата инн реквизиты адрес егрюл огрн',
+  openErrlogSheet: 'ошибки журнал сбой лог', openMonitorSettingsSheet: 'суд суды коллектор мониторинг кад сайт заседания события',
+  openPochtaSheet: 'почта трек трек-номер отслеживание письмо отправление',
+  openSyncSheet: 'синхронизация сервер обмен отправить загрузить база пароль код', openRefsSheet: 'справочники суды судьи списки праздники нерабочие дни',
+  openIntegritySheet: 'проверка данных дубли ошибки номера доверители', openHelpSheet: 'инструкция помощь справка как',
+};
+const setsNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е');
+function settingsWordsOf(q) { return setsNorm(q).split(/[\s,.;:«»"']+/).filter(w => w.length >= 2); }
+function settingsHit(text, words) { const t = setsNorm(text); return words.every(w => t.includes(w)); }
+function settingsRowText(r) { const fn = String(r.getAttribute('onclick') || '').split('(')[0].trim(); return (r.textContent || '') + ' ' + (SETTINGS_WORDS[fn] || '') + ' ' + (r.dataset.words || ''); }
+// поле поиска и пункты из других мест — в начало листа «Настройки» (ui/sheets.js)
+function settingsSearchHtml() {
+  const extra = [['openSyncSheet()', 'Синхронизация', 'личный сервер, обмен базой'], ['openRefsSheet()', 'Справочники', 'суды, судьи, списки, нерабочие дни'], ['openIntegritySheet()', 'Проверка данных', 'дубли, записи без связей'], ['openHelpSheet()', 'Инструкция', 'как пользоваться программой']]
+    .filter(([fn]) => typeof window !== 'object' || typeof window[fn.slice(0, -2)] === 'function');
+  return `<label class="field wide set-search"><span>Найти настройку</span><input id="set-search" type="search" autocomplete="off" placeholder="например: PIN, Telegram, ордер" oninput="settingsFilter(this.value)"></label>
+    <div class="section-label" id="set-extra-label" hidden>Другие разделы</div><div class="list-rows set-list" id="set-extra" hidden>${extra.map(([fn, t, sub]) => `<button type="button" class="list-btn" onclick="${fn}"><span>${esc(t)}</span><span class="muted">${esc(sub)}</span></button>`).join('')}</div>
+    <p class="small muted" id="set-search-none" hidden>Ничего не найдено. Попробуйте другое слово — например, «сервер», «копия», «PIN».</p>`;
+}
+function settingsFilter(q) {
+  const box = document.getElementById('sheetContent'); if (!box) return 0;
+  const words = settingsWordsOf(q); let found = 0;
+  box.querySelectorAll('.set-block').forEach(b => { const hit = !words.length || settingsHit((b.dataset.words || '') + ' ' + b.textContent, words); b.hidden = !hit; if (hit && words.length) found++; });
+  box.querySelectorAll('.set-list').forEach(list => {
+    const extra = list.id === 'set-extra'; let any = false;
+    list.querySelectorAll(':scope > .list-btn, :scope > div').forEach(r => { const hit = words.length ? settingsHit(settingsRowText(r), words) : !extra; r.hidden = !hit; if (hit) { any = true; if (words.length) found++; } });
+    list.hidden = !any; const lab = extra ? document.getElementById('set-extra-label') : list.previousElementSibling; if (lab && lab.classList.contains('section-label')) lab.hidden = !any;
+  });
+  const none = document.getElementById('set-search-none'); if (none) none.hidden = !words.length || found > 0;
+  return found;
 }
 
 // ▼▼▼ ui/forms.js
@@ -6786,6 +7084,8 @@ async function saveCaseForm(id) {
   const r = formModelCase(v, prev, { clients: await getAll('clients'), cases: allCases }); if (r.error) { fErr(r.error); return; }
   // деморежим (решение пользователя 04.10.2026, ui/license.js): новое дело и новый доверитель — до 5 в месяц без пропуска
   if (typeof demoAllow === 'function' && ((!id && !(await demoAllow('cases'))) || (r.newClient && !(await demoAllow('clients'))))) return;
+  // Б16 (11.10.2026): возможный конфликт интересов — предупреждение, второе «Сохранить» записывает (ui/parties.js)
+  if (typeof caseConflictGate === 'function' && !caseConflictGate(r.obj, prev, allCases)) return;
   // введённое в строках-справочниках (категория, суд, судья, орган, роль) запоминается; поля вкладок другого вида дела — нет
   { const tabs = new Set(caseTabsFor(r.obj.kind || '').map(t => t.id)); await comboRememberAll(document.getElementById('sheetContent'), inp => { const pane = inp.closest('[id^="cx-pane-"]'); return !pane || tabs.has(pane.id.slice(8)); }); }
   // полная форма: поля показанных вкладок — поверх записи (имена полей — как в v312); поля скрытых вкладок не трогаются
@@ -6821,7 +7121,9 @@ async function saveCaseForm(id) {
   await refreshCasesCache();
   // п. 8 аудита 11.10.2026: номер дела изменён — связанные записи переходят на новый номер
   let relinked = 0; if (prev && prev.number && r.obj.number && prev.number !== r.obj.number) { try { relinked = await caseRelinkRenamed(r.obj.id, prev.number, r.obj.number); } catch (e) { logErr('case:relink', e); toast('Дело сохранено, но связанные записи не переведены на новый номер: ' + ((e && e.message) || e) + '. Сохраните дело ещё раз', true); } }
-  toast((id ? 'Дело сохранено' : 'Дело создано') + (relinked ? ' · записей переведено на новый номер: ' + relinked : '') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
+  // Б3 (11.10.2026): «Номер ордера» в форме дела — в журнал ордеров, если такого номера там ещё нет (ui/depord.js)
+  let ordMade = null; if (typeof orderFromCase === 'function') { try { ordMade = await orderFromCase(r.obj); } catch (e) { logErr('case:order', e); } }
+  toast((id ? 'Дело сохранено' : 'Дело создано') + (relinked ? ' · записей переведено на новый номер: ' + relinked : '') + (ordMade ? ' · ордер № ' + ordMade.num + ' записан в журнал' : '') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
   // 09.10.2026: перечень дел со ссылками у коллектора обновляется сам (sync/monauto.js) — иначе новое дело он не обойдёт
@@ -7921,7 +8223,9 @@ SCREENS.today = async function () {
   let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== RULES_VER) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
   const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>Правила сроков обновлены ${badge(RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
       ${review.slice(0, 8).map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.c.id)}')"><span class="task-title">${esc([r.c.number, r.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(actLabel(r.c.kind, r.act))} от ${esc(fmtDate(r.base))}: ${esc([r.missing.length ? 'нет сроков — ' + r.missing.map(n => n.title).join(', ') : '', r.changed.length ? 'изменились — ' + r.changed.map(x => x.title + ': ' + fmtDate(x.from) + ' → ' + fmtDate(x.to)).join(', ') : ''].filter(Boolean).join('; '))}</span></button><div class="imp-done"><button type="button" class="button small-btn" onclick="rulesReviewApply('${jsq(r.c.id)}')">${icon('refresh-cw', 'icon-sm')}Пересчитать</button></div></div>`).join('')}${review.length > 8 ? `<p class="panel-foot">Ещё ${review.length - 8}</p>` : ''}</section>` : '';
-  const impRows = m.important.slice(0, TODAY_IMPORTANT_MAX).map((x, i) => `<div class="imp-row${i >= TODAY_PHONE_MAX ? ' imp-extra' : ''}">
+  // Б15 (11.10.2026): строку можно смахнуть вправо — то же действие, что кнопка в строке (ui/swipe.js)
+  const swp = (fn, args, label) => typeof swipeAttrs === 'function' ? swipeAttrs(fn, args, label) : '';
+  const impRows = m.important.slice(0, TODAY_IMPORTANT_MAX).map((x, i) => `<div class="imp-row${i >= TODAY_PHONE_MAX ? ' imp-extra' : ''}"${x.done ? swp('todayDone', [x.key], 'Выполнено') : x.after ? swp('openAfterHearing', [x.hearingId], 'Итог заседания') : ''}>
       <button type="button" class="imp-main" onclick="${impOpen(x)}"><span class="task-title">${esc(x.title)}</span><span class="task-sub"><span class="task-when${x.overdue ? ' overdue' : ''}">${esc(x.when)}</span> · ${esc(x.sub)}</span>${x.badges.length ? `<span class="task-badges">${x.badges.map(b => badge(b[0], b[1])).join('')}</span>` : ''}</button>
       ${x.done ? `<div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button></div>` : x.after ? `<div class="imp-done"><button type="button" class="button small-btn" onclick="openAfterHearing('${jsq(x.hearingId)}')">${icon('gavel', 'icon-sm')}После заседания</button></div>` : ''}
       <div class="imp-x">${iconBtn('Скрыть на 7 дней', `todayHide('${jsq(x.key)}')`, 'x')}</div></div>`).join('');
@@ -7934,7 +8238,7 @@ SCREENS.today = async function () {
   const impBody = m.important.length ? impRows + moreBtn + more + hiddenNote : m.hiddenCount ? `<p class="panel-foot" id="imp-all-hidden">Все предупреждения скрыты: ${m.hiddenCount}${hiddenOverdue ? ', из них просроченных — ' + hiddenOverdue : ''}. <button type="button" class="text-button" onclick="todayUnhideAll()">Показать снова</button></p>` : `<p class="panel-foot">Срочного нет: просроченных сроков и задач нет, заседания с неуказанным результатом разобраны.</p>`;
   // v312: «Считать все проведёнными» — прошедшим заседаниям без результата ставится «Проведено»
   // п. 1.5: «Сделать сегодня» — задачи на сегодня без времени; у строки «Выполнено»; блок сворачивается до завтра
-  const todoBox = m.todo.length ? panel('t-todo', 'todo', 'Сделать сегодня', m.todo.length, '', m.todo.map(x => `<div class="imp-row"><button type="button" class="imp-main" onclick="openTaskForm('${jsq(x.taskId)}')"><span class="task-title">${esc(x.title)}</span><span class="task-sub">${esc(x.sub)}${x.priority === 'Высокий' ? ' · ' + badge('Высокий', 'warn') : ''}</span></button><div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button></div></div>`).join('')) : '';
+  const todoBox = m.todo.length ? panel('t-todo', 'todo', 'Сделать сегодня', m.todo.length, '', m.todo.map(x => `<div class="imp-row"${swp('todayDone', [x.key], 'Выполнено')}><button type="button" class="imp-main" onclick="openTaskForm('${jsq(x.taskId)}')"><span class="task-title">${esc(x.title)}</span><span class="task-sub">${esc(x.sub)}${x.priority === 'Высокий' ? ' · ' + badge('Высокий', 'warn') : ''}</span></button><div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button></div></div>`).join('')) : '';
   const important = panel('t-important', 'important', 'Требует внимания', m.important.length, (m.pastCount ? `<button type="button" class="text-button" onclick="todayHearingsAllDone()">Считать все проведёнными</button>` : '') + (m.important.length ? `<button type="button" class="text-button" onclick="todayHideAll()">Скрыть все</button>` : ''), impBody);
 
   // без времени — короткая пометка вида записи вместо «весь день» (не переносится в узкой колонке)
@@ -8175,7 +8479,8 @@ function caseOpenBar(selId, num) {
 }
 async function openCaseSheet(id, keep) {
   const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
-  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents', 'mail', 'expenses', 'monitorEvents', 'poa']) d[st] = await getAll(st);
+  // Б2, Б3 (11.10.2026): депозиты и ордера дела — ui/depord.js
+  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'finance', 'documents', 'mail', 'expenses', 'monitorEvents', 'poa', 'deposits', 'orders']) d[st] = await getAll(st);
   const m = caseCardModel(c, d, new Date());
   // доверитель из реестра — телефон и способы связи (этап 3)
   const cl = (await getAll('clients')).find(x => x && (c.clientId ? x.id === c.clientId : clientKey(x.name) === clientKey(c.client))) || null;
@@ -8202,7 +8507,7 @@ async function openCaseSheet(id, keep) {
     <div class="actions case-acts">${btn('Задача', `openTaskForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${cHead.next ? btn('Подготовка к заседанию', `openHearingForm('${jsq(cHead.next.id)}')`, 'small-btn', 'list-checks') : ''}</div>
     ${caseQuickHtml(c)}
     <details class="fgroup card-add" id="card-add"><summary>${icon('chevron-down', 'icon-sm')}<span>Ещё: добавить в дело</span></summary>
-    <div class="actions" style="padding:4px 14px 14px">${btn('Заседание', `openHearingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'calendar-plus')}${btn('Встреча', `openMeetingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'handshake')}${btn('Срок', `openDeadlineAdd('${jsq(c.id)}')`, 'small-btn', 'clock-3')}${btn('Отправление', `openMailForm('', '${jsq(c.number || '')}')`, 'small-btn', 'mail')}${btn('Счёт', `openFinanceForm('', '${jsq(c.number || '')}')`, 'small-btn', 'wallet')}${btn('Расход', `openExpenseForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${btn('Доверенность', `openPoaForm('', { caseId: '${jsq(c.id)}', clientId: '${jsq(c.clientId || '')}' })`, 'small-btn', 'plus')}</div>
+    <div class="actions" style="padding:4px 14px 14px">${btn('Заседание', `openHearingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'calendar-plus')}${btn('Встреча', `openMeetingForm('', '${jsq(c.number || '')}')`, 'small-btn', 'handshake')}${btn('Срок', `openDeadlineAdd('${jsq(c.id)}')`, 'small-btn', 'clock-3')}${btn('Отправление', `openMailForm('', '${jsq(c.number || '')}')`, 'small-btn', 'mail')}${btn('Счёт', `openFinanceForm('', '${jsq(c.number || '')}')`, 'small-btn', 'wallet')}${btn('Расход', `openExpenseForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${typeof openDepositForm === 'function' ? btn('Аванс', `openDepositForm('', '${jsq(c.number || '')}', 'in')`, 'small-btn', 'plus') + btn('Ордер', `openOrderForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus') : ''}${btn('Доверенность', `openPoaForm('', { caseId: '${jsq(c.id)}', clientId: '${jsq(c.clientId || '')}' })`, 'small-btn', 'plus')}</div>
     </details>
     ${steps}
     <div class="section-label">Лента дела</div>
@@ -8213,12 +8518,15 @@ async function openCaseSheet(id, keep) {
       `${c.kind === 'Уголовное' ? sec('Уголовное дело', `<div class="list-rows">${row('Кто ведёт расследование', c.crimAgencyKind)}${row('Орган', c.agency)}${row('Форма расследования', c.crimForm)}${row('Следователь / дознаватель', c.crimInvestigator)}${row('№ у органа', c.crimAgencyNum)}${row('Возбуждено', c.crimStartDate ? fmtDate(c.crimStartDate) : '')}${row('Статья УК', c.crimArticle)}${row('Стадия расследования', c.crimStage)}${row('Обвинение', c.crimChargeDate ? fmtDate(c.crimChargeDate) + (c.crimCharge ? ' · ' + c.crimCharge : '') : c.crimCharge)}${row('Мера пресечения', [c.crimMeasure, c.crimMeasureUntil ? 'до ' + fmtDate(c.crimMeasureUntil) : ''].filter(Boolean).join(' · '))}${row('В суде', [c.crimCourtStage, c.crimVerdictDate ? 'приговор ' + fmtDate(c.crimVerdictDate) : '', c.crimVerdict].filter(Boolean).join(' · '))}</div>`) : ''}`,
       `${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}`,
       `${(c.i1FilingDate || c.i1DecisionDate || c.i1Result || c.apFilingDate || c.apCourt || c.courtApp || c.csFilingDate || c.courtCass || c.judgeApp || c.judgeCass || c.fsspNo || c.ipStatus) ? sec('Инстанции', `<div class="list-rows">${row('Первая инстанция', [c.i1FilingDate ? 'подано ' + fmtDate(c.i1FilingDate) : '', c.i1DecisionDate ? 'решение ' + fmtDate(c.i1DecisionDate) : '', c.i1Result].filter(Boolean).join(' · '))}${row('Апелляция', [c.apCourt || c.courtApp, c.courtNoApp ? '№ ' + c.courtNoApp : '', c.judgeApp ? 'судья ' + c.judgeApp : '', c.apFilingDate ? 'жалоба ' + fmtDate(c.apFilingDate) : '', c.apDecisionDate ? 'определение ' + fmtDate(c.apDecisionDate) : '', c.apResult].filter(Boolean).join(' · '))}${row('Кассация', [c.courtCass, c.courtNoCass ? '№ ' + c.courtNoCass : '', c.judgeCass ? 'судья ' + c.judgeCass : '', c.csFilingDate ? 'жалоба ' + fmtDate(c.csFilingDate) : '', c.csDecisionDate ? 'определение ' + fmtDate(c.csDecisionDate) : '', c.csResult].filter(Boolean).join(' · '))}${row('Исполнение', [c.fsspNo ? 'ИП № ' + c.fsspNo : '', c.ipOsp, c.ipStatus].filter(Boolean).join(' · '))}</div>`) : ''}`,
-      `${m.participants.length ? sec('Участники', `<div class="list-rows">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.inn ? 'ИНН ' + p.inn : '', p.addr].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>`, m.participants.length) : ''}`,
+      // Б9 (11.10.2026): участники правятся в листе «Участники дела» (ui/parties.js)
+      `${sec('Участники', `${m.participants.length ? `<div class="list-rows" id="case-parties">${m.participants.map(p => `<div><span>${esc(p.name || '')}</span><span class="muted">${esc([p.role, p.phone, p.email, p.inn ? 'ИНН ' + p.inn : '', p.addr, p.note].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>` : '<p class="small muted">Третьих лиц и представителей в деле нет.</p>'}${typeof openPartiesForm === 'function' ? `<div class="actions" style="margin:8px 0">${btn(m.participants.length ? 'Изменить участников' : 'Добавить участника', `openPartiesForm('${jsq(c.id)}')`, 'small-btn', m.participants.length ? 'pencil' : 'plus')}</div>` : ''}`, m.participants.length || undefined)}`,
       `${typeof poaBlockHtml === 'function' && (d.poa || []).some(p => p && !p._deleted && (p.caseId ? p.caseId === c.id : (!!p.caseNum && p.caseNum === c.number))) ? poaBlockHtml(d.poa.filter(p => p && !p._deleted && (p.caseId ? p.caseId === c.id : (!!p.caseNum && p.caseNum === c.number))), { caseId: c.id, clientId: c.clientId || '' }) : ''}`,
-      `${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, typeof monEvUnique === 'function' ? monEvUnique(d.monitorEvents) : d.monitorEvents, d.hearings) : ''}`].join(''))}
-    ${cardGroup('cm-money', 'Деньги: счета и расходы', [
+      `${typeof monitorCaseFlowHtml === 'function' ? monitorCaseFlowHtml(c, typeof monEvUnique === 'function' ? monEvUnique(d.monitorEvents) : d.monitorEvents, d.hearings) : ''}`,
+      `${typeof ordersBlockHtml === 'function' ? ordersBlockHtml(c, d.orders) : ''}`].join(''))}
+    ${cardGroup('cm-money', 'Деньги: счета, расходы, депозит', [
       `${m.bills.length ? sec('Счета', `<div class="list-rows">${m.bills.map(f => { const st = finStateOf(f, localISO(new Date())), mt = FIN_STATE_META[st]; return `<button type="button" class="list-btn" onclick="openFinanceSheet('${jsq(f.id)}')"><span>${esc(f.service || BILLING_LABEL[f.billType || 'fixed'])}${f.dueDate ? `<br><span class="muted small">срок ${esc(fmtDate(f.dueDate))}</span>` : ''}</span><span class="muted">${esc(fmtMoney(f.amount))} ${badge(mt[0], mt[1])}</span></button>`; }).join('')}</div>`, m.bills.length) : ''}`,
       `${m.expenses.length ? sec('Расходы', `<div class="list-rows">${m.expenses.slice(0, 8).map(e => `<button type="button" class="list-btn" onclick="openExpenseForm('${jsq(e.id)}')"><span>${esc(e.category || 'Расход')}${e.note ? ' · ' + esc(e.note) : ''}</span><span class="muted">${esc(fmtMoney(e.amount))}${e.recoverable ? ' ' + badge(e.recovered ? 'возмещено' : 'к возмещению', e.recovered ? 'good' : 'warn') : ''}</span></button>`).join('')}</div>`, m.expenses.length) : ''}`,
+      `${typeof depositBlockHtml === 'function' ? depositBlockHtml(c, d.deposits) : ''}`,
       `${sec('Финансы', `<div class="list-rows">${row('Начислено', m.fin.amount ? fmtMoney(m.fin.amount) : '')}${row('Оплачено', m.fin.paid ? fmtMoney(m.fin.paid) : '')}${row('Остаток', m.fin.debt ? fmtMoney(m.fin.debt) : (m.fin.amount ? '0 ₽' : ''))}${row('Ожидается', m.fin.pending ? fmtMoney(m.fin.pending) : '')}${row('Документов', m.docs ? String(m.docs) : '')}</div>`)}`].join(''))}
     ${cardGroup('cm-lists', 'Списки: сроки, заседания, задачи, встречи, переписка', [
       `${sec('Сроки', m.deadlines.length ? `<div class="list-rows">${m.deadlines.map(x => `<button type="button" class="list-btn" onclick="openDeadlineSheet('${jsq(c.id)}', '${jsq(x.key)}')"><span>${esc(x.title || 'Срок')}${x.unconfirmed ? ' ' + badge('требует проверки', 'warn') : ''}</span><span class="${x.state === 'overdue' ? 'task-when overdue' : 'muted'}">${esc(fmtDate(x.date))}${x.state === 'done' ? ' · выполнен' : x.when ? ' · ' + esc(x.when) : ''}</span></button>`).join('')}</div>` : '<p class="small muted">Сроков нет.</p>', m.deadlines.length)}`,
@@ -8676,7 +8984,8 @@ SCREENS.tasks = async function () {
   const tabs = TASKS_TABS.map(([k, t]) => `<button type="button" class="button small-btn" aria-pressed="${p.tab === k}" onclick="tasksSet('tab','${k}')">${esc(t)} <span class="chip-n">${m.tabCounts[k] || 0}</span></button>`).join('');
   const chips = TASKS_RANGES.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.range === k}" onclick="tasksSet('range','${k}')">${esc(t)} <span class="chip-n">${m.counts[k] || 0}</span></button>`).join('');
   const open = x => x.kind === 'deadline' ? `openDeadlineSheet('${jsq(x.caseId)}', '${jsq(x.id)}')` : `openTaskForm('${jsq(x.id)}')`;
-  const rows = m.rows.map(x => `<div class="agenda-row tasks-row"><span class="agenda-time">${esc(x.date ? fmtDate(x.date).slice(0, 5) : '—')}${x.time ? `<br>${esc(x.time)}` : ''}</span>
+  // Б15 (11.10.2026): невыполненную строку можно смахнуть вправо — «Выполнено» (ui/swipe.js)
+  const rows = m.rows.map(x => `<div class="agenda-row tasks-row"${!x.done && typeof swipeAttrs === 'function' ? swipeAttrs('tasksMarkDone', [x.kind, x.kind === 'deadline' ? x.caseId : x.id, x.id], 'Выполнено') : ''}><span class="agenda-time">${esc(x.date ? fmtDate(x.date).slice(0, 5) : '—')}${x.time ? `<br>${esc(x.time)}` : ''}</span>
     <button type="button" class="agenda-stripe ${x.kind}${x.done ? ' done' : ''} tasks-main" onclick="${open(x)}"><span class="agenda-title">${esc(x.title)}</span><span class="agenda-sub">${esc([x.kind === 'deadline' ? (x.control ? 'контрольный срок' : 'процессуальный срок') : 'задача' + (x.priority && x.priority !== 'Средний' ? ' · ' + x.priority.toLowerCase() + ' приоритет' : ''), x.sub, x.basis].filter(Boolean).join(' · '))}</span>
       <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
     ${x.done ? '' : `<button type="button" class="icon-button tasks-done" aria-label="Выполнено" title="Выполнено" onclick="tasksMarkDone('${x.kind}', '${jsq(x.kind === 'deadline' ? x.caseId : x.id)}', '${jsq(x.id)}')">${icon('check')}</button>`}</div>`).join('');
@@ -8794,6 +9103,8 @@ async function saveClientForm(id) {
   const v = {}; ['name', 'type', 'role', 'phone', 'email', 'birthDate', 'birthPlace', 'passport', 'passportInfo', 'comment'].forEach(k => { v[k] = fv('cl-' + k); }); v.inn = fv('clInn'); v.addr = fv('clAddr'); v.zip = fv('clZip');
   const r = formModelClient(v, prev, clients); if (r.error) { fErr(r.error); return; }
   if (!id && typeof demoAllow === 'function' && !(await demoAllow('clients'))) return;
+  // Б16 (11.10.2026): новый или переименованный доверитель встречается участником других дел — предупреждение (ui/parties.js)
+  if (typeof clientConflictGate === 'function' && !clientConflictGate(r.obj, prev, await getAll('cases'))) return;
   await comboRememberAll(document.getElementById('sheetContent'));
   const cases = clientRenamePlan(prev, r.obj, await getAll('cases'));
   try { await put('clients', r.obj); for (const x of cases) { x.client = r.obj.name; x.clientId = r.obj.id; await put('cases', x); } } catch (e) { logErr('form:client', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
@@ -9067,7 +9378,8 @@ const BILLING_LABEL = Object.fromEntries(BILLING_TYPES);
 const PAY_METHODS = { cash: 'Наличные', bank: 'Безнал', card: 'Карта / СБП', '': 'Способ не указан' };
 const FIN_VIEW_KEY = 'crm_finview';
 const FIN_FILTERS = [['debt', 'К оплате'], ['overdue', 'Просроченные'], ['partial', 'Частично'], ['done', 'Оплачено'], ['pending', 'Ожидается'], ['all', 'Все']];
-const FIN_TABS = [['bills', 'Счета'], ['payments', 'Платежи'], ['expenses', 'Расходы']];
+// Б2 (11.10.2026): вкладка «Депозиты» — остатки авансов по делам (ui/depord.js)
+const FIN_TABS = [['bills', 'Счета'], ['payments', 'Платежи'], ['expenses', 'Расходы'], ['deposits', 'Депозиты']];
 const FIN_PERIODS = [['month', 'Месяц'], ['quarter', 'Квартал'], ['year', 'Год'], ['custom', 'Свой период']];
 function finPrefs() { try { const p = JSON.parse(localStorage.getItem(FIN_VIEW_KEY) || '{}'); return { tab: FIN_TABS.some(t => t[0] === p.tab) ? p.tab : 'bills', f: FIN_FILTERS.some(x => x[0] === p.f) ? p.f : 'debt', period: FIN_PERIODS.some(x => x[0] === p.period) ? p.period : 'month', from: /^\d{4}-\d{2}-\d{2}$/.test(p.from || '') ? p.from : '', to: /^\d{4}-\d{2}-\d{2}$/.test(p.to || '') ? p.to : '' }; } catch (e) { return { tab: 'bills', f: 'debt', period: 'month', from: '', to: '' }; } }
 // свой период — обе даты из полей, затем «Показать»
@@ -9125,6 +9437,8 @@ SCREENS.finance = async function () {
     const methods = Object.keys(pm.byMethod).length > 1 ? ' · ' + Object.entries(pm.byMethod).map(([k, v]) => (PAY_METHODS[k] || 'без способа').toLowerCase() + ' ' + fmtMoney(v)).join(', ') : '';
     const rows = pm.rows.map(x => `<button type="button" class="list-btn mail-row" onclick="openFinanceSheet('${jsq(x.finId)}')"><span><span class="task-title">${esc(x.title)}</span><span class="task-sub">${esc([x.sub, PAY_METHODS[x.method] || '', x.note].filter(Boolean).join(' · '))}</span></span><span class="mail-right"><b>${esc(fmtMoney(x.sum))}</b><span class="muted small">${esc(x.at ? fmtDate(x.at) : '')}</span></span></button>`).join('');
     body = `<div class="chips" style="margin-bottom:12px">${chips}</div>${custom}<div class="info-box" id="fin-period-total"><b>Получено ${esc(pm.range.label)}: ${esc(fmtMoney(pm.total))}</b> · платежей: ${pm.rows.length}${esc(methods)}${pm.rows.length && typeof printIncome === 'function' ? ` <button type="button" class="text-button" id="fin-print" onclick="printIncome('${jsq(pm.range.from || '')}', '${jsq(pm.range.to || '')}', '${jsq(pm.range.label)}')">Выписка для печати</button>` : ''}</div><section class="panel">${pm.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('wallet', 'Платежей за период нет', 'Выберите другой период или внесите оплату по счёту')}</section>`;
+  } else if (p.tab === 'deposits' && typeof depositsTabHtml === 'function') {
+    body = depositsTabHtml(await getAll('deposits'), await getAll('cases'));
   } else if (p.tab === 'expenses') {
     const rows = m.expenses.map(e => `<button type="button" class="list-btn mail-row" onclick="openExpenseForm('${jsq(e.id)}')"><span><span class="task-title">${esc(e.category || 'Расход')}${e.note ? ' · ' + esc(e.note) : ''}</span><span class="task-sub">${esc([e.caseNum, e.date ? fmtDate(e.date) : ''].filter(Boolean).join(' · '))}</span></span><span class="mail-right"><b>${esc(fmtMoney(e.amount))}</b>${e.recoverable ? badge(e.recovered ? 'возмещено' : 'к возмещению', e.recovered ? 'good' : 'warn') : ''}</span></button>`).join('');
     body = `<section class="panel">${m.expenses.length ? `<div class="list-rows">${rows}</div>` : emptyState('wallet', 'Расходов пока нет', 'Госпошлина, экспертиза, почта — по кнопке «Расход»; возмещаемые считаются отдельно', btn('Расход', 'openExpenseForm()', 'primary', 'plus'))}</section>`;
@@ -9319,6 +9633,146 @@ async function saveExpenseForm(id) {
   await comboRememberAll(document.getElementById('sheetContent'));
   try { await put('expenses', r.obj); } catch (e) { logErr('form:expense', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(id ? 'Расход сохранён' : 'Расход записан'); closeSheet(); if (UI.screen === 'finance') finSet('tab', 'expenses'); else nav(UI.screen);
+}
+
+// ▼▼▼ ui/depord.js
+// ═══ ui/depord.js — депозиты (авансы) по делу и журнал ордеров (план переноса 11.10.2026, пункты Б2 и Б3) ═══
+// Хранилища те же, что в прежней программе v314: deposits {id, caseNum, caseId, kind in|out, amount, date, note} и
+// orders {id, num, date, caseNum, caseId, basis, stage, note} — записи прежней программы видны и правятся здесь, и наоборот.
+// Связь с делом — по внутреннему id (formCaseLink, урок 107); удаление — в корзину (openDeleteSheet, ui/trash.js).
+// Против v314: сумма проверяется (знак, предел); списание больше остатка — предупреждение, второе «Сохранить» — запись; повтор номера
+// ордера — предупреждение; ордер из формы дела попадает в журнал и при правке дела, если такого номера в журнале ещё нет; на экране
+// «Финансы» — вкладка «Депозиты» с остатками по делам.
+
+const ORDER_BASIS = ['Соглашение', 'Назначение (ст. 51 УПК РФ)', 'Назначение (ст. 50 ГПК РФ)', 'Поручение коллегии'];
+// запись относится к делу: по внутренней связи, а без неё — по номеру (как в карточке дела, caseCardModel)
+function depMine(x, c) { return !!(x && c && (x.caseId ? x.caseId === c.id : (!!x.caseNum && x.caseNum === c.number))); }
+function depAmount(s) { return Number(String(s == null ? '' : s).replace(/\s/g, '').replace(',', '.')) || 0; }
+// остаток: внесения минус списания, в копейках без хвостов округления; удалённые не считаются
+function depositBalance(list) { return Math.round((list || []).filter(d => d && !d._deleted).reduce((a, d) => a + (d.kind === 'out' ? -1 : 1) * Math.round(Number(d.amount || 0) * 100), 0)) / 100; }
+function formModelDeposit(v, prev) {
+  const amount = Math.round(depAmount(v.amount) * 100) / 100;
+  if (!(amount > 0 && amount <= FIN_MAX)) return { error: 'Сумма — больше нуля и не больше 1 млрд ₽' };
+  if (v.date && !/^\d{4}-\d{2}-\d{2}$/.test(v.date)) return { error: 'Дата — из поля даты' };
+  if (!String(v.caseNum || '').trim()) return { error: 'Выберите дело — депозит ведётся по делу' };
+  const p = prev || {};
+  return { obj: { ...p, id: p.id || uid('Дп'), ...formCaseLink(v.caseNum, prev), kind: v.kind === 'out' ? 'out' : 'in', amount, date: v.date || todayISO(), note: String(v.note || '').trim(), createdAt: p.createdAt || Date.now() } };
+}
+const depCasesFor = async keepNum => (await getAll('cases')).filter(c => c && !c._deleted && (!c.archived || c.number === keepNum)).sort((a, b) => String(a.number).localeCompare(String(b.number), 'ru', { numeric: true }));
+async function openDepositForm(id, presetCaseNum, kind) {
+  const prev = id ? await getOne('deposits', id) : null; if (id && !prev) { toast('Операция не найдена', true); return; }
+  const d = prev || { caseNum: presetCaseNum || '', kind: kind === 'out' ? 'out' : 'in', date: todayISO() };
+  const cases = await depCasesFor(d.caseNum), c = d.caseId ? cases.find(x => x.id === d.caseId) : (d.caseNum ? CASES_BY_NUM[d.caseNum] : null);
+  const bal = c ? depositBalance((await getAll('deposits')).filter(x => x && x.id !== id && depMine(x, c))) : null;
+  const body = `${bal !== null ? `<p class="small muted" id="dp-balance">Остаток на депозите по делу${prev ? ' без этой операции' : ''}: <b>${esc(fmtMoney(bal))}</b></p>` : ''}<div class="form-grid">
+    ${fSelect('dp-kind', 'Операция', d.kind === 'out' ? 'out' : 'in', [['in', 'Внесение (аванс)'], ['out', 'Списание']])}${fInput('dp-amount', 'Сумма, ₽ *', d.amount, 'inputmode="decimal" autocomplete="off"')}
+    ${fSelect('dp-caseNum', 'Дело *', d.caseNum, cases.map(x => [x.number, [x.number, x.client].filter(Boolean).join(' · ')]), true)}${fInput('dp-date', 'Дата', d.date, 'type="date"')}
+    ${wide(fInput('dp-note', 'Назначение', d.note, 'autocomplete="off" placeholder="аванс по соглашению; оплата работы за июнь; госпошлина"'))}
+  </div>${fSaveBar(`saveDepositForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('deposits', '${jsq(id)}')` : '')}`;
+  openSheet(id ? 'Правка операции по депозиту' : (d.kind === 'out' ? 'Списание с депозита' : 'Внесение аванса'), body, UI.cur ? true : undefined);
+  if (prev && typeof formRecMark === 'function') formRecMark('deposits', prev);
+}
+// «списание больше остатка» показано для этой суммы и дела — второе нажатие записывает (ключ — только введённое, урок 52)
+let DEP_WARNED = '';
+async function saveDepositForm(id) {
+  const prev = id ? await getOne('deposits', id) : null; if (formGone(id, prev, 'Операция')) return;
+  const v = { kind: fv('dp-kind'), amount: fv('dp-amount'), caseNum: fv('dp-caseNum'), date: fv('dp-date'), note: fv('dp-note') };
+  const r = formModelDeposit(v, prev); if (r.error) { fErr(r.error); return; }
+  if (r.obj.kind === 'out') {
+    const c = (r.obj.caseId && CASES_BY_ID[r.obj.caseId]) || CASES_BY_NUM[r.obj.caseNum] || { id: r.obj.caseId, number: r.obj.caseNum };
+    const bal = depositBalance((await getAll('deposits')).filter(x => x && x.id !== r.obj.id && depMine(x, c))), key = [id || '', r.obj.caseNum, r.obj.amount].join('|');
+    if (r.obj.amount > bal && DEP_WARNED !== key) { DEP_WARNED = key; fErr('Списание ' + fmtMoney(r.obj.amount) + ' больше остатка на депозите (' + fmtMoney(bal) + '). Если всё верно — нажмите «Сохранить» ещё раз.'); return; }
+  }
+  DEP_WARNED = '';
+  try { await put('deposits', r.obj); } catch (e) { logErr('form:deposit', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  toast(id ? 'Операция сохранена' : (r.obj.kind === 'out' ? 'Списано с депозита' : 'Аванс внесён'));
+  if (UI.screen === 'finance' && !UI.stack.length) { closeSheet(); finSet('tab', 'deposits'); } else formAfterSave(r.obj.caseNum);
+}
+// блок «Депозит» в карточке дела: остаток, последние операции, кнопки
+function depositBlockHtml(c, list) {
+  const mine = (list || []).filter(d => d && !d._deleted && depMine(d, c)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const bal = depositBalance(mine);
+  const rows = mine.slice(0, 8).map(d => `<button type="button" class="list-btn" onclick="openDepositForm('${jsq(d.id)}')"><span>${esc(d.note || (d.kind === 'out' ? 'Списание' : 'Внесение'))}<br><span class="muted small">${esc(d.date ? fmtDate(d.date) : '')}</span></span><span class="${d.kind === 'out' ? 'dep-out' : 'dep-in'}">${d.kind === 'out' ? '−' : '+'}${esc(fmtMoney(d.amount))}</span></button>`).join('');
+  return `<div class="section-label">Депозит${mine.length ? ' · остаток ' + esc(fmtMoney(bal)) : ''}</div>${mine.length ? `<div class="list-rows" id="dep-rows">${rows}</div>${mine.length > 8 ? `<p class="small muted">Показаны последние 8 операций из ${mine.length} — все на экране «Финансы» → «Депозиты».</p>` : ''}` : '<p class="small muted">Авансов по делу нет.</p>'}
+    <div class="actions" style="margin:8px 0">${btn('Внести аванс', `openDepositForm('', '${jsq(c.number || '')}', 'in')`, 'small-btn', 'plus')}${btn('Списать', `openDepositForm('', '${jsq(c.number || '')}', 'out')`, 'small-btn', 'wallet')}</div>`;
+}
+// вкладка «Депозиты» на экране «Финансы»: дела с операциями — остаток, внесено, списано; последние операции
+function depositsSummary(list, cases) {
+  const live = (list || []).filter(d => d && !d._deleted), byCase = new Map(), alive = (cases || []).filter(c => c && !c._deleted);
+  for (const d of live) { const c = alive.find(x => depMine(d, x)) || null, k = c ? c.id : '#' + (d.caseNum || ''); if (!byCase.has(k)) byCase.set(k, { c, num: c ? c.number : (d.caseNum || ''), ops: [] }); byCase.get(k).ops.push(d); }
+  const rows = [...byCase.values()].map(g => ({ ...g, bal: depositBalance(g.ops), inSum: depositBalance(g.ops.filter(o => o.kind !== 'out')), outSum: depositBalance(g.ops.filter(o => o.kind === 'out').map(o => ({ ...o, kind: 'in' }))), last: g.ops.map(o => o.date || '').sort().pop() || '' }))
+    .sort((a, b) => b.last.localeCompare(a.last));
+  return { rows, total: Math.round(rows.reduce((a, r) => a + Math.round(r.bal * 100), 0)) / 100 };
+}
+function depositsTabHtml(list, cases) {
+  const m = depositsSummary(list, cases);
+  if (!m.rows.length) return `<section class="panel">${emptyState('wallet', 'Авансов пока нет', 'Аванс по делу вносится в карточке дела («Деньги» → «Внести аванс») или кнопкой ниже', btn('Внести аванс', "openDepositForm('', '', 'in')", 'primary', 'plus'))}</section>`;
+  const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="${r.c ? `openCaseSheet('${jsq(r.c.id)}')` : `openDepositForm('${jsq(r.ops[0].id)}')`}"><span><span class="task-title">${esc(r.num || 'без дела')}${r.c && r.c.client ? ' · ' + esc(r.c.client) : ''}</span><span class="task-sub">${esc('внесено ' + fmtMoney(r.inSum) + ' · списано ' + fmtMoney(r.outSum) + (r.last ? ' · последняя ' + fmtDate(r.last) : ''))}</span></span><span class="mail-right"><b class="${r.bal < 0 ? 'dep-out' : ''}">${esc(fmtMoney(r.bal))}</b></span></button>`).join('');
+  return `<div class="info-box" id="dep-total"><b>На депозитах всего: ${esc(fmtMoney(m.total))}</b> · дел: ${m.rows.length}</div><div class="actions" id="dep-acts" style="margin:8px 0">${btn('Внести аванс', "openDepositForm('', '', 'in')", 'small-btn', 'plus')}${btn('Списать', "openDepositForm('', '', 'out')", 'small-btn', 'wallet')}</div><section class="panel"><div class="list-rows">${rows}</div></section>`;
+}
+
+// ── журнал ордеров ──
+// следующий номер: наибольший числовой в журнале + 1 (как в v314 nextOrderNo); пусто — если ордеров ещё нет
+function nextOrderNo(orders) { let max = 0; (orders || []).filter(o => o && !o._deleted).forEach(o => { const n = parseInt(String(o.num || '').replace(/\D/g, ''), 10); if (n > max) max = n; }); return max ? String(max + 1) : ''; }
+const orderNumKey = s => String(s || '').replace(/\s+/g, '').replace(/^№/, '').toLowerCase();
+function formModelOrder(v, prev, orders) {
+  const num = String(v.num || '').trim(), date = String(v.date || '').trim();
+  if (!num || !date) return { error: 'Заполните номер и дату ордера' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'Дата — из поля даты' };
+  const p = prev || {}, dup = (orders || []).find(o => o && !o._deleted && o.id !== p.id && orderNumKey(o.num) === orderNumKey(num));
+  return { obj: { ...p, id: p.id || uid('О'), num, date, ...formCaseLink(v.caseNum, prev), basis: ORDER_BASIS.includes(v.basis) ? v.basis : (String(v.basis || '').trim() || 'Соглашение'), stage: String(v.stage || '').trim(), note: String(v.note || '').trim(), createdAt: p.createdAt || Date.now() }, dup: dup || null };
+}
+async function openOrdersSheet(caseNum, mode) {
+  await refreshCasesCache();
+  const all = (await getAll('orders')).filter(o => o && !o._deleted).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.num || '').localeCompare(String(a.num || ''), 'ru', { numeric: true }));
+  const c = caseNum ? CASES_BY_NUM[caseNum] : null, list = c ? all.filter(o => depMine(o, c)) : all;
+  const rows = list.map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>Ордер № ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}<br><span class="muted small">${esc([caseNum ? '' : (o.caseNum || 'без дела'), o.basis, o.stage].filter(Boolean).join(' · '))}</span></span>${icon('chevron-right', 'icon-sm')}</button>`).join('');
+  openSheet(c ? 'Ордера по делу ' + (c.number || '') : 'Журнал ордеров', `<p class="small muted">${c ? 'Ордера, выписанные по этому делу' : 'Все выписанные ордера'}: ${list.length}. Номер — с бланка из вашей книжки; ордер из формы дела («Номер ордера») попадает сюда сам.</p>
+    ${list.length ? `<div class="list-rows" id="ord-rows">${rows}</div>` : '<p class="small muted">Ордеров пока нет.</p>'}
+    <div class="form-actions">${btn('Выписать ордер', `openOrderForm('', '${jsq(caseNum || '')}')`, 'primary', 'plus')}${typeof printRegister === 'function' && !c ? btn('Реестр на печать', "printRegister('orders')", '', 'files') : ''}</div>`, mode || (UI.cur ? true : undefined));
+  // отметка листа-журнала: после записи ордера из него журнал показывается заново со свежим списком (saveOrderForm)
+  if (UI.cur) UI.cur.ordJournal = caseNum || '';
+}
+async function openOrderForm(id, presetCaseNum) {
+  const prev = id ? await getOne('orders', id) : null; if (id && !prev) { toast('Ордер не найден', true); return; }
+  const orders = await getAll('orders'), o = prev || { num: nextOrderNo(orders), date: todayISO(), caseNum: presetCaseNum || '', basis: 'Соглашение' };
+  const cases = await depCasesFor(o.caseNum), basis = ORDER_BASIS.includes(o.basis) || !o.basis ? ORDER_BASIS : ORDER_BASIS.concat([o.basis]);
+  const body = `<p class="small muted">Номер — с бланка ордера из вашей книжки${prev ? '' : '; предложен следующий за последним в журнале'}.</p><div class="form-grid">
+    ${fInput('or-num', 'Номер ордера *', o.num, 'inputmode="numeric" autocomplete="off"')}${fInput('or-date', 'Дата *', o.date, 'type="date"')}
+    ${fSelect('or-caseNum', 'Дело', o.caseNum, cases.map(x => [x.number, [x.number, x.client].filter(Boolean).join(' · ')]), true)}${fSelect('or-basis', 'Основание', o.basis || 'Соглашение', basis)}
+    ${wide(fInput('or-stage', 'Поручение / стадия', o.stage, 'autocomplete="off" placeholder="защита в суде первой инстанции"'))}${wide(fInput('or-note', 'Заметка', o.note, 'autocomplete="off"'))}
+  </div>${fSaveBar(`saveOrderForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('orders', '${jsq(id)}')` : '')}`;
+  openSheet(id ? 'Ордер № ' + (o.num || '') : 'Новый ордер', body, UI.cur ? true : undefined);
+  if (prev && typeof formRecMark === 'function') formRecMark('orders', prev);
+}
+let ORD_WARNED = '';
+async function saveOrderForm(id) {
+  const prev = id ? await getOne('orders', id) : null; if (formGone(id, prev, 'Ордер')) return;
+  const v = { num: fv('or-num'), date: fv('or-date'), caseNum: fv('or-caseNum'), basis: fv('or-basis'), stage: fv('or-stage'), note: fv('or-note') };
+  const r = formModelOrder(v, prev, await getAll('orders')); if (r.error) { fErr(r.error); return; }
+  const key = [id || '', orderNumKey(r.obj.num)].join('|');
+  if (r.dup && ORD_WARNED !== key) { ORD_WARNED = key; fErr('Ордер № ' + r.obj.num + ' уже есть в журнале (от ' + fmtDate(r.dup.date) + (r.dup.caseNum ? ', дело ' + r.dup.caseNum : '') + '). Если это другой ордер с тем же номером — нажмите «Сохранить» ещё раз.'); return; }
+  ORD_WARNED = '';
+  try { await put('orders', r.obj); } catch (e) { logErr('form:order', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  toast(id ? 'Ордер сохранён' : 'Ордер № ' + r.obj.num + ' записан в журнал');
+  const back = UI.stack.length ? UI.stack[UI.stack.length - 1] : null;
+  if (back && typeof back.ordJournal === 'string' && sheetBack()) { await openOrdersSheet(back.ordJournal, 'replace'); return; }
+  formAfterSave(r.obj.caseNum);
+}
+// блок «Ордера» в карточке дела
+function ordersBlockHtml(c, list) {
+  const mine = (list || []).filter(o => o && !o._deleted && depMine(o, c)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  return `<div class="section-label">Ордера${mine.length ? ' · ' + mine.length : ''}</div>${mine.length ? `<div class="list-rows">${mine.slice(0, 6).map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>№ ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}</span><span class="muted">${esc(o.basis || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Ордеров по делу нет.</p>'}
+    <div class="actions" style="margin:8px 0">${btn('Выписать ордер', `openOrderForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${mine.length > 6 ? btn('Все ордера дела', `openOrdersSheet('${jsq(c.number || '')}')`, 'small-btn', 'list') : ''}</div>`;
+}
+// форма дела: «Номер ордера» заполнен, а в журнале такого номера нет — ордер записывается в журнал (v314 maybeCreateOrderForCase делал это
+// только для нового дела; здесь — и при правке, если номер появился позже). Возвращает записанный ордер или null.
+async function orderFromCase(caseObj) {
+  const num = String(caseObj && caseObj.orderNo || '').trim(); if (!num) return null;
+  const orders = await getAll('orders'); if (orders.some(o => o && !o._deleted && orderNumKey(o.num) === orderNumKey(num))) return null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(caseObj.orderDate || '')) ? caseObj.orderDate : todayISO();
+  const o = { id: uid('О'), num, date, caseNum: caseObj.number || '', caseId: caseObj.id || '', basis: 'Соглашение', stage: '', note: 'из формы дела', createdAt: Date.now() };
+  await put('orders', o); return o;
 }
 
 // ▼▼▼ screens/reports.js
@@ -10252,14 +10706,17 @@ async function saveHolidaysForm() {
 // Ищет записи без связей и неточности: похожие доверители (возможные дубли), дела без доверителя и с потерянной карточкой, завершённые без даты,
 // повторяющиеся номера дел, заседания, задачи, встречи, счета, расходы и отправления со ссылкой на дело, которого нет, счета с переплатой,
 // сроки и заседания без даты. Ничего не меняет сама: у каждой строки — «Открыть». Чистая модель — integrityModel (тест next_38_integrity.js).
-const INTEGRITY_STORES = [['hearings', 'Заседание', 'openHearingForm'], ['tasks', 'Задача', 'openTaskForm'], ['meetings', 'Встреча', 'openMeetingForm'], ['finance', 'Счёт', 'openFinanceSheet'], ['expenses', 'Расход', 'openExpenseForm'], ['mail', 'Отправление', 'openMailSheet']];
+const INTEGRITY_STORES = [['hearings', 'Заседание', 'openHearingForm'], ['tasks', 'Задача', 'openTaskForm'], ['meetings', 'Встреча', 'openMeetingForm'], ['finance', 'Счёт', 'openFinanceSheet'], ['expenses', 'Расход', 'openExpenseForm'], ['mail', 'Отправление', 'openMailSheet'], ['deposits', 'Депозит', 'openDepositForm'], ['orders', 'Ордер', 'openOrderForm']];
 function integrityModel(d) {
   const live = a => (a || []).filter(x => x && !x._deleted), out = [];
   const cases = live(d.cases), clients = live(d.clients), byNum = {}, byId = {}; cases.forEach(c => { if (c.number) (byNum[c.number] = byNum[c.number] || []).push(c); byId[c.id] = c; });
   const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, ' ').trim();
   // похожие доверители: одинаковые имена после нормализации
   const groups = {}; clients.forEach(c => { const k = norm(c.name); if (k) (groups[k] = groups[k] || []).push(c); });
-  Object.values(groups).filter(g => g.length > 1).forEach(g => out.push({ type: 'Похожие доверители', label: g[0].name + ' · ' + g.length, detail: 'Возможные дубли карточки — проверьте и оставьте одну', open: ['openClientSheet', g[0].id] }));
+  // Б23 (11.10.2026): дубли объединяются из «Проверки данных» (ui/parties.js, openClientMerge); одинаковый ИНН у разных имён — тоже дубль
+  const merge = typeof openClientMerge === 'function', byInn = {}; clients.forEach(c => { const i = String(c.inn || '').replace(/\D/g, ''); if (i.length === 10 || i.length === 12) (byInn[i] = byInn[i] || []).push(c); });
+  Object.entries(groups).filter(([, g]) => g.length > 1).forEach(([k, g]) => out.push({ type: 'Похожие доверители', label: g[0].name + ' · ' + g.length, detail: merge ? 'Возможные дубли карточки — объедините в одну' : 'Возможные дубли карточки — проверьте и оставьте одну', open: merge ? ['openClientMerge', 'n:' + k] : ['openClientSheet', g[0].id] }));
+  Object.entries(byInn).filter(([, g]) => g.length > 1 && new Set(g.map(c => norm(c.name))).size > 1).forEach(([i, g]) => out.push({ type: 'Похожие доверители', label: 'ИНН ' + i + ' · ' + g.map(c => c.name).join(', '), detail: 'Один ИНН у разных карточек — объедините в одну', open: merge ? ['openClientMerge', 'i:' + i] : ['openClientSheet', g[0].id] }));
   cases.forEach(c => {
     const t = 'Дело ' + (c.number || 'без номера');
     if (!String(c.client || '').trim()) out.push({ type: 'Дела без доверителя', label: t, detail: 'Не указан доверитель', open: ['openCaseSheet', c.id] });
@@ -10267,7 +10724,7 @@ function integrityModel(d) {
     if ((c.status === 'Завершено' || c.stage === 'Завершено') && !c.closedAt) out.push({ type: 'Завершено без даты', label: t, detail: 'Дело завершено, дата завершения не указана', open: ['openCaseSheet', c.id] });
     (c.deadlines || []).forEach(dl => { if (dl && !dl.done && !/^\d{4}-\d{2}-\d{2}$/.test(dl.date || '')) out.push({ type: 'Сроки без даты', label: t + ' · ' + (dl.title || 'срок'), detail: 'У срока нет даты — напоминаний не будет', open: ['openCaseSheet', c.id] }); });
   });
-  Object.keys(byNum).filter(n => byNum[n].length > 1).forEach(n => out.push({ type: 'Повторяющиеся номера дел', label: 'Дело ' + n, detail: 'Номер используется в ' + byNum[n].length + ' делах', open: ['openCaseSheet', byNum[n][0].id] }));
+  Object.keys(byNum).filter(n => byNum[n].length > 1).forEach(n => out.push({ type: 'Повторяющиеся номера дел', label: 'Дело ' + n, detail: 'Номер используется в ' + byNum[n].length + ' делах' + (typeof caseNumFixOpen === 'function' ? ' — дайте другим делам новые номера' : ''), open: typeof caseNumFixOpen === 'function' ? ['caseNumFixOpen', n] : ['openCaseSheet', byNum[n][0].id] }));
   for (const [store, title, opener] of INTEGRITY_STORES) live(d[store]).forEach(r => {
     const ref = r.caseNum || (r.caseId ? '#' + r.caseId : '');
     // аудит 11.10.2026, п. 1: внутренняя связь — одно дело, номер — другое (форма задачи, встречи, заседания до этого выпуска) — выбор за пользователем
@@ -10301,7 +10758,215 @@ async function openIntegritySheet(mode) {
   const types = [...new Set(rows.map(r => r.type))];
   const body = rows.length ? types.map(t => `<div class="section-label">${esc(t)} · ${rows.filter(r => r.type === t).length}</div><div class="list-rows">${rows.filter(r => r.type === t).slice(0, 50).map(r => `<button type="button" class="list-btn" onclick="${esc(r.open[0])}('${jsq(r.open[1])}')"><span>${esc(r.label)}</span><span class="muted">${esc(r.detail)}</span></button>`).join('')}${rows.filter(r => r.type === t).length > 50 ? '<p class="small muted">Показаны первые 50</p>' : ''}</div>`).join('')
     : `<div class="status-line good" role="status">${icon('check')}<span>Неточностей не найдено</span></div>`;
-  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты. Проверка ничего не меняет сама — откройте запись и поправьте; у записи, привязанной к двум делам, выберите верное дело.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
+  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты. Проверка ничего не меняет сама — откройте запись и поправьте; у записи, привязанной к двум делам, выберите верное дело; дубли доверителей объединяются, повторяющемуся номеру дела даётся новый.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
+}
+
+// ▼▼▼ ui/parties.js
+// ═══ ui/parties.js — участники дела, конфликт интересов, объединение дублей (план переноса 11.10.2026, пункты Б9, Б16, Б23) ═══
+// Б9: лист «Участники дела» — третьи лица, представители, противная сторона с ИНН (и «По ИНН»), телефоном, почтой, адресом и заметкой.
+//     Удалённый участник — надгробие _delItems.participants[ключ имени] (раздел 6 правил): при слиянии он не возвращается из старой копии,
+//     а сайт суда не добавляет его снова (sync/monitor.js); добавленный заново после удаления — остаётся (addedAt новее надгробия).
+// Б16: конфликт интересов — как в прежней программе (conflictScan v2xx): доверитель дела встречается участником других дел, противная
+//     сторона или новый участник — доверитель по другому делу. Программа предупреждает, решение за адвокатом: второе «Сохранить» записывает.
+// Б23: «Проверка данных» не только находит, но и исправляет — объединение дублей доверителей (дела, счета, доверенности переходят к
+//     оставленной карточке, остальные — в корзину) и новый номер для дела с повторяющимся номером (связанные записи переходят вместе с ним).
+
+// ── Б9: участники ──
+const partyKey = s => crmMonNorm(s);
+function partyRolesFor(kind, cur) {
+  const code = typeof caseCodeOf === 'function' ? caseCodeOf(kind || '') : '';
+  return [...new Set([...((typeof CASE_ROLES_BY_CODE === 'object' && CASE_ROLES_BY_CODE[code]) || ['Истец', 'Ответчик', 'Третье лицо', 'Заявитель', 'Заинтересованное лицо']), 'Противная сторона', 'Представитель', 'Свидетель', 'Иное лицо', ...(cur ? [cur] : [])])];
+}
+// rows — то, что в листе: { key (ключ имени при открытии; пусто у новой строки), name, role, inn, phone, email, addr, ogrn, kpp, note }
+function casePartiesModel(prev, rows, now) {
+  const t = now || Date.now(), p = prev || {}, old = (Array.isArray(p.participants) ? p.participants : []).filter(x => x && x.name);
+  const oldByKey = new Map(old.map(x => [partyKey(x.name), x])), seen = new Set(), out = [], added = [], renamed = {};
+  for (const r of rows || []) {
+    const name = String(r.name || '').replace(/\s+/g, ' ').trim();
+    if (!name && !['inn', 'phone', 'email', 'addr', 'note'].some(k => String(r[k] || '').trim())) continue;
+    if (!name) return { error: 'У участника не указано ФИО или наименование — впишите или уберите строку' };
+    const k = partyKey(name); if (seen.has(k)) return { error: 'Участник «' + name + '» указан дважды' }; seen.add(k);
+    const inn = String(r.inn || '').replace(/\D/g, ''); if (inn && inn.length !== 10 && inn.length !== 12) return { error: 'ИНН участника «' + name + '» — 10 цифр (организация) или 12 (физлицо, ИП)' };
+    const was = (r.key && oldByKey.get(r.key)) || oldByKey.get(k) || null, same = !!was && partyKey(was.name) === k;
+    if (r.key && r.key !== k) renamed[r.key] = name;
+    if (!same) added.push(name);
+    const o = { ...(was || {}), name, role: String(r.role || '').trim() || 'Иное лицо', inn, phone: String(r.phone || '').trim(), email: String(r.email || '').trim(), addr: String(r.addr || '').trim(), note: String(r.note || '').trim(), addedAt: same ? (Number(was.addedAt) || 0) : t };
+    for (const f of ['ogrn', 'kpp']) { const v = String(r[f] || '').trim(); if (v) o[f] = v; }
+    if (!o.addedAt) delete o.addedAt;
+    out.push(o);
+  }
+  const del = { ...((p._delItems && p._delItems.participants) || {}) }, removed = [];
+  for (const x of old) { const k = partyKey(x.name); if (!seen.has(k)) { del[k] = t; if (!(k in renamed)) removed.push(x.name); } }
+  for (const k of seen) delete del[k];
+  const obj = { ...p, participants: out };
+  if (Object.keys(del).length) obj._delItems = { ...(p._delItems || {}), participants: del }; else if (obj._delItems) { obj._delItems = { ...obj._delItems }; delete obj._delItems.participants; if (!Object.keys(obj._delItems).length) delete obj._delItems; }
+  // противная сторона из формы дела — строка участников с тем же именем: переименовали — имя меняется и в поле, убрали — поле пустеет
+  const ok0 = p.opponent ? partyKey(p.opponent) : '';
+  if (ok0 && oldByKey.has(ok0)) obj.opponent = renamed[ok0] || (seen.has(ok0) ? p.opponent : '');
+  return { obj, added, removed };
+}
+let PARTY_N = 0;
+function partyRowHtml(p, kind) {
+  const i = ++PARTY_N, pre = 'pt' + i;
+  if (typeof INN_TARGETS === 'object') INN_TARGETS[pre] = { name: pre + 'Name' };
+  return `<fieldset class="party-row" data-i="${i}" data-key="${esc(p && p.name ? partyKey(p.name) : '')}"><div class="form-grid">
+    ${wide(fInput(pre + 'Name', 'ФИО или наименование *', p && p.name, 'autocomplete="off"'))}${fSelect(pre + 'Role', 'Роль', (p && p.role) || 'Третье лицо', partyRolesFor(kind, p && p.role))}
+    ${fInnRow(pre, 'ИНН', p && p.inn)}${fInput(pre + 'Phone', 'Телефон', p && p.phone, 'type="tel" autocomplete="off" inputmode="tel"')}${fInput(pre + 'Email', 'Email', p && p.email, 'type="email" autocomplete="off" inputmode="email"')}
+    ${fAddr(pre + 'Addr', 'Адрес', p && p.addr)}${wide(fInput(pre + 'Note', 'Заметка', p && p.note, 'autocomplete="off" placeholder="представитель истца по доверенности; свидетель защиты"'))}
+    <input type="hidden" id="${pre}Ogrn" value="${esc((p && p.ogrn) || '')}"><input type="hidden" id="${pre}Kpp" value="${esc((p && p.kpp) || '')}">
+  </div><div class="actions" style="margin:4px 0 0"><button type="button" class="button small-btn party-del" onclick="partyRowDel(this)">${icon('trash-2')}Убрать участника</button></div></fieldset>`;
+}
+async function openPartiesForm(caseId) {
+  const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
+  const list = (Array.isArray(c.participants) ? c.participants : []).filter(p => p && p.name);
+  PARTIES_WARNED = '';
+  const body = `<p class="small muted">Третьи лица, представители, противная сторона и другие участники дела. Доверитель — в форме дела. Участник, которого вы уберёте, не вернётся при обмене с другими устройствами и с сайта суда.</p>
+    <div id="pt-rows">${list.map(p => partyRowHtml(p, c.kind)).join('')}</div>
+    <div class="actions" style="margin:8px 0">${btn('Добавить участника', `partyRowAdd('${jsq(c.kind || '')}')`, 'small-btn', 'plus')}</div>
+    ${fSaveBar(`savePartiesForm('${jsq(c.id)}')`, '')}`;
+  openSheet('Участники дела ' + (c.number || ''), body, UI.cur ? true : undefined);
+  if (typeof formRecMark === 'function') formRecMark('cases', c);
+  if (!list.length) partyRowAdd(c.kind || '');
+}
+function partyRowAdd(kind) {
+  const box = document.querySelector('#sheetContent #pt-rows'); if (!box) return;
+  box.insertAdjacentHTML('beforeend', partyRowHtml(null, kind));
+  const last = box.lastElementChild, inp = last && last.querySelector('input'); if (inp) inp.focus();
+}
+function partyRowDel(btnEl) { const row = btnEl && btnEl.closest('.party-row'); if (row) row.remove(); }
+function partyRowsRead() {
+  return [...document.querySelectorAll('#sheetContent .party-row')].map(el => { const pre = 'pt' + el.dataset.i, g = s => fv(pre + s);
+    return { key: el.dataset.key || '', name: g('Name'), role: g('Role'), inn: g('Inn'), phone: g('Phone'), email: g('Email'), addr: g('Addr'), ogrn: g('Ogrn'), kpp: g('Kpp'), note: g('Note') }; });
+}
+let PARTIES_WARNED = '';
+async function savePartiesForm(caseId) {
+  const prev = await getOne('cases', caseId); if (formGone(caseId, prev, 'Дело')) return;
+  const r = casePartiesModel(prev, partyRowsRead(), Date.now()); if (r.error) { fErr(r.error); return; }
+  // Б16: новый участник — ваш доверитель по другому делу
+  const hits = conflictForNames(r.added, await getAll('cases'), prev.id, m => m.client), key = [caseId, ...r.added.map(conflictNorm)].join('|');
+  if (hits.length && PARTIES_WARNED !== key) { PARTIES_WARNED = key; fErr(conflictText(hits)); return; }
+  PARTIES_WARNED = '';
+  try { await put('cases', r.obj); } catch (e) { logErr('form:parties', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  await refreshCasesCache();
+  toast('Участники сохранены' + (r.added.length ? ' · добавлено: ' + r.added.length : '') + (r.removed.length ? ' · убрано: ' + r.removed.length : ''));
+  closeSheet(); await nav(UI.screen); openCaseSheet(caseId);
+}
+
+// ── Б16: конфликт интересов ──
+const conflictNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[«»"'.,]/g, ' ').replace(/\s+/g, ' ').trim();
+const conflictSurname = s => { const w = conflictNorm(s).replace(/^(ооо|зао|оао|пао|ао|ип|ано|нко|кфх)\s+/, '').split(' ')[0] || ''; return w.length >= 4 ? w : ''; };
+// где имя встречается в других делах: доверителем (client: true) или участником; точное совпадение — первым, затем совпадение фамилии
+function conflictScanNext(name, cases, exceptCaseId) {
+  const n = conflictNorm(name); if (!n) return [];
+  const sn = conflictSurname(name), out = [];
+  for (const c of cases || []) {
+    if (!c || c._deleted || c.id === exceptCaseId) continue;
+    const one = (who, role, client) => { const w = conflictNorm(who); if (!w) return; if (w === n) out.push({ exact: true, client, role, name: who, caseId: c.id, caseNum: c.number || '', caseClient: c.client || '' }); else if (sn && conflictSurname(who) === sn) out.push({ exact: false, client, role, name: who, caseId: c.id, caseNum: c.number || '', caseClient: c.client || '' }); };
+    one(c.client, 'доверитель', true);
+    for (const p of (c.participants || [])) if (p && p.name && conflictNorm(p.name) !== conflictNorm(c.client)) one(p.name, String(p.role || 'участник').toLowerCase(), false);
+  }
+  return out.sort((a, b) => (b.exact ? 1 : 0) - (a.exact ? 1 : 0));
+}
+function conflictForNames(names, cases, exceptCaseId, pick) { const out = []; for (const nm of names || []) for (const m of conflictScanNext(nm, cases, exceptCaseId)) if (pick(m)) out.push({ ...m, asked: nm }); return out.sort((a, b) => (b.exact ? 1 : 0) - (a.exact ? 1 : 0)); }
+function conflictText(hits) {
+  const one = m => (m.exact ? '' : 'совпадает фамилия: ') + '«' + m.name + '» — ' + m.role + ' по делу ' + (m.caseNum || 'без номера') + (m.client || !m.caseClient ? '' : ' (доверитель ' + m.caseClient + ')');
+  const shown = hits.slice(0, 3).map(one).join('; ');
+  return 'Возможный конфликт интересов (подп. 10 п. 1 ст. 9, п. 1 ст. 11 Кодекса профессиональной этики адвоката): ' + shown + (hits.length > 3 ? '; и ещё ' + (hits.length - 3) : '') + '. Если конфликта нет — нажмите «Сохранить» ещё раз.';
+}
+// дело: доверитель встречается участником других дел; противная сторона — доверитель по другому делу. Проверяется у нового дела и когда
+// доверитель или противная сторона изменились (правка остального не предупреждает каждый раз)
+function caseConflictHits(obj, prev, cases) {
+  if (prev && conflictNorm(prev.client) === conflictNorm(obj.client) && conflictNorm(prev.opponent) === conflictNorm(obj.opponent)) return [];
+  return [...conflictForNames(obj.client ? [obj.client] : [], cases, obj.id, m => !m.client), ...conflictForNames(obj.opponent ? [obj.opponent] : [], cases, obj.id, m => m.client)].sort((a, b) => (b.exact ? 1 : 0) - (a.exact ? 1 : 0));
+}
+let CASE_CONFLICT_WARNED = '';
+function caseConflictGate(obj, prev, cases) {
+  // ключ — только введённое и id из формы: у нового дела id создаётся заново при каждом нажатии (урок 52)
+  const hits = caseConflictHits(obj, prev, cases), key = [(prev && prev.id) || 'new', conflictNorm(obj.client), conflictNorm(obj.opponent)].join('|');
+  if (hits.length && CASE_CONFLICT_WARNED !== key) { CASE_CONFLICT_WARNED = key; fErr(conflictText(hits)); return false; }
+  CASE_CONFLICT_WARNED = ''; return true;
+}
+// карточка доверителя (новая или переименованная): имя встречается участником других дел (противной стороной, третьим лицом)
+let CLIENT_CONFLICT_WARNED = '';
+function clientConflictGate(obj, prev, cases) {
+  if (prev && conflictNorm(prev.name) === conflictNorm(obj.name)) return true;
+  const hits = conflictForNames([obj.name], (cases || []).filter(c => !(c && (c.clientId ? c.clientId === obj.id : false))), '', m => !m.client), key = [(prev && prev.id) || 'new', conflictNorm(obj.name)].join('|');
+  if (hits.length && CLIENT_CONFLICT_WARNED !== key) { CLIENT_CONFLICT_WARNED = key; fErr(conflictText(hits)); return false; }
+  CLIENT_CONFLICT_WARNED = ''; return true;
+}
+
+// ── Б23: дубли доверителей ──
+const clientDupNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, ' ').trim(); // как в integrityModel
+const clientDupInn = s => String(s || '').replace(/\D/g, '');
+function clientDupGroup(key, clients) {
+  const live = (clients || []).filter(c => c && !c._deleted), k = String(key || '');
+  if (k.startsWith('i:')) return live.filter(c => clientDupInn(c.inn) === k.slice(2));
+  const n = k.startsWith('n:') ? k.slice(2) : clientDupNorm(k); return live.filter(c => clientDupNorm(c.name) === n);
+}
+const CLIENT_MERGE_FIELDS = ['type', 'role', 'phone', 'email', 'inn', 'addr', 'zip', 'birthDate', 'birthPlace', 'passport', 'passportInfo'];
+// что изменится: оставленная карточка дополняется пустыми полями из остальных; дела, счета, доверенности переходят к ней; остальные — в корзину
+function clientMergePlan(keep, others, d, now) {
+  const t = now || Date.now(), ids = new Set(others.map(o => o.id)), keys = new Set([keep, ...others].map(x => clientDupNorm(x.name)));
+  const k = { ...keep }; for (const f of CLIENT_MERGE_FIELDS) if (!String(k[f] || '').trim()) { const src = others.find(o => String(o[f] || '').trim()); if (src) k[f] = src[f]; }
+  const notes = [...new Set([keep, ...others].map(x => String(x.comment || '').trim()).filter(Boolean))]; if (notes.length > 1) k.comment = notes.join(' | ');
+  k.updatedAt = t;
+  const mine = r => r && !r._deleted && (r.clientId ? ids.has(r.clientId) : keys.has(clientDupNorm(r.client)));
+  const list = [['clients', k]], counts = { cases: 0, finance: 0, poa: 0, trash: others.length };
+  for (const c of (d.cases || [])) if (mine(c)) { list.push(['cases', { ...c, clientId: k.id, client: k.name }]); counts.cases++; }
+  for (const f of (d.finance || [])) if (mine(f)) { list.push(['finance', { ...f, clientId: k.id, client: k.name }]); counts.finance++; }
+  for (const p of (d.poa || [])) if (p && !p._deleted && ids.has(p.clientId)) { list.push(['poa', { ...p, clientId: k.id, clientName: k.name }]); counts.poa++; }
+  for (const o of others) list.push(['clients', deleteMark(o, t)]);
+  return { list, counts, keep: k };
+}
+async function clientMergeData() { const d = {}; for (const st of ['clients', 'cases', 'finance', 'poa']) d[st] = await getAll(st); return d; }
+async function openClientMerge(key) {
+  const d = await clientMergeData(), g = clientDupGroup(key, d.clients);
+  if (g.length < 2) { toast('Дублей этой карточки больше нет'); if (typeof openIntegritySheet === 'function') openIntegritySheet(sheetIsOpen() ? 'replace' : undefined); return; }
+  const use = x => ({ cases: d.cases.filter(c => c.clientId === x.id).length, fin: d.finance.filter(f => f.clientId === x.id).length, poa: d.poa.filter(p => p.clientId === x.id).length });
+  const ranked = g.map(x => ({ x, u: use(x) })).sort((a, b) => (b.u.cases + b.u.fin + b.u.poa) - (a.u.cases + a.u.fin + a.u.poa) || (a.x.createdAt || 0) - (b.x.createdAt || 0));
+  const rows = ranked.map(({ x, u }, i) => `<label class="list-btn cm-row"><input type="radio" name="cm-keep" value="${esc(x.id)}"${i === 0 ? ' checked' : ''}><span><b>${esc(x.name)}</b><br><span class="small muted">${esc([x.phone, x.inn ? 'ИНН ' + x.inn : '', x.addr].filter(Boolean).join(' · ') || 'реквизитов нет')}</span><br><span class="small muted">${esc('дел: ' + u.cases + ' · счетов: ' + u.fin + ' · доверенностей: ' + u.poa)}</span></span></label>`).join('');
+  openSheet('Объединить карточки', `<p class="small muted">Отметьте карточку, которую оставить. Её пустые поля заполнятся из остальных; дела, счета и доверенности перейдут к ней; остальные карточки уйдут в корзину — вернуть можно в «Настройках».</p>
+    <div class="list-rows" id="cm-rows">${rows}</div>
+    <div class="form-actions"><button type="button" class="button primary" id="cm-go" onclick="clientMergeApply('${jsq(key)}')">${icon('check')}Объединить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, UI.cur ? true : undefined);
+}
+async function clientMergeApply(key) {
+  const pick = document.querySelector('#sheetContent input[name="cm-keep"]:checked'); if (!pick) { toast('Отметьте карточку, которую оставить', true); return; }
+  const d = await clientMergeData(), g = clientDupGroup(key, d.clients), keep = g.find(x => x.id === pick.value), others = g.filter(x => x.id !== pick.value);
+  if (!keep || !others.length) { toast('Карточки изменились — откройте «Проверку данных» заново', true); return; }
+  const p = clientMergePlan(keep, others, d, Date.now());
+  try { await putMany(p.list); } catch (e) { logErr('integrity:clientMerge', e); toast('Не удалось объединить: ' + ((e && e.message) || e), true); return; }
+  await refreshCasesCache();
+  toast('Карточки объединены в «' + p.keep.name + '» · дел: ' + p.counts.cases + ', счетов: ' + p.counts.finance + ', доверенностей: ' + p.counts.poa + ' · в корзине: ' + p.counts.trash);
+  closeSheet(); openIntegritySheet();
+}
+
+// ── Б23: повторяющиеся номера дел ──
+const CASE_NUM_LINKED = ['hearings', 'tasks', 'meetings', 'finance', 'expenses', 'mail', 'deposits', 'orders', 'poa'];
+async function caseNumFixOpen(num) {
+  const all = await getAll('cases'), same = all.filter(c => c && c.number === num);
+  if (same.length < 2) { toast('Номер ' + num + ' больше не повторяется'); openIntegritySheet(sheetIsOpen() ? 'replace' : undefined); return; }
+  const d = {}; for (const st of CASE_NUM_LINKED) d[st] = await getAll(st);
+  const by = c => CASE_NUM_LINKED.reduce((a, st) => a + d[st].filter(r => r && r.caseId === c.id).length, 0), loose = CASE_NUM_LINKED.reduce((a, st) => a + d[st].filter(r => r && !r.caseId && r.caseNum === num).length, 0);
+  const rows = same.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0)).map(c => `<div class="list-btn"><span><b>${esc(c.client || 'Доверитель не указан')}</b>${c.subject ? ' · ' + esc(c.subject) : ''}<br><span class="small muted">${esc((c.kind || 'вид не указан') + ' · связанных записей: ' + by(c))}</span></span><button type="button" class="button small-btn" onclick="caseNumFixForm('${jsq(c.id)}')">Дать новый номер</button></div>`).join('');
+  openSheet('Номер ' + num + ' у ' + same.length + ' дел', `<p class="small muted">Дайте новый номер всем делам, кроме одного. Записи, привязанные к делу внутренней связью, перейдут на его новый номер.${loose ? ' Записей без связи с номером ' + esc(num) + ': ' + loose + ' — они останутся у дела, сохранившего номер; проверьте их в его карточке.' : ''}</p><div class="list-rows" id="cn-rows">${rows}</div>`, UI.cur ? true : undefined);
+}
+async function caseNumFixForm(caseId) {
+  const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
+  const all = await getAll('cases'), next = typeof nextCaseNo === 'function' ? nextCaseNo(all, typeof orphanCaseNums === 'function' ? await orphanCaseNums(all) : []) : '';
+  openSheet('Новый номер дела', `<p class="small muted">Сейчас: ${esc(c.number || '')} · ${esc(c.client || '')}. Предложен следующий свободный номер — его можно исправить.</p><div class="form-grid">${wide(fInput('cn-new', 'Новый номер дела *', next, 'autocomplete="off"'))}</div>${fSaveBar(`caseNumFixApply('${jsq(caseId)}')`, '')}`, UI.cur ? true : undefined);
+}
+async function caseNumFixApply(caseId) {
+  const c = await getOne('cases', caseId); if (formGone(caseId, c, 'Дело')) return;
+  // дело в корзине держит свой номер (автонумерация 03.10.2026) — проверка и по записям в корзине
+  const num = String(fv('cn-new') || '').trim(), all = (await getAllRaw('cases')).filter(Boolean); if (!num) { fErr('Впишите новый номер дела'); return; }
+  const taken = typeof caseNoTakenBy === 'function' ? caseNoTakenBy(all, num, caseId) : all.find(x => x && x.id !== caseId && x.number === num);
+  if (taken) { fErr('Номер ' + num + ' уже занят делом' + (taken.client ? ' ' + taken.client : '') + (taken._deleted ? ' (в корзине)' : '')); return; }
+  const old = c.number;
+  try { await put('cases', { ...c, number: num }); } catch (e) { logErr('integrity:caseNum', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  await refreshCasesCache();
+  let moved = 0; try { moved = await caseRelinkRenamed(caseId, old, num); } catch (e) { logErr('integrity:relink', e); toast('Номер сменён, но связанные записи перевести не удалось — откройте «Проверку данных»', true); }
+  toast('Номер дела: ' + num + (moved ? ' · записей переведено: ' + moved : ''));
+  closeSheet(); openIntegritySheet();
 }
 
 // ▼▼▼ ui/help.js
@@ -10346,6 +11011,13 @@ const HELP_SECTIONS = [
 <p>«Обращения» — заявки до заключения соглашения: срок ответа на претензию, статус, «Создать дело» — дело и доверитель заполняются из обращения.</p>` },
   { id: 'money', title: 'Финансы, отчёты, калькуляторы', html: `
 <p>«Финансы»: счета (фиксированная сумма, почасовой, гонорар успеха, абонентская плата), оплата из строки счёта, рассрочка, расходы, «Платежи» за период с итогом и «Выписка для печати».</p>
+<p>Депозит (авансы по делу): в карточке дела «Ещё: добавить в дело» → «Аванс», или группа «Деньги» → «Внести аванс» / «Списать». Остаток по делу виден там же; списание больше остатка программа записывает только после второго нажатия «Сохранить». Все остатки по делам и общий итог — «Финансы» → «Депозиты». Операции, внесённые в прежней программе, видны и здесь.</p>
+<p>Участники дела (третьи лица, представители, противная сторона): карточка дела → «Суд, стороны, инстанции» → «Изменить участников». У каждого — роль, ИНН (кнопка «По ИНН» заполняет адрес), телефон, почта, заметка. Участник, которого вы убрали, не вернётся ни при обмене с другими устройствами, ни с сайта суда.</p>
+<p>Конфликт интересов: при сохранении дела, доверителя и участников программа ищет то же имя в других делах — доверитель, который проходит у вас противной стороной или третьим лицом, и наоборот (подп. 10 п. 1 ст. 9, п. 1 ст. 11 Кодекса профессиональной этики адвоката). Совпадение имени или фамилии — только предупреждение: если конфликта нет, нажмите «Сохранить» ещё раз.</p>
+<p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер.</p>
+<p>Жест: строку «Выполнено» в «Задачах и сроках» и на «Сегодня» можно смахнуть пальцем вправо — задача или срок отмечаются выполненными; у прошедшего заседания смахивание открывает «Итог заседания». Кнопки в строке работают как раньше.</p>
+<p>Настройки: строка «Найти настройку» вверху — введите слово (например, «PIN», «Telegram», «ордер»), останутся только подходящие пункты.</p>
+<p>Журнал ордеров: «Настройки» → «Журнал ордеров» или карточка дела → «Суд, стороны, инстанции» → «Выписать ордер». Номер предлагается следующим за последним в журнале — сверьте его с бланком из книжки; повтор номера программа показывает и записывает только после второго нажатия. Номер ордера, вписанный в форму дела (вкладка «Соглашение»), попадает в журнал сам, один раз. Реестр ордеров для печати — кнопка в журнале.</p>
 <p>«Отчёты»: дела, деньги, нагрузка и обращения за месяц, квартал, год или свой период. Расчёт — как в прежней программе; у каждого блока указано, за какой он срок.</p>
 <p>«Калькуляторы»: госпошлина (с записью в дело), проценты по ст. 395 ГК РФ по ключевой ставке, неустойка и пеня по закону о защите прав потребителей, индексация по ст. 208 ГПК РФ, расчёт срока с переносом с нерабочего дня, дни в периоде. Ставки и индексы — в справочниках на том же экране; результат — подсказка, перед подачей сверяйте с первоисточником.</p>` },
   { id: 'sync', title: 'Синхронизация и свой сервер', html: `
@@ -10386,8 +11058,11 @@ const HELP_SECTIONS = [
 <ul><li>События приходят сами: при открытии программы, при возвращении в неё и раз в 30 минут (на «Сегодня» — когда проверено и когда следующая проверка). Коллектор обходит сайты по расписанию (утром и днём); «Обновить с сайтов судов» в «Судах и мониторинге» или «Обновить» на «Сегодня» — обойти прямо сейчас, это несколько минут; «Получить события» — только забрать то, что коллектор уже собрал. Перечень дел со ссылками уходит коллектору сам после сохранения дела.</li>
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
+<h3>Карточки всех дел разом</h3>
+<p>«Суды и мониторинг» → «Карточки всех дел»: программа по очереди читает карточку каждого дела в работе со ссылкой на сайт суда — суды общей юрисдикции через коллектор, КАД в приложении для Android — и пишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». В листе — итог по каждому делу; «Остановить» прерывает обход после текущего дела.</p>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
 <p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) карточку можно прочитать с телефона: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения 1.15. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
+<p>Автопроверка карточек КАД (приложение для Android 1.22 и новее): пока программа открыта, карточки дел в работе со ссылкой на КАД перечитываются сами раз в 6 часов — незаметно, по одной, и записываются в дело так же, как по кнопке «Карточка КАД». Выключатель и время последней проверки — Настройки → «Мониторинг судов». Если сайт попросит проверку браузера, автопроверка ждёт 6 часов: откройте «Карточка КАД» в любом деле и пройдите проверку — автопроверка продолжится.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
@@ -10409,6 +11084,7 @@ const HELP_SECTIONS = [
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
+<p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
 <p>Настройки → «Печать и выгрузка» (или «Отчёты» → «Печать и выгрузка»): выписка поступлений для кассовой книги, реестры дел, заседаний, ордеров и доверенностей — в окне печати можно «Сохранить как PDF»; таблицы CSV для Excel по разделам.</p>
 <p>Удалённое попадает в «Корзину» (Настройки) — оттуда его можно вернуть.</p>` },
   { id: 'licence', title: 'Лицензия и соглашение', html: `
@@ -10826,6 +11502,8 @@ async function caseFetchCard(caseId, opts) {
   const out = { done, diff, errs, ask, evCount, cfgErr, kad: kadStages }, m = caseCardResultModel(out);
   const shown = sheetIsOpen() && UI.cur && UI.cur.caseId === caseId;
   if (opts.silent) {
+    // Б25: в пакете «Карточки всех дел» итог показывает лист хода, а не сообщение на каждое дело
+    if (opts.batch) return out;
     if (done.length) { toast(m.toast); if (shown) await openCaseSheet(caseId); }
     else if (ask.length || diff.length) toast('Данные дела расходятся с сайтом суда — откройте дело и нажмите «Данные с сайта суда»');
     return out;
@@ -10863,7 +11541,7 @@ SCREENS.monitoring = async function () {
   // «Получить события» — только то, что уже лежит на сервере (быстро, сайты судов не трогаются); состояние автоматики — подзаголовком
   const sub = typeof monPullStatusText === 'function' ? monPullStatusText() : (m.last ? 'последнее получение ' + new Date(m.last).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'события с сайтов судов');
   const refreshBtn = `<button type="button" class="button primary" id="mon-refresh" onclick="monRefreshAll()"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? ' disabled' : ''}>${icon('refresh-cw')}Обновить с сайтов судов</button>`;
-  return pageHead('Суды и мониторинг', sub, refreshBtn + btn('Получить события', 'monitorPull()', '', 'cloud-download') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
+  return pageHead('Суды и мониторинг', sub, refreshBtn + btn('Получить события', 'monitorPull()', '', 'cloud-download') + (typeof openCardsAllSheet === 'function' ? btn('Карточки всех дел', 'openCardsAllSheet()', '', 'files') : '') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
     `<div class="status-line" id="mon-refresh-state"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? '' : ' hidden'}>${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? 'Обхожу сайты судов — до 8 минут, не закрывайте страницу…' : ''}</div>` +
     hint + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел по расписанию и кладёт события на ваш сервер; программа забирает их сама при открытии и раз в 30 минут. «Обновить с сайтов судов» — обойти сайты прямо сейчас. Как настроить — Настройки → «Мониторинг судов».', m.counts.all ? '' : btn('Обновить с сайтов судов', 'monRefreshAll()', 'primary', 'refresh-cw'))}</section>`;
 };
@@ -10930,6 +11608,8 @@ function openMonitorSettingsSheet(mode) {
     <div class="section-label">Как события попадают в программу</div>
     <label class="check"><input type="checkbox" id="mon-pull-auto"${typeof monPullAutoOn === 'function' && monPullAutoOn() ? ' checked' : ''} onchange="monPullSetAuto(this.checked); toast(this.checked ? 'События будут приходить сами: при открытии программы, при возврате в неё и раз в 30 минут' : 'Автоматическое получение выключено — только по кнопкам'); openMonitorSettingsSheet('replace')"><span>Получать события с сервера автоматически — при открытии программы, при возврате в неё и раз в 30 минут</span></label>
     <p class="small muted" id="mon-pull-state">${typeof monPullStatusText === 'function' ? esc(monPullStatusText()) : ''}</p>
+    ${typeof kadAutoStatusText === 'function' ? `<label class="check"><input type="checkbox" id="kad-auto"${kadAutoState().on ? ' checked' : ''}${kadQuietSupported() ? '' : ' disabled'} onchange="kadAutoSet(this.checked); const s = document.getElementById('kad-auto-state'); if (s) s.textContent = kadAutoStatusText()"><span>Проверять карточки КАД раз в 6 часов, пока программа открыта (приложение для Android)</span></label>
+    <p class="small muted" id="kad-auto-state">${esc(kadAutoStatusText())}</p>` : ''}
     <div class="section-label">Как применяются данные</div>
     <label class="check"><input type="checkbox" id="mon-auto"${auto ? ' checked' : ''} onchange="localStorage.setItem('crm_mon_auto', this.checked ? '1' : '0'); toast(this.checked ? 'Данные суда применяются автоматически' : 'Автоприменение выключено — события разбираются вручную')"><span>Применять данные суда автоматически: заседания создаются, переносятся и дополняются; дата акта записывается, если поле в деле пустое. Спорное — на разбор.</span></label>
     <div class="info-box">Если события не приходят: проверьте, что «Собрать сейчас» отвечает без ошибки (403 — неверный секрет, 404 — неверный адрес), что у дел указаны ссылки, и что список дел отправлен. Запрос к сайтам судов идёт из Облака, не с вашего устройства.</div>`, mode || true);
