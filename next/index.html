@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="11.10.2026 22:14 · 2e036b2">
+<meta name="build" content="12.10.2026 00:45 · b308c82">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -225,6 +225,10 @@ dialog::backdrop{background:#0c183a70}
   .intro-strip{padding:18px;margin-bottom:18px}
   dialog{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}.modal-head{padding:12px 8px 10px 18px}.modal-content{padding:16px 18px 20px}
   #toast{right:16px;bottom:150px}.upd-bar{right:16px;left:16px;bottom:212px}.more-grid{gap:8px}}
+/* 11.10.2026: пока на экране полоса «Доступна новая версия», сообщение выводится под шапкой — иначе многострочное сообщение закрывало кнопки
+   полосы «Обновить» и «Позже» (итог «Проверить обновления», снимок 360 px). Класс ставит и снимает сама полоса (next/boot.js): селектор «содержит
+   элемент» старые WebView не знают. Правило — после медиа-правила для телефона (урок 16). */
+body.upd-shown #toast{top:calc(var(--topbar-h,76px) + 12px);bottom:auto}
 
 /* ── «Дела» (этап 1в): фильтры, список, таблица, доска, панель карточки справа ── */
 .work-grid{display:grid;grid-template-columns:minmax(0,1fr);align-items:start}
@@ -4136,18 +4140,31 @@ function appUpdInstall() {
     else if (u.env === 'windows') { if (typeof window.CRMDesktop.installUpdate === 'function') { toast('Скачиваю установщик…'); Promise.resolve(window.CRMDesktop.installUpdate(u.url)).then(() => toast('Установщик запущен — следуйте его шагам')).catch(e => { logErr('appupd:install', e); toast('Не удалось скачать установщик: ' + ((e && e.message) || e), true); }); } else window.open(u.url, '_blank', 'noopener'); }
   } catch (e) { logErr('appupd:install', e); toast('Не удалось начать обновление: ' + ((e && e.message) || e), true); }
 }
-// Настройки → «Проверить обновления»
+// итог проверки программы (nextUpdateCheck в next/boot.js) — одной фразой; совет только там, где причина известна (урок 65)
+function appUpdProgText(r) {
+  const s = r && r.state, b = typeof BUILD_ID === 'string' && BUILD_ID ? ' (сборка ' + BUILD_ID + ')' : '';
+  if (s === 'new') return 'Программа: есть новая версия — нажмите «Обновить» в полосе внизу экрана.';
+  if (s === 'loading') return 'Программа: новая версия загружается — через несколько секунд внизу появится полоса «Обновить».';
+  if (s === 'latest') return 'Программа: у вас последняя версия' + b + '.';
+  if (s === 'error') return 'Программа: проверить не удалось — ' + String(r.error || '').replace(/[.\s]+$/, '') + '.';
+  return 'Программа: новая версия проверяется при открытии страницы.';
+}
+// Настройки → «Проверить обновления». 11.10.2026 (снимок пользователя, урок 113): в приложении кнопка проверяла только само приложение
+// («У вас 1.22, на раздаче 1.22 — обновление не требуется»), а новая сборка программы на сайте оставалась незамеченной. Теперь проверяются
+// программа и приложение, ответ называет обе части.
 async function appUpdCheckManual() {
   localStorage.removeItem('crm_appupd_skip');
-  const env = appEnv();
-  if (!env) { toast('Вы в браузере: программа обновляется сама при открытии (полоса «Доступна новая версия»), приложения — в самих приложениях'); return; }
-  const man = await appUpdFetch(); if (!man || !man[env]) { toast('На раздаче нет сведений о версии приложения — попробуйте позже', true); return; }
+  let prog = { state: 'nosw' }; try { if (typeof nextUpdateCheck === 'function') prog = await nextUpdateCheck(true); } catch (e) { logErr('appupd:prog', e); }
+  const pt = appUpdProgText(prog), perr = prog.state === 'error', env = appEnv();
+  if (!env) { toast(pt + ' Приложения для Android и компьютера проверяют свои обновления сами — в этом же пункте внутри приложения.', perr); return; }
+  const what = env === 'android' ? 'Приложение для Android' : 'Приложение для компьютера';
+  const man = await appUpdFetch(); if (!man || !man[env]) { toast(`${pt} ${what}: на раздаче нет сведений о версии — попробуйте позже.`, true); return; }
   APPUPD.checked = true; APPUPD.upd = await appUpdResolve(man, env);
-  if (APPUPD.missing) { toast(`На сайте указана версия ${APPUPD.missing.version}, но файла обновления по адресу нет — обновление пока недоступно`, true); return; }
-  toast(APPUPD.upd ? `Доступно обновление ${APPUPD.upd.version} — карточка на «Сегодня»` : `У вас ${appVersionNow() || 'неизвестная версия'}, на раздаче ${man[env].version} — обновление не требуется`);
+  if (APPUPD.missing) { toast(`${pt} ${what}: на сайте указана версия ${APPUPD.missing.version}, но файла обновления по адресу нет — обновление пока недоступно.`, true); return; }
+  toast(APPUPD.upd ? `${pt} ${what}: доступно обновление ${APPUPD.upd.version} — карточка на «Сегодня».` : `${pt} ${what}: у вас ${appVersionNow() || 'неизвестная версия'}, на раздаче ${man[env].version} — обновление не требуется.`, perr);
   if (APPUPD.upd) { closeSheet(true); nav('today'); }
 }
-function appVersionLine() { const env = appEnv(); return env ? (env === 'android' ? 'Приложение для Android ' : 'Приложение для компьютера ') + (appVersionNow() || '(версия неизвестна)') : 'Браузер'; }
+function appVersionLine() { const env = appEnv(); return 'программа' + (env ? ' и ' + (env === 'android' ? 'приложение для Android ' : 'приложение для компьютера ') + (appVersionNow() || '(версия неизвестна)') : ''); }
 
 // ▼▼▼ sync/files.js
 // ═══ sync/files.js — копии базы в файл и обмен через файл (этап 4, часть 4) ═══
@@ -6703,7 +6720,8 @@ function toast(msg, warn) {
   // сообщение — в верхнем слое браузера (popover), иначе открытый лист <dialog> его закрывает (снимок пользователя 03.10.2026);
   // где popover не поддерживается — как раньше, снизу страницы
   try { if (t.showPopover && !t.matches(':popover-open')) t.showPopover(); } catch (e) { logErr('toast', e); }
-  clearTimeout(_toastTimer); _toastTimer = setTimeout(() => { t.className = ''; try { if (t.hidePopover && t.matches(':popover-open')) t.hidePopover(); } catch (e) { logErr('toast', e); } }, warn ? 8000 : 3500);
+  // 11.10.2026: длинное сообщение (итог «Проверить обновления» — программа и приложение) держится дольше, чтобы его успели прочитать
+  clearTimeout(_toastTimer); _toastTimer = setTimeout(() => { t.className = ''; try { if (t.hidePopover && t.matches(':popover-open')) t.hidePopover(); } catch (e) { logErr('toast', e); } }, warn ? 8000 : Math.min(8000, Math.max(3500, String(msg || '').length * 45)));
 }
 
 // ── тема и шрифт (ключи настроек — те же, что у прежней программы: crm_theme, crm_fontsize, crm_fontfam) ──
@@ -6752,15 +6770,20 @@ function guardDraftsAll() { let a = []; try { a = JSON.parse(localStorage.getIte
 function guardDraftsWrite(list) { const a = list.slice().sort((x, y) => (y.at || 0) - (x.at || 0)).slice(0, GUARD_DRAFT_MAX); localStorage.setItem(GUARD_DRAFTS_KEY, JSON.stringify(a)); if (a.length) localStorage.setItem(GUARD_DRAFT_KEY, JSON.stringify(a[0])); else localStorage.removeItem(GUARD_DRAFT_KEY); }
 // saving — время нажатия «Сохранить»/«Удалить»: пока запись идёт, закрытие листа (успех) разрешено; ошибка записи (fErr, сообщение об
 // ошибке) сбрасывает отметку — защита и черновик остаются (разбор GPT 03.10.2026: раньше защита снималась до результата записи)
-const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0, busy: null, slowT: 0 };
+const SHEET_GUARD = { snap: '', armed: false, timer: null, prompt: false, saving: 0, busy: null, slowT: 0, runKey: '', failed: false };
 const GUARD_SAVE_MS = 20000, GUARD_START_MS = 1500, GUARD_SLOW_MS = 8000;
 // разбор GPT 04.10.2026 (вечер), п. 5: «идёт запись» — пока обработчик «Сохранить» не завершился (guardRun держит его обещание), а не по таймеру;
 // таймер остаётся запасным для кнопок без guardRun («Удалить») и для сообщения «дольше обычного»
 function guardSaving() { return !!SHEET_GUARD.busy || (!!SHEET_GUARD.saving && Date.now() - SHEET_GUARD.saving < GUARD_SAVE_MS); }
 function guardRun(fn) {
   if (SHEET_GUARD.busy) { toast('Сохраняю — подождите'); return SHEET_GUARD.busy; }
+  // 11.10.2026 (провал живого сценария форм, разобран по коду): черновик сохраняемой формы снимается по итогу записи — здесь, в завершении,
+  // по ключу на момент нажатия. Раньше его снимал показ следующего листа или закрытие — по ключу листа, открытого В ЭТОТ МОМЕНТ: если за время
+  // медленной записи открылась другая форма, снимался её черновик (которого нет), а черновик сохранённой записи оставался навсегда
+  // («Незавершённая форма» на «Сегодня»). Снимается, если неудачи не было (guardSaveFailed) и формы на экране уже нет (обработчик её закрыл).
+  SHEET_GUARD.runKey = guardCurKey(); SHEET_GUARD.failed = false;
   SHEET_GUARD.saving = Date.now(); clearTimeout(SHEET_GUARD.slowT); SHEET_GUARD.slowT = setTimeout(() => { if (SHEET_GUARD.busy) toast('Сохранение занимает дольше обычного — подождите'); }, GUARD_SLOW_MS);
-  const p = Promise.resolve().then(fn).catch(e => { logErr('form:run', e); if (typeof fErr === 'function') fErr((e && e.message) || 'Не удалось сохранить'); }).finally(() => { if (SHEET_GUARD.busy === p) SHEET_GUARD.busy = null; clearTimeout(SHEET_GUARD.slowT); });
+  const p = Promise.resolve().then(fn).catch(e => { logErr('form:run', e); if (typeof fErr === 'function') fErr((e && e.message) || 'Не удалось сохранить'); }).finally(() => { if (SHEET_GUARD.busy === p) { const k = SHEET_GUARD.runKey; if (k && !SHEET_GUARD.failed && !(sheetIsOpen() && guardCurKey() === k)) guardDraftDrop(k); SHEET_GUARD.busy = null; SHEET_GUARD.runKey = ''; } clearTimeout(SHEET_GUARD.slowT); });
   SHEET_GUARD.busy = p; return p;
 }
 // разбор GPT 04.10.2026, пп. 2 и 7: «идёт запись» — пока в базу действительно пишется (незавершённые put/putRaw/del) или первые 1,5 с после
@@ -6791,7 +6814,7 @@ function formRecConflictText(r, cur, obj) {
 }
 // устойчивый id новой записи на время жизни формы: повтор «Сохранить» после сбоя не создаёт вторую запись (разбор GPT 04.10.2026 (вечер), п. 1)
 function formNewId(prefix, fallback) { if (!UI.cur) return fallback; UI.cur.newIds = UI.cur.newIds || {}; if (!UI.cur.newIds[prefix]) UI.cur.newIds[prefix] = fallback; return UI.cur.newIds[prefix]; }
-function guardSaveFailed() { SHEET_GUARD.saving = 0; }
+function guardSaveFailed() { SHEET_GUARD.saving = 0; SHEET_GUARD.failed = true; }
 function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions'); }
 // значения всех полей формы одной строкой — для сравнения
 function guardFormState() {
@@ -6804,7 +6827,8 @@ function guardFormState() {
 function guardArm() {
   clearTimeout(SHEET_GUARD.timer); SHEET_GUARD.prompt = false;
   // показан следующий лист, пока шло сохранение, — запись удалась: черновик прежней формы больше не нужен
-  if (guardSaving()) guardDraftDrop();
+  // идёт запись через guardRun — черновик снимет её завершение (по итогу и по своему ключу), а не показ листа
+  if (guardSaving() && !SHEET_GUARD.busy) guardDraftDrop();
   SHEET_GUARD.saving = 0;
   if (!guardIsForm()) { SHEET_GUARD.armed = false; SHEET_GUARD.snap = ''; return; }
   SHEET_GUARD.armed = true;
@@ -6855,8 +6879,9 @@ function guardDraftSave() {
 // предложение GPT «Смартфон»: уход со страницы (переключение приложений, клавиатура свернула окно) — черновик пишется сразу, не дожидаясь паузы ввода
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && SHEET_GUARD.armed) { clearTimeout(SHEET_GUARD.timer); try { guardDraftSave(); } catch (e) { logErr('guard:draft', e); } } });
 // снимается черновик текущей формы (по её ключу); ключ — из кнопки «Сохранить» открытого листа или запомненный при записи черновика
+function guardCurKey() { return (UI.cur && UI.cur.draftKey) || (guardIsForm() ? guardDraftKeyOf({ open: guardFormOpener(), title: UI.cur && UI.cur.title }) : ''); }
 function guardDraftDrop(key) {
-  try { const k = key || (UI.cur && UI.cur.draftKey) || (guardIsForm() ? guardDraftKeyOf({ open: guardFormOpener(), title: UI.cur && UI.cur.title }) : ''); if (!k) return;
+  try { const k = key || guardCurKey(); if (!k) return;
     guardDraftsWrite(guardDraftsAll().filter(x => guardDraftKeyOf(x) !== k)); if (UI.cur && UI.cur.draftKey === k) UI.cur.draftKey = ''; } catch (e) { logErr('guard:draft', e); }
 }
 function guardDraftGet(key) { const all = guardDraftsAll(); return key ? (all.find(x => guardDraftKeyOf(x) === key) || null) : (all[0] || null); }
@@ -6864,7 +6889,7 @@ function guardDraftGet(key) { const all = guardDraftsAll(); return key ? (all.fi
 function guardBeforeClose(how, byUser) {
   if (guardSaving()) {
     // закрывает сам обработчик после успешной записи — защита и черновик больше не нужны
-    if (!byUser) { guardDisarm(true); SHEET_GUARD.saving = 0; return true; }
+    if (!byUser) { guardDisarm(!SHEET_GUARD.busy); SHEET_GUARD.saving = 0; return true; }
     // закрывает пользователь (×, ←, Esc, «Назад»), пока запись идёт, — ждём её исхода (при ошибке введённое иначе пропало бы)
     if (guardWriteInProgress()) { toast('Идёт сохранение — подождите секунду'); return false; }
     // записи нет (форма показала предупреждение и ждёт) — обычная проверка изменений ниже
@@ -7154,7 +7179,7 @@ async function openSearchSheet(q) {
 const SETTINGS_WORDS = {
   openBackupSheet: 'копия резервная бэкап экспорт импорт файл восстановить перенести поделиться telegram телеграм',
   openPrintSheet: 'печать реестр выписка csv excel выгрузка кассовая книга', openSecuritySheet: 'pin пин код пароль блокировка вход защита',
-  appUpdCheckManual: 'обновление версия приложение apk android андроид', openLicenseSheet: 'лицензия ключ пропуск подписка оплата тариф демо купить',
+  appUpdCheckManual: 'обновление обновить новая версия программа сборка приложение apk android андроид', openLicenseSheet: 'лицензия ключ пропуск подписка оплата тариф демо купить',
   openRemindSheet: 'telegram телеграм бот уведомления напоминания', openDevRemindSheet: 'уведомления напоминания будильник устройство телефон',
   openYcSetupSheet: 'сервер облако яндекс функция мастер развернуть', openTrashSheet: 'корзина удалённые удаленные восстановить вернуть',
   openOrdersSheet: 'ордер ордера журнал книжка бланк', openDadataSheet: 'dadata дадата инн реквизиты адрес егрюл огрн',
@@ -11651,6 +11676,7 @@ const HELP_SECTIONS = [
 <li><b>«Пока форма была открыта, запись изменили на другом устройстве»</b> — программа показывает оба варианта; второе «Сохранить» запишет ваш поверх, «Отмена» и открыть заново — увидеть чужой.</li>
 <li><b>Ошибка при сохранении или обмене</b> — Настройки → «Журнал ошибок» → «Скопировать» и пришлите автору: там нет данных дел, только технические сведения.</li>
 <li><b>Появилась полоса «Доступна новая версия»</b> — нажмите «Обновить»: программа дождётся записи, незавершённую форму сохранит в черновик.</li>
+<li><b>Как проверить, нет ли новой версии</b> — Настройки → «Проверить обновления»: проверяются и программа, и приложение для Android или компьютера, ответ называет обе части. Программа ищет новую версию и сама — при открытии, при возврате в приложение (не чаще раза в 15 минут) и раз в час, пока открыта; номер сборки — внизу Настроек, «О программе».</li>
 <li><b>Запись не сохраняется: «Деморежим…»</b> — исчерпан месячный предел без пропуска; Настройки → «Лицензия».</li>
 <li><b>Незавершённая форма</b> — на «Сегодня» полоска «Незавершённая форма» → «Открыть»; если запись изменили на другом устройстве, программа предупредит.</li></ul>
 ` },
@@ -12239,14 +12265,14 @@ document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() 
 // Обновление программы (аудит 02.10.2026): новая версия service worker ждёт согласия пользователя — полоса «Доступна новая
 // версия» с кнопками «Обновить» и «Позже». Раньше программа согласия не спрашивала, и новая версия включалась только после
 // закрытия всех вкладок. «Позже» убирает полосу до следующего запуска.
-const NEXT_UPDATE = { reg: null, asked: false, done: false };
+const NEXT_UPDATE = { reg: null, asked: false, done: false, last: 0 };
 function nextUpdateOffer(reg) {
   NEXT_UPDATE.reg = reg || NEXT_UPDATE.reg; if (document.getElementById('upd-bar')) return;
   const bar = document.createElement('div'); bar.id = 'upd-bar'; bar.className = 'upd-bar'; bar.setAttribute('role', 'status');
   bar.innerHTML = '<span>Доступна новая версия программы. Обновление перезагрузит страницу — сначала сохраните открытую форму.</span><span class="upd-actions"><button type="button" class="button primary" id="upd-go" onclick="nextUpdateApply()">Обновить</button><button type="button" class="button" id="upd-later" onclick="nextUpdateLater()">Позже</button></span>';
-  document.body.appendChild(bar);
+  document.body.appendChild(bar); document.body.classList.add('upd-shown');
 }
-function nextUpdateLater() { const b = document.getElementById('upd-bar'); if (b) b.remove(); }
+function nextUpdateLater() { const b = document.getElementById('upd-bar'); if (b) b.remove(); document.body.classList.remove('upd-shown'); }
 function nextUpdateReload() { if (NEXT_UPDATE.done) return; NEXT_UPDATE.done = true; location.reload(); }
 // разбор GPT 05.10.2026, п. 7: обновление ждёт, пока завершится запись из формы; незавершённая форма уходит в черновик до перезагрузки
 async function nextUpdateApply() {
@@ -12259,8 +12285,32 @@ async function nextUpdateApply() {
   if (!w) { nextUpdateReload(); return; }
   w.postMessage({ type: 'SKIP_WAITING' }); setTimeout(nextUpdateReload, 3000);
 }
+// 11.10.2026 (снимок пользователя, урок 113): браузер ищет новую версию программы только при открытии страницы, а приложение держит её
+// открытой часами — на планшете новая сборка оставалась незамеченной. Прежняя программа проверяла сама при возврате на экран (не чаще раза
+// в 15 минут); здесь так же, раз в час на экране и по кнопке «Проверить обновления» (force). Итог: 'new' — новая версия ждёт «Обновить»
+// (полоса показана), 'loading' — загружается (полоса появится сама), 'latest', 'error' (текст ошибки), 'nosw' — проверять нечем, 'skip'.
+async function nextUpdateCheck(force) {
+  const reg = NEXT_UPDATE.reg;
+  if (!reg || typeof reg.update !== 'function') return { state: 'nosw' };
+  if (!force && Date.now() - NEXT_UPDATE.last < 15 * 60 * 1000) return { state: 'skip' };
+  NEXT_UPDATE.last = Date.now();
+  try { await reg.update(); } catch (e) { logErr('next:update', e); return { state: 'error', error: (e && e.message) || String(e) }; }
+  // по кнопке — дождаться загрузки новой версии (до 10 с): ответ «есть новая версия» приходит вместе с полосой «Обновить»
+  if (force && reg.installing) {
+    const w = reg.installing;
+    await new Promise(res => { const t = setTimeout(res, 10000); w.addEventListener('statechange', () => { if (w.state !== 'installing') { clearTimeout(t); res(); } }); });
+    if (w.state === 'redundant') return { state: 'error', error: 'новая версия программы не загрузилась (сбой установки)' };
+  }
+  if (reg.waiting && navigator.serviceWorker.controller) { nextUpdateOffer(reg); return { state: 'new' }; }
+  if (reg.installing) return { state: 'loading' };
+  return { state: 'latest' };
+}
 function nextUpdateWatch(reg) {
   if (!reg || typeof reg.addEventListener !== 'function') return;
+  // открытие страницы уже проверило новую версию — следующая сама не раньше чем через 15 минут
+  NEXT_UPDATE.reg = reg; NEXT_UPDATE.last = Date.now();
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') nextUpdateCheck(false); });
+  setInterval(() => { if (document.visibilityState === 'visible') nextUpdateCheck(false); }, 60 * 60 * 1000);
   const offer = () => { if (reg.waiting && navigator.serviceWorker.controller) nextUpdateOffer(reg); };
   offer();
   reg.addEventListener('updatefound', () => { const w = reg.installing; if (w) w.addEventListener('statechange', () => { if (w.state === 'installed') offer(); }); });
