@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 00:02 · e8c9628">
+<meta name="build" content="13.10.2026 00:49 · 152fb95">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -320,6 +320,13 @@ button.imp-main:hover .task-title{color:var(--accent)}
 .list-rows>.list-btn>span:last-child{overflow-wrap:anywhere}
 /* 13.10.2026 (А3): строка «сайта суда» — название сверху, пояснение под ним: длинное пояснение с номером не рвётся по колонкам */
 .list-rows>.list-btn.site-row{flex-direction:column;align-items:flex-start;gap:2px;text-decoration:none}
+/* А4: возврат к снимку — кнопки строки снимка переносятся, списки записей сворачиваются */
+.snap-row>span:first-child{flex:1;min-width:0}
+.snap-row>.row-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+.snap-row>.row-actions>.button{white-space:nowrap}
+.rb-list>summary{display:flex;align-items:center;min-height:var(--touch);cursor:pointer;color:var(--accent);font-size:.875rem}
+.rb-rows{max-height:50vh;overflow-y:auto;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.rb-row>span{overflow-wrap:anywhere}
 /* этап 2б: полная форма дела — вкладки */
 .case-tabs{margin:0 0 12px}.case-tabs .button[hidden]{display:none}
 /* этап 2б: календарь — месяц (по образцу «Практики»), неделя, список */
@@ -3811,9 +3818,12 @@ async function openSrvHistorySheet(res) {
   if (!res) { toast('Запрашиваю историю снимков…'); res = await srvCall('dbhistlist'); }
   if (!res || !res.ok) { toast(res && res.error === 'unknown_action' ? 'Сервер старой версии: история снимков есть с версии 178' : 'История не получена: ' + nextSrvError(res), true); return res; }
   const fmt = v => new Date(v).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-  const rows = (res.items || []).map((x, i) => `<div class="snap-row"><span>${esc(fmt(x.ver))}${i === 0 ? ' · текущий' : ''}<br><span class="muted small">${esc((Math.round((x.bytes || 0) / 102.4) / 10).toLocaleString('ru-RU'))} КБ</span></span><button type="button" class="button small-btn" id="snap-save-${i}" onclick="srvSnapshotSave(${Number(x.ver) || 0})">${icon('cloud-download', 'icon-sm')}Скачать</button></div>`).join('');
+  // А4 (13.10.2026): «Вернуть…» — возврат базы к снимку (sync/snaprb.js): сравнение, выбор записей, запись новыми правками, отмена
+  const back = typeof openSnapRollback === 'function';
+  const rows = (res.items || []).map((x, i) => `<div class="snap-row"><span>${esc(fmt(x.ver))}${i === 0 ? ' · текущий' : ''}<br><span class="muted small">${esc((Math.round((x.bytes || 0) / 102.4) / 10).toLocaleString('ru-RU'))} КБ</span></span><span class="row-actions">${back && i ? `<button type="button" class="button small-btn" id="snap-back-${i}" onclick="openSnapRollback(${Number(x.ver) || 0})">${icon('rotate-ccw', 'icon-sm')}Вернуть…</button>` : ''}<button type="button" class="button small-btn" id="snap-save-${i}" onclick="srvSnapshotSave(${Number(x.ver) || 0})">${icon('cloud-download', 'icon-sm')}Скачать</button></span></div>`).join('');
   openSheet('Снимки базы на сервере', (rows ? `<p class="small muted">Сервер хранит пять последних снимков и по одному за каждый из 14 последних дней с записями. Снимки зашифрованы паролем базы.</p><div class="list-rows">${rows}</div>` : emptyState('hard-drive', 'Снимков пока нет', 'Первый снимок появится после первой записи базы на сервер 178.')) +
-    `<div class="info-box">«Скачать» сохраняет снимок файлом копии; пароль к нему — пароль шифрования синхронизации. Вернуться к снимку: в прежней программе — «Восстановить из файла»; в новой версии — «Копии базы» → «Загрузить из файла» (записи из снимка добавятся и обновят более старые, но правки, сделанные после снимка, не отменят).</div>`, sheetIsOpen() ? true : undefined);
+    (back ? snapRbUndoBox() : '') +
+    `<div class="info-box">«Вернуть…» сравнивает снимок с базой на устройстве и показывает, что вернётся: удалённое после снимка, изменённое после снимка, созданное после снимка (его можно убрать в корзину). Ничего не записывается, пока вы не нажмёте «Вернуть выбранное». «Скачать» сохраняет снимок файлом копии; пароль к нему — пароль шифрования синхронизации; в прежней программе такой файл открывает «Восстановить из файла».</div>`, sheetIsOpen() ? true : undefined);
   return res;
 }
 
@@ -5149,6 +5159,7 @@ function openBackupSheet(sub) {
     <p class="small muted" id="bk-files"></p>
     <div class="info-box warning" id="bk-nofiles" hidden>Эта копия больше, чем программа может открыть на этом устройстве (на телефоне — 120 МБ, на компьютере — 400 МБ). Сохраните ещё копию без файлов документов — её программа откроет; файлы останутся на устройстве и в хранилище сервера.<div class="form-actions"><button type="button" class="button" id="bk-save-nofiles" onclick="backupSaveNow(true)">${icon('hard-drive')}Сохранить копию без файлов документов</button></div></div>
     ${last ? `<p class="small muted">Последнее скачивание копии с этого устройства: ${esc(new Date(last).toLocaleString('ru-RU'))}${checked ? '; последняя проверенная копия (открыта и расшифрована): ' + esc(new Date(checked).toLocaleString('ru-RU')) : ''}.</p>` : ''}
+    ${typeof snapRbUndoBox === 'function' ? snapRbUndoBox() : ''}
     <div class="section-label step-label">Загрузить из файла</div>
     <p class="small muted">Записи из файла добавятся к базе и обновят более старые; ничего не стирается. Сначала программа покажет, что изменится.</p>
     <div class="form-grid"><label class="field wide"><span>Файл копии (.crm)</span><input type="file" id="bk-file" accept=".crm,.json,application/json,application/octet-stream"></label>${wide(fInput('bk-pass', 'Пароль копии', '', 'type="password" autocomplete="off"'))}</div>
@@ -5198,7 +5209,8 @@ async function backupCheckFile() {
   const bigNote = file.size > BACKUP_WARN ? ` Файл большой — ${backupMb(file.size)} МБ: объединение займёт несколько минут.` : '';
   if (box) box.innerHTML = `<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}</div>
     <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
-    <div class="form-actions">${m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}</div>`;
+    <div class="form-actions">${m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}${typeof openFileRollback === 'function' ? `<button type="button" class="button" id="bk-rollback" onclick="openFileRollback()">${icon('rotate-ccw')}Вернуть базу к копии…</button>` : ''}</div>
+    ${typeof openFileRollback === 'function' ? '<p class="small muted">«Объединить» только добавляет и обновляет. «Вернуть базу к копии…» покажет, что изменилось после копии, и вернёт выбранное к её состоянию — в том числе правки, сделанные позже.</p>' : ''}`;
   return m;
 }
 async function backupApply() {
@@ -5230,6 +5242,284 @@ async function srvSnapshotSave(ver) {
   if (!fileSave(name, r.data)) { toast('Браузер не дал сохранить файл', true); return null; }
   toast('Снимок сохранён: ' + name + '. Пароль к нему — пароль шифрования синхронизации');
   return { name, bytes: r.data.length };
+}
+
+// ▼▼▼ sync/snaprb.js
+// ═══ sync/snaprb.js — А4: возврат базы к снимку (13.10.2026, план переноса; обещано 02.10.2026) ═══
+// Прежняя программа «восстанавливала» снимок слиянием: записи, которых нет, возвращались, а правки, сделанные после снимка, оставались.
+// Здесь — возврат к состоянию снимка: программа сравнивает снимок (с сервера или из файла копии) с базой на устройстве и показывает три
+// группы — удалённые после снимка (вернутся), изменённые после снимка (вернутся к значениям снимка), созданные после снимка (уйдут в
+// корзину; по умолчанию не отмечены). Пользователь снимает отметки с того, что возвращать не нужно.
+// Возврат записывается как НОВЫЕ правки (putMany: свежая метка _upd и метки полей _ch), поэтому при обмене он уходит на остальные устройства
+// и побеждает более ранние правки по тем же полям (слияние по полям, раздел 6). Отдельно:
+//  • у дела поля, которые сливаются по журналу дела (CASE_MERGE_FIELDS), получают события журнала — иначе слияние вернуло бы прежнее значение
+//    (так же делает «Вернуть моё», урок А2);
+//  • списки с элементами (платежи, сроки дела, участники) возвращаются по элементам: элемент, добавленный после снимка, получает надгробие
+//    (_delItems / _delDl), элемент, удалённый после снимка, — новую метку создания, которая старше надгробия (иначе слияние снова убрало бы его);
+//  • журналы (история дела, квитанции ИП) не откатываются — они только пополняются;
+//  • настройки, файлы документов, события судов, документы и сеансы помощника не меняются (перечень — SNAPRB_STORES).
+// Перед записью — проверка версии каждой записи в той же транзакции (уроки 78, 89): изменилась после сравнения — возврат не пишется, сравнение
+// нужно повторить. Прежние версии изменённых записей запоминаются на устройстве (crm_snaprb_undo, наружу не уходит — его нет в
+// SYNC_SETTINGS_KEYS): «Отменить возврат» вернёт их тем же механизмом. Чистые функции snapRbPlan, snapRbRecord, snapRbTarget,
+// snapRbCaseEvents, snapRbBuild проверяет next_63_snaprb.js (в том числе слиянием с другим устройством).
+const SNAPRB_SET = new Set(['clients', 'cases', 'hearings', 'finance', 'refs', 'tasks', 'mail', 'files', 'expenses', 'templates', 'orders', 'time', 'deposits', 'leads', 'poa', 'meetings', 'caseEvents']);
+const snapRbStores = () => (typeof STORES === 'object' ? STORES : [...SNAPRB_SET]).filter(s => SNAPRB_SET.has(s));
+// справочники в корзину не уходят — созданные после снимка строки справочников не трогаются
+const SNAPRB_NO_EXTRA = new Set(['refs']);
+// поля-журналы и служебная метка правки в сравнении не участвуют
+const SNAPRB_SKIP = { '*': new Set(['updatedAt']), cases: new Set(['updatedAt', 'history', 'ipReceipts']) };
+const SNAPRB_UNDO_KEY = 'crm_snaprb_undo', SNAPRB_UNDO_MAX = 2500000, SNAPRB_SHOW = 300;
+const snapRbClone = v => v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+const snapRbSame = (a, b) => JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
+// из журнала дела участвуют только заметки (поле note): остальные события — история правок, они только пополняются
+const snapRbOk = (store, r) => !!r && r.id != null && (store !== 'caseEvents' || r.field === 'note');
+function snapRbFields(store, cur, snap) {
+  const skip = SNAPRB_SKIP[store] || SNAPRB_SKIP['*'], out = [];
+  for (const k of new Set([...Object.keys(cur || {}), ...Object.keys(snap || {})])) {
+    if (k.startsWith('_') || k === 'id' || skip.has(k)) continue;
+    if (!snapRbSame(cur && cur[k], snap && snap[k])) out.push(k);
+  }
+  return out;
+}
+// Запись в состоянии снимка — как новая правка поверх текущей (cur может отсутствовать: запись удалена окончательно). now — время возврата.
+function snapRbRecord(store, cur, snap, now) {
+  const c = cur || {}, o = snapRbClone(snap);
+  for (const k of ['_deleted', '_deletedAt', '_deletedWith', '_ch', '_upd', '_device']) delete o[k];
+  const after = t => Math.max(now, (Number(t) || 0) + 1);
+  // надгробия обеих версий — по максимуму (как при слиянии)
+  const dels = {};
+  for (const src of [c._delItems, snap._delItems]) if (src && typeof src === 'object') for (const f of Object.keys(src)) { dels[f] = dels[f] || {}; for (const id of Object.keys(src[f] || {})) dels[f][id] = Math.max(Number(dels[f][id]) || 0, Number(src[f][id]) || 0); }
+  const isCase = store === 'cases', special = isCase ? new Set(['deadlines', 'participants', 'history', 'ipReceipts']) : new Set();
+  // списки с элементами (платежи и т. п.): по элементам
+  for (const k of new Set([...Object.keys(c), ...Object.keys(snap)])) {
+    if (k.startsWith('_') || k === 'id' || special.has(k) || !(itemListKey(c[k]) || itemListKey(snap[k]))) continue;
+    const S = Array.isArray(snap[k]) ? snap[k] : [], C = Array.isArray(c[k]) ? c[k] : [], d = dels[k] || {};
+    const cm = new Map(C.filter(x => x && x.id != null).map(x => [x.id, x])), sIds = new Set(S.filter(x => x && x.id != null).map(x => x.id));
+    if (Array.isArray(snap[k])) o[k] = S.map(x => {
+      if (!x || x.id == null) return snapRbClone(x);
+      const y = snapRbClone(x), had = cm.get(x.id), t = Number(d[x.id]) || 0;
+      // удалён после снимка (или есть надгробие не моложе создания) — новая метка создания, старше надгробия; изменён — новая метка правки
+      if (!had || t >= (Number(y.createdAt) || 0)) { y.createdAt = after(t); y.updatedAt = now; } else if (!snapRbSame(had, x)) y.updatedAt = now;
+      return y;
+    });
+    for (const x of C) if (x && x.id != null && !sIds.has(x.id)) d[x.id] = after(x.createdAt);
+    if (Object.keys(d).length) dels[k] = d;
+  }
+  if (isCase) {
+    // сроки дела: надгробия _delDl
+    const dl = {}; for (const src of [c._delDl, snap._delDl]) if (src && typeof src === 'object') for (const id of Object.keys(src)) dl[id] = Math.max(Number(dl[id]) || 0, Number(src[id]) || 0);
+    const SD = Array.isArray(snap.deadlines) ? snap.deadlines : [], CD = Array.isArray(c.deadlines) ? c.deadlines : [];
+    if (Array.isArray(snap.deadlines) || CD.length) {
+      const cm = new Map(CD.filter(x => x && x.id).map(x => [x.id, x])), sIds = new Set(SD.filter(x => x && x.id).map(x => x.id));
+      o.deadlines = SD.map(x => { const y = snapRbClone(x); if (y && y.id) { const t = Number(dl[y.id]) || 0; if (!cm.has(y.id) || t >= (Number(y.createdAt) || 0)) y.createdAt = after(t); } return y; });
+      for (const x of CD) if (x && x.id && !sIds.has(x.id)) dl[x.id] = after(x.createdAt);
+    }
+    if (Object.keys(dl).length) o._delDl = dl; else delete o._delDl;
+    // участники: по имени, надгробия _delItems.participants и метка addedAt (next/fixes.js)
+    const norm = p => (typeof crmMonNorm === 'function' ? crmMonNorm((p && p.name) || '') : String((p && p.name) || '').toLowerCase().trim());
+    const SP = Array.isArray(snap.participants) ? snap.participants : [], CP = Array.isArray(c.participants) ? c.participants : [];
+    if (Array.isArray(snap.participants) || CP.length) {
+      const dp = dels.participants || {}, cpk = new Set(CP.map(norm)), spk = new Set(SP.map(norm));
+      o.participants = SP.map(p => { const y = snapRbClone(p), k = norm(p), t = Number(dp[k]) || 0; if (y && typeof y === 'object' && (!cpk.has(k) || t > (Number(y.addedAt) || 0))) y.addedAt = after(t); return y; });
+      for (const p of CP) { const k = norm(p); if (k && !spk.has(k)) dp[k] = after(p && p.addedAt); }
+      if (Object.keys(dp).length) dels.participants = dp;
+    }
+    // журналы не откатываются: история — текущая, квитанции — объединение
+    if (c.history !== undefined) o.history = snapRbClone(c.history);
+    if (Array.isArray(c.ipReceipts) || Array.isArray(snap.ipReceipts)) { const seen = new Set(), out = []; for (const r of [...(snap.ipReceipts || []), ...(c.ipReceipts || [])]) { const k = r && r.id; if (k == null || seen.has(k)) continue; seen.add(k); out.push(snapRbClone(r)); } o.ipReceipts = out; }
+  }
+  if (Object.keys(dels).length) o._delItems = dels; else delete o._delItems;
+  o.id = snap.id;
+  return o;
+}
+// Что записать, чтобы запись стала как target: target нет или он удалён — запись уходит в корзину (данные target, если он есть); иначе — snapRbRecord.
+// null — делать нечего (запись и так удалена или её нет).
+function snapRbTarget(store, cur, target, now) {
+  if (!target || target._deleted) {
+    if (!cur || cur._deleted) return null;
+    const o = target ? snapRbRecord(store, cur, target, now) : snapRbClone(cur);
+    for (const k of ['_ch', '_upd', '_device', '_deletedWith']) delete o[k];
+    o._deleted = true; o._deletedAt = (target && Number(target._deletedAt)) || now; if (target && target._deletedWith) o._deletedWith = target._deletedWith;
+    o.id = cur.id; return o;
+  }
+  return snapRbRecord(store, cur, target, now);
+}
+// события журнала дела для полей, которые сливаются по журналу
+function snapRbCaseEvents(cur, snap, now) {
+  const out = [], seen = new Set(), s = v => v == null ? '' : String(v);
+  for (const f of Object.values(CASE_MERGE_FIELDS)) {
+    if (seen.has(f)) continue; seen.add(f);
+    const a = cur && !cur._deleted ? cur[f] : undefined, b = snap[f];
+    if (s(a) === s(b)) continue;
+    out.push({ id: uid('СБ'), caseId: snap.id, caseNum: snap.number || '', ts: now, field: f, from: s(a), to: s(b), source: 'snapshot' });
+  }
+  return out;
+}
+function snapRbName(store, rec) {
+  if (!rec) return '';
+  if (store === 'caseEvents') return [rec.caseNum, String(rec.to || '').slice(0, 60)].filter(Boolean).join(' · ') || 'заметка';
+  const t = typeof TRASH_STORES === 'object' ? TRASH_STORES.find(x => x.store === store) : null;
+  try { if (t) return t.name(rec); } catch (e) { logErr('snaprb:name', e); }
+  return String((typeof recLabel === 'function' ? recLabel(store, rec) : '') || rec.name || rec.title || rec.id);
+}
+function snapRbKind(store) { const t = typeof TRASH_STORES === 'object' ? TRASH_STORES.find(x => x.store === store) : null; return store === 'refs' ? 'Справочник' : t ? t.label : store; }
+// Сравнение: local и snap — { хранилище: все записи, включая надгробия }
+function snapRbPlan(local, snap) {
+  const plan = { back: [], changed: [], extra: [] };
+  const item = (store, cur, s, fields) => ({ store, id: (cur || s).id, kind: snapRbKind(store), name: snapRbName(store, cur && !cur._deleted ? cur : (s || cur)), fields, cur: cur || null, snap: s || null });
+  for (const st of snapRbStores()) {
+    const L = ((local || {})[st] || []).filter(r => snapRbOk(st, r)), S = ((snap || {})[st] || []).filter(r => snapRbOk(st, r));
+    const lm = new Map(L.map(r => [r.id, r])), sm = new Map(S.map(r => [r.id, r]));
+    for (const s of S) {
+      if (s._deleted) continue;
+      const c = lm.get(s.id);
+      if (!c || c._deleted) { plan.back.push(item(st, c, s, [])); continue; }
+      const f = snapRbFields(st, c, s); if (f.length) plan.changed.push(item(st, c, s, f));
+    }
+    if (!SNAPRB_NO_EXTRA.has(st)) for (const c of L) { if (c._deleted) continue; const s = sm.get(c.id); if (!s || s._deleted) plan.extra.push(item(st, c, s || null, [])); }
+  }
+  return plan;
+}
+// Что записать: пары [хранилище, запись] (с событиями журнала дела), проверки версий и прежние версии для отмены
+function snapRbBuild(items, now) {
+  const list = [], expect = [], undo = [];
+  for (const it of items || []) {
+    const obj = snapRbTarget(it.store, it.cur, it.snap, now); if (!obj) continue;
+    list.push([it.store, obj]);
+    if (it.cur) expect.push({ store: it.store, id: it.id, upd: it.cur._upd || 0, ack: null });
+    undo.push([it.store, it.id, it.cur ? snapRbClone(it.cur) : null]);
+    if (it.store === 'cases' && it.snap && !it.snap._deleted) for (const e of snapRbCaseEvents(it.cur, it.snap, now)) list.push(['caseEvents', e]);
+  }
+  return { list, expect, undo };
+}
+
+// ── листы ──
+let SNAPRB = null;
+const snapRbWhen = ts => ts ? new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'без даты';
+function snapRbUndoGet() { try { const o = JSON.parse(localStorage.getItem(SNAPRB_UNDO_KEY) || 'null'); return o && Array.isArray(o.items) ? o : null; } catch (e) { logErr('snaprb:undo:read', e); return null; } }
+// строка «последний возврат» с кнопкой отмены — в листах «Снимки базы на сервере» и «Копии базы»
+function snapRbUndoBox() {
+  const u = snapRbUndoGet(); if (!u) return '';
+  return `<div class="info-box" id="rb-undo-box">Последний возврат к снимку: ${esc(snapRbWhen(u.at))} (снимок от ${esc(snapRbWhen(u.snapAt))}), записей: ${u.items.length}.<div class="form-actions"><button type="button" class="button" id="rb-undo-open" onclick="openSnapRbUndo()">${icon('rotate-ccw', 'icon-sm')}Отменить возврат…</button></div></div>`;
+}
+// снимок с сервера: скачать, расшифровать паролем синхронизации, сравнить
+async function openSnapRollback(ver) {
+  if (NEXT_SYNC.busy) { toast('Идёт обмен с сервером — дождитесь его окончания', true); return null; }
+  if (!SRVDB.pass) { toast('Сначала укажите пароль шифрования в листе «Синхронизация»', true); return null; }
+  toast('Скачиваю снимок…');
+  const g = await nextDbGet(ver);
+  if (!g || !g.ok) { toast('Снимок не получен: ' + nextSrvError(g), true); return null; }
+  if (!g.exists || !g.data) { toast('Такого снимка на сервере уже нет', true); return null; }
+  let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { toast('Снимок не открыт: ' + nextSrvError({ error: nextDecryptWhy(e) }), true); return null; }
+  const checked = validateBackup(dump); if (!checked.ok) { toast('Снимок не прочитан: ' + checked.error, true); return null; }
+  return openSnapRbSheet('server', Number(ver) || Number(g.ver) || 0, checked.parsed.data);
+}
+// файл копии, проверенный в «Копии базы» (BACKUP_PENDING — расшифрован и проверен)
+async function openFileRollback() {
+  const m = typeof BACKUP_PENDING === 'object' ? BACKUP_PENDING : null;
+  if (!m || !m.parsed) { toast('Сначала выберите файл и нажмите «Проверить файл»', true); return null; }
+  return openSnapRbSheet('file', Number(m.exportedAt) || 0, m.parsed.data);
+}
+async function openSnapRbSheet(src, at, data) {
+  const local = {};
+  try { for (const st of snapRbStores()) local[st] = await getAllRaw(st); }
+  catch (e) { logErr('snaprb:read', e); toast('Не удалось прочитать базу на устройстве: ' + ((e && e.message) || e), true); return null; }
+  const plan = snapRbPlan(local, data || {});
+  SNAPRB = { src, at: Number(at) || 0, plan };
+  snapRbRender();
+  return plan;
+}
+function snapRbFieldsText(store, fields) {
+  const known = fields.filter(f => CONFLICT_FIELDS[f]).map(f => CONFLICT_FIELDS[f]), other = fields.length - known.length;
+  return [...new Set(known)].join(', ') + (other ? (known.length ? '; ' : '') + 'других полей: ' + other : '');
+}
+function snapRbRender() {
+  const s = SNAPRB; if (!s) return;
+  const p = s.plan, total = p.back.length + p.changed.length + p.extra.length;
+  const group = (g, title, on, note) => {
+    const list = p[g]; if (!list.length) return '';
+    const rows = list.slice(0, SNAPRB_SHOW).map((it, i) => `<label class="check rb-row"><input type="checkbox" data-g="${g}" data-i="${i}"${on ? ' checked' : ''} onchange="snapRbCount()"><span><b>${esc(it.kind)}</b> · ${esc(it.name)}${note(it) ? `<br><span class="small muted">${esc(note(it))}</span>` : ''}</span></label>`).join('');
+    const more = list.length > SNAPRB_SHOW ? `<p class="small muted">И ещё ${list.length - SNAPRB_SHOW} — возвращаются вместе с группой.</p>` : '';
+    return `<label class="check rb-group"><input type="checkbox" id="rb-g-${g}"${on ? ' checked' : ''} onchange="snapRbGroup('${g}', this.checked)"><span><b>${esc(title)}</b> · ${list.length}</span></label>
+      <details class="rb-list" id="rb-list-${g}"><summary>Показать записи</summary><div class="rb-rows">${rows}</div>${more}</details>`;
+  };
+  const undoSize = JSON.stringify(p.back.concat(p.changed, p.extra).map(it => it.cur)).length, undoFits = undoSize <= SNAPRB_UNDO_MAX;
+  const body = total ? `<div class="info-box">${s.src === 'server' ? 'Снимок базы на сервере' : 'Копия базы из файла'} от ${esc(snapRbWhen(s.at))} сравнён с базой на этом устройстве. Ничего ещё не записано.</div>
+    ${group('back', 'Вернуть удалённые после снимка', true, it => it.cur ? 'сейчас в корзине' : 'удалено окончательно')}
+    ${group('changed', 'Вернуть изменённые к состоянию снимка', true, it => 'изменено: ' + snapRbFieldsText(it.store, it.fields))}
+    ${group('extra', 'Убрать в корзину созданные после снимка', false, it => it.snap ? 'в снимке удалено' : 'в снимке нет')}
+    <div class="info-box">Возврат записывается как новые правки: при обмене он уйдёт на остальные устройства. Чтобы учесть правки других устройств, перед возвратом получите изменения с сервера. Не меняются: настройки, файлы документов, события судов, история изменений дел. Убранное в корзину возвращается из «Настройки» → «Корзина».</div>
+    ${undoFits ? '<p class="small muted">Программа запомнит текущие версии этих записей — возврат можно будет отменить: «Отменить возврат…» в листах «Копии базы» и «Снимки базы на сервере».</p>'
+      : `<div class="info-box warning">Записей слишком много, чтобы запомнить их для отмены на этом устройстве. Сначала сохраните копию базы в файл.<label class="check"><input type="checkbox" id="rb-copy-ok" onchange="snapRbCount()"><span>Копия базы сохранена</span></label><div class="form-actions"><button type="button" class="button" onclick="openBackupSheet()">${icon('hard-drive', 'icon-sm')}Копии базы</button></div></div>`}
+    <div class="info-box warning" id="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button type="button" class="button primary" id="rb-go" onclick="snapRbApply()">${icon('rotate-ccw')}Вернуть выбранное</button></div>`
+    : `<div class="info-box" id="rb-same">${s.src === 'server' ? 'Снимок базы на сервере' : 'Копия базы из файла'} от ${esc(snapRbWhen(s.at))} совпадает с базой на этом устройстве — возвращать нечего.</div>`;
+  openSheet('Возврат к снимку', body, sheetIsOpen() ? true : undefined);
+  SNAPRB.undoFits = undoFits;
+  snapRbCount();
+}
+function snapRbGroup(g, on) { document.querySelectorAll(`#sheetContent input[data-g="${g}"]`).forEach(x => { x.checked = on; }); snapRbCount(); }
+// выбранные записи: отмеченные строки и (у группы длиннее SNAPRB_SHOW) — непоказанные, если группа отмечена
+function snapRbSelected() {
+  const s = SNAPRB, out = []; if (!s) return out;
+  for (const g of ['back', 'changed', 'extra']) {
+    const list = s.plan[g], box = document.getElementById('rb-g-' + g);
+    list.forEach((it, i) => { const x = i < SNAPRB_SHOW ? document.querySelector(`#sheetContent input[data-g="${g}"][data-i="${i}"]`) : box; if (x && x.checked) out.push(it); });
+  }
+  return out;
+}
+function snapRbCount() {
+  const b = document.getElementById('rb-go'); if (!b || !SNAPRB) return;
+  const n = snapRbSelected().length, copy = document.getElementById('rb-copy-ok');
+  b.disabled = !n || (!SNAPRB.undoFits && !(copy && copy.checked));
+  b.lastChild.textContent = n ? 'Вернуть выбранное (' + n + ')' : 'Вернуть выбранное';
+}
+// Записать возврат одной транзакцией; items — выбранное, undoOf — признак отмены (прежние версии не запоминаются)
+async function snapRbWrite(items, undoOf) {
+  const now = Date.now(), b = snapRbBuild(items, now);
+  if (!b.list.length) return { ok: true, n: 0 };
+  NEXT_SYNC.busy = true; if (typeof syncStatusRender === 'function') syncStatusRender();
+  try { await putMany(b.list, { expect: b.expect }); }
+  catch (e) { logErr('snaprb:write', e); return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
+  finally { NEXT_SYNC.busy = false; if (typeof syncStatusRender === 'function') syncStatusRender(); }
+  let undoSaved = false;
+  if (!undoOf) { try { const txt = JSON.stringify({ at: now, snapAt: SNAPRB ? SNAPRB.at : 0, src: SNAPRB ? SNAPRB.src : '', items: b.undo }); if (txt.length <= SNAPRB_UNDO_MAX) { localStorage.setItem(SNAPRB_UNDO_KEY, txt); undoSaved = true; } } catch (e) { logErr('snaprb:undo:save', e); } }
+  else localStorage.removeItem(SNAPRB_UNDO_KEY);
+  try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('snaprb:refresh', e); }
+  if (typeof devrAlarms === 'function' && typeof devrAlarmsSync === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e));
+  return { ok: true, n: items.length, undoSaved };
+}
+async function snapRbApply() {
+  const btnGo = document.getElementById('rb-go'); if (!btnGo || btnGo.disabled) return null;
+  if (NEXT_SYNC.busy) { fErr('Идёт обмен с сервером — дождитесь его окончания и нажмите ещё раз'); return null; }
+  const items = snapRbSelected(); if (!items.length) return null;
+  btnGo.disabled = true;
+  const r = await snapRbWrite(items, false);
+  if (!r.ok) { fErr('Возврат не записан: ' + r.error + '. Ничего не изменено — откройте возврат к снимку заново: сравнение покажет текущее состояние'); btnGo.disabled = false; return r; }
+  SNAPRB = null;
+  toast('Возвращено записей: ' + r.n + (r.undoSaved ? '. Отменить — «Отменить возврат…» в «Копиях базы» и в «Снимках базы на сервере»' : '') + '. На другие устройства уйдёт при обмене');
+  closeSheet(); if (UI.ready) nav(UI.screen);
+  return r;
+}
+// Отмена последнего возврата: прежние версии записей — тем же механизмом (новыми правками)
+function openSnapRbUndo() {
+  const u = snapRbUndoGet();
+  openSheet('Отменить возврат к снимку', u ? `<div class="info-box">Возврат ${esc(snapRbWhen(u.at))} (снимок от ${esc(snapRbWhen(u.snapAt))}) изменил записей: ${u.items.length}. Отмена вернёт им версии, которые были до возврата; записи, вернувшиеся из окончательно удалённых, уйдут в корзину. Правки этих записей, сделанные после возврата, будут заменены.</div>
+    <div class="info-box warning" id="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button type="button" class="button primary" id="rb-undo-go" onclick="snapRbUndo()">${icon('rotate-ccw')}Отменить возврат</button><button type="button" class="button" onclick="sheetBack()">Не отменять</button></div>`
+    : emptyState('rotate-ccw', 'Отменять нечего', 'Возврат к снимку на этом устройстве не выполнялся или уже отменён.'), sheetIsOpen() ? true : undefined);
+}
+async function snapRbUndo() {
+  const u = snapRbUndoGet(), b = document.getElementById('rb-undo-go'); if (!u) return null; if (b) { if (b.disabled) return null; b.disabled = true; }
+  if (NEXT_SYNC.busy) { fErr('Идёт обмен с сервером — дождитесь его окончания и нажмите ещё раз'); if (b) b.disabled = false; return null; }
+  const items = [];
+  try { const raw = {}; for (const [st, id, pre] of u.items) { if (!raw[st]) raw[st] = new Map((await getAllRaw(st)).filter(r => r && r.id != null).map(r => [r.id, r])); items.push({ store: st, id, cur: raw[st].get(id) || null, snap: pre }); } }
+  catch (e) { logErr('snaprb:undo:read', e); fErr('Не удалось прочитать базу: ' + ((e && e.message) || e)); if (b) b.disabled = false; return null; }
+  const r = await snapRbWrite(items, true);
+  if (!r.ok) { fErr('Отмена не записана: ' + r.error + ' — нажмите ещё раз'); if (b) b.disabled = false; return r; }
+  toast('Возврат отменён: записей ' + r.n + '. На другие устройства уйдёт при обмене');
+  closeSheet(); if (UI.ready) nav(UI.screen);
+  return r;
 }
 
 // ▼▼▼ sync/fsync.js
@@ -7952,7 +8242,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')","openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -13189,6 +13479,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
+<p><b>Вернуть базу к снимку.</b> «Синхронизация» → «Снимки базы на сервере» → «Вернуть…» у нужного снимка (или «Копии базы» → проверить файл → «Вернуть базу к копии…»). Программа сравнит снимок с базой на устройстве и покажет три группы: удалённое после снимка — вернётся; изменённое после снимка — вернётся к значениям снимка; созданное после снимка — по желанию уйдёт в корзину (по умолчанию не отмечено). Снимите отметки с того, что возвращать не нужно, и нажмите «Вернуть выбранное». Возврат записывается как новые правки и при обмене уходит на остальные устройства; перед возвратом получите изменения с сервера, чтобы учесть правки других устройств. Не меняются настройки, файлы документов, события судов и история изменений дел. Возврат можно отменить: «Отменить возврат…» в тех же листах — записи получат версии, которые были до возврата.</p>
 <p>Смена сервера или пароля шифрования: если часть файлов документов лежит только в хранилище прежнего подключения, программа предложит «Перенести» — скачает их на это устройство прежним подключением, затем сменит подключение; в новое хранилище файлы уйдут при ближайшей отправке на сервер. «Синхронизация» → «Файлы документов» показывает, где лежат файлы, и скачивает недостающие.</p>
 <p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
 <p>Настройки → «Печать и выгрузка» (или «Отчёты» → «Печать и выгрузка»): выписка поступлений для кассовой книги, реестры дел, заседаний, ордеров и доверенностей — в окне печати можно «Сохранить как PDF»; таблицы CSV для Excel по разделам.</p>
