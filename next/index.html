@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="12.10.2026 00:45 · b308c82">
+<meta name="build" content="12.10.2026 10:00 · a930d9d">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4648,7 +4648,7 @@ async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw(
   }
   { /* v239: карточки дел с сайта суда при плановом сборе — заполняем пустые поля дела */
     const cards=added.filter(x=>x.eventType==='casecard'&&x.caseId);
-    if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null,cardSt='';try{const j=JSON.parse(x.raw||'{}');card=j.card;cardSt=String(j.st||'');}catch (e) { if (typeof logErr === "function") logErr("", e); }if(!card)continue;
+    if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null,cardSt='';{const j=crmMonRawObj(x);card=j.card||null;cardSt=String(j.st||'');}if(!card)continue;
     // 10.10.2026: инстанция карточки (raw.st от коллектора и окна КАД) — поля апелляции и кассации, а не всегда первой инстанции
     const res=crmCaseApplyCard(c,card,cardSt==='Апелляция'?'App':(cardSt==='Кассация'||cardSt==='Надзор')?'Cass':'');if(res.done.length){addCaseHistoryEvent(c,'courtCard','',res.done.join('; '),'monitor');await put('cases',c);await crmCaseLogByNum(c.number,'flow','С сайта суда: '+res.done.join('; '));}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
   }
@@ -4786,10 +4786,17 @@ async function crmMonBindOrphans() {
   }
   return n;
 }
+// 12.10.2026 (журнал ошибок пользователя: 34 записи из 60 — «Unexpected token 'Д', "Д-36/2026 …" is not valid JSON»): у событий коллектора raw —
+// текст («Д-36/2026 · …»), у событий карточки КАД — JSON. Разбор как JSON — только если raw похож на объект; текст — штатно «полей нет», не
+// ошибка (урок 11). В журнал попадает только испорченный JSON. Код v312 разбирал так же и тоже писал журнал (перенесено построчно).
+function crmMonRawObj(e) {
+  const s = String((e && e.raw) || '').trim(); if (s.charAt(0) !== '{') return {};
+  try { const o = JSON.parse(s); return o && typeof o === 'object' ? o : {}; } catch (x) { if (typeof logErr === 'function') logErr('monitor:raw', x); return {}; }
+}
 function crmMonActOf(e) {
-  let act = ''; try { act = String(JSON.parse(e.raw || '{}').act || ''); } catch (x) { if (typeof logErr === "function") logErr("", x); }
+  const ro = crmMonRawObj(e); let act = String(ro.act || '');
   if (act) return act;
-  const t = String(e.title || '').toLowerCase(); let st = ''; try { st = String(JSON.parse(e.raw || '{}').st || ''); } catch (x) { if (typeof logErr === "function") logErr("", x); }
+  const t = String(e.title || '').toLowerCase(); let st = String(ro.st || '');
   if (e.eventType !== 'caseflow' && e.eventType !== 'notice') return '';
   if (/мотивированн\S* (решени|приговор)|в окончательной форме/.test(t)) return 'fullDecision';
   if (/без движени/.test(t)) return 'noMotion';
@@ -4834,7 +4841,7 @@ function caseStageCourt(c) {
     secretary: (c && c.secretary) || '', secretaryPhone: (c && c.secretaryPhone) || '', cabinet: (c && c.cabinet) || '' };
 }
 function crmFlowMatches(c,e){if(!c||!e)return false;if(e.caseId)return e.caseId===c.id;const nz=crmMonNorm;if(e.caseUid&&nz(c.caseUid))return nz(e.caseUid)===nz(c.caseUid);/* v238: УИД решает, если он есть у обоих */if(e.uidConflict)return false;if(e.crmNumber)return nz(e.crmNumber)===nz(c.number);if(e.ambiguous)return false;if(e.caseUid&&nz(c.caseUid)&&nz(e.caseUid)===nz(c.caseUid))return true;const no=nz(e.courtNo);if(!no)return false;return [c.number,c.courtNo,c.courtNoApp,c.courtNoCass].some(v=>nz(v)&&nz(v)===no);}
-function crmFlowParts(e){let res='',base='',st='';try{const j=JSON.parse(e.raw||'');res=String(j.result||j['результат']||j.resolution||'').trim();base=String(j.basis||j['основание']||'').trim();st=String(j.st||'').trim();}catch (_) { if (typeof logErr === "function") logErr("", _); }return{res,base,st};}
+function crmFlowParts(e){let res='',base='',st='';{const j=crmMonRawObj(e);res=String(j.result||j['результат']||j.resolution||'').trim();base=String(j.basis||j['основание']||'').trim();st=String(j.st||'').trim();}return{res,base,st};}
 function crmCaseFlowMissing(c, monAll, caseHearings) {
   const have = new Set((caseHearings || []).filter(h => h.status !== 'Отменено').map(h => h.date + '|' + ((h.time || '').slice(0, 5))));
   const haveDate = new Set((caseHearings || []).filter(h => h.status !== 'Отменено').map(h => h.date));
@@ -4952,7 +4959,7 @@ async function crmCollectorCall(body, timeoutMs) {
     if (!j) return { http: r.status, err: crmCollectorHttpHint(r.status) }; // v270: ответ не от коллектора (страница ошибки Облака)
     return { http: r.status, j };
   } catch (e) {
-    return { err: e && e.name === 'AbortError' ? 'нет ответа за отведённое время — сайт суда отвечает медленно, повторите позже' : crmCollectorNetHint(e) };
+    return { err: e && e.name === 'AbortError' ? crmCollectorSlowHint(body && body.action, timeoutMs || 30000) : crmCollectorNetHint(e) };
   } finally { clearTimeout(timer); }
 }
 function crmCollectorStatusLine(j) {
@@ -4974,11 +4981,25 @@ function crmCollectorHttpHint(code) {
   if (code === 502 || code === 504) return 'функция коллектора упала или не успела ответить (' + code + ') — журнал в консоли: collector-sud → «Логи»';
   return 'функция ответила не так, как ожидалось (HTTP ' + code + ')';
 }
+// 12.10.2026 (журнал ошибок пользователя): «сайт суда отвечает медленно» писалось и при отправке списка дел, где сайты судов не участвуют, —
+// причина называлась неверно (уроки 60, 62, 80, 99). Текст — по действию: сайты судов обходят только collect и collectone.
+function crmCollectorSlowHint(action, ms) {
+  if (action === 'collect' || action === 'collectone') return 'нет ответа за отведённое время — сайт суда отвечает медленно, повторите позже';
+  return 'функция коллектора не ответила за ' + Math.round((ms || 30000) / 1000) + ' с (сайты судов в этом действии не участвуют — молчит сама функция). Что с ней было — в журнале: Яндекс Облако → collector-sud → «Логи»';
+}
+// «Failed to fetch» браузер даёт в нескольких случаях, и по самой ошибке их не различить: неверный адрес или функция не публичная; нет связи
+// с Облаком (VPN, сеть); функция упала или не успела ответить — ответ Облака об этом приходит без разрешения для браузера, и он видит только
+// «не удалось». Прежний текст называл первые два случая и не называл третий; проверка предлагала вписать секрет в адресную строку.
+// Различает факт: личный сервер в том же Облаке недавно отвечал — значит, связь с Облаком есть.
 function crmCollectorNetHint(e) {
   const m = String((e && e.message) || '');
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'нет интернета';
-  if (/failed to fetch|networkerror|load failed|network request failed/i.test(m))
-    return 'функция коллектора недоступна: проверьте адрес в Мониторинге → «Сбор в облаке», что функция публичная, и выключите VPN, если он включён. Проверка: откройте адрес функции с «?action=status&secret=…» в браузере';
+  if (/failed to fetch|networkerror|load failed|network request failed/i.test(m)) {
+    const at = typeof monPullLastAt === 'function' ? monPullLastAt() : 0, fresh = at && Date.now() - at < 3 * 3600000;
+    const head = 'функция коллектора не ответила так, чтобы программа могла прочитать ответ. Возможные причины: функция упала или не успела запуститься; адрес неверный или функция не публичная; нет связи с Облаком (VPN, сеть).';
+    const check = ' Проверка без секрета: адрес функции collector-sud, открытый в браузере, у живой функции показывает {"ok":false,"error":"forbidden"}; журнал — Яндекс Облако → collector-sud → «Логи».';
+    return head + (fresh ? ' Личный сервер в том же Облаке отвечал в ' + new Date(at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) + ' — связь с Облаком есть.' : '') + check;
+  }
   return m || 'сбой сети';
 }
 async function crmCollectorPack() {
@@ -5002,9 +5023,10 @@ async function crmCollectorSendLinks() {
   toast('Отправляю список дел на сервер…');
   const r = await crmCollectorCall({ action: 'linksput', links: pack });
   if (!r) return;
-  if (r.j && r.j.ok) { toast(`Список отправлен: дел ${r.j.cases}`); crmCollectorStatus(false); return; }
+  if (r.j && r.j.ok) { if (typeof monLinksNote === 'function') monLinksNote(true); toast(`Список отправлен: дел ${r.j.cases}`); crmCollectorStatus(false); return; }
   // ответ словами — по тому, кто ответил (crmCollectorWhy, screens/monitoring.js)
   const why = typeof crmCollectorWhy === 'function' ? crmCollectorWhy(r) : { text: r.err || (r.j && r.j.error) || 'HTTP ' + r.http };
+  if (typeof monLinksNote === 'function') monLinksNote(false, why.text);
   toast('Список дел не отправлен: ' + why.text, true);
 }
 
@@ -5026,6 +5048,7 @@ const MON_PULL_NEW = 'crm_mon_pull_new';    // сколько новых соб�
 const MON_PULL_ERR = 'crm_mon_pull_err';    // { at, msg } — последняя ошибка автоматического получения
 const MON_LINKS_SIG = 'crm_mon_links_sig';  // отпечаток перечня дел со ссылками, отправленного коллектору
 const MON_LINKS_AT = 'crm_mon_links_at';    // время последней удачной отправки списка дел
+const MON_LINKS_ERR = 'crm_mon_links_err';  // { at, msg } — последняя неудачная отправка (12.10.2026: раньше была видна только в журнале ошибок)
 const MON_PULL_MS = 30 * 60000;             // период проверки при открытой программе
 const MON_PULL_MIN_GAP = 10 * 60000;        // возврат в приложение и появление сети — не чаще раза в 10 минут
 const MON_LINKS_DELAY = 8000;               // после сохранения дела список уходит через 8 секунд (несколько правок подряд — один запрос)
@@ -5035,6 +5058,20 @@ const monPullReady = () => !!(SRV.url && SRV.secret);
 const monPullLastAt = () => Number(localStorage.getItem(MON_PULL_AT) || 0);
 const monPullLastErr = () => lsJSON(MON_PULL_ERR, null);
 const monLinksLastAt = () => Number(localStorage.getItem(MON_LINKS_AT) || 0);
+// 12.10.2026 (журнал ошибок пользователя: отправка списка дел не удавалась при каждом запуске, а экран писал «уходит сам»): итог отправки
+// записывается и показывается — в «Суды и мониторинг» и в настройке мониторинга (урок 96: звено автоматики, которое не сработало, видно)
+function monLinksNote(ok, msg) { if (ok) { localStorage.setItem(MON_LINKS_AT, String(Date.now())); localStorage.removeItem(MON_LINKS_ERR); } else localStorage.setItem(MON_LINKS_ERR, JSON.stringify({ at: Date.now(), msg: String(msg || 'коллектор не ответил').slice(0, 1200) })); }
+function monLinksStatus() {
+  const at = monLinksLastAt(), err = lsJSON(MON_LINKS_ERR, null), fmt = t => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  // удачная отправка снимает запись о неудаче (monLinksNote), поэтому запись о неудаче всегда новее последней удачной
+  if (err && err.at) {
+    const title = 'Список дел коллектору не отправлен (' + fmt(err.at) + ').', reason = 'Причина: ' + String(err.msg || '').replace(/[.\s]+$/, '') + '.';
+    const tail = (at ? 'Коллектор обходит список от ' + fmt(at) + ' — дела, добавленные или изменённые позже, в него не попали.' : 'Коллектор обходит прежний список — новые дела в него не попали.') + ' Повтор — сам при следующем открытии программы или кнопкой «Отправить список дел».';
+    return { bad: true, title, reason, tail, text: title + ' ' + reason + ' ' + tail };
+  }
+  if (at) return { bad: false, text: 'Список дел уходит коллектору сам после сохранения дела; последняя отправка ' + fmt(at) + '.' };
+  return { bad: false, text: 'Список дел уходит коллектору сам после сохранения дела со ссылкой и при открытии программы, если перечень изменился.' };
+}
 function monPullSetAuto(on) { localStorage.setItem(MON_PULL_KEY, on ? '1' : '0'); if (on) monAutoStart(); else { clearInterval(MON_AUTO.loop); MON_AUTO.loop = null; } }
 // ── получение событий с личного сервера: одна общая часть для кнопки и автоматики ──
 // Возвращает { ok, added, applied, total } или { ok:false, error } (error — словами). Пишет в базу только события и то, что применяет
@@ -5112,13 +5149,22 @@ async function monLinksSync(force) {
     // перечня у коллектора ещё не было и дел со ссылками нет — отправлять нечего; был — пустой перечень снимает дела с наблюдения
     if (!p.count && !localStorage.getItem(MON_LINKS_SIG)) return { skipped: true, why: 'нет дел со ссылками' };
     if (!force && localStorage.getItem(MON_LINKS_SIG) === p.sig) return { skipped: true, why: 'перечень не менялся', count: p.count };
-    const r = await crmCollectorCall({ action: 'linksput', links: p.pack }, 20000);
-    if (r && r.j && r.j.ok) { localStorage.setItem(MON_LINKS_SIG, p.sig); localStorage.setItem(MON_LINKS_AT, String(Date.now())); return { sent: true, count: p.count, cleared: !p.count }; }
+    // 12.10.2026: 20 с не хватало — запрос к функции, которую долго не вызывали, дольше (по журналу пользователя — «не ответила за 20 с»)
+    const r = await crmCollectorCall({ action: 'linksput', links: p.pack }, 45000);
+    if (r && r.j && r.j.ok) { localStorage.setItem(MON_LINKS_SIG, p.sig); monLinksNote(true); return { sent: true, count: p.count, cleared: !p.count }; }
     // коллектор 3.17 и старше пустой перечень отвергает (400 «ожидается выгрузка CRM…») — причина и действие называются прямо
-    if (!p.count && r && r.j && /ожидается выгрузка CRM/.test(String(r.j.error || ''))) { const msg = 'дел со ссылками не осталось, а коллектор этой версии не принимает пустой перечень и продолжит обходить прежние дела — обновите коллектор до 3.18'; logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true }; }
+    if (!p.count && r && r.j && /ожидается выгрузка CRM/.test(String(r.j.error || ''))) { const msg = 'дел со ссылками не осталось, а коллектор этой версии не принимает пустой перечень и продолжит обходить прежние дела — обновите коллектор до 3.18'; monLinksNote(false, msg); logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true }; }
     const why = r && typeof crmCollectorWhy === 'function' ? (crmCollectorWhy(r) || {}).text : ''; const msg = why || (r && (r.err || (r.j && r.j.error))) || 'коллектор не ответил';
-    logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true };
+    monLinksNote(false, msg); logErr('monitor:links', new Error(msg)); return { skipped: true, why: msg, failed: true };
   } finally { MON_AUTO.linksBusy = false; }
+}
+// кнопка в предупреждении на экране «Суды и мониторинг»: отправить сейчас, итог — сообщением, экран перерисовывается
+async function monLinksSendNow() {
+  const b = document.querySelector('#mon-links-bad button'); if (b) b.disabled = true; toast('Отправляю список дел коллектору…');
+  let r = null; try { r = await monLinksSync(true); } catch (e) { logErr('monitor:links', e); r = { failed: true, why: String((e && e.message) || e) }; }
+  if (r && r.sent) toast('Список дел отправлен коллектору: дел ' + r.count); else toast('Список дел не отправлен: ' + ((r && r.why) || 'нет ответа'), !!(r && r.failed));
+  if (typeof UI === 'object' && UI.ready && UI.screen === 'monitoring' && !sheetIsOpen()) nav('monitoring'); else if (b) b.disabled = false;
+  return r;
 }
 // после сохранения дела (ui/forms.js): через 8 секунд, одним запросом на несколько правок подряд
 function monLinksTouch() {
@@ -6549,7 +6595,7 @@ window.UI_MANIFEST = {
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
   phoneWidths: [360, 390, 412], desktopWidth: 1280, phoneTheme: 'dark', desktopTheme: 'light',
   sidebarAlign: 'top', minTouch: 44, seedFile: 'ui_seed_next.js', readyExpr: 'window.NEXT_READY', lsPrefix: NEXT_NS.ls,
-  variants: [{ name: 'monitoring-all', screen: 'monitoring', js: "monSet('f','all')" }, { name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
+  variants: [{ name: 'monitoring-all', screen: 'monitoring', js: "monSet('f','all')" }, { name: 'monitoring-linksbad', screen: 'monitoring', js: "localStorage.setItem('crm_collector_url','https://functions.yandexcloud.net/d4e-ui-col');localStorage.setItem('crm_collector_secret','ui');nav('monitoring')" }, { name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
     { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'sync-error', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за минуту' }; syncStatusRender()" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }],
 };
 
@@ -11629,7 +11675,7 @@ const HELP_SECTIONS = [
 <li>В программе: Настройки → «Мониторинг судов» → <b>адрес функции коллектора</b> (не адрес сервера — это разные функции) и <b>секрет коллектора</b> (переменная SECRET коллектора, не код сервера) → «Сохранить» → «Проверить доставку на сервер»: коллектор должен ответить, что видит сервер.</li>
 <li>В каждом деле укажите ссылку на карточку дела на сайте суда: форма дела → «Все поля» → вкладка инстанции → поле ссылки (адрес из строки браузера на странице дела: «Движение дела»). Либо «Данные с сайта суда» в карточке дела — программа прочитает судью, номер и УИД.</li></ol>
 <h3>Как пользоваться</h3>
-<ul><li>События приходят сами: при открытии программы, при возвращении в неё и раз в 30 минут (на «Сегодня» — когда проверено и когда следующая проверка). Коллектор обходит сайты по расписанию (утром и днём); «Обновить с сайтов судов» в «Судах и мониторинге» или «Обновить» на «Сегодня» — обойти прямо сейчас, это несколько минут; «Получить события» — только забрать то, что коллектор уже собрал. Перечень дел со ссылками уходит коллектору сам после сохранения дела.</li>
+<ul><li>События приходят сами: при открытии программы, при возвращении в неё и раз в 30 минут (на «Сегодня» — когда проверено и когда следующая проверка). Коллектор обходит сайты по расписанию (утром и днём); «Обновить с сайтов судов» в «Судах и мониторинге» или «Обновить» на «Сегодня» — обойти прямо сейчас, это несколько минут; «Получить события» — только забрать то, что коллектор уже собрал. Перечень дел со ссылками уходит коллектору сам после сохранения дела и при открытии программы. Если отправка не удалась, на экране «Суды и мониторинг» — предупреждение «Список дел коллектору не отправлен» с причиной и кнопкой «Отправить список дел»; повтор — и сам, при следующем открытии программы.</li>
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле).</li></ul>
 <h3>Карточки всех дел разом</h3>
@@ -11669,6 +11715,7 @@ const HELP_SECTIONS = [
   { id: 'trouble', title: 'Если что-то не работает', html: `
 <ul><li><b>«Нет связи с сервером»</b> — «Синхронизация» → «Сохранить и проверить связь»: программа назовёт причину. «403 / не публичная» — на странице функции в консоли включите «Публичная функция». «auth» — секретный код не совпадает с переменной SECRET функции (или в поле коллектора стоит код сервера). «Нет ответа» — адрес с опечаткой, нет интернета или мешает VPN.</li>
 <li><b>«Запрос слишком большой»</b> при отправке — база больше предела Облака: «Синхронизация» → «Размер базы» → включите сжатие; файлы документов уходят в хранилище отдельно от снимка.</li>
+<li><b>«Список дел коллектору не отправлен»</b> — программа не получила ответа функции collector-sud. Откройте адрес этой функции в браузере без секрета: живая функция отвечает {"ok":false,"error":"forbidden"}. Ответ другой или его нет — журнал функции: Яндекс Облако → collector-sud → «Логи». Затем «Отправить список дел».</li>
 <li><b>Мониторинг: «unknown_action» или «функция ещё прежней версии»</b> — в поле адреса коллектора вписан адрес сервера (это разные функции): Настройки → «Мониторинг судов» → адрес именно функции collector-sud.</li>
 <li><b>Мастер «Свой сервер»: «OAuth token … issued after 2026-06-01 is not supported»</b> — Облако больше не принимает новые строки «y0_…»; используйте ключ сервисного аккаунта или IAM-токен (способы описаны в самом мастере и в разделе «Синхронизация и свой сервер»).</li>
 <li><b>Мастер: «платёжный аккаунт не активен»</b> — консоль → «Биллинг»: привяжите карту и дождитесь статуса «Активен»; «имя бакета занято» — придумайте другое.</li>
@@ -12112,6 +12159,9 @@ SCREENS.monitoring = async function () {
   const chips = MON_FILTERS.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.f === k}" onclick="monSet('f','${k}')">${esc(t)} <span class="chip-n">${m.counts[k] || 0}</span></button>`).join('');
   const col = crmCollectorSrvCfg(), st = monitorSettingsState(SRV.url, col, crmMonAutoOn());
   const hint = st.ready ? '' : `<div class="info-box">${esc(st.lines[0])} ${esc(st.lines[1])} Как настроить — Настройки → «Мониторинг судов».</div>`;
+  // 12.10.2026: неудачная отправка списка дел коллектору видна на экране, а не только в журнале ошибок (урок 96)
+  const lsSt = typeof monLinksStatus === 'function' && col.url && col.secret ? monLinksStatus() : null;
+  const linksBad = lsSt && lsSt.bad ? `<div class="info-box warning" id="mon-links-bad" role="alert"><b>${esc(lsSt.title)}</b><div class="small" style="margin-top:4px">${esc(lsSt.reason)}</div><div style="margin-top:4px">${esc(lsSt.tail)}</div><div class="form-actions" style="margin:8px 0 0">${btn('Отправить список дел', 'monLinksSendNow()', 'primary', 'arrow-right')}</div></div>` : '';
   const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done"><button type="button" class="button small-btn primary" onclick="monOfferApply('${jsq(o.e.id)}')">${icon('check', 'icon-sm')}Записать</button><button type="button" class="button small-btn" onclick="monOfferSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
   const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openMonitorEventSheet('${jsq(r.e.id)}')"><span><span class="task-title">${esc(r.e.title || 'Событие')}</span><span class="task-sub">${esc([r.type, r.e.date ? fmtDate(r.e.date) : '', r.e.court, r.e.courtNo ? '№ ' + r.e.courtNo : '', r.bound ? 'дело ' + r.bound : '', r.problem].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status[0], r.status[1])}${r.problem && r.e.status === 'new' ? badge('нужен разбор', 'bad') : ''}</span></button>`).join('');
   // 09.10.2026: одна кнопка «Обновить с сайтов судов» — сбор в облаке по всем делам, получение, применение (sync/monauto.js);
@@ -12120,7 +12170,7 @@ SCREENS.monitoring = async function () {
   const refreshBtn = `<button type="button" class="button primary" id="mon-refresh" onclick="monRefreshAll()"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? ' disabled' : ''}>${icon('refresh-cw')}Обновить с сайтов судов</button>`;
   return pageHead('Суды и мониторинг', sub, refreshBtn + btn('Получить события', 'monitorPull()', '', 'cloud-download') + (typeof openCardsAllSheet === 'function' ? btn('Карточки всех дел', 'openCardsAllSheet()', '', 'files') : '') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
     `<div class="status-line" id="mon-refresh-state"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? '' : ' hidden'}>${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? 'Обхожу сайты судов — до 8 минут, не закрывайте страницу…' : ''}</div>` +
-    hint + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел по расписанию и кладёт события на ваш сервер; программа забирает их сама при открытии и раз в 30 минут. «Обновить с сайтов судов» — обойти сайты прямо сейчас. Как настроить — Настройки → «Мониторинг судов».', m.counts.all ? '' : btn('Обновить с сайтов судов', 'monRefreshAll()', 'primary', 'refresh-cw'))}</section>`;
+    hint + linksBad + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел по расписанию и кладёт события на ваш сервер; программа забирает их сама при открытии и раз в 30 минут. «Обновить с сайтов судов» — обойти сайты прямо сейчас. Как настроить — Настройки → «Мониторинг судов».', m.counts.all ? '' : btn('Обновить с сайтов судов', 'monRefreshAll()', 'primary', 'refresh-cw'))}</section>`;
 };
 // ── карточка события ──
 async function openMonitorEventSheet(id, mode) {
@@ -12176,7 +12226,7 @@ function openMonitorSettingsSheet(mode) {
     <div class="form-grid">${wide(fInput('col-url', 'Адрес функции коллектора', col.url, 'type="url" autocomplete="off" placeholder="https://functions.yandexcloud.net/…"'))}${wide(fInput('col-secret', 'Секрет коллектора (переменная SECRET функции collector-sud)', col.secret, 'type="password" autocomplete="off"'))}</div>
     <div class="form-actions" style="margin-top:8px">${btn('Сохранить', 'monitorCollectorSave()', 'primary', 'check')}${btn('Проверить', 'monitorCollectorStatus(true)', '', 'refresh-cw')}</div>
     <div class="info-box"><b>Шаг 3. Ссылки на дела.</b> В карточке дела (полная форма, «Основное» и вкладки инстанций) укажите ссылку на дело на сайте суда — коллектор ходит только по ним. Перечень дел со ссылками уходит коллектору сам — после сохранения дела и при открытии программы; «Отправить список дел» ниже — чтобы отправить немедленно.</div>
-    <p class="small muted" id="mon-links-state">${typeof monLinksLastAt === 'function' && monLinksLastAt() ? 'Список дел уходит коллектору сам после сохранения дела; последняя отправка ' + esc(new Date(monLinksLastAt()).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })) + '.' : 'Список дел уходит коллектору сам после сохранения дела со ссылкой и при открытии программы, если перечень изменился.'}</p>
+    ${(() => { const ls = typeof monLinksStatus === 'function' ? monLinksStatus() : { bad: false, text: '' }; return ls.bad ? `<div class="info-box warning" id="mon-links-state" role="alert"><b>${esc(ls.title)}</b><div class="small" style="margin-top:4px">${esc(ls.reason)}</div><div style="margin-top:4px">${esc(ls.tail)}</div></div>` : `<p class="small muted" id="mon-links-state">${esc(ls.text)}</p>`; })()}
     <div class="form-actions">${btn('Отправить список дел', 'crmCollectorSendLinks()', '', 'arrow-right')}${btn('Собрать сейчас', 'monitorCollectorRun()', '', 'cloud-download')}</div>
     <div class="status-line" id="col-srv-status">${col.url && col.secret ? 'Серверный сбор: нажмите «Проверить»' : 'Серверный сбор: укажите адрес и секрет функции.'}</div>
     <div class="info-box warning" id="col-srv-hint" hidden></div>
