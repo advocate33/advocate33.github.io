@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="12.10.2026 22:15 · d5aafb6">
+<meta name="build" content="13.10.2026 00:02 · e8c9628">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -318,6 +318,8 @@ button.imp-main:hover .task-title{color:var(--accent)}
 .list-rows>div>span:last-child{overflow-wrap:anywhere}
 /* 12.10.2026: длинное слово без пробелов (адрес почты учётной записи календаря) во второй строке кнопки списка переносится, а не расширяет лист */
 .list-rows>.list-btn>span:last-child{overflow-wrap:anywhere}
+/* 13.10.2026 (А3): строка «сайта суда» — название сверху, пояснение под ним: длинное пояснение с номером не рвётся по колонкам */
+.list-rows>.list-btn.site-row{flex-direction:column;align-items:flex-start;gap:2px;text-decoration:none}
 /* этап 2б: полная форма дела — вкладки */
 .case-tabs{margin:0 0 12px}.case-tabs .button[hidden]{display:none}
 /* этап 2б: календарь — месяц (по образцу «Практики»), неделя, список */
@@ -368,6 +370,8 @@ button.agenda-row:hover{background:var(--surface2)}
 .conflict{padding:12px 0;border-bottom:1px solid var(--line)}
 .conflict:last-of-type{border-bottom:0}
 .conflict-field{display:grid;grid-template-columns:1fr;gap:2px;margin-top:8px;overflow-wrap:anywhere}
+/* А2 (12.10.2026): «Вернуть моё» и отметка «возвращено» в строке поля — по своей ширине, не на всю строку */
+.conflict-field>.button,.conflict-field>.badge{justify-self:start;margin-top:4px}
 @media(max-width:640px){.form-grid{grid-template-columns:1fr}.field input,.field select{min-height:var(--touch);font-size:1rem}
   .trash-row{flex-wrap:wrap;gap:8px}.trash-row .grow{flex-basis:100%}
   #scr-today .page-head .head-actions{grid-template-columns:1fr 1fr}
@@ -3465,17 +3469,58 @@ const CONFLICT_FIELDS = { number: 'Номер дела', client: 'Доверит
   // 05.10.2026: поля доверителя, счёта и заседания — чтобы конфликт назывался по-русски, а не «служебных полей: N»
   addr: 'Адрес', zip: 'Индекс', inn: 'ИНН', ogrn: 'ОГРН', kpp: 'КПП', type: 'Тип', role: 'Роль', note: 'Заметка', comment: 'Примечание', service: 'Услуга', billType: 'Тип расчёта', dueDate: 'Срок оплаты', plan: 'График платежей', pending: 'Условный счёт',
   judge: 'Судья', room: 'Зал', result: 'Результат', time: 'Время', date: 'Дата', court: 'Суд', with: 'С кем', place: 'Место', clientAddr: 'Адрес доверителя', clientInn: 'ИНН доверителя', closedAt: 'Дата завершения', docsPath: 'Папка документов', docsUrl: 'Папка в облаке' };
-// Журнал коллизий — просмотр: что разошлось при слиянии и какое значение оставлено. Кнопки «Вернуть моё» (conflictRestore прежней программы,
-// data/merge.js) нет — она в плане переноса; до неё лист не обещает того, чего нет (урок 86, сверка 11.10.2026).
-function showConflictsSheet() {
+// Журнал коллизий — просмотр: что разошлось при слиянии и какое значение оставлено.
+// А2 (12.10.2026, план переноса): «Вернуть моё» — значение этого устройства в одном поле, перезаписанное при обмене. Перенос conflictRestore
+// прежней программы (data/merge.js — общий модуль, не меняется) с отличиями: коллизия ищется по устойчивому ключу (хранилище, id, время), а не
+// по номеру строки — обмен может дописать журнал, пока лист открыт (урок 73); подтверждение «поле уже изменено» — в листе, не системным confirm
+// (урок 57); поле меняется внутри транзакции записи по текущей версии записи с проверкой, что запись не изменилась (уроки 78, 89); у дела поле,
+// которое сливается по журналу дела (CASE_MERGE_FIELDS), получает и событие журнала — иначе следующее слияние вернуло бы чужое значение;
+// списки (сроки, участники, платежи) целиком не возвращаются — они объединяются по элементам, и возврат всего списка стёр бы добавленное там.
+const CONFLICT_RESTORE_SKIP = new Set(['deadlines', 'participants', 'payments', 'history', 'ipReceipts', 'plan', 'items', 'docs']);
+const conflictKey = c => [c.store || '', c.id == null ? '' : c.id, c.at || 0].join('|');
+const conflictShow = v => v === undefined || (v && v.__undef) ? '' : v === null ? 'null' : typeof v === 'object' ? JSON.stringify(v).slice(0, 120) : String(v).slice(0, 120);
+function conflictCanRestore(c, d) {
+  return !!(c && c.id != null && c.store && d && 'hereV' in d && !d.list && !CONFLICT_RESTORE_SKIP.has(d.field) && !String(d.field).startsWith('_') && d.field !== 'id'
+    && JSON.stringify(d.hereV) !== JSON.stringify(d.keptV));
+}
+// ask — {key, field, now}: поле уже изменено после коллизии — спросить в листе
+function showConflictsSheet(ask) {
+  ask = ask && ask.key ? ask : null;
   const log = syncConflicts().slice().reverse();
+  const fieldRow = (c, d) => {
+    const key = conflictKey(c), can = conflictCanRestore(c, d), asking = ask && ask.key === key && ask.field === d.field;
+    const act = d.restored ? `<span class="badge good">возвращено ${esc(new Date(d.restored).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}</span>`
+      : can ? `<button type="button" class="button small-btn" data-restore="${esc(d.field)}" onclick="conflictRestoreNext('${jsq(key)}', '${jsq(d.field)}')">${icon('rotate-ccw', 'icon-sm')}Вернуть моё</button>` : '';
+    const warn = asking ? `<div class="info-box warning" id="conflict-ask" role="alert">Поле уже изменено после обмена: сейчас «${esc(ask.now || '—')}». Вернуть значение этого устройства «${esc(d.here || '—')}»?
+      <div class="form-actions"><button type="button" class="button primary" id="conflict-ask-yes" onclick="conflictRestoreNext('${jsq(key)}', '${jsq(d.field)}', true)">Вернуть</button><button type="button" class="button" onclick="showConflictsSheet()">Отмена</button></div></div>` : '';
+    return `<div class="conflict-field small"><b>${esc(CONFLICT_FIELDS[d.field] || d.field)}</b><span class="muted">здесь: ${esc(d.here || '—')}</span><span class="muted">пришло: ${esc(d.there || '—')}</span><span>итог: ${esc(d.kept || '—')}</span>${act}</div>${warn}`;
+  };
   const rows = log.map(c => `<div class="conflict"><div class="task-title">${esc(c.label || c.id || 'Запись')}</div>
     <div class="task-sub">${esc(STORE_TITLES[c.store] || c.store || '')} · оставлено: ${esc(c.kept || '')}</div>
-    ${(c.diff || []).slice(0, 12).map(d => `<div class="conflict-field small"><b>${esc(CONFLICT_FIELDS[d.field] || d.field)}</b><span class="muted">здесь: ${esc(d.here || '—')}</span><span class="muted">пришло: ${esc(d.there || '—')}</span><span>итог: ${esc(d.kept || '—')}</span></div>`).join('')}</div>`).join('');
+    ${(c.diff || []).slice(0, 12).map(d => fieldRow(c, d)).join('')}</div>`).join('');
   openSheet('Журнал коллизий', (rows ? `<p class="small muted">Записи, которые менялись и здесь, и на другом устройстве. Показаны последние ${log.length}.</p>${rows}
-    <div class="info-box">Чтобы вернуть своё значение, откройте запись и исправьте поле в форме — при следующем обмене оно разойдётся на остальные устройства.</div>
+    <div class="info-box">«Вернуть моё» ставит в поле значение этого устройства; при следующем обмене оно уйдёт на остальные устройства. Списки (сроки, участники, платежи) объединяются по элементам — их правьте в самой записи.</div>
     <div class="form-actions">${btn('Очистить журнал', 'clearSyncConflicts()', '', 'check-check')}</div>`
     : emptyState('check-check', 'Коллизий нет', 'Сюда попадают записи, которые менялись и здесь, и на другом устройстве.')), true);
+}
+async function conflictRestoreNext(key, field, force) {
+  const log = syncConflicts(), c = log.find(x => conflictKey(x) === key), d = c && (c.diff || []).find(x => x.field === field);
+  if (!c || !d || !conflictCanRestore(c, d)) { toast('Эта строка журнала уже изменилась — журнал обновлён', true); showConflictsSheet(); return { ok: false, error: 'gone' }; }
+  let rec; try { rec = await getOne(c.store, c.id); } catch (e) { logErr('conflict:read', e); toast('Не удалось прочитать запись: ' + ((e && e.message) || e), true); return { ok: false, error: 'read' }; }
+  if (!rec || rec._deleted) { toast('Запись удалена — возвращать некуда', true); return { ok: false, error: 'deleted' }; }
+  const nowV = rec[field] === undefined ? { __undef: 1 } : rec[field];
+  if (!force && JSON.stringify(nowV) !== JSON.stringify(d.keptV)) { showConflictsSheet({ key, field, now: conflictShow(nowV) }); return { ok: false, ask: true }; }
+  const val = JSON.parse(JSON.stringify(d.hereV)), setField = r => { const o = JSON.parse(JSON.stringify(r)); if (val && val.__undef) delete o[field]; else o[field] = val; return o; };
+  const upd = setField(rec), list = [[c.store, upd]];
+  if (c.store === 'cases' && typeof CASE_MERGE_FIELDS === 'object' && CASE_MERGE_FIELDS[field])
+    list.push(['caseEvents', { id: uid('СБ'), caseId: rec.id, caseNum: rec.number || '', ts: Date.now(), field, from: conflictShow(nowV), to: val && val.__undef ? '' : String(val == null ? '' : val), source: 'conflict' }]);
+  try { await putMany(list, { expect: { store: c.store, id: rec.id, upd: rec._upd || 0, ack: null } }); }
+  catch (e) { logErr('conflict:restore', e); toast('Не вернул: ' + ((e && e.message) || e), true); showConflictsSheet(); return { ok: false, error: 'write' }; }
+  const log2 = syncConflicts(), c2 = log2.find(x => conflictKey(x) === key), d2 = c2 && (c2.diff || []).find(x => x.field === field);
+  if (d2) { d2.kept = d2.here; d2.keptV = d2.hereV; d2.restored = Date.now(); localStorage.setItem('crm_sync_conflicts', JSON.stringify(log2)); }
+  toast('Возвращено значение этого устройства — уйдёт на другие устройства при следующем обмене');
+  showConflictsSheet();
+  return { ok: true };
 }
 
 // ▼▼▼ sync/push.js
@@ -7462,9 +7507,10 @@ if (typeof document === 'object' && document && typeof document.addEventListener
 // ▼▼▼ sync/ycdeploy.js
 // ═══ sync/ycdeploy.js — «Свой сервер в Яндекс Облаке одной кнопкой» (план основных функций, п. 3.2; обещано 30.09.2026) ═══
 // Мастер прежней программы (v273/v275, ycDeploy) перенесён дословно: каталог → сервисный аккаунт и роли → ключ хранилища → закрытый бакет →
-// функции crm-bridge и collector-sud с загрузчиками автообновления из папки раздачи → шлюз для ленты календаря → таймер коллектора.
-// Всё находится по имени и переиспользуется — повторный запуск после сбоя ничего не задваивает. Одно отличие: адрес сервера — всегда адрес
-// функции (https://functions.yandexcloud.net/…), шлюз даёт только ленту календаря: новая версия ходит к серверу только по адресу функции (CSP).
+// функции crm-bridge и collector-sud с загрузчиками автообновления из папки раздачи → таймер коллектора.
+// Всё находится по имени и переиспользуется — повторный запуск после сбоя ничего не задваивает. Отличия: адрес сервера — всегда адрес
+// функции (https://functions.yandexcloud.net/…): новая версия ходит к серверу только по адресу функции (CSP); шлюза для ленты календаря нет
+// (13.10.2026) — лента отдаётся самой функцией по ссылке с меткой (сервер 187), без секретного кода в адресе.
 // Работает в приложении для компьютера: запросы к API Облака идут через мост CRMDesktop.ycHttp (из браузера их не пустит CORS; мост пускает
 // только https://*.api.cloud.yandex.net). OAuth- и IAM-токены — только в памяти, пока открыт лист. В браузере лист даёт пошаговую инструкцию.
 
@@ -7608,15 +7654,10 @@ async function ycDeploy(o, log) {
     environment: Object.assign({ SECRET: secret, BUCKET: o.bucket, S3_KEY_ID: res.s3KeyId, S3_SECRET: s3Secret, FOLDER_ID: folderId, UPDATE_URL: dist }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {}) }), iam, 'версия сервера'); // v275: с лицензией — обновления только по ключу
   await ycOp(await ycApi('POST', YC.fns + '/' + bridge.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к серверу');
   res.bridgeUrl = 'https://functions.yandexcloud.net/' + bridge.id;
-  // 8. шлюз (лента календаря)
-  if (o.withGateway) {
-    log('Шлюз для ленты календаря…');
-    const spec = ['openapi: 3.0.0', 'info:', '  title: CRM Адвоката — личный сервер', '  version: 1.0.0', 'paths:', '  /bridge:', '    x-yc-apigateway-any-method:', '      x-yc-apigateway-integration:', '        type: cloud_functions', '        function_id: ' + bridge.id, '        service_account_id: ' + sa.id,
-      '  /cal/{secret}:', '    get:', '      parameters:', '        - name: secret', '          in: path', '          required: true', '          schema:', '            type: string', '      x-yc-apigateway-integration:', '        type: object_storage', '        bucket: ' + o.bucket, "        object: 'cal-{secret}.ics'", '        service_account_id: ' + sa.id].join('\n');
-    let gw = (await ycList(YC.gws + '?folderId=' + folderId, 'apiGateways', iam)).find(x => x.name === 'crm-gw');
-    if (!gw) gw = (await ycOp(await ycApi('POST', YC.gws, iam, { folderId, name: 'crm-gw', description: 'CRM Адвоката', openapiSpec: spec }), iam, 'шлюз')).response;
-    if (gw && gw.domain) { res.gatewayDomain = gw.domain; res.calUrl = 'https://' + gw.domain + '/cal/' + secret; }
-  }
+  // 8. лента календаря (13.10.2026, сервер 187 опубликован): сервер сам отдаёт ленту по ссылке «<адрес функции>?cal=<метка>»; метка —
+  // HMAC от секретного кода (sync/calfeed.js, calFeedToken), кода в ссылке нет. Прежний шлюз с маршрутом /cal/{secret} клал в адрес подписки
+  // сам секретный код сервера (урок 126) — мастер его больше не создаёт; o.withGateway не используется.
+  if (typeof calFeedToken === 'function') { try { res.calUrl = res.bridgeUrl + '?cal=' + await calFeedToken(secret); } catch (e) { logErr('yc:calurl', e); } }
   // 9. коллектор судов
   if (o.withCollector) {
     log('Функция коллектора судов…');
@@ -7700,7 +7741,7 @@ function openYcSetupSheet(sub) {
     <div id="cloud-where"><div class="section-label step-label">Шаг 2. Облако и каталог</div><p class="small muted">Станет доступно после шага 1.</p></div>
     <div class="section-label step-label">Шаг 3. Что создать</div>
     <div class="form-grid">${wide(fInput('cloud-bucket', 'Имя бакета (латиница, цифры, дефис)', bucketSuggest, 'autocomplete="off" spellcheck="false"'))}</div>
-    <label class="check"><input type="checkbox" id="cloud-gw" checked><span>Шлюз для ленты календаря (подписка в календаре телефона)</span></label>
+    <p class="small muted" id="cloud-cal-note">Лента календаря отдаётся по адресу самого сервера (с версии 187) — отдельный шлюз не нужен.</p>
     <label class="check"><input type="checkbox" id="cloud-col" checked><span>Коллектор судов</span></label>
     <label class="check"><input type="checkbox" id="cloud-timer" checked><span>Сбор с сайтов судов по расписанию (07:30 и 15:30 по Москве)</span></label>
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
@@ -7756,14 +7797,14 @@ async function ycRunWizard() {
   const logEl = () => document.getElementById('cloud-log');
   const log = t => { YC_SESS.log.push(t); const el = logEl(); if (el) el.innerHTML = ycStepsHtml(); };
   try {
-    const res = await ycDeploy({ oauth: YC_SESS.tok || oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: !!(document.getElementById('cloud-gw') || {}).checked, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
+    const res = await ycDeploy({ oauth: YC_SESS.tok || oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: false, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
     log('Записываю настройки в программу и проверяю связь…');
     const ok = await ycApply(res);
     // токен Облака после развёртывания больше не нужен — из памяти убирается
     YC_SESS.res = res; YC_SESS.iam = null; const el = logEl(); if (el) el.innerHTML = ycStepsHtml();
     const out = document.getElementById('cloud-result');
     if (out) out.innerHTML = `<div class="info-box${ok ? '' : ' warning'}" id="cloud-done">${ok ? 'Сервер работает.' : 'Сервер создан, но пока не отвечает — через минуту откройте «Синхронизация» и нажмите «Сохранить и проверить связь».'}
-      <div class="small" style="margin-top:6px;word-break:break-all">Адрес сервера: ${esc(res.bridgeUrl)}${res.calUrl ? '<br>Лента календаря: ' + esc(res.calUrl) : ''}${res.collectorUrl ? '<br>Коллектор: ' + esc(res.collectorUrl) : ''}</div>${res.calUrl ? '<div class="small" style="margin-top:6px"><b>В адресе ленты календаря — секретный код сервера: не пересылайте его и не показывайте на снимках экрана.</b></div>' : ''}</div>
+      <div class="small" style="margin-top:6px;word-break:break-all">Адрес сервера: ${esc(res.bridgeUrl)}${res.calUrl ? '<br>Лента календаря: ' + esc(res.calUrl) : ''}${res.collectorUrl ? '<br>Коллектор: ' + esc(res.collectorUrl) : ''}</div>${res.calUrl ? '<div class="small" style="margin-top:6px">Адрес ленты календаря — как ключ: кто его знает, видит ваши события. Не пересылайте его и не показывайте на снимках экрана. Публикация ленты включается в «Настройки → Лента календаря».</div>' : ''}</div>
       <div class="section-label">Что дальше</div><ol class="steps-list">
         <li>«Синхронизация» → шаг 1: адрес и код уже вписаны — придумайте пароль шифрования (не короче 12 знаков), впишите его и нажмите «Сохранить и проверить связь».</li>
         <li>Шаг 4 — «Отправить изменения на сервер»: база этого устройства уйдёт на сервер зашифрованной.</li>
@@ -7911,7 +7952,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')","openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -10492,7 +10533,7 @@ async function openCaseSheet(id, keep) {
     <div class="task-badges">${badge(c.status || 'Без статуса', c.status === 'Завершено' ? 'good' : c.status === 'Ожидание' ? 'warn' : 'accent')}${c.kind ? badge(c.kind) : ''}${c.category ? badge(c.category) : ''}${c.archived ? badge('Архив') : ''}</div>
     ${cHead.court || cHead.judge ? `<div class="case-court">${cHead.court ? `<div>${icon('landmark', 'icon-sm')}<span>${esc(cHead.court)}${c.stage && c.stage !== 'Первая инстанция' ? ' · ' + esc(String(c.stage).toLowerCase()) : ''}</span></div>` : ''}${cHead.judge ? `<div>${icon('users-round', 'icon-sm')}<span>Судья: ${esc(cHead.judge)}</span></div>` : ''}</div>` : ''}
     ${!cHead.judge && c.court ? `<div class="case-step">${icon('circle-alert', 'icon-sm')}<span>Судья не указан — ${hasLink ? 'нажмите «Данные с сайта суда»' : 'впишите в форме дела («Изменить»)'}</span></div>` : ''}
-    <div class="actions" style="margin:10px 0 8px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Контакты суда', `openCourtContacts('${jsq(c.id)}')`, 'small-btn', 'landmark')}${(c.docsPath || c.docsUrl) ? btn('Папка документов', `openCaseDocs('${jsq(c.id)}')`, 'small-btn', 'files') : ''}${hasLink ? `<button type="button" class="button small-btn" id="case-card-fetch" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button>` : ''}${typeof kadProtoButton === 'function' ? kadProtoButton(c) : ''}${cl && contactLinks(cl.phone).tel ? `<button type="button" class="button small-btn" id="case-contact" onclick="openContactSheet('${jsq(cl.id)}')">${icon('phone', 'icon-sm')}Связаться с доверителем</button>` : ''}</div>
+    <div class="actions" style="margin:10px 0 8px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Контакты суда', `openCourtContacts('${jsq(c.id)}')`, 'small-btn', 'landmark')}${typeof openCourtSites === 'function' ? `<button type="button" class="button small-btn" id="case-sites" onclick="openCourtSites('${jsq(c.id)}')">${icon('arrow-right', 'icon-sm')}Сайты судов</button>` : ''}${(c.docsPath || c.docsUrl) ? btn('Папка документов', `openCaseDocs('${jsq(c.id)}')`, 'small-btn', 'files') : ''}${hasLink ? `<button type="button" class="button small-btn" id="case-card-fetch" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button>` : ''}${typeof kadProtoButton === 'function' ? kadProtoButton(c) : ''}${cl && contactLinks(cl.phone).tel ? `<button type="button" class="button small-btn" id="case-contact" onclick="openContactSheet('${jsq(cl.id)}')">${icon('phone', 'icon-sm')}Связаться с доверителем</button>` : ''}</div>
     ${cHead.next ? `<button type="button" class="case-next" onclick="openHearingForm('${jsq(cHead.next.id)}')">${icon('calendar-days')}<span><b>${esc(fmtDate(cHead.next.date))}${cHead.next.time ? ' · ' + esc(cHead.next.time) : ''}</b><small>Заседание${cHead.next.room ? ' · зал ' + esc(cHead.next.room) : ''} · ${esc(todayDayLabel(cHead.next.date, localISO(new Date())).toLowerCase())}</small></span>${icon('chevron-right', 'icon-sm')}</button>` : ''}
     ${c.nextAction ? `<div class="case-step${m.nextOverdue ? ' overdue' : ''}">${icon('check-check', 'icon-sm')}<span>Следующий шаг: ${esc(c.nextAction)}${c.nextActionDue ? ' — ' + esc(m.nextWhen) + ', ' + esc(fmtDate(c.nextActionDue)) : ''}</span></div>` : ''}
     ${m.fin.amount || m.fin.paid ? `<button type="button" class="case-money" onclick="caseMoneyOpen()"><span><small>Начислено</small><b>${esc(fmtMoney(m.fin.amount))}</b></span><span><small>Оплачено</small><b>${esc(fmtMoney(m.fin.paid))}</b></span><span><small>Долг</small><b class="${m.fin.debt ? 'bad' : ''}">${esc(fmtMoney(m.fin.debt))}</b></span></button>` : ''}
@@ -10756,7 +10797,56 @@ async function openCourtContacts(caseId) {
       <div class="actions" style="margin:8px 0 4px">${x.phone && tel(x.phone) ? `<a class="button small-btn primary" href="tel:${esc(tel(x.phone))}">${icon('phone', 'icon-sm')}Позвонить</a>` : ''}${url ? `<a class="button small-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${icon('landmark', 'icon-sm')}Сайт суда</a>` : ''}</div>`; }).join('')
     : `<p class="small">В деле пока нет суда и контактов.</p>`;
   if (typeof sheetFreeze === 'function') sheetFreeze();
-  openSheet('Контакты суда', body + `<p class="small muted" style="margin-top:10px">Телефон помощника, кабинет и ссылка на сайт суда заполняются в форме дела («Все поля» → «Первая инстанция»); ссылку на дело может подставить мониторинг.</p><div class="actions">${btn('Изменить данные суда', `openCaseForm('${jsq(c.id)}', true)`, 'small-btn', 'pencil')}</div>`, true);
+  openSheet('Контакты суда', body + `<div class="form-actions" style="margin-top:8px"><button type="button" class="button small-btn" onclick="openCourtSites('${jsq(c.id)}')">${icon('arrow-right', 'icon-sm')}Дело на сайтах судов</button></div>` + `<p class="small muted" style="margin-top:10px">Телефон помощника, кабинет и ссылка на сайт суда заполняются в форме дела («Все поля» → «Первая инстанция»); ссылку на дело может подставить мониторинг.</p><div class="actions">${btn('Изменить данные суда', `openCaseForm('${jsq(c.id)}', true)`, 'small-btn', 'pencil')}</div>`, true);
+}
+// ── А3 (12.10.2026, план переноса): дело на сайтах судов ──
+// Перенос openCourtCheck прежней программы («Проверить дело в суде»): ссылки на дело каждой инстанции из формы дела (первая инстанция,
+// апелляция, кассация, ВС РФ, надзор) и быстрые переходы — для арбитражного дела КАД Арбитр и «Мой Арбитр», для дела суда общей
+// юрисдикции ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП. Адреса — те же, что в прежней программе.
+// Отличие: номер для поиска (номер в суде, № ИП) копируется при переходе — поиск сайта суда по ссылке из программы не заполняется
+// (параметр поиска КАД в адресе прежней программы на настоящем сайте не проверен, поэтому не используется).
+const COURT_SITES = {
+  kad: ['КАД Арбитр', 'https://kad.arbitr.ru/', 'Картотека арбитражных дел: движение дела, документы, заседания'],
+  myarb: ['Мой Арбитр', 'https://my.arbitr.ru/', 'Электронная подача исков, жалоб и ходатайств в арбитражные суды'],
+  bsr: ['ГАС «Правосудие» — поиск по делам', 'https://bsr.sudrf.ru/bigs/portal.html', 'Поиск дел и судебных актов судов общей юрисдикции'],
+  sudrf: ['Поиск сайта суда', 'https://sudrf.ru/index.php?id=300&searchtype=fed', 'Сайт нужного суда общей юрисдикции — на нём поиск дела по номеру'],
+  ej: ['Подача документов в суд общей юрисдикции', 'https://ej.sudrf.ru/', 'Электронная подача обращений'],
+  fssp: ['Банк данных исполнительных производств', 'https://fssp.gov.ru/iss/ip', 'ФССП: исполнительное производство по должнику или № ИП'],
+};
+function courtSitesModel(c) {
+  c = c || {};
+  const inst = [
+    ['Первая инстанция', c.link, c.courtNo, c.court], ['Апелляция', c.linkApp, c.apCourtNo || c.courtNoApp, c.apCourt || c.courtApp],
+    ['Кассация', c.linkCass, c.csCourtNo || c.courtNoCass, c.courtCass], ['Верховный Суд', c.linkVs, c.courtNoVs, 'Верховный Суд РФ'], ['Надзор', c.linkNadzor, c.nzNo, 'Президиум ВС РФ'],
+  ].map(([title, link, no, court]) => ({ title, url: safeExternalUrl(link || ''), no: String(no || '').trim(), court: court || '' })).filter(x => x.url);
+  const num = String(c.courtNo || c.courtNoApp || c.courtNoCass || '').trim();
+  const arb = c.kind === 'Арбитраж' || /^[АA]\d{1,3}\s*[-–—]/.test(num) || /арбитражн/i.test(String(c.court || ''));
+  const quick = (arb ? ['kad', 'myarb'] : ['bsr', 'sudrf', 'ej']).map(k => ({ key: k, title: COURT_SITES[k][0], url: COURT_SITES[k][1], desc: COURT_SITES[k][2], copy: num }));
+  quick.push({ key: 'fssp', title: COURT_SITES.fssp[0], url: COURT_SITES.fssp[1], desc: COURT_SITES.fssp[2], copy: String(c.fsspNo || '').trim() });
+  return { inst, quick, arb, num, fsspNo: String(c.fsspNo || '').trim() };
+}
+// переход по быстрой ссылке: номер — в буфер обмена (вставить в поиск сайта), сайт — в новой вкладке (в приложении — в браузере)
+async function courtSiteGo(url, copy) {
+  if (copy) { try { await navigator.clipboard.writeText(copy); toast('Номер ' + copy + ' скопирован — вставьте его в поиск сайта'); } catch (e) { logErr('courtsite:copy', e); } }
+  // тот же путь, что у обычных внешних ссылок программы (<a target="_blank">): приложение для Android отдаёт такой переход браузеру
+  const safe = safeExternalUrl(url); if (!safe) return;
+  const a = document.createElement('a'); a.href = safe; a.target = '_blank'; a.rel = 'noopener noreferrer'; document.body.appendChild(a); a.click(); a.remove();
+}
+async function openCourtSites(caseId) {
+  const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
+  const m = courtSitesModel(c);
+  const go = (x, cls) => `<button type="button" class="list-btn site-row${cls || ''}" data-site="${esc(x.key || '')}" onclick="courtSiteGo('${jsq(x.url)}', '${jsq(x.copy || '')}')"><span>${esc(x.title)}</span><span class="muted">${esc(x.desc || '')}${x.copy ? ' · номер ' + esc(x.copy) + ' скопируется' : ''}</span></button>`;
+  const inst = m.inst.length ? `<div class="section-label">Дело на сайте суда</div><div class="list-rows" id="cs-inst">${m.inst.map(x => `<a class="list-btn site-row" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer"><span>${esc(x.title)}</span><span class="muted">${esc([x.court, x.no ? '№ ' + x.no : ''].filter(Boolean).join(' · ') || 'открыть')}</span></a>`).join('')}</div>`
+    : `<div class="info-box" id="cs-noinst">Ссылок на дело на сайтах судов в деле нет. Вставьте ссылку на карточку дела с сайта суда в форму дела («Изменить» → вкладка инстанции → «Ссылка на дело») — тогда она откроется отсюда одним нажатием, а мониторинг будет следить за делом.</div>`;
+  if (typeof sheetFreeze === 'function') sheetFreeze();
+  openSheet('Дело на сайтах судов', `${inst}
+    <div class="section-label">${m.arb ? 'Арбитражное дело' : 'Суд общей юрисдикции'}</div>
+    ${m.num ? '' : `<p class="small muted" id="cs-nonum">Номер дела в суде не указан — поиск на сайте придётся вести по сторонам или по номеру, когда он появится.</p>`}
+    <div class="list-rows" id="cs-quick">${m.quick.filter(x => x.key !== 'fssp').map(x => go(x)).join('')}</div>
+    <div class="section-label">Исполнительное производство</div>
+    <div class="list-rows" id="cs-fssp">${go(m.quick.find(x => x.key === 'fssp'))}</div>
+    <p class="small muted">Сайты открываются в браузере. Номер для поиска программа копирует сама — вставьте его в поле поиска на сайте. Из-за рубежа сайты судов могут не открываться без VPN.</p>
+    <div class="actions">${btn('Изменить ссылки и номера', `openCaseForm('${jsq(c.id)}', true)`, 'small-btn', 'pencil')}</div>`, true);
 }
 
 // ▼▼▼ screens/calendar.js
@@ -12987,7 +13077,7 @@ const HELP_SECTIONS = [
 <p>Дело программа ищет по номеру, номеру в суде или фамилии доверителя. Если подходит несколько дел или ни одного — нажмите «Выбрать дело». «Так и есть» записывает сразу, «Отменить» возвращает запись. Некогда — «В неразобранные».</p>` },
   { id: 'cases', title: 'Дела, сроки, стадии', html: `
 <p>«Дела» — список с фильтрами и поиском, таблица (на компьютере можно выбрать столбцы) и доска по стадиям. Поиск и фильтр сохраняются, пока вы смотрите карточки.</p>
-<p><b>Карточка дела</b>: сверху доверитель, суд и судья, ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Папка документов», «Связаться с доверителем». Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам.</p>
+<p><b>Карточка дела</b>: сверху доверитель, суд и судья, ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Сайты судов», «Папка документов», «Связаться с доверителем». «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам.</p>
 <p><b>Стадия</b> меняется нажатием на плашку в карточке. Она поднимается и сама, когда в деле появляются данные более высокой инстанции: номер или ссылка апелляции, кассации, Верховного Суда, заседание в апелляционном или кассационном суде. Если стадию вернули вручную, по тем же данным она не поднимается. Дела, где данные выше стадии, перечислены на «Сегодня» с кнопкой «Поднять».</p>
 <p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё.</p>
 <p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение, папка документов на компьютере и в облаке.</p>` },
@@ -13028,7 +13118,7 @@ const HELP_SECTIONS = [
 <h3>Путь А. Мастер «Свой сервер в Яндекс Облаке» (приложение для компьютера)</h3>
 <ol><li>Установите приложение для компьютера (CRM_Advokata_Setup.exe с сайта программы). Windows может спросить разрешение — установщик подписан не магазином, это ожидаемо.</li>
 <li>В приложении: Настройки → «Свой сервер в Яндекс Облаке». Шаг 1 — доступ к Облаку. С 1 июня 2026 года Облако не принимает новые строки «y0_…», поэтому проще всего ключ сервисного аккаунта: либо скажите ИИ-помощнику консоли (запрос — в мастере, «Способ 4»), либо сами: в консоли Облака слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; затем вверху выберите само облако → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» → скачайте файл, откройте его в «Блокноте», скопируйте всё и вставьте в поле мастера. Нажмите «Подключиться к Облаку» — появятся облако и каталог. Вставлять нужно файл целиком (в нём есть id и service_account_id); если скопирован только закрытый ключ, мастер попросит два идентификатора. Закрытый ключ — секрет: после развёртывания удалите его в консоли.</li>
-<li>Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки (шлюз для ленты календаря, коллектор судов, сбор по расписанию) → «Развернуть». Мастер создаёт сервисный аккаунт для функций, бакет, функции crm-bridge и collector-sud с таймером; ход виден по шагам. Обычно 2–4 минуты.</li>
+<li>Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки (коллектор судов, сбор по расписанию) → «Развернуть». Мастер создаёт сервисный аккаунт для функций, бакет, функции crm-bridge и collector-sud с таймером; ход виден по шагам. Обычно 2–4 минуты.</li>
 <li>В конце мастер покажет адрес сервера и секретный код и сам впишет их в «Синхронизацию»; введите пароль шифрования → «Сохранить и проверить связь». Ключ crm-admin после этого можно удалить в консоли.</li></ol>
 <h3>Путь Б. ИИ-помощник консоли Облака (без приложения)</h3>
 <p>В консоли console.yandex.cloud вверху есть «Чат с AI» — он умеет создавать ресурсы сам. Настройки → «Свой сервер в Яндекс Облаке» → «Скопировать запрос для ИИ-помощника» → вставьте в чат и подтверждайте шаги. В конце помощник покажет адрес сервера и секретный код — впишите их в «Синхронизацию» вместе с паролем шифрования. Коды и ключи — секрет: после настройки очистите чат помощника («Удалить сейчас»).</p>
@@ -13039,7 +13129,7 @@ const HELP_SECTIONS = [
 <li>На странице функции включите «Публичная функция». «Ссылка для вызова» вида https://functions.yandexcloud.net/d4e… — это адрес сервера.</li>
 <li>В программе: «Синхронизация» → адрес сервера, секретный код (тот же SECRET), пароль шифрования → «Сохранить и проверить связь». Должно ответить, что сервер отвечает, с номером версии.</li></ol>
 <h3>Работа с сервером</h3>
-<ol><li>«Загрузить базу с сервера» — база сервера объединяется с базой устройства: ничего не стирается, одинаковые записи сливаются по полям, спорные правки показываются в «Журнале коллизий».</li>
+<ol><li>«Загрузить базу с сервера» — база сервера объединяется с базой устройства: ничего не стирается, одинаковые записи сливаются по полям, спорные правки показываются в «Журнале коллизий». Там у поля, где при обмене осталось чужое значение, есть «Вернуть моё» — значение этого устройства уйдёт на остальные при следующем обмене; если поле уже правили после обмена, программа сначала спросит. Списки (сроки, участники, платежи) объединяются по элементам — их правьте в самой записи.</li>
 <li>«Проверить слияние» — что изменится на сервере и на устройстве, без записи. Полезно перед первой отправкой с нового устройства.</li>
 <li>«Отправить изменения на сервер» — правки этого устройства уходят на сервер (зашифрованными). Лист покажет этапы: получение, объединение, файлы, подготовка, загрузка, подтверждение.</li>
 <li>«Автоматический обмен» — переключатель на шаге 5, доступен после первой удачной отправки: устройство само обменивается правками раз в несколько минут и при открытии. Включите на каждом устройстве.</li>
