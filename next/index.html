@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="12.10.2026 19:01 · 46090d5">
+<meta name="build" content="12.10.2026 20:58 · e3eee31">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2861,7 +2861,8 @@ async function stageLagHide(id, key) {
 // Разрешены только действия чтения; всё остальное возвращает отказ и пишется в журнал ошибок. Второй рубеж — CSP.
 // track — запрос статусов Почты России через сервер (этап 3): сервер ничего не записывает, только спрашивает Почту
 // eventsget — события судов с сервера (этап 4): чтение
-const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget', 'bookget', 'deltaget'];
+// calcheck — сервер читает свой файл ленты календаря и считает события (план переноса, А1): чтение
+const NEXT_SERVER_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'blobget', 'bloblist', 'track', 'eventsget', 'bookget', 'deltaget', 'calcheck'];
 // этап 4, часть 2в: история снимков базы на сервере 178 — чтение
 const NEXT_SERVER_HIST = ['dbhistlist', 'dbhistget'];
 // этап 4, часть 2в: запись базы (dbput) разрешена только пока идёт явная отправка по кнопке (sync/push.js ставит и снимает
@@ -2872,10 +2873,12 @@ const NEXT_REMIND = { on: false };
 // план переноса, Б5: онлайн-запись — окна (bookpub) и ответ доверителю (bookset) только пока идёт действие sync/booking.js;
 // заявки (bookget) — чтение; Д6: цепочка изменений базы (deltaget) — чтение
 const NEXT_BOOK = { on: false };
+// план переноса, А1: лента календаря (ics) — только пока идёт публикация (sync/calfeed.js ставит и снимает отметку)
+const NEXT_CAL = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on) && !(['bookpub', 'bookset'].includes(action) && NEXT_BOOK.on)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on) && !(['bookpub', 'bookset'].includes(action) && NEXT_BOOK.on) && !(action === 'ics' && NEXT_CAL.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -4189,6 +4192,252 @@ function openRemindSheet(sub, msg) {
     <p class="small muted">Проверка: после «Передать сейчас» в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных — латиницей, заглавными). Первое сообщение придёт в 08:05, если на сегодня или завтра есть срок или заседание. Ничего не пришло — проверьте таймер (шаг 3) и что вы нажали «Start» у бота.</p>`, sub);
 }
 
+// ▼▼▼ sync/calfeed.js
+// ═══ sync/calfeed.js — лента календаря на личном сервере (план переноса 11.10.2026, пункт А1) ═══
+// Перенос icsBuild / srvIcsPush прежней программы: программа собирает ленту .ics из предстоящих заседаний, задач, встреч и сроков
+// и кладёт её на личный сервер (действие ics → файл cal-<код>.ics в бакете); календарь телефона или Google, подписанный на ленту,
+// обновляется сам. До этого выпуска новая версия ленту не обновляла (заглушка icsTouch), и подписка застыла бы после перехода.
+// Отличия от прежней программы:
+// — публикация включается явно (лента лежит на сервере открытым текстом — раздел 1 п. 6 правил: осознанно открытая часть);
+//   признак crm_ics_feed — только у новой версии; «только номера дел» — прежний crm_ics_anon (тот же смысл, урок 120);
+// — сервер 187 сам отдаёт ленту по ссылке «<адрес сервера>?cal=<метка>»; метка — HMAC-SHA256 от секретного кода с подписью
+//   «crm-cal-feed-v1» (тот же расчёт, что в сервере): код сервера по ссылке не узнать. Прежний адрес шлюза «…/cal/<код>» содержал
+//   сам код — программа его больше не показывает; файл ленты тот же, поэтому подписка через шлюз продолжает обновляться;
+// — в ленте и сроки дел (план А1: «заседания, сроки»); одинаковая лента повторно не отправляется (отпечаток с адресом сервера);
+// — итог публикации виден в листе и в строке Настроек, а не только в журнале (урок 115). Запись ics сторож пропускает только на
+//   время публикации (NEXT_CAL в next/guard.js), как напоминания — NEXT_REMIND. Только основной сервер (запасной хранит одну базу).
+// Время — как записано в программе, без часового пояса (так было и в прежней программе): календарь покажет его по часам устройства.
+const CALF = { timer: null, busy: null, label: 'crm-cal-feed-v1', keyOn: 'crm_ics_feed', keyAnon: 'crm_ics_anon', keyAt: 'crm_next_cal_at', keyN: 'crm_next_cal_n',
+  keyCut: 'crm_next_cal_cut', keyErr: 'crm_next_cal_err', keyHash: 'crm_next_cal_hash', keyVer: 'crm_srv_ver', keyChk: 'crm_next_cal_chk', max: 380000, lastBuild: 0 };
+const calFeedOn = () => localStorage.getItem(CALF.keyOn) === '1';
+const calFeedAnon = () => localStorage.getItem(CALF.keyAnon) === '1';
+const calFeedSrvOk = () => !!(SRV.url && SRV.secret);
+// ── сборка ──
+function calFeedEsc(v) { return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+// RFC 5545, п. 3.1: строка длиннее 75 октетов переносится (CRLF и пробел); многобайтовый знак не разрывается
+function calFeedFold(line) {
+  const enc = new TextEncoder(); if (enc.encode(line).length <= 75) return line;
+  const out = []; let cur = '', n = 0, lim = 75;
+  for (const ch of line) { const b = enc.encode(ch).length; if (n + b > lim) { out.push(cur); cur = ''; n = 0; lim = 74; } cur += ch; n += b; }
+  out.push(cur); return out.join('\r\n ');
+}
+const calFeedP2 = n => String(n).padStart(2, '0');
+const calFeedD8 = d => d.getFullYear() + calFeedP2(d.getMonth() + 1) + calFeedP2(d.getDate());
+// начало и конец: со временем — «плавающее» местное время (без пояса), без времени — весь день
+function calFeedDt(date, time, minutes) {
+  const [y, m, d] = String(date).split('-').map(Number);
+  const tm = /^(\d{1,2}):(\d{2})/.exec(String(time || ''));
+  if (tm) {
+    const s = new Date(y, m - 1, d, Number(tm[1]), Number(tm[2])), e = new Date(s.getTime() + (minutes || 60) * 60000);
+    return ['DTSTART:' + calFeedD8(s) + 'T' + calFeedP2(s.getHours()) + calFeedP2(s.getMinutes()) + '00', 'DTEND:' + calFeedD8(e) + 'T' + calFeedP2(e.getHours()) + calFeedP2(e.getMinutes()) + '00'];
+  }
+  return ['DTSTART;VALUE=DATE:' + calFeedD8(new Date(y, m - 1, d)), 'DTEND;VALUE=DATE:' + calFeedD8(new Date(y, m - 1, d + 1))];
+}
+const calFeedIso = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+const CALF_DONE = ['Проведено', 'Отменено', 'Дата прошла'];
+// события ленты по данным базы: заседания (назначенные), задачи (невыполненные), встречи (кроме отменённых и отклонённых заявок),
+// сроки активных дел (невыполненные) — с сегодняшнего дня; anon — только номера дел, без имён, заметок и мест встреч
+function calFeedModel(data, today, anon) {
+  const cases = (data.cases || []).filter(c => c && !c._deleted), byId = {}, byNum = {};
+  cases.forEach(c => { if (c.id) byId[c.id] = c; if (c.number && !byNum[c.number]) byNum[c.number] = c; });
+  const caseOf = x => (x.caseId && byId[x.caseId]) || (x.caseNum && byNum[x.caseNum]) || null;
+  const numOf = (x, c) => (c && c.number) || x.caseNum || '';
+  const future = d => calFeedIso(d) && d >= today;
+  const out = [];
+  (data.hearings || []).forEach(h => {
+    if (!h || h._deleted || !future(h.date) || CALF_DONE.includes(h.status)) return;
+    const c = caseOf(h), num = numOf(h, c), court = typeof hearingCourtOf === 'function' ? hearingCourtOf(h, c || {}) : (h.court || ''), client = c && c.client;
+    const judge = typeof todayJudgeOf === 'function' ? todayJudgeOf(h, c || {}) : (h.judge || '');
+    const addr = court && typeof courtAddrOf === 'function' ? courtAddrOf(court, '') : '';
+    out.push({ kind: 'hearing', uid: String(h.id) + '@crm-advocate', date: h.date, time: h.time || '', min: 60,
+      summary: anon ? (num ? 'Заседание по делу ' + num : 'Заседание') : 'Заседание' + (client ? ': ' + client + (num ? ' (' + num + ')' : '') : num ? ': ' + num : ''),
+      location: [court, addr, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', '),
+      desc: (anon ? [num ? 'Дело: ' + num : '', h.status ? 'Статус: ' + h.status : ''] : [num ? 'Дело: ' + num + (c && c.subject ? ' — ' + c.subject : '') : '', judge ? 'Судья: ' + judge : '', h.status ? 'Статус: ' + h.status : '']).filter(Boolean).join('\n') });
+  });
+  (data.tasks || []).forEach(t => {
+    if (!t || t._deleted || t.done || !future(t.due)) return;
+    const c = caseOf(t), num = numOf(t, c);
+    out.push({ kind: 'task', uid: String(t.id) + '@crm-advocate', date: t.due, time: t.time || '', min: 30,
+      summary: anon ? (num ? 'Задача по делу ' + num : 'Задача') : 'Задача: ' + (t.title || 'без названия'),
+      location: '', desc: (anon ? [num ? 'Дело: ' + num : ''] : [num ? 'Дело: ' + num : '', t.note || '']).filter(Boolean).join('\n') });
+  });
+  (data.meetings || []).forEach(m => {
+    if (!m || m._deleted || !future(m.date) || m.status === 'Отменено' || m.bookingStatus === 'declined') return;
+    const c = caseOf(m), num = numOf(m, c), pending = m.bookingStatus === 'new' ? 'Заявка онлайн-записи — ещё не подтверждена' : '';
+    out.push({ kind: 'meeting', uid: String(m.id) + '@crm-advocate', date: m.date, time: m.time || '', min: Number(m.duration) > 0 ? Number(m.duration) : 60,
+      summary: anon ? 'Встреча' : 'Встреча' + (m.with ? ': ' + m.with : ''), location: anon ? '' : (m.place || ''),
+      desc: (anon ? [num ? 'Дело: ' + num : '', pending] : [num ? 'Дело: ' + num : '', pending, m.note || '']).filter(Boolean).join('\n') });
+  });
+  cases.filter(c => !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено').forEach(c => (c.deadlines || []).forEach((dl, i) => {
+    if (!dl || dl.done || !future(dl.date)) return;
+    const unconf = dl.kind !== 'control' && !dl.confirmedAt ? 'Срок не подтверждён — проверьте в программе' : '';
+    out.push({ kind: 'deadline', uid: 'dl-' + String(c.id) + '-' + String(dl.id || i + '-' + dl.date) + '@crm-advocate', date: dl.date, time: '', min: 0,
+      summary: anon ? 'Срок по делу ' + (c.number || '') : 'Срок: ' + (dl.title || 'срок') + (c.number ? ' (' + c.number + ')' : ''),
+      location: '', desc: (anon ? [c.number ? 'Дело: ' + c.number : '', unconf] : [c.number ? 'Дело: ' + c.number + (c.client ? ' — ' + c.client : '') : '', unconf, dl.note || '']).filter(Boolean).join('\n') });
+  }));
+  return out.sort((a, b) => (a.date + (a.time || '99')).localeCompare(b.date + (b.time || '99')) || a.uid.localeCompare(b.uid));
+}
+// текст ленты; лента длиннее предела сервера (400 000 знаков) обрезается с дальнего конца — cut называет, сколько не вошло
+function calFeedText(items, stampTs) {
+  const stamp = new Date(stampTs || Date.now()).toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
+  const head = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CRM Advokata//RU', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:CRM Адвоката'], tail = 'END:VCALENDAR';
+  let text = head.map(calFeedFold).join('\r\n'), n = 0;
+  for (const it of items) {
+    const dt = calFeedDt(it.date, it.time, it.min);
+    const ev = ['BEGIN:VEVENT', 'UID:' + calFeedEsc(it.uid), 'DTSTAMP:' + stamp, dt[0], dt[1], 'SUMMARY:' + calFeedEsc(it.summary)]
+      .concat(it.location ? ['LOCATION:' + calFeedEsc(it.location)] : [], it.desc ? ['DESCRIPTION:' + calFeedEsc(it.desc)] : [], ['TRANSP:' + (it.time ? 'OPAQUE' : 'TRANSPARENT'), 'END:VEVENT'])
+      .map(calFeedFold).join('\r\n');
+    if (text.length + ev.length + tail.length + 4 > CALF.max) break;
+    text += '\r\n' + ev; n++;
+  }
+  return { ics: text + '\r\n' + tail, n, cut: items.length - n };
+}
+async function calFeedBuild(nowTs) {
+  const data = {}; for (const st of ['cases', 'hearings', 'tasks', 'meetings']) data[st] = await getAll(st);
+  const today = typeof todayISO === 'function' && !nowTs ? todayISO() : (() => { const d = new Date(nowTs || Date.now()); return d.getFullYear() + '-' + calFeedP2(d.getMonth() + 1) + '-' + calFeedP2(d.getDate()); })();
+  const items = calFeedModel(data, today, calFeedAnon()); CALF.lastBuild = Date.now();
+  return Object.assign(calFeedText(items, nowTs), { items });
+}
+// отпечаток: адрес сервера и текст без отметок времени — одинаковая лента повторно не отправляется; смена сервера — отправляется
+async function calFeedHash(ics) {
+  const src = String(SRV.url || '') + '\n' + String(ics).replace(/\r\nDTSTAMP:[^\r]*/g, '');
+  const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(src)));
+  return Array.from(d, b => b.toString(16).padStart(2, '0')).join('');
+}
+// метка ссылки — та же, что считает сервер 187 (HMAC-SHA256 от секретного кода, base64url, 32 знака)
+async function calFeedToken(secret) {
+  const enc = new TextEncoder();
+  const k = await crypto.subtle.importKey('raw', enc.encode(String(secret || '')), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', k, enc.encode(CALF.label)));
+  let s = ''; for (const b of sig) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 32);
+}
+async function calFeedUrl() { if (!calFeedSrvOk()) return ''; return SRV.url + (SRV.url.includes('?') ? '&' : '?') + 'cal=' + await calFeedToken(SRV.secret); }
+const calFeedSrvVer = () => Number(localStorage.getItem(CALF.keyVer) || 0) || 0;
+// ── публикация ──
+function calFeedWhy(j) {
+  const e = String((j && j.error) || '');
+  if (e === 'bad_ics') return 'сервер не принял ленту: файл не похож на календарь';
+  if (e === 'ics_too_big') return 'лента больше 400 000 знаков — сервер её не принимает';
+  if (/^Хранилище не настроено/.test(e)) return 'у сервера не настроено хранилище (переменные BUCKET, S3_KEY_ID, S3_SECRET функции)';
+  if (/^s3 /.test(e)) return 'хранилище сервера не приняло файл (' + e.slice(3, 70) + '); при сбое Яндекс Облака запись может не проходить — status.yandex.cloud';
+  return typeof nextSrvError === 'function' ? nextSrvError(j) : (e || 'нет ответа');
+}
+async function calFeedPublish(force) {
+  if (!calFeedSrvOk()) return { ok: false, error: 'сначала подключите личный сервер («Синхронизация», шаг 1)' };
+  if (CALF.busy) { try { await CALF.busy; } catch (e) { logErr('cal:wait', e); } }
+  const run = (async () => {
+    const b = await calFeedBuild(), h = await calFeedHash(b.ics);
+    if (!force && h === localStorage.getItem(CALF.keyHash) && !lsJSON(CALF.keyErr, null)) return { ok: true, same: true, n: b.n, cut: b.cut };
+    NEXT_CAL.on = true;
+    let j; try { j = await srvCall('ics', { ics: b.ics }); } catch (e) { logErr('cal:publish', e); j = { ok: false, error: String((e && e.message) || e).slice(0, 120) }; } finally { NEXT_CAL.on = false; }
+    if (j && j.ok) {
+      localStorage.setItem(CALF.keyHash, h); localStorage.setItem(CALF.keyAt, String(Date.now())); localStorage.setItem(CALF.keyN, String(b.n)); localStorage.setItem(CALF.keyCut, String(b.cut)); localStorage.removeItem(CALF.keyErr);
+      return { ok: true, n: b.n, cut: b.cut };
+    }
+    const msg = calFeedWhy(j); localStorage.setItem(CALF.keyErr, JSON.stringify({ at: Date.now(), msg })); localStorage.removeItem(CALF.keyHash);
+    return { ok: false, error: msg };
+  })();
+  CALF.busy = run;
+  try { return await run; } finally { if (CALF.busy === run) CALF.busy = null; }
+}
+// после правок — публикация через 8 секунд после последней (как в прежней программе); ничего не изменилось — ничего не уходит
+function calFeedTouch() { if (!calFeedOn() || !calFeedSrvOk()) return; clearTimeout(CALF.timer); CALF.timer = setTimeout(() => calFeedPublish(false).catch(e => logErr('cal:touch', e)), 8000); }
+// каждая запись в базу зовёт srvdbTouch (sync/auto.js) — к нему подключается и лента (так же — напоминания, онлайн-запись)
+if (typeof srvdbTouch === 'function') { const srvdbTouchCal = srvdbTouch; srvdbTouch = function () { srvdbTouchCal(); try { calFeedTouch(); } catch (e) { logErr('cal:hook', e); } }; }
+// при запуске и при возврате к программе (не чаще раза в 30 минут): прошедшие события уходят из ленты, даже если правок не было
+function calFeedStart() {
+  calFeedTouch();
+  if (typeof document === 'object' && document.addEventListener) document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && Date.now() - CALF.lastBuild > 30 * 60000) calFeedTouch(); });
+}
+// ── проверка «как календарь»: версия сервера, затем сама ссылка ──
+async function calFeedCheck() {
+  if (!calFeedSrvOk()) return { ok: false, error: 'личный сервер не подключён' };
+  const p = await srvCall('ping');
+  if (!p || !p.ok) return { ok: false, error: typeof nextSrvError === 'function' ? nextSrvError(p) : 'сервер не отвечает' };
+  const ver = Number(p.ver || 0); localStorage.setItem(CALF.keyVer, String(ver));
+  if (ver < 187) {
+    const c = await srvCall('calcheck');
+    return { ok: true, ver, old: true, exists: !!(c && c.ok && c.exists), events: c && c.ok ? Number(c.events || 0) : 0, error: c && !c.ok ? calFeedWhy(c) : '' };
+  }
+  const url = await calFeedUrl(), ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 20000);
+  try {
+    const r = await fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const txt = await r.text();
+    if (r.status === 200 && /^BEGIN:VCALENDAR/.test(txt)) return { ok: true, ver, status: 200, events: (txt.match(/\r?\nBEGIN:VEVENT/g) || []).length };
+    return { ok: true, ver, status: r.status, text: txt.slice(0, 200) };
+  } catch (e) { return { ok: false, ver, error: e && e.name === 'AbortError' ? 'ссылка не ответила за 20 секунд' : 'ссылка не открылась: нет связи, VPN или сбой Яндекс Облака (status.yandex.cloud)' }; }
+  finally { clearTimeout(timer); }
+}
+// ── лист «Лента календаря» (Настройки) ──
+function calFeedStateText() {
+  if (!calFeedSrvOk()) return 'сервер не подключён';
+  if (!calFeedOn()) return 'выключена';
+  const err = lsJSON(CALF.keyErr, null); if (err) return 'не опубликована: ошибка';
+  const at = Number(localStorage.getItem(CALF.keyAt) || 0);
+  return at ? 'опубликована ' + new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'включена, ещё не публиковалась';
+}
+async function calFeedToggle(on) {
+  localStorage.setItem(CALF.keyOn, on ? '1' : '0'); if (typeof bumpSettings === 'function') bumpSettings();
+  if (!on) { clearTimeout(CALF.timer); openCalFeedSheet('replace', { text: 'Публикация выключена. Лента на сервере осталась прежней — календари больше не получат изменений. Чтобы убрать её совсем, выключите подписку в самом календаре.' }); return; }
+  const r = await calFeedPublish(true);
+  openCalFeedSheet('replace', r.ok ? null : { text: 'Лента не опубликована: ' + r.error, bad: true });
+}
+async function calFeedAnonToggle(on) {
+  localStorage.setItem(CALF.keyAnon, on ? '1' : '0'); if (typeof bumpSettings === 'function') bumpSettings();
+  if (!calFeedOn()) { openCalFeedSheet('replace'); return; }
+  const r = await calFeedPublish(true);
+  openCalFeedSheet('replace', r.ok ? { text: on ? 'Лента опубликована заново — в ней только номера дел.' : 'Лента опубликована заново — с именами доверителей и заметками.' } : { text: 'Лента не опубликована: ' + r.error, bad: true });
+}
+async function calFeedNow() {
+  const b = document.getElementById('cf-now'); if (b) b.disabled = true;
+  const r = await calFeedPublish(true);
+  openCalFeedSheet('replace', r.ok ? null : { text: 'Лента не опубликована: ' + r.error, bad: true });
+}
+async function calFeedCheckNow() {
+  const b = document.getElementById('cf-check'); if (b) b.disabled = true;
+  const r = await calFeedCheck(); let msg;
+  if (!r.ok) msg = { text: 'Проверка не удалась: ' + r.error, bad: true };
+  else if (r.old) msg = r.error ? { text: 'Сервер версии ' + r.ver + ': ' + r.error, bad: true }
+    : { text: 'Сервер версии ' + r.ver + (r.exists ? ' хранит ленту (событий: ' + r.events + '), но сам её не отдаёт — адрес подписки появится после обновления сервера до версии 187.' : ': ленты на нём ещё нет. Адрес подписки появится после обновления сервера до версии 187.'), bad: true };
+  else if (r.status === 200) msg = { text: 'Лента открывается по ссылке, событий: ' + r.events + '. Так её увидит календарь.' };
+  else if (r.status === 404) msg = { text: 'Ссылка работает, но ленты на сервере ещё нет: включите публикацию и нажмите «Опубликовать сейчас».', bad: true };
+  else if (r.status === 403) msg = { text: 'Сервер не принял ссылку (403): секретный код в программе не совпадает с кодом функции. Проверьте код в «Синхронизации».', bad: true };
+  else msg = { text: 'Ссылка ответила ' + r.status + ': ' + r.text, bad: true };
+  openCalFeedSheet('replace', msg);
+}
+async function calFeedCopy() {
+  try { await navigator.clipboard.writeText(await calFeedUrl()); toast('Адрес ленты скопирован'); }
+  catch (e) { logErr('cal:copy', e); toast('Не удалось скопировать — выделите адрес вручную', true); }
+}
+async function openCalFeedSheet(sub, msg) {
+  const srv = calFeedSrvOk(), on = calFeedOn(), anon = calFeedAnon(), err = lsJSON(CALF.keyErr, null), at = Number(localStorage.getItem(CALF.keyAt) || 0);
+  const n = Number(localStorage.getItem(CALF.keyN) || 0), cut = Number(localStorage.getItem(CALF.keyCut) || 0), ver = calFeedSrvVer();
+  const when = t => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const state = !srv ? ['', 'Личный сервер не подключён — сначала «Синхронизация», шаг 1'] : !on ? ['', 'Публикация ленты выключена'] : err ? ['bad', 'Последняя публикация не удалась ' + when(err.at) + ': ' + err.msg]
+    : at ? ['good', `Опубликована ${when(at)} · событий: ${n}${cut ? ` · не вошло дальних: ${cut}` : ''}${anon ? ' · только номера дел' : ''}`] : ['', 'Включена, ещё не публиковалась'];
+  const url = srv && ver >= 187 ? await calFeedUrl() : '';
+  const addr = !srv ? '' : url
+    ? `<div class="info-box" id="cf-url">Адрес ленты: <span class="addr">${esc(url)}</span> <button type="button" class="text-button" onclick="calFeedCopy()">Скопировать</button></div>
+       <p class="small muted">Адрес — как ключ: кто его знает, видит ваши события${anon ? ' (номера дел, суды, время)' : ', а без «только номеров дел» — и имена доверителей'}. Не пересылайте его и не показывайте на снимках экрана. Отозвать адрес — сменить секретный код сервера: прежняя ссылка перестанет работать.</p>`
+    : ver ? `<div class="info-box warning" id="cf-url">Сервер версии ${ver} хранит ленту, но сам её не отдаёт. Адрес подписки появится здесь после обновления сервера до версии 187. Если вы уже подписаны через шлюз (адрес вида «…apigw.yandexcloud.net/cal/…»), подписка продолжит обновляться: программа кладёт ленту в тот же файл.</div>`
+    : `<div class="info-box" id="cf-url">Адрес подписки появится после «Проверить ленту»: программа узнает версию сервера (ссылку отдаёт сервер с версии 187).</div>`;
+  openSheet('Лента календаря', `<div class="status-line ${state[0]}" id="cf-state" role="status">${icon(state[0] === 'good' ? 'check' : state[0] ? 'circle-alert' : 'calendar-days')}<span>${esc(state[1])}</span></div>
+    ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="cf-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
+    <p class="small muted">Программа кладёт на ваш личный сервер ленту предстоящих заседаний, задач, встреч и сроков дел. Календарь телефона или Google Календарь, подписанный на ленту, обновляется сам — без программы. Лента лежит на сервере открытым текстом (база — зашифрована).</p>
+    <label class="check"><input type="checkbox" id="cf-on"${on ? ' checked' : ''}${srv ? '' : ' disabled'} onchange="calFeedToggle(this.checked)"><span>Публиковать ленту на сервере</span></label>
+    <p class="small muted">Включается на каждом устройстве отдельно: ленту обновляет устройство, на котором она включена; правки с других устройств попадают в неё, когда дойдут до него через синхронизацию. Включите на тех, которыми пользуетесь чаще.</p>
+    <label class="check"><input type="checkbox" id="cf-anon"${anon ? ' checked' : ''} onchange="calFeedAnonToggle(this.checked)"><span>В ленте — только номера дел</span></label>
+    <p class="small muted">«Только номера дел» убирает из ленты имена доверителей и участников встреч, заметки, места встреч и предмет спора; остаются номер дела, суд, зал, время. Включите, если подписываетесь в Google Календаре или ссылка может попасть посторонним.</p>
+    <div class="form-actions"><button type="button" class="button primary" id="cf-now"${on && srv ? '' : ' disabled'} onclick="calFeedNow()">${icon('send')}Опубликовать сейчас</button><button type="button" class="button" id="cf-check"${srv ? '' : ' disabled'} onclick="calFeedCheckNow()">${icon('refresh-cw')}Проверить ленту</button>${srv ? '' : `<button type="button" class="button" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button>`}</div>
+    ${addr}
+    <div class="section-label step-label">Как подписаться</div>
+    <ol class="steps-list"><li><b>iPhone, iPad:</b> приложение «Календарь» → «Календари» → «Добавить» → «Добавить подписной календарь» → вставьте адрес ленты → «Подписаться» (в iOS 26 — «Поиск») → учётная запись iCloud → «Добавить» («Готово»).</li>
+      <li><b>Яндекс Календарь</b> (в браузере): на левой панели в разделе «Подписки» — «Добавить» → в поле «Адрес календаря» вставьте адрес → «Создать». По справке Яндекса подписка обновляется от нескольких часов до двух дней.</li>
+      <li><b>Google Календарь:</b> подписка по ссылке — только в браузере на компьютере (в приложении для телефона её нет): в левой колонке у списка других календарей нажмите «+» и выберите добавление по URL, вставьте адрес. Календарь появится и в приложении на телефоне с той же учётной записью. Как часто Google обновляет подписку, он не сообщает — изменения появляются не сразу.</li></ol>
+    <p class="small muted">Проверка: «Проверить ленту» — вверху должно появиться «Лента открывается по ссылке, событий: N». Время заседаний в ленте — как записано в программе, без часового пояса: календарь покажет его по часам устройства; в поездке в другой часовой пояс сверяйте время с программой. Лента обновляется сама через несколько секунд после правки заседания, задачи, встречи или срока и при открытии программы.</p>`, sub);
+}
+
 // ▼▼▼ sync/devremind.js
 // ═══ sync/devremind.js — напоминания на устройстве (план перехода, п. 7; решение пользователя 04.10.2026) ═══
 // Перенесено из прежней программы: уведомления браузера (notifCheck v215: заседания сегодня и завтра, сроки — по одному уведомлению на ступень,
@@ -5266,7 +5515,8 @@ function navBadgeRefresh() {}
 // прежний интерфейс перерисовывал свои экраны сам; часть вызовов в v312 без проверки typeof — заглушки обязательны (урок 57)
 function renderCases() {}
 function renderCalendar() {}
-function icsTouch() {}
+// лента календаря (план переноса, А1): правки заседаний из мониторинга — публикация ленты (sync/calfeed.js)
+function icsTouch() { if (typeof calFeedTouch === 'function') calFeedTouch(); }
 function alarmsTouch() {}
 function bookRepublishSoon() {}
 function renderDashboard() { if (typeof UI === 'object' && UI.ready && UI.screen === 'today') nav('today'); }
@@ -7305,7 +7555,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openCalFeedSheet()','openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -7783,7 +8033,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     </div>
     <div class="section-label">Данные</div>
-    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-calfeed" onclick="openCalFeedSheet()"><span>Лента календаря</span><span class="muted">${typeof calFeedStateText === 'function' ? esc(calFeedStateText()) : 'подписка в календаре телефона'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" id="set-orders" onclick="openOrdersSheet()"><span>Журнал ордеров</span><span class="muted">выписать, найти, распечатать реестр</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
@@ -7947,7 +8197,8 @@ const SETTINGS_WORDS = {
   openFsyncSheet: 'синхронизация файл облако папка google гугл диск яндекс dropbox дропбокс onedrive без сервера телефон iphone айфон',
   openPrintSheet: 'печать реестр выписка csv excel выгрузка кассовая книга', openSecuritySheet: 'pin пин код пароль блокировка вход защита',
   appUpdCheckManual: 'обновление обновить новая версия программа сборка приложение apk android андроид', openLicenseSheet: 'лицензия ключ пропуск подписка оплата тариф демо купить',
-  openRemindSheet: 'telegram телеграм бот уведомления напоминания', openDevRemindSheet: 'уведомления напоминания будильник устройство телефон',
+  openRemindSheet: 'telegram телеграм бот уведомления напоминания', openCalFeedSheet: 'календарь лента подписка ics icloud google гугл яндекс айфон iphone заседания расписание',
+openDevRemindSheet: 'уведомления напоминания будильник устройство телефон',
   openYcSetupSheet: 'сервер облако яндекс функция мастер развернуть', openTrashSheet: 'корзина удалённые удаленные восстановить вернуть',
   openOrdersSheet: 'ордер ордера журнал книжка бланк', openDadataSheet: 'dadata дадата инн реквизиты адрес егрюл огрн',
   openErrlogSheet: 'ошибки журнал сбой лог', openMonitorSettingsSheet: 'суд суды коллектор мониторинг кад сайт заседания события',
@@ -12425,7 +12676,12 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <li>Откройте своего бота по ссылке от BotFather и нажмите «Start» (или напишите ему любое слово) — иначе бот не сможет вам писать. Узнайте номер чата: в браузере откройте адрес <b>https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates</b> (подставив токен вместо &lt;ТОКЕН&gt;) — в ответе найдите «chat»:{«id»:<b>число</b>} — это номер чата.</li>
 <li>Запишите на сервер: консоль Облака → функция crm-bridge → «Редактор» → «Переменные окружения» → <b>TG_TOKEN</b> (токен) и <b>TG_CHAT</b> (номер чата) → «Создать версию». Таймер: «Триггеры» → «Создать» → «Таймер» → cron <b>5 5 * * ? *</b> (08:05 по Москве) → функция crm-bridge.</li>
 <li>В программе: Настройки → «Напоминания в Telegram» → включите → «Передать сейчас»: в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Дальше список обновляется сам после каждой правки.</li></ol>
-<p>Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных латиницей, заглавными). Если бот молчит в назначенное время — проверьте, что нажали «Start» у бота и что таймер создан именно для функции crm-bridge.</p>` },
+<p>Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных латиницей, заглавными). Если бот молчит в назначенное время — проверьте, что нажали «Start» у бота и что таймер создан именно для функции crm-bridge.</p>
+<h3>Лента календаря — заседания в календаре телефона</h3>
+<p>Программа кладёт на ваш личный сервер ленту предстоящих заседаний, задач, встреч и сроков дел; календарь телефона, Яндекс или Google Календарь, подписанный на ленту, обновляется сам. Лента лежит на сервере открытым текстом — включается явно: Настройки → «Лента календаря» → «Публиковать ленту на сервере». «Только номера дел» убирает имена доверителей, заметки и места встреч.</p>
+<ol><li>«Проверить ленту» — программа узнаёт версию сервера и проверяет ссылку так, как её откроет календарь: вверху должно быть «Лента открывается по ссылке, событий: N».</li>
+<li>«Скопировать» у адреса ленты (адрес появляется с сервером версии 187) и добавьте его в календарь: iPhone — «Календарь» → «Календари» → «Добавить» → «Добавить подписной календарь»; Яндекс Календарь — «Подписки» → «Добавить» → «Адрес календаря»; Google Календарь — только в браузере на компьютере, «+» у списка других календарей → добавление по URL.</li></ol>
+<p>Адрес — как ключ: не пересылайте его и не показывайте на снимках экрана. Отозвать — сменить секретный код сервера. Время в ленте — как записано в программе, без часового пояса. Календари обновляют подписку не сразу (Яндекс — от нескольких часов до двух дней).</p>` },
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
@@ -13038,7 +13294,9 @@ document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() 
   // 09.10.2026: события судов с личного сервера — сами (sync/monauto.js), через 4 секунды после запуска, чтобы не мешать первому экрану
   if (typeof monAutoStart === 'function') setTimeout(() => { try { monAutoStart(); } catch (e) { logErr('monitor:start', e); } }, 4000);
   // 12.10.2026: файл в папке облака (sync/fsync.js) — проверка разрешения без вопросов и первый обмен через 3 секунды после запуска
-  if (typeof fsyncStart === 'function') setTimeout(() => { fsyncStart().catch(e => logErr('fsync:start', e)); }, 3000); }); });
+  if (typeof fsyncStart === 'function') setTimeout(() => { fsyncStart().catch(e => logErr('fsync:start', e)); }, 3000);
+  // 12.10.2026 (А1): лента календаря — публикация через 8 секунд после запуска, если включена и что-то изменилось (sync/calfeed.js)
+  if (typeof calFeedStart === 'function') setTimeout(() => { try { calFeedStart(); } catch (e) { logErr('cal:start', e); } }, 5000); }); });
 // Обновление программы (аудит 02.10.2026): новая версия service worker ждёт согласия пользователя — полоса «Доступна новая
 // версия» с кнопками «Обновить» и «Позже». Раньше программа согласия не спрашивала, и новая версия включалась только после
 // закрытия всех вкладок. «Позже» убирает полосу до следующего запуска.
