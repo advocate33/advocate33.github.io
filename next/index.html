@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="12.10.2026 14:44 · 95ede67">
+<meta name="build" content="12.10.2026 19:01 · 46090d5">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -4587,11 +4587,16 @@ async function srvSnapshotSave(ver) {
 // Как в прежней программе («Синхронизация через файл», legacy/rest.js): база лежит одним зашифрованным файлом в папке облака, которое выбрал
 // пользователь (Google Диск, Яндекс Диск, Dropbox, OneDrive…). Переносит файл между устройствами приложение облака, а не программа: сама
 // программа в сеть не ходит. Пароль файла знает только пользователь.
-// На компьютере (Chrome, Edge — File System Access) программа привязывает ПАПКУ облака и сама пишет в ней файл crm-advocate-sync.crm (то же имя,
-// что у прежней программы) и читает его: через несколько секунд после правки, при запуске, при возврате в программу и раз в 2 минуты.
-// На телефоне браузер к папкам доступа не даёт — обмен тем же файлом вручную: «Взять из облака» (выбрать файл) и «Положить в облако» (меню
-// «Поделиться» или загрузка). Файл с телефона получает своё имя crm-advocate-sync-<устройство>-<время>.crm — компьютер находит такие файлы
-// в папке сам и объединяет их с базой (копии, которые облако создаёт при одновременной записи, — тоже).
+// Где браузер даёт выбор папки (File System Access: Chrome и Edge на компьютере) — программа привязывает ПАПКУ облака и сама пишет в ней файл
+// crm-advocate-sync.crm (то же имя, что у прежней программы) и читает его: через несколько секунд после правки, при запуске, при возврате в
+// программу и раз в 2 минуты. Где есть выбор одного файла (showOpenFilePicker: Chrome для Android с версии 132, приложение для Android —
+// 12.10.2026 у пользователя привязка файла прежней программой в приложении 1.22 прошла, урок 125) — можно привязать сам ФАЙЛ облака: тот же
+// обмен, но файлы с других телефонов программа не видит (их объединяет компьютер с папкой). Запись в файл через приложение облака на Android
+// поддерживают не все облака (переписка разработчиков Chromium «File System Access on Android and WebView») — на устройстве не проверено.
+// Где выбора нет (Safari, в том числе на iPhone, и Firefox — caniuse, 12.10.2026) — обмен тем же файлом вручную: «Взять из облака» (выбрать
+// файл) и «Положить в облако» (меню «Поделиться» или загрузка). Файл, положенный вручную, получает своё имя
+// crm-advocate-sync-<устройство>-<время>.crm — компьютер с папкой находит такие файлы сам и объединяет их с базой (копии, которые облако
+// создаёт при одновременной записи, — тоже).
 // Учёт обмена у файла свой, как у запасного сервера (sync/srv2.js): база определения коллизий crm_merge_base_fs, отметка «есть что записать»
 // crm_next_fwd_fs (данные, записанные слиянием с серверов или из копии), редакция последней записи crm_fsync_rev. Данные из файла ждут отправки
 // на серверы (srvFwdMark('fs')). Затёртая запись: облако может сохранить версию другого компьютера поверх нашей — в файле хранится, до какой
@@ -4600,10 +4605,28 @@ const FSYNC_MAIN = 'crm-advocate-sync.crm';
 const FSYNC_FILE_RE = /^crm-advocate-sync.*\.crm$/i;
 const FSYNC_DELAY = 5000, FSYNC_POLL_MS = 2 * 60000, FSYNC_BACK_MS = 20000;
 // признак привязки — не crm_fsync_on: этот ключ у прежней программы (привязан ФАЙЛ, а не папка), на основном адресе хранилище общее; пароль crm_fsync_pass общий намеренно
-const FS_K = { on: 'crm_fsync_bound', dir: 'crm_fsync_dir', base: 'crm_merge_base_fs', fwd: 'crm_next_fwd_fs', rev: 'crm_fsync_rev', mine: 'crm_fsync_mine', map: 'crm_fsync_map', sig: 'crm_fsync_sig', seen: 'crm_fsync_seen', readAt: 'crm_fsync_read_at', writeAt: 'crm_fsync_write_at', takeAt: 'crm_fsync_take_at', putAt: 'crm_fsync_put_at', err: 'crm_fsync_err' };
+const FS_K = { on: 'crm_fsync_bound', kind: 'crm_fsync_kind', dir: 'crm_fsync_dir', base: 'crm_merge_base_fs', fwd: 'crm_next_fwd_fs', rev: 'crm_fsync_rev', mine: 'crm_fsync_mine', map: 'crm_fsync_map', sig: 'crm_fsync_sig', seen: 'crm_fsync_seen', readAt: 'crm_fsync_read_at', writeAt: 'crm_fsync_write_at', takeAt: 'crm_fsync_take_at', putAt: 'crm_fsync_put_at', err: 'crm_fsync_err' };
 const FSYNC = { handle: null, perm: '', busy: false, timer: null, loop: null, backAt: 0 };
-// компьютер с Chrome или Edge — привязка папки; иначе обмен вручную
-const fsyncSupported = () => typeof window === 'object' && typeof window.showDirectoryPicker === 'function';
+// что даёт браузер (по наличию возможности, а не по типу устройства — урок 123): выбор папки, выбор файла, создание файла
+const fsyncDirOk = () => typeof window === 'object' && typeof window.showDirectoryPicker === 'function';
+const fsyncFileOk = () => typeof window === 'object' && typeof window.showOpenFilePicker === 'function';
+const fsyncNewOk = () => typeof window === 'object' && typeof window.showSaveFilePicker === 'function';
+// что привязано: папка (по умолчанию — так было до 12.10.2026) или один файл облака
+const fsyncKind = () => localStorage.getItem(FS_K.kind) === 'file' ? 'file' : 'dir';
+const fsyncWhat = k => (k || fsyncKind()) === 'file' ? { n: 'файл облака', g: 'файлу облака', a: 'файл' } : { n: 'папка облака', g: 'папке облака', a: 'папку' };
+const fsyncAllowLabel = () => 'Разрешить доступ к ' + (fsyncKind() === 'file' ? 'файлу' : 'папке');
+// привязанное здесь работает: для папки нужен выбор папки, для файла — выбор файла
+const fsyncSupported = () => fsyncKind() === 'file' ? fsyncFileOk() : fsyncDirOk();
+// приложение для Android до 1.23 давало выбранный файл временно (урок 125, гипотеза): после перезапуска приложения файл мог не читаться
+function fsyncOldApp() { try { return typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.filePickInfo !== 'function'; } catch (e) { logErr('fsync:app', e); return false; } }
+// ошибка операции с файлом или папкой — словами и с именем (урок 123): имя пишется и в журнал
+function fsyncErrText(e) {
+  const n = String((e && e.name) || ''), m = String((e && e.message) || e || '').replace(/\s+/g, ' ').slice(0, 100);
+  const w = { NotAllowedError: 'браузер не дал доступа', NotFoundError: 'файл или папка не найдены — их переместили, переименовали или облако заменило файл', NotReadableError: 'файл не читается — облако его передаёт или ещё не скачало', NoModificationAllowedError: 'файл занят приложением облака', InvalidStateError: 'файл изменился во время операции', SecurityError: 'браузер запретил доступ', QuotaExceededError: 'не хватает места', AbortError: 'действие прервано' }[n];
+  return w ? w + ' (' + n + (m && m !== n ? ': ' + m : '') + ')' : ((n && n !== 'Error' ? n + ': ' : '') + (m || 'сбой'));
+}
+// сведения приложения о последнем выборе файла (1.23) — в журнал при сбое
+function fsyncPickInfo() { try { return typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.filePickInfo === 'function' ? String(AndroidApp.filePickInfo()).slice(0, 200) : ''; } catch (e) { logErr('fsync:pickinfo', e); return ''; } }
 const fsyncPass = () => localStorage.getItem('crm_fsync_pass') || '';
 function fsyncPassSet(p) { if (p) localStorage.setItem('crm_fsync_pass', p); else localStorage.removeItem('crm_fsync_pass'); if (typeof bumpSecrets === 'function') bumpSecrets('crm_fsync_pass'); }
 const fsyncBound = () => localStorage.getItem(FS_K.on) === '1';
@@ -4665,9 +4688,12 @@ function fsyncCheckMap(dump) {
   if (mine && Number(map[fsyncDev()] || 0) < mine) { localStorage.setItem(FS_K.fwd, '1'); return true; }
   return false;
 }
-// главный файл папки: { state: 'none' | 'empty' | 'same' | 'merged', r } | { state: 'bad', error }
+// главный файл: привязан файл — он сам; привязана папка — crm-advocate-sync.crm в ней (create — создать, если нет)
+async function fsyncMainHandle(h, create) { return h && h.kind === 'file' ? h : h.getFileHandle(FSYNC_MAIN, create ? { create: true } : undefined); }
+// главный файл: { state: 'none' | 'empty' | 'same' | 'merged', r } | { state: 'bad', error }. Привязанный файл пропал — ошибка с именем
+// (NotFoundError), а не «файла нет»: создавать его заново программа не может — привязывается заново
 async function fsyncReadMain(h, force) {
-  let fh; try { fh = await h.getFileHandle(FSYNC_MAIN); } catch (e) { if (e && (e.name === 'NotFoundError' || e.name === 'TypeError')) return { state: 'none' }; throw e; }
+  let fh; try { fh = await fsyncMainHandle(h); } catch (e) { if (h.kind !== 'file' && e && (e.name === 'NotFoundError' || e.name === 'TypeError')) return { state: 'none' }; throw e; }
   const f = await fh.getFile(), sig = fsyncSig(f);
   if (!f.size) return { state: 'empty' };
   if (!force && sig === localStorage.getItem(FS_K.sig)) return { state: 'same' };
@@ -4681,6 +4707,8 @@ async function fsyncReadMain(h, force) {
 // файлы с телефонов и копии, которые облако сделало при одновременной записи: объединить один раз
 async function fsyncReadIncoming(h, force) {
   const seen = lsJSON(FS_K.seen, {}), out = { files: 0, added: 0, updated: 0, bad: [] };
+  // привязан один файл — других файлов программа не видит
+  if (!h || h.kind === 'file' || typeof h.values !== 'function') return out;
   for await (const e of h.values()) {
     const name = e && e.name;
     if (!e || e.kind !== 'file' || name === FSYNC_MAIN || !FSYNC_FILE_RE.test(name)) continue;
@@ -4709,7 +4737,7 @@ async function fsyncBuild() {
 async function fsyncWriteMain(h) {
   const revAt = syncRevision(); localStorage.removeItem(FS_K.fwd);
   try {
-    const b = await fsyncBuild(), fh = await h.getFileHandle(FSYNC_MAIN, { create: true }), w = await fh.createWritable();
+    const b = await fsyncBuild(), fh = await fsyncMainHandle(h, true), w = await fh.createWritable();
     await w.write(b.text); await w.close();
     const f = await fh.getFile();
     localStorage.setItem(FS_K.sig, fsyncSig(f)); localStorage.setItem(FS_K.mine, String(b.stamp)); localStorage.setItem(FS_K.map, JSON.stringify(b.map));
@@ -4720,13 +4748,14 @@ async function fsyncWriteMain(h) {
 // обмен с папкой: главный файл → файлы телефонов → запись, если есть что. opts: { ask } — по нажатию (можно спросить разрешение), { force }
 async function fsyncExchange(reason, opts) {
   const o = opts || {};
-  if (!fsyncBound()) return { ok: false, error: 'папка облака не выбрана' };
-  if (!fsyncSupported()) return { ok: false, error: 'этот браузер не даёт доступа к папке — обмен вручную' };
+  const W = fsyncWhat();
+  if (!fsyncBound()) return { ok: false, error: 'файл или папка облака не выбраны' };
+  if (!fsyncSupported()) return { ok: false, error: 'этот браузер не даёт доступа к ' + W.g + ' — обмен вручную' };
   if (FSYNC.busy || (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy)) { fsyncLater(); return { ok: false, error: 'идёт другой обмен — повторю через несколько секунд', busy: true }; }
   const h = FSYNC.handle || (FSYNC.handle = await fsyncHandleGet());
-  if (!h) { fsyncNote('err', 'папка облака не найдена на этом устройстве — выберите её заново'); return { ok: false, error: 'папка не найдена' }; }
+  if (!h) { const t = (W.a === 'файл' ? 'привязанный файл облака не найден' : 'папка облака не найдена') + ' на этом устройстве — выберите заново'; fsyncNote('err', t); return { ok: false, error: t }; }
   FSYNC.perm = await fsyncPerm(h, !!o.ask);
-  if (FSYNC.perm !== 'granted') { try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } return { ok: false, perm: true, error: 'нет доступа к папке — нажмите «Разрешить доступ к папке»' }; }
+  if (FSYNC.perm !== 'granted') { try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } return { ok: false, perm: true, error: 'нет доступа к ' + W.g + ' — нажмите «' + fsyncAllowLabel() + '»' }; }
   if (!fsyncPass()) { fsyncNote('err', 'нужен пароль файла'); return { ok: false, error: 'нужен пароль файла' }; }
   FSYNC.busy = true; if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = true; try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
   const res = { ok: true, added: 0, updated: 0, files: 0, wrote: false, reason: reason || '' };
@@ -4735,7 +4764,8 @@ async function fsyncExchange(reason, opts) {
     const m = await fsyncReadMain(h, !!o.force);
     if (m.state === 'bad') { fsyncNote('err', 'файл ' + FSYNC_MAIN + ': ' + m.error); return { ok: false, error: m.error, badPass: m.badPass }; }
     if (m.state === 'failed') { fsyncNote('err', 'из файла не записано записей: ' + m.r.failed + ' — повторю'); return { ok: false, error: 'не записано записей: ' + m.r.failed }; }
-    if (m.state === 'empty') { fsyncNote('err', 'файл ' + FSYNC_MAIN + ' пуст — облако ещё не скачало его; повторю'); return { ok: false, error: 'файл пуст — облако ещё не скачало его' }; }
+    // пустой файл: только что созданный программой (o.fresh) — записать базу; иначе облако ещё не скачало его
+    if (m.state === 'empty' && !o.fresh) { fsyncNote('err', 'файл ' + FSYNC_MAIN + ' пуст — облако ещё не скачало его; повторю'); return { ok: false, error: 'файл пуст — облако ещё не скачало его' }; }
     if (m.state === 'merged') { res.added += m.r.added || 0; res.updated += m.r.updated || 0; if (!hadLocal && !m.lost) localStorage.setItem(FS_K.rev, syncRevisionAfterPull(revBefore, m.r)); }
     const inc = await fsyncReadIncoming(h, !!o.force);
     res.files = inc.files; res.added += inc.added; res.updated += inc.updated; res.bad = inc.bad;
@@ -4747,11 +4777,15 @@ async function fsyncExchange(reason, opts) {
     fsyncNote(inc.bad.length ? 'err' : 'ok', inc.bad.length ? 'не прочитан файл: ' + inc.bad[0] : '');
     return res;
   } catch (e) {
-    logErr('fsync:exchange', e);
+    // имя ошибки и сведения приложения о выборе файла — в журнал (урок 123)
+    logErr('fsync:exchange', e, [e && e.name, fsyncKind(), fsyncPickInfo()].filter(Boolean).join(' · '));
     const busyFile = e && (e.name === 'NotReadableError' || e.name === 'NoModificationAllowedError' || e.name === 'InvalidStateError');
-    fsyncNote('err', busyFile ? 'файл занят приложением облака — повторю' : 'обмен с файлом не удался: ' + String((e && e.message) || e).slice(0, 100));
+    const gone = e && e.name === 'NotFoundError' && fsyncKind() === 'file';
+    const t = gone ? 'привязанный файл облака не найден — его переместили, переименовали или облако заменило его; привяжите файл заново (NotFoundError)'
+      : busyFile ? 'файл занят приложением облака или ещё не скачан — повторю (' + e.name + ')' : 'обмен с файлом не удался: ' + fsyncErrText(e);
+    fsyncNote('err', t);
     if (busyFile) fsyncLater(15000);
-    return { ok: false, error: String((e && e.message) || e).slice(0, 100) };
+    return { ok: false, error: t };
   } finally { FSYNC.busy = false; if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = false; try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } }
 }
 function fsyncLater(ms) { clearTimeout(FSYNC.timer); FSYNC.timer = setTimeout(() => { fsyncExchange('повтор').catch(e => logErr('fsync:auto', e)); }, ms || 3000); }
@@ -4761,7 +4795,7 @@ function fsyncTouch() { if (!fsyncBound() || !fsyncSupported()) return; clearTim
 async function fsyncStart() {
   if (!fsyncBound() || !fsyncSupported()) return false;
   FSYNC.handle = await fsyncHandleGet();
-  if (!FSYNC.handle) { fsyncNote('err', 'папка облака не найдена на этом устройстве — выберите её заново'); return false; }
+  if (!FSYNC.handle) { fsyncNote('err', (fsyncKind() === 'file' ? 'привязанный файл облака не найден' : 'папка облака не найдена') + ' на этом устройстве — выберите заново'); return false; }
   FSYNC.perm = await fsyncPerm(FSYNC.handle, false); try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
   clearInterval(FSYNC.loop); FSYNC.loop = setInterval(() => { if (document.visibilityState === 'visible') fsyncExchange('проверка').catch(e => logErr('fsync:auto', e)); }, FSYNC_POLL_MS);
   await fsyncExchange('запуск');
@@ -4785,7 +4819,7 @@ function fsyncStateText(now) {
   const st = fsyncState(), last = fsyncLast(), e = lsJSON(FS_K.err, null);
   if (st === 'off') return 'не используется';
   if (st === 'err') return 'обмен не удался' + (e.at ? ' в ' + fsyncWhen(e.at, now) : '') + ': ' + e.msg;
-  if (st === 'perm') return 'браузер ждёт разрешения на папку облака — нажмите «Разрешить доступ к папке»';
+  if (st === 'perm') return 'браузер ждёт разрешения на ' + (fsyncKind() === 'file' ? 'файл' : 'папку') + ' облака — нажмите «' + fsyncAllowLabel() + '»';
   if (st === 'pending') return fsyncBound() ? 'правки запишутся в файл через несколько секунд' : 'на этом устройстве есть правки, которых нет в облаке — нажмите «Положить в облако»';
   return (fsyncBound() ? 'все правки этого устройства записаны в файл' : 'все правки этого устройства положены в облако') + (last ? ', последний обмен ' + fsyncWhen(last, now) : '');
 }
@@ -4794,7 +4828,7 @@ function fsyncStatusModel(now) {
   const st = fsyncState(), last = fsyncLast(); if (st === 'off') return null;
   const title = 'Файл в облаке: ' + fsyncStateText(now);
   if (st === 'err') return { icon: 'circle-alert', text: 'Ошибка файла', cls: 'bad', title };
-  if (st === 'perm') return { icon: 'circle-alert', text: 'Нужен доступ к папке', cls: 'warn', title };
+  if (st === 'perm') return { icon: 'circle-alert', text: 'Нужен доступ к ' + (fsyncKind() === 'file' ? 'файлу' : 'папке'), cls: 'warn', title };
   if (st === 'pending') return { icon: 'files', text: fsyncBound() ? 'Ждёт записи в файл' : 'Положить в облако', cls: 'warn', title };
   return { icon: 'files', text: 'Файл ' + (last ? fsyncWhen(last, now).split(' ').pop() : ''), cls: 'good', title };
 }
@@ -4809,9 +4843,9 @@ function fsyncPassFromForm(needRepeat) {
   return { pass: p1, fresh: true };
 }
 async function fsyncPickDir() {
-  if (!fsyncSupported()) { openFsyncSheet('replace', { text: 'Этот браузер не даёт программе доступа к папке. На компьютере откройте программу в Chrome или Edge; на телефоне пользуйтесь кнопками «Взять из облака» и «Положить в облако».', bad: true }); return null; }
+  if (!fsyncDirOk()) { openFsyncSheet('replace', { text: 'Этот браузер не даёт программе выбрать папку. На компьютере откройте программу в Chrome или Edge' + (fsyncFileOk() ? '; здесь можно привязать сам файл облака' : '; здесь — кнопки «Взять из облака» и «Положить в облако»') + '.', bad: true }); return null; }
   const pp = fsyncPassFromForm(false); if (pp.error) { openFsyncSheet('replace', { text: pp.error, bad: true }); return null; }
-  let h; try { h = await window.showDirectoryPicker({ id: 'crm-sync', mode: 'readwrite' }); } catch (e) { if (e && e.name === 'AbortError') return null; logErr('fsync:pick', e); openFsyncSheet('replace', { text: 'Папка не выбрана: ' + String((e && e.message) || e).slice(0, 100), bad: true }); return null; }
+  let h; try { h = await window.showDirectoryPicker({ id: 'crm-sync', mode: 'readwrite' }); } catch (e) { if (e && e.name === 'AbortError') return null; logErr('fsync:pick', e, [e && e.name, fsyncPickInfo()].filter(Boolean).join(' · ')); openFsyncSheet('replace', { text: 'Папка не выбрана: ' + fsyncErrText(e), bad: true }); return null; }
   if ((await fsyncPerm(h, true)) !== 'granted') { openFsyncSheet('replace', { text: 'Браузер не дал доступа к папке — без него программа не сможет записывать файл. Выберите папку ещё раз и разрешите изменение файлов.', bad: true }); return null; }
   // защита от потери данных (как в прежней программе): существующий файл сначала читается тем же паролем; не прочитан — папка не привязывается
   let main = null; try { main = await (await h.getFileHandle(FSYNC_MAIN)).getFile(); } catch (e) { if (!(e && (e.name === 'NotFoundError' || e.name === 'TypeError'))) logErr('fsync:pick', e); }
@@ -4820,7 +4854,7 @@ async function fsyncPickDir() {
   else if (pp.fresh) { const again = fsyncPassFromForm(true); if (again.error) { openFsyncSheet('replace', { text: again.error + ' — в папке ещё нет файла, программа создаст его с этим паролем', bad: true }); return null; } }
   if (pp.fresh) fsyncPassSet(pp.pass);
   FSYNC.handle = h; FSYNC.perm = 'granted'; await fsyncHandleSave(h);
-  localStorage.setItem(FS_K.on, '1'); localStorage.setItem(FS_K.dir, String(h.name || '').slice(0, 80));
+  localStorage.setItem(FS_K.on, '1'); localStorage.setItem(FS_K.kind, 'dir'); localStorage.setItem(FS_K.dir, String(h.name || '').slice(0, 80));
   // другая папка — учёт обмена с нуля (база коллизий остаётся: слияние по полям с прежней базой безопасно)
   for (const k of [FS_K.sig, FS_K.seen, FS_K.mine, FS_K.map, FS_K.err]) localStorage.removeItem(k);
   // база устройства записывается в файл при любой привязке: в другой папке её может не быть, хотя в прежнюю она уже записана
@@ -4830,7 +4864,42 @@ async function fsyncPickDir() {
   openFsyncSheet('replace', r.ok ? { text: (main ? 'Папка подключена, файл прочитан: новых записей — ' + r.added + ', обновлено — ' + r.updated + '.' : 'Папка подключена, файл ' + FSYNC_MAIN + ' создан.') + (r.wrote ? ' База этого устройства записана в файл.' : '') + ' Дальше программа обменивается с файлом сама.' } : { text: 'Папка подключена, но обмен не удался: ' + r.error, bad: true });
   return r;
 }
-async function fsyncAllowNow() { const r = await fsyncExchange('разрешение', { ask: true }); openFsyncSheet('replace', r.ok ? { text: 'Доступ к папке есть, обмен прошёл.' } : { text: r.error, bad: true }); return r; }
+// привязать сам файл облака — где браузер даёт выбор одного файла (Chrome для Android, приложение для Android): тот же обмен, что с папкой,
+// но других файлов программа не видит. create — создать новый файл (выбор места сохранения)
+async function fsyncPickFile(create) {
+  if (!(create ? fsyncNewOk() : fsyncFileOk())) { openFsyncSheet('replace', { text: 'Этот браузер не даёт программе ' + (create ? 'создать' : 'выбрать') + ' файл облака — пользуйтесь кнопками «Взять из облака» и «Положить в облако».', bad: true }); return null; }
+  const pp = fsyncPassFromForm(!!create); if (pp.error) { openFsyncSheet('replace', { text: pp.error, bad: true }); return null; }
+  const why = e => [e && e.name, fsyncPickInfo()].filter(Boolean).join(' · ');
+  let h;
+  try {
+    if (create) h = await window.showSaveFilePicker({ id: 'crm-sync', suggestedName: FSYNC_MAIN });
+    else { const a = await window.showOpenFilePicker({ id: 'crm-sync', multiple: false }); h = a && a[0]; }
+  } catch (e) { if (e && e.name === 'AbortError') return null; logErr('fsync:pickfile', e, why(e)); openFsyncSheet('replace', { text: 'Файл не выбран: ' + fsyncErrText(e), bad: true }); return null; }
+  if (!h) return null;
+  if ((await fsyncPerm(h, true)) !== 'granted') { openFsyncSheet('replace', { text: 'Браузер не дал изменять этот файл — без этого программа не сможет записывать в него правки. Выберите файл ещё раз и разрешите изменение. Файл не привязан.', bad: true }); return null; }
+  let f; try { f = await h.getFile(); } catch (e) { logErr('fsync:pickfile', e, why(e)); openFsyncSheet('replace', { text: 'Файл выбран, но не прочитан: ' + fsyncErrText(e) + '. Файл не привязан.', bad: true }); return null; }
+  // защита от потери данных (как в прежней программе): непустой файл сначала открывается тем же паролем; пустой существующий — облако не скачало его
+  if (!create && !f.size) { openFsyncSheet('replace', { text: 'Файл пуст — облако, вероятно, ещё не скачало его. Подождите минуту-две и выберите файл снова. Файл не привязан.', bad: true }); return null; }
+  if (f.size) { let d; try { d = await fsyncDecrypt(await f.text(), pp.pass); } catch (e) { logErr('fsync:pickfile', e, why(e)); d = { ok: false, error: fsyncErrText(e) }; }
+    if (!d.ok) { openFsyncSheet('replace', { text: 'Файл «' + (h.name || '') + '» не открыт: ' + d.error + '. Нужен файл ' + FSYNC_MAIN + ' и тот же пароль, что на других устройствах. Файл не привязан и не изменён.', bad: true }); return null; } }
+  else if (pp.fresh) { const again = fsyncPassFromForm(true); if (again.error) { openFsyncSheet('replace', { text: again.error + ' — файл новый, программа зашифрует его этим паролем', bad: true }); return null; } }
+  if (pp.fresh) fsyncPassSet(pp.pass);
+  // в приложении 1.23 видно, откуда выбран файл: из памяти телефона (загрузки, недавние) — копия, с облаком не связанная
+  const local = /providers\.downloads|externalstorage|providers\.media/.test(fsyncPickInfo());
+  FSYNC.handle = h; FSYNC.perm = 'granted'; await fsyncHandleSave(h);
+  localStorage.setItem(FS_K.on, '1'); localStorage.setItem(FS_K.kind, 'file'); localStorage.setItem(FS_K.dir, String(h.name || '').slice(0, 80));
+  for (const k of [FS_K.sig, FS_K.seen, FS_K.mine, FS_K.map, FS_K.err]) localStorage.removeItem(k);
+  // база устройства записывается в файл при любой привязке (урок 120)
+  localStorage.setItem(FS_K.fwd, '1');
+  const r = await fsyncExchange('выбор файла', { force: true, fresh: !f.size });
+  clearInterval(FSYNC.loop); FSYNC.loop = setInterval(() => { if (document.visibilityState === 'visible') fsyncExchange('проверка').catch(e => logErr('fsync:auto', e)); }, FSYNC_POLL_MS);
+  const warn = (local ? ' Файл выбран из памяти устройства (загрузки, недавние), а не из облака: с другими устройствами он не связан, если его не переносит отдельная программа. Чтобы обмен шёл через облако, отключите и выберите файл в разделе облака.' : '')
+    + (h.name && h.name !== FSYNC_MAIN ? ' Имя файла — «' + h.name + '», а не ' + FSYNC_MAIN + ': проверьте, что это общий файл.' : '');
+  openFsyncSheet('replace', r.ok ? { text: (f.size ? 'Файл привязан и прочитан: новых записей — ' + r.added + ', обновлено — ' + r.updated + '.' : 'Файл ' + (h.name || FSYNC_MAIN) + ' создан и привязан.') + (r.wrote ? ' База этого устройства записана в файл.' : '') + ' Дальше программа обменивается с файлом сама.' + warn, bad: !!warn }
+    : { text: 'Файл привязан, но обмен не удался: ' + r.error + warn, bad: true });
+  return r;
+}
+async function fsyncAllowNow() { const r = await fsyncExchange('разрешение', { ask: true }); openFsyncSheet('replace', r.ok ? { text: 'Доступ к ' + (fsyncKind() === 'file' ? 'файлу' : 'папке') + ' есть, обмен прошёл.' } : { text: r.error, bad: true }); return r; }
 async function fsyncExchangeNow() {
   const b = document.getElementById('fs-sync'); if (b) b.disabled = true;
   const r = await fsyncExchange('кнопка', { ask: true, force: true });
@@ -4838,17 +4907,17 @@ async function fsyncExchangeNow() {
   return r;
 }
 function fsyncForget() {
-  openSheet('Отключить файл в облаке?', `<p>Программа перестанет читать и записывать файл в папке облака на этом устройстве. Записи на устройстве и файл в облаке останутся.</p>
+  openSheet('Отключить файл в облаке?', `<p>Программа перестанет читать и записывать ${fsyncKind() === 'file' ? 'привязанный файл облака' : 'файл в папке облака'} на этом устройстве. Записи на устройстве и файл в облаке останутся.</p>
     <div class="form-actions"><button type="button" class="button danger" id="fs-forget-go" onclick="fsyncForgetGo()">${icon('x')}Отключить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
 }
 async function fsyncForgetGo() {
   clearInterval(FSYNC.loop); clearTimeout(FSYNC.timer); FSYNC.handle = null; FSYNC.perm = ''; await fsyncHandleClear();
-  for (const k of [FS_K.on, FS_K.dir, FS_K.sig, FS_K.seen, FS_K.err, FS_K.fwd, FS_K.mine, FS_K.map]) localStorage.removeItem(k);
+  for (const k of [FS_K.on, FS_K.kind, FS_K.dir, FS_K.sig, FS_K.seen, FS_K.err, FS_K.fwd, FS_K.mine, FS_K.map]) localStorage.removeItem(k);
   try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
   sheetBack(true); openFsyncSheet('replace', { text: 'Файл в облаке отключён на этом устройстве.' });
 }
 // файлы с телефонов, уже объединённые с базой: убрать из папки, чтобы не копились
-async function fsyncProcessed(h) { const seen = lsJSON(FS_K.seen, {}), out = []; for await (const e of h.values()) { if (e && e.kind === 'file' && e.name !== FSYNC_MAIN && FSYNC_FILE_RE.test(e.name)) { try { const f = await e.getFile(); if (seen[e.name] === fsyncSig(f)) out.push(e.name); } catch (er) { logErr('fsync:list', er); } } } return out; }
+async function fsyncProcessed(h) { const seen = lsJSON(FS_K.seen, {}), out = []; if (!h || h.kind === 'file' || typeof h.values !== 'function') return out; for await (const e of h.values()) { if (e && e.kind === 'file' && e.name !== FSYNC_MAIN && FSYNC_FILE_RE.test(e.name)) { try { const f = await e.getFile(); if (seen[e.name] === fsyncSig(f)) out.push(e.name); } catch (er) { logErr('fsync:list', er); } } } return out; }
 async function fsyncCleanup() {
   const h = FSYNC.handle || (FSYNC.handle = await fsyncHandleGet()); if (!h || (await fsyncPerm(h, true)) !== 'granted') { openFsyncSheet('replace', { text: 'Нет доступа к папке', bad: true }); return 0; }
   const names = await fsyncProcessed(h); let n = 0;
@@ -4865,7 +4934,7 @@ async function fsyncTake() {
   { const bad = backupSizeCheck(Number(file.size || 0), backupIsMobile()); if (bad) { fErr(bad); return null; } }
   const pp = fsyncPassFromForm(false); if (pp.error) { fErr(pp.error); return null; }
   if (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) { fErr('Идёт другой обмен — дождитесь его окончания и нажмите ещё раз'); return null; }
-  let text; try { text = await file.text(); } catch (e) { logErr('fsync:take', e); fErr('Файл не прочитан'); return null; }
+  let text; try { text = await file.text(); } catch (e) { logErr('fsync:take', e, e && e.name); fErr('Файл не прочитан: ' + fsyncErrText(e)); return null; }
   const d = await fsyncDecrypt(text, pp.pass); if (!d.ok) { fErr('Файл не открыт: ' + d.error); return null; }
   if (pp.fresh) fsyncPassSet(pp.pass);
   if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = true;
@@ -4905,21 +4974,33 @@ async function fsyncPut() {
 
 // ── лист «Файл в облаке» ──
 async function openFsyncSheet(sub, msg) {
-  const sup = fsyncSupported(), bound = fsyncBound(), st = fsyncState(), e = lsJSON(FS_K.err, null), saved = fsyncPass();
-  let processed = 0; if (bound && sup && FSYNC.handle && FSYNC.perm === 'granted') { try { processed = (await fsyncProcessed(FSYNC.handle)).length; } catch (er) { logErr('fsync:list', er); } }
+  const bound = fsyncBound(), kind = fsyncKind(), sup = fsyncSupported(), dirOk = fsyncDirOk(), fileOk = fsyncFileOk(), newOk = fsyncNewOk();
+  const st = fsyncState(), e = lsJSON(FS_K.err, null), saved = fsyncPass();
+  let processed = 0; if (bound && sup && kind === 'dir' && FSYNC.handle && FSYNC.perm === 'granted') { try { processed = (await fsyncProcessed(FSYNC.handle)).length; } catch (er) { logErr('fsync:list', er); } }
   const passHtml = !saved || (e && e.pass) ? `<div class="section-label step-label">Пароль файла</div>
     <p class="small muted">Файл шифруется этим паролем: облако хранит файл, но прочитать его не может. Пароль одинаковый на всех устройствах, не короче ${BACKUP_MIN_PASS} знаков; запишите его — без пароля файл не открыть.${saved ? ' Сохранённый пароль не подошёл к файлу — введите тот, что на других устройствах.' : ''}</p>
     <div class="form-grid">${fInput('fs-p1', 'Пароль файла', '', 'type="password" autocomplete="new-password"')}${fInput('fs-p2', 'Пароль ещё раз (для нового файла)', '', 'type="password" autocomplete="new-password"')}</div>
     ${saved ? `<div class="form-actions">${btn('Заменить пароль на этом устройстве', 'fsyncPassReplace()', '', 'shield-check')}</div>` : ''}` : '';
   const m = fsyncStatusModel() || { cls: '', icon: 'files', title: 'Файл в облаке ещё не используется на этом устройстве' };
-  const pcBlock = sup ? `<div class="section-label step-label">${bound ? icon('check', 'icon-sm') : ''}На этом компьютере — папка облака</div>
-    ${bound ? `<div class="list-rows" id="fs-state"><div><span>Папка</span><span class="muted">${esc(localStorage.getItem(FS_K.dir) || '—')} · файл ${esc(FSYNC_MAIN)}</span></div><div><span>Состояние</span><span class="muted">${esc(fsyncStateText())}</span></div>${processed ? `<div><span>Файлы с других устройств</span><span class="muted">объединено и можно убрать: ${processed}</span></div>` : ''}</div>
-      <div class="form-actions">${st === 'perm' ? btn('Разрешить доступ к папке', 'fsyncAllowNow()', 'primary', 'shield-check') : ''}<button type="button" class="button${st === 'perm' ? '' : ' primary'}" id="fs-sync" onclick="fsyncExchangeNow()"${FSYNC.busy ? ' disabled' : ''}>${icon('refresh-cw')}Обменяться сейчас</button>${processed ? btn('Убрать обработанные файлы телефонов', 'fsyncCleanup()', '', 'trash-2') : ''}${btn('Отключить', 'fsyncForget()', '', 'x')}</div>
-      <p class="small muted">Программа записывает правки в файл через несколько секунд и читает правки других устройств при запуске, при возврате в программу и раз в 2 минуты. Браузер может спрашивать разрешение на папку после перезапуска — нажмите «Разрешить доступ к папке» (если браузер предложит разрешать при каждом посещении, выберите это — спрашивать перестанет).</p>`
-    : `<p class="small muted">Первое устройство: создайте в папке облака папку, например CRM, и выберите её — программа создаст в ней файл ${esc(FSYNC_MAIN)}. Следующее устройство: дождитесь, пока облако скачает этот файл, и выберите ту же папку — программа прочитает файл и объединит с базой устройства; ничего не стирается.</p>
-      <div class="form-actions">${btn('Выбрать папку облака', 'fsyncPickDir()', 'primary', 'files')}</div>`}` : '';
-  const phoneBlock = `<div class="section-label step-label">${sup ? 'Обмен вручную (если папка недоступна)' : 'На этом устройстве — обмен вручную'}</div>
-    <p class="small muted">${sup ? 'Пригодится, если на этом компьютере нет приложения облака.' : 'Браузер телефона не даёт программам доступа к папкам, поэтому файлом обмениваются вручную: перед работой — «Взять из облака», после работы — «Положить в облако».'}</p>
+  // подписи — по возможностям браузера, а не по типу устройства (урок 123); порядок блоков: на Android — сначала файл (облачные приложения
+  // Android папку для выбора дают не всегда — не проверено), иначе — папка
+  const android = typeof navigator === 'object' && /Android/i.test(String(navigator.userAgent || ''));
+  const appNote = fsyncOldApp() && (fileOk || dirOk) ? `<p class="small muted">Приложение для Android ниже 1.23 даёт выбранный файл временно: после перезапуска приложения файл может перестать читаться. Обновите приложение: «Настройки» → «Проверить обновления».</p>` : '';
+  const boundBlock = bound ? `<div class="section-label step-label">${icon('check', 'icon-sm')}${kind === 'file' ? 'Привязан файл облака' : 'Подключена папка облака'}</div>
+    ${sup ? `<div class="list-rows" id="fs-state">${kind === 'file' ? `<div><span>Файл</span><span class="muted">${esc(localStorage.getItem(FS_K.dir) || '—')}</span></div>` : `<div><span>Папка</span><span class="muted">${esc(localStorage.getItem(FS_K.dir) || '—')} · файл ${esc(FSYNC_MAIN)}</span></div>`}<div><span>Состояние</span><span class="muted">${esc(fsyncStateText())}</span></div>${processed ? `<div><span>Файлы с других устройств</span><span class="muted">объединено и можно убрать: ${processed}</span></div>` : ''}</div>
+      <div class="form-actions">${st === 'perm' ? btn(fsyncAllowLabel(), 'fsyncAllowNow()', 'primary', 'shield-check') : ''}<button type="button" class="button${st === 'perm' ? '' : ' primary'}" id="fs-sync" onclick="fsyncExchangeNow()"${FSYNC.busy ? ' disabled' : ''}>${icon('refresh-cw')}Обменяться сейчас</button>${processed ? btn('Убрать обработанные файлы телефонов', 'fsyncCleanup()', '', 'trash-2') : ''}${btn('Отключить', 'fsyncForget()', '', 'x')}</div>
+      <p class="small muted">Программа записывает правки в файл через несколько секунд и читает правки других устройств при запуске, при возврате в программу и раз в 2 минуты. Браузер может спрашивать разрешение после перезапуска — нажмите «${fsyncAllowLabel()}» (если браузер предложит разрешать при каждом посещении, выберите это — спрашивать перестанет).${kind === 'file' ? ' Файлы, положенные в облако вручную с других телефонов, объединяет компьютер с подключённой папкой — здесь их программа не видит.' : ''}</p>${appNote}`
+      : `<p class="small muted">Привязка есть, но этот браузер не даёт к ней доступа: ${kind === 'file' ? 'выбор файла' : 'выбор папки'} здесь недоступен. Отключите привязку на этом устройстве и пользуйтесь обменом вручную.</p><div class="form-actions">${btn('Отключить', 'fsyncForget()', '', 'x')}</div>`}` : '';
+  const fileBlock = !bound && fileOk ? `<div class="section-label step-label">Файл облака</div>
+    <p class="small muted">Программа сама читает и записывает общий файл ${esc(FSYNC_MAIN)} в облаке — нужно приложение облака на этом устройстве. В окне выбора откройте раздел облака (Google Диск, Яндекс Диск, Dropbox…) → папка CRM → ${esc(FSYNC_MAIN)}; не «Загрузки» и не «Недавние»: копия там с облаком не связана. Файла ещё нет ни на одном устройстве — ${newOk ? '«Создать файл облака» и сохраните его в папку облака' : 'создайте его на компьютере'}. Записывать файл через приложение облака умеют не все облака: если программа сообщит, что записать не удалось, пользуйтесь обменом вручную ниже.</p>
+    <div class="form-actions">${btn('Привязать файл облака', 'fsyncPickFile()', android || !dirOk ? 'primary' : '', 'files')}${newOk ? btn('Создать файл облака', 'fsyncPickFile(true)', '', 'plus') : ''}</div>${appNote}` : '';
+  const dirBlock = !bound && dirOk ? `<div class="section-label step-label">Папка облака</div>
+    <p class="small muted">Первое устройство: создайте в папке облака папку, например CRM, и выберите её — программа создаст в ней файл ${esc(FSYNC_MAIN)}. Следующее устройство: дождитесь, пока облако скачает этот файл, и выберите ту же папку — программа прочитает файл и объединит с базой устройства; ничего не стирается. С папкой программа сама объединяет и файлы, положенные в неё вручную с телефонов.</p>
+    <div class="form-actions">${btn('Выбрать папку облака', 'fsyncPickDir()', android && fileOk ? '' : 'primary', 'files')}</div>` : '';
+  const pcBlock = boundBlock + (android ? fileBlock + dirBlock : dirBlock + fileBlock);
+  const any = dirOk || fileOk;
+  const phoneBlock = `<div class="section-label step-label">${any ? 'Обмен вручную (если привязка не работает)' : 'На этом устройстве — обмен вручную'}</div>
+    <p class="small muted">${any ? 'Пригодится, если облако не даёт программе читать или записывать файл или на устройстве нет приложения облака.' : 'Этот браузер не даёт программам выбирать файлы и папки облака (так в Safari — в том числе на iPhone — и в Firefox), поэтому файлом обмениваются вручную: перед работой — «Взять из облака», после работы — «Положить в облако».'}</p>
     <div class="form-grid"><label class="field wide"><span>Файл ${esc(FSYNC_MAIN)} из папки облака</span><input type="file" id="fs-file" accept=".crm,application/octet-stream,application/json"></label></div>
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
     <div class="form-actions"><button type="button" class="button primary" id="fs-take" onclick="fsyncTake()">${icon('cloud-download')}Взять из облака</button><button type="button" class="button" id="fs-put" onclick="fsyncPut()">${icon('send')}Положить в облако</button><button type="button" class="button" id="bk-share-go" onclick="backupShareAgain()" hidden>${icon('files')}Открыть меню «Поделиться»</button></div>
@@ -4954,22 +5035,24 @@ const FSYNC_GUIDE = [
 <li>Откройте программу в Chrome или Edge: «Синхронизация» → «Файл в облаке» → пароль → «Выбрать папку облака» → выберите папку CRM → разрешите браузеру изменять файлы. Программа создаст в папке файл crm-advocate-sync.crm.</li>
 <li>Дальше программа сама: правки записывает в файл через несколько секунд, правки других устройств читает при запуске, при возврате в программу и раз в 2 минуты. Приложение облака переносит файл на другие устройства.</li>
 <li>Второй компьютер: установите то же облако, дождитесь, пока в папке CRM появится crm-advocate-sync.crm, и выберите эту папку в программе (с тем же паролем). Программа объединит файл с базой компьютера — ничего не стирается.</li>
-<li>Телефон: установите приложение того же облака. Перед работой — «Взять из облака» (выберите crm-advocate-sync.crm в папке CRM), после работы — «Положить в облако» (сохраните файл в папку CRM). Компьютер с подключённой папкой сам объединит файл с телефона с общим файлом.</li></ol>
+<li>Телефон: установите приложение того же облака. Android (Chrome или приложение CRM 1.23 и новее): «Привязать файл облака» → в окне выбора — раздел облака → CRM → crm-advocate-sync.crm (не «Загрузки» и не «Недавние»); дальше программа обменивается с файлом сама. Если программа сообщит, что записать в файл не удалось, — обмен вручную. iPhone и браузеры без выбора файлов: перед работой — «Взять из облака» (выберите crm-advocate-sync.crm в папке CRM), после работы — «Положить в облако» (сохраните файл в папку CRM); компьютер с подключённой папкой сам объединит файл с телефона с общим файлом.</li></ol>
 <p>Если есть и личный сервер, они работают вместе: правки из файла уходят на сервер, правки с сервера — в файл.</p>` },
   { id: 'gdrive', title: 'Google Диск', html: `<p><b>Компьютер.</b> Установите «Google Диск для компьютера» (Drive for desktop) с сайта Google и войдите своим аккаунтом. У приложения два режима: потоковая передача — файлы лежат на виртуальном диске и скачиваются при открытии, и зеркальное копирование — файлы хранятся в папке на компьютере. Для программы надёжнее зеркальное: оно включается в настройках приложения, в разделе папок с Google Диска (названия пунктов могут немного отличаться). В «Моём диске» создайте папку CRM и выберите её в программе.</p>
 <p><b>iPhone.</b> Установите приложение «Google Диск» и войдите. В приложении «Файлы»: «Обзор» → «…» → «Изменить» → включите Google Диск. «Взять из облака» → выбор файла → «Обзор» → Google Диск → CRM → crm-advocate-sync.crm. «Положить в облако» → «Сохранить в Файлы» → Google Диск → CRM → «Сохранить».</p>
-<p><b>Android.</b> «Взять из облака» → в окне выбора файла откройте Google Диск (обычно он там есть) → CRM → crm-advocate-sync.crm. «Положить в облако» → в меню «Поделиться» выберите Google Диск → папка CRM → сохранить.</p>` },
+<p><b>Android.</b> «Привязать файл облака» → в окне выбора откройте Google Диск (обычно он там есть) → CRM → crm-advocate-sync.crm. Если программа сообщит, что записать в файл не удалось, — обмен вручную: «Взять из облака» → Google Диск → CRM → crm-advocate-sync.crm; «Положить в облако» → в меню «Поделиться» выберите Google Диск → папка CRM → сохранить.</p>` },
   { id: 'yadisk', title: 'Яндекс Диск', html: `<p>Если ваш личный сервер тоже в Яндекс Облаке, Яндекс Диск не застрахует от сбоя у Яндекса — при сбое могут не работать оба способа. В этом случае лучше выбрать другое облако.</p>
 <p><b>Компьютер.</b> Установите приложение «Яндекс Диск» для Windows или macOS с сайта Яндекс Диска и войдите. Приложение создаёт на компьютере папку Яндекс Диска и держит её в согласии с облаком. Создайте в ней папку CRM и выберите её в программе.</p>
 <p><b>iPhone.</b> Установите приложение «Яндекс Диск» и войдите. Включите его в «Файлах» («Обзор» → «…» → «Изменить»), если оно там есть. Если Яндекса Диска в «Файлах» нет: откройте файл в приложении Яндекс Диска, «Поделиться» → «Сохранить в Файлы», и выберите его оттуда; файл с телефона сохраняйте через «Поделиться» → Яндекс Диск → папка CRM.</p>
-<p><b>Android.</b> Если Яндекса Диска нет в окне выбора файла — скачайте crm-advocate-sync.crm на телефон в приложении Яндекс Диска и выберите его из «Загрузок». «Положить в облако» → «Поделиться» → Яндекс Диск → папка CRM.</p>` },
+<p><b>Android.</b> Если Яндекс Диск есть в окне выбора файла — «Привязать файл облака» → Яндекс Диск → CRM → crm-advocate-sync.crm. Если его там нет, привязать файл облака нельзя — обмен вручную: скачайте crm-advocate-sync.crm в приложении Яндекс Диска и выберите его из «Загрузок» кнопкой «Взять из облака»; «Положить в облако» → «Поделиться» → Яндекс Диск → папка CRM.</p>` },
   { id: 'dropbox', title: 'Dropbox', html: `<p><b>Компьютер.</b> Установите приложение Dropbox для компьютера с сайта Dropbox и войдите. Оно создаёт папку Dropbox; создайте в ней папку CRM и выберите её в программе. Бесплатный тариф — 2 ГБ; на бесплатном тарифе приложение Dropbox можно поставить не больше чем на три устройства.</p>
 <p><b>iPhone.</b> Установите приложение Dropbox, войдите и включите Dropbox в «Файлах» («Обзор» → «…» → «Изменить»). Дальше — как с Google Диском: выбор файла → Dropbox → CRM; «Сохранить в Файлы» → Dropbox → CRM.</p>
-<p><b>Android.</b> Если Dropbox есть в окне выбора файла — выберите файл там; если нет — скачайте его в приложении Dropbox и выберите из «Загрузок». «Положить в облако» → «Поделиться» → Dropbox → папка CRM.</p>` },
+<p><b>Android.</b> Если Dropbox есть в окне выбора файла — «Привязать файл облака» → Dropbox → CRM → crm-advocate-sync.crm. Если нет — обмен вручную: скачайте файл в приложении Dropbox и выберите его из «Загрузок» кнопкой «Взять из облака»; «Положить в облако» → «Поделиться» → Dropbox → папка CRM.</p>` },
   { id: 'onedrive', title: 'OneDrive', html: `<p><b>Компьютер.</b> OneDrive встроен в Windows 10 и 11: войдите учётной записью Microsoft, на компьютере появится папка OneDrive. Создайте в ней папку CRM и выберите её в программе. Чтобы файл всегда лежал на компьютере, в меню папки CRM (правая кнопка мыши) выберите вариант «Всегда сохранять на этом устройстве», если он есть.</p>
-<p><b>iPhone и Android.</b> Приложение OneDrive; дальше — как с Google Диском: выбор файла → OneDrive → CRM; сохранение файла с телефона — через «Поделиться» (Android) или «Сохранить в Файлы» (iPhone) в папку CRM.</p>` },
+<p><b>iPhone и Android.</b> Приложение OneDrive; дальше — как с Google Диском: на Android — «Привязать файл облака» → OneDrive → CRM → crm-advocate-sync.crm (или обмен вручную); на iPhone — выбор файла → OneDrive → CRM, сохранение файла с телефона — «Сохранить в Файлы» в папку CRM.</p>` },
   { id: 'other', title: 'Другое облако или папка', html: `<p>Подойдёт любое облако, у которого есть приложение для компьютера с папкой, которую оно держит в согласии с облаком (Облако Mail.ru, MEGA, pCloud и другие), — и даже общая папка в сети офиса. Программе нужна только папка: выберите её через «Выбрать папку облака». На телефоне — приложение того же облака и кнопки «Взять из облака» / «Положить в облако».</p>` },
-  { id: 'trouble', title: 'Если что-то не так', html: `<ul><li><b>«Нужен доступ к папке»</b> — браузер после перезапуска снова спрашивает разрешение: «Синхронизация» → «Файл в облаке» → «Разрешить доступ к папке».</li>
+  { id: 'trouble', title: 'Если что-то не так', html: `<ul><li><b>«Нужен доступ к папке»</b> или <b>«Нужен доступ к файлу»</b> — браузер после перезапуска снова спрашивает разрешение: «Синхронизация» → «Файл в облаке» → «Разрешить доступ к папке» (к файлу).</li>
+<li><b>«Привязанный файл облака не найден»</b> — файл переместили, переименовали или облако заменило его: «Отключить» и «Привязать файл облака» заново. В приложении для Android ниже 1.23 так бывает после перезапуска приложения — обновите приложение.</li>
+<li><b>«Записать в файл не удалось»</b> на телефоне — не все облака дают программам записывать файл через своё приложение. Пользуйтесь обменом вручную или подключите папку на компьютере.</li>
 <li><b>«Пароль файла не подошёл»</b> — на всех устройствах должен быть один пароль. «Заменить пароль на этом устройстве» — ввести тот, что на других.</li>
 <li><b>«Файл пуст»</b> — облако ещё не скачало файл на это устройство; подождите и нажмите «Обменяться сейчас».</li>
 <li><b>«Файл занят приложением облака»</b> — облако как раз передаёт файл; программа повторит сама.</li>
@@ -4978,7 +5061,7 @@ const FSYNC_GUIDE = [
 <li><b>Файл большой</b> — в нём вся база вместе с файлами документов; на телефоне программа открывает файл до 120 МБ.</li></ul>` }
 ];
 function fsyncGuideHtml(open) { return FSYNC_GUIDE.map(s => `<details class="fgroup guide"${s.id === open ? ' open' : ''}><summary>${icon('chevron-down', 'icon-sm')}<span>${esc(s.title)}</span></summary><div class="card-more-body">${s.html}</div></details>`).join(''); }
-function openFsyncHelpSheet(open) { openSheet('Файл в облаке — инструкция', `<p class="small muted">Выберите облако. Порядок для всех одинаковый: приложение облака на компьютере → папка CRM → «Выбрать папку облака» в программе; на телефоне — приложение того же облака и обмен вручную.</p>${fsyncGuideHtml(open || 'how')}`, true); }
+function openFsyncHelpSheet(open) { openSheet('Файл в облаке — инструкция', `<p class="small muted">Выберите облако. Порядок для всех одинаковый: приложение облака на компьютере → папка CRM → «Выбрать папку облака» в программе; на телефоне — приложение того же облака и «Привязать файл облака» (Android) или обмен вручную (iPhone).</p>${fsyncGuideHtml(open || 'how')}`, true); }
 
 // ▼▼▼ sync/dadata.js
 // ═══ sync/dadata.js — реквизиты по ИНН и подсказки адресов (DaData), как в v312 (поручение пользователя 30.09.2026) ═══
@@ -12306,7 +12389,7 @@ const HELP_SECTIONS = [
 <p>С сервера 186 устройство, которое уже получало базу, скачивает не весь снимок, а только изменения после своей версии — это быстрее и меньше расходует связь. Весь снимок скачивается, если цепочка изменений прервана (базу отправила прежняя программа), изменений больше половины снимка, устройство получает базу впервые или сменился сервер или пароль. Что было в последний раз и почему — Настройки → «О программе» → «Получение с сервера». Отправка по-прежнему передаёт снимок целиком: прежняя программа читает только его.</p>
 <p><b>Запасной сервер</b> (необязательно) — второй личный сервер с той же зашифрованной базой и тем же паролем шифрования: если один сервер недоступен, правки уходят на другой, и другие устройства получают их оттуда. «Синхронизация» → «Запасной сервер» → адрес и секретный код → «Сохранить и проверить связь» → «Обменяться с запасным сервером»; автообмен обменивается с обоими. Серверы между собой не обмениваются — их выравнивают ваши устройства, поэтому запасной сервер подключается на каждом устройстве. Строка под шапкой: «2 из 2» — оба сервера получили все правки, «1 из 2» — один (какой и почему — в подсказке и в листе «Синхронизация»), «Ошибка серверов» — правки пока только на устройстве. На запасной сервер уходит только база: события судов, напоминания в Telegram, онлайн-запись и отслеживание писем идут через основной, файлы документов на запасной сервер пока не передаются. Прежняя программа запасного сервера не знает.</p>
 <h3>Без своего сервера: файл в облаке</h3>
-<p>Как в прежней программе: база лежит одним зашифрованным файлом в папке вашего облака — Google Диска, Яндекс Диска, Dropbox, OneDrive или другого, а между устройствами его переносит приложение облака. «Синхронизация» → «Файл в облаке». На компьютере (Chrome или Edge) — «Выбрать папку облака», дальше программа обменивается с файлом сама; «Обменяться сейчас» — по кнопке; после перезапуска браузер может попросить «Разрешить доступ к папке». На телефоне — вручную: «Взять из облака» перед работой и «Положить в облако» после. Подробно по каждому облаку — кнопка «Инструкция по облакам» и ниже.</p>
+<p>Как в прежней программе: база лежит одним зашифрованным файлом в папке вашего облака — Google Диска, Яндекс Диска, Dropbox, OneDrive или другого, а между устройствами его переносит приложение облака. «Синхронизация» → «Файл в облаке». На компьютере (Chrome или Edge) — «Выбрать папку облака», дальше программа обменивается с файлом сама; «Обменяться сейчас» — по кнопке; после перезапуска браузер может попросить «Разрешить доступ к папке». На телефоне с Android (Chrome или приложение CRM 1.23 и новее) — «Привязать файл облака»: выберите crm-advocate-sync.crm в разделе облака, дальше программа обменивается с файлом сама; если облако не даёт записывать файл — вручную. На iPhone — вручную: «Взять из облака» перед работой и «Положить в облако» после. Подробно по каждому облаку — кнопка «Инструкция по облакам» и ниже.</p>
 ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p><b>Второе устройство (телефон):</b> откройте программу, «Синхронизация» → те же адрес, код и пароль → «Сохранить и проверить связь» → «Загрузить базу с сервера». Смена секретного кода — отдельная инструкция у автора: код меняется на сервере, во всех устройствах и в коллекторе одновременно.</p>` },
   { id: 'monitor', title: 'Мониторинг судов', html: `
