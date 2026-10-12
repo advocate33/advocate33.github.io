@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="12.10.2026 12:05 · 42919d8">
+<meta name="build" content="12.10.2026 14:44 · 95ede67">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -519,6 +519,8 @@ button.agenda-row:hover{background:var(--surface2)}
 .set-search{margin:0 0 12px}
 /* А6: строка устройства лицензии — название и даты слева, «Отвязать» справа */
 .lic-dev{display:flex;align-items:center;justify-content:space-between;gap:12px}.lic-dev .button{flex:none}
+/* 12.10.2026: инструкция по облакам (файл в облаке) — раскрываемые блоки по облакам */
+.fgroup.guide{margin:0 0 8px}.fgroup.guide ol,.fgroup.guide ul{padding-left:20px;margin:6px 0}.fgroup.guide li{margin:4px 0}
 
 </style>
 </head>
@@ -2365,9 +2367,9 @@ async function dataInit() {
 // поэтому здесь безопасные заглушки: ничего не пишут в базу и ничего не отправляют. Каждую заменит настоящая функция
 // нового интерфейса — этап указан справа. Состав списка закреплён тестом tests_next_1a.js: новый порт появляется осознанно.
 // Этап 1г заменил настоящими функциями (sync/pull.js) три порта: showConflictsSheet, syncStatusRender, srvdbMergeSnapshot.
+// 12.10.2026: fsyncTouch заменён настоящей функцией (sync/fsync.js — файл в папке облака).
 let _integrityCache = null;                          // 2 — карточка целостности (сбрасывается после слияния)
 function askBackupPassphrase() { return null; }      // 3 — пароль копии (без интерфейса копия не создаётся)
-function fsyncTouch() {}                             // 4 — файл синхронизации на компьютере
 async function pushCloud() {}                        // 4 — Яндекс.Диск
 async function licInit() {}                          // 4 — лицензия
 
@@ -2978,10 +2980,12 @@ const SRV_FWD_KEY = 'crm_next_fwd';
 const srvFwd = slot => localStorage.getItem(srvKey(SRV_FWD_KEY, slot)) === '1';
 function srvFwdMark(fromSlot) {
   for (const s of [0, 1]) { if (s === fromSlot) continue; const S = srvOf(s); if (S.url && S.secret) localStorage.setItem(srvKey(SRV_FWD_KEY, s), '1'); }
+  // файл в папке облака (sync/fsync.js) — ещё один канал: записанное с серверов или из копии должно попасть и в файл
+  if (fromSlot !== 'fs' && typeof fsyncUsed === 'function' && fsyncUsed()) { localStorage.setItem('crm_next_fwd_fs', '1'); if (typeof fsyncTouch === 'function') fsyncTouch(); }
 }
 // база определения коллизий для слияния из файла: самая ранняя из баз серверов. Более ранняя база безопасна (запись, правленная с обеих
 // сторон, объединяется по полям), более поздняя — теряет правку поля. Загрузка из файла базы серверов не сдвигает.
-function syncMergeBaseForFile() { const b = [0, 1].map(s => Number(localStorage.getItem(srvKey('crm_merge_base', s)) || 0)).filter(Boolean); return b.length ? Math.min(...b) : 0; }
+function syncMergeBaseForFile() { const b = [srvKey('crm_merge_base', 0), srvKey('crm_merge_base', 1), 'crm_merge_base_fs'].map(k => Number(localStorage.getItem(k) || 0)).filter(Boolean); return b.length ? Math.min(...b) : 0; }
 // Запросы к запасному серверу. Разрешено только то, что нужно обмену базой: чтение — всегда, запись — только пока идёт отправка (NEXT_PUSH,
 // sync/push.js). Остальные действия (события судов, напоминания, онлайн-запись, письма, файлы документов) — отказ и запись в журнал.
 const SRV2_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'deltaget', 'dbhistlist', 'dbhistget'];
@@ -3337,7 +3341,9 @@ function syncStatusModel(now) {
   const t = now || Date.now(), err = SRVDB.lastErr, pulled = SRVDB.lastPull;
   const when = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return new Date(t).toDateString() === d.toDateString() ? p(d.getHours()) + ':' + p(d.getMinutes()) : p(d.getDate()) + '.' + p(d.getMonth() + 1); };
   const auto = typeof nextAutoOn === 'function' && nextAutoOn() ? ' · автообмен' : '';
-  if (NEXT_SYNC.busy) return { icon: 'refresh-cw', text: 'Обмен…', cls: '', title: 'Идёт обмен с сервером' + auto };
+  if (NEXT_SYNC.busy) return { icon: 'refresh-cw', text: 'Обмен…', cls: '', title: (typeof FSYNC === 'object' && FSYNC.busy ? 'Идёт обмен с файлом в облаке' : 'Идёт обмен с сервером') + auto };
+  // своего сервера нет, а файл в облаке используется — строка говорит о файле (sync/fsync.js)
+  if (typeof fsyncStatusModel === 'function' && !nextSrvConfigured()) { const fm = fsyncStatusModel(t); if (fm) return fm; }
   // запасной сервер подключён и проверен — итог по двум серверам: «2 из 2», «1 из 2» (sync/srv2.js)
   if (typeof syncTwoServers === 'function' && syncTwoServers()) return syncStatusModel2(t, !!auto);
   // успешная загрузка стирает прошлую ошибку (srvdbNote), поэтому ошибка, которая есть, — всегда последнее событие
@@ -4575,6 +4581,404 @@ async function srvSnapshotSave(ver) {
   toast('Снимок сохранён: ' + name + '. Пароль к нему — пароль шифрования синхронизации');
   return { name, bytes: r.data.length };
 }
+
+// ▼▼▼ sync/fsync.js
+// ═══ sync/fsync.js — синхронизация через файл в папке облака (12.10.2026) ═══
+// Как в прежней программе («Синхронизация через файл», legacy/rest.js): база лежит одним зашифрованным файлом в папке облака, которое выбрал
+// пользователь (Google Диск, Яндекс Диск, Dropbox, OneDrive…). Переносит файл между устройствами приложение облака, а не программа: сама
+// программа в сеть не ходит. Пароль файла знает только пользователь.
+// На компьютере (Chrome, Edge — File System Access) программа привязывает ПАПКУ облака и сама пишет в ней файл crm-advocate-sync.crm (то же имя,
+// что у прежней программы) и читает его: через несколько секунд после правки, при запуске, при возврате в программу и раз в 2 минуты.
+// На телефоне браузер к папкам доступа не даёт — обмен тем же файлом вручную: «Взять из облака» (выбрать файл) и «Положить в облако» (меню
+// «Поделиться» или загрузка). Файл с телефона получает своё имя crm-advocate-sync-<устройство>-<время>.crm — компьютер находит такие файлы
+// в папке сам и объединяет их с базой (копии, которые облако создаёт при одновременной записи, — тоже).
+// Учёт обмена у файла свой, как у запасного сервера (sync/srv2.js): база определения коллизий crm_merge_base_fs, отметка «есть что записать»
+// crm_next_fwd_fs (данные, записанные слиянием с серверов или из копии), редакция последней записи crm_fsync_rev. Данные из файла ждут отправки
+// на серверы (srvFwdMark('fs')). Затёртая запись: облако может сохранить версию другого компьютера поверх нашей — в файле хранится, до какой
+// записи каждого устройства он дошёл (_fsync.map); если наша последняя запись в нём не отражена, программа записывает файл снова.
+const FSYNC_MAIN = 'crm-advocate-sync.crm';
+const FSYNC_FILE_RE = /^crm-advocate-sync.*\.crm$/i;
+const FSYNC_DELAY = 5000, FSYNC_POLL_MS = 2 * 60000, FSYNC_BACK_MS = 20000;
+// признак привязки — не crm_fsync_on: этот ключ у прежней программы (привязан ФАЙЛ, а не папка), на основном адресе хранилище общее; пароль crm_fsync_pass общий намеренно
+const FS_K = { on: 'crm_fsync_bound', dir: 'crm_fsync_dir', base: 'crm_merge_base_fs', fwd: 'crm_next_fwd_fs', rev: 'crm_fsync_rev', mine: 'crm_fsync_mine', map: 'crm_fsync_map', sig: 'crm_fsync_sig', seen: 'crm_fsync_seen', readAt: 'crm_fsync_read_at', writeAt: 'crm_fsync_write_at', takeAt: 'crm_fsync_take_at', putAt: 'crm_fsync_put_at', err: 'crm_fsync_err' };
+const FSYNC = { handle: null, perm: '', busy: false, timer: null, loop: null, backAt: 0 };
+// компьютер с Chrome или Edge — привязка папки; иначе обмен вручную
+const fsyncSupported = () => typeof window === 'object' && typeof window.showDirectoryPicker === 'function';
+const fsyncPass = () => localStorage.getItem('crm_fsync_pass') || '';
+function fsyncPassSet(p) { if (p) localStorage.setItem('crm_fsync_pass', p); else localStorage.removeItem('crm_fsync_pass'); if (typeof bumpSecrets === 'function') bumpSecrets('crm_fsync_pass'); }
+const fsyncBound = () => localStorage.getItem(FS_K.on) === '1';
+// канал используется: папка привязана или файл хоть раз брали / клали вручную
+const fsyncUsed = () => fsyncBound() || !!(localStorage.getItem(FS_K.takeAt) || localStorage.getItem(FS_K.putAt));
+// есть ли что записать в файл: правки после последней записи или данные, пришедшие с серверов / из копии
+function fsyncNeedsWrite() { if (!fsyncUsed()) return false; return localStorage.getItem(FS_K.rev) !== syncRevision() || localStorage.getItem(FS_K.fwd) === '1'; }
+// свои правки до первого обмена: были ли записи на устройстве вообще
+const fsyncHadLocal = () => fsyncUsed() ? fsyncNeedsWrite() : !!localStorage.getItem('crm_last_write_stamp');
+const fsyncSig = f => Number(f.size || 0) + ':' + Number(f.lastModified || 0);
+const fsyncDev = () => { let d = ''; try { d = String(deviceId()); } catch (e) { logErr('fsync:dev', e); } return d || 'dev'; };
+function fsyncNote(kind, msg) {
+  if (kind === 'err') localStorage.setItem(FS_K.err, JSON.stringify({ at: Date.now(), msg: String(msg || 'сбой').slice(0, 160), pass: /пароль/.test(String(msg || '')) }));
+  else localStorage.removeItem(FS_K.err);
+  try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
+}
+
+// ── папка: дескриптор хранится в своей маленькой базе (как в прежней программе; изоляция новой версии переименует её) ──
+function fsyncIdb() { return new Promise((res, rej) => { const r = indexedDB.open('crm_fsync', 1); r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains('h')) r.result.createObjectStore('h'); }; r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+async function fsyncHandleSave(h) { const d = await fsyncIdb(); await new Promise((res, rej) => { const t = d.transaction('h', 'readwrite'); t.objectStore('h').put(h, 'dir'); t.oncomplete = res; t.onerror = () => rej(t.error); }); }
+async function fsyncHandleGet() { try { const d = await fsyncIdb(); return await new Promise((res, rej) => { const t = d.transaction('h', 'readonly'), q = t.objectStore('h').get('dir'); q.onsuccess = () => res(q.result || null); q.onerror = () => rej(q.error); }); } catch (e) { logErr('fsync:handle', e); return null; } }
+async function fsyncHandleClear() { try { const d = await fsyncIdb(); await new Promise(res => { const t = d.transaction('h', 'readwrite'); t.objectStore('h').delete('dir'); t.oncomplete = res; t.onerror = res; }); } catch (e) { logErr('fsync:handle', e); } }
+// разрешение на папку: без нажатия пользователя — только проверка (просить браузер позволяет лишь по нажатию)
+async function fsyncPerm(h, ask) {
+  const o = { mode: 'readwrite' };
+  try { if ((await h.queryPermission(o)) === 'granted') return 'granted'; if (!ask) return 'prompt'; return (await h.requestPermission(o)) === 'granted' ? 'granted' : 'denied'; }
+  catch (e) { logErr('fsync:perm', e); return 'error'; }
+}
+
+// ── файл: расшифровать, влить, записать ──
+// текст файла → { ok, dump } | { ok:false, error, badPass }
+async function fsyncDecrypt(text, pass) {
+  let head; try { head = JSON.parse(text); } catch (e) { return { ok: false, error: 'это не файл синхронизации CRM' }; }
+  if (!head || head._fmt !== ENC_FMT) return { ok: false, error: 'файл не зашифрован — это не файл синхронизации CRM' };
+  const p = pass != null ? pass : fsyncPass(); if (!p) return { ok: false, error: 'нужен пароль файла', badPass: true };
+  let dump; try { dump = await decryptDump(text, p); } catch (e) { const w = nextDecryptWhy(e); return w === 'decrypt' ? { ok: false, error: 'пароль файла не подошёл или файл повреждён', badPass: true } : { ok: false, error: w }; }
+  if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: 'в файле нет базы CRM' };
+  return { ok: true, dump };
+}
+// влить базу из файла: своя база коллизий; записанное ждёт отправки на серверы
+async function fsyncMergeDump(dump) {
+  const r = await mergeIncoming(dump, false, { baseKey: FS_K.base });
+  if (r.added || r.updated || r.settingsChanged) {
+    if (typeof srvFwdMark === 'function') srvFwdMark('fs');
+    if (typeof srvdbTouch === 'function') srvdbTouch();
+    try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('fsync:refresh', e); }
+    if (typeof UI === 'object' && UI.ready && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav(UI.screen);
+  }
+  return r;
+}
+// до какой записи каждого устройства дошёл файл. Запоминается максимум по каждому устройству: база устройства после слияния содержит всё,
+// что было в прочитанных файлах, поэтому следующая запись отразит и их. Затёрта ли наша запись — только по самому прочитанному файлу:
+// наша последняя запись в нём не отражена — облако сохранило поверх неё чужую версию, записать снова
+function fsyncMapOf(dump) { return dump && dump._fsync && dump._fsync.map && typeof dump._fsync.map === 'object' ? dump._fsync.map : {}; }
+function fsyncMapKeep(map) { const keep = lsJSON(FS_K.map, {}); for (const [k, v] of Object.entries(map || {})) keep[k] = Math.max(Number(keep[k] || 0), Number(v || 0)); localStorage.setItem(FS_K.map, JSON.stringify(keep)); }
+function fsyncCheckMap(dump) {
+  const map = fsyncMapOf(dump); fsyncMapKeep(map);
+  const mine = Number(localStorage.getItem(FS_K.mine) || 0);
+  if (mine && Number(map[fsyncDev()] || 0) < mine) { localStorage.setItem(FS_K.fwd, '1'); return true; }
+  return false;
+}
+// главный файл папки: { state: 'none' | 'empty' | 'same' | 'merged', r } | { state: 'bad', error }
+async function fsyncReadMain(h, force) {
+  let fh; try { fh = await h.getFileHandle(FSYNC_MAIN); } catch (e) { if (e && (e.name === 'NotFoundError' || e.name === 'TypeError')) return { state: 'none' }; throw e; }
+  const f = await fh.getFile(), sig = fsyncSig(f);
+  if (!f.size) return { state: 'empty' };
+  if (!force && sig === localStorage.getItem(FS_K.sig)) return { state: 'same' };
+  const d = await fsyncDecrypt(await f.text());
+  if (!d.ok) return { state: 'bad', error: d.error, badPass: d.badPass };
+  const r = await fsyncMergeDump(d.dump);
+  if (r.failed) return { state: 'failed', r };
+  localStorage.setItem(FS_K.sig, sig); localStorage.setItem(FS_K.readAt, String(Date.now()));
+  return { state: 'merged', r, lost: fsyncCheckMap(d.dump) };
+}
+// файлы с телефонов и копии, которые облако сделало при одновременной записи: объединить один раз
+async function fsyncReadIncoming(h, force) {
+  const seen = lsJSON(FS_K.seen, {}), out = { files: 0, added: 0, updated: 0, bad: [] };
+  for await (const e of h.values()) {
+    const name = e && e.name;
+    if (!e || e.kind !== 'file' || name === FSYNC_MAIN || !FSYNC_FILE_RE.test(name)) continue;
+    let f; try { f = await e.getFile(); } catch (er) { logErr('fsync:incoming', er); continue; }
+    const sig = fsyncSig(f);
+    if (!f.size || seen[name] === sig || (!force && seen[name] === 'bad:' + sig)) continue;
+    const d = await fsyncDecrypt(await f.text());
+    if (!d.ok) { seen[name] = 'bad:' + sig; out.bad.push(name + ' — ' + d.error); continue; }
+    const r = await fsyncMergeDump(d.dump);
+    if (r.failed) { out.bad.push(name + ' — не записано записей: ' + r.failed); continue; }
+    seen[name] = sig; out.files++; out.added += r.added || 0; out.updated += r.updated || 0; fsyncMapKeep(fsyncMapOf(d.dump));
+    // данные телефона должны попасть в главный файл, чтобы их увидели остальные устройства
+    if (r.added || r.updated || r.settingsChanged) localStorage.setItem(FS_K.fwd, '1');
+  }
+  localStorage.setItem(FS_K.seen, JSON.stringify(seen));
+  return out;
+}
+// собрать зашифрованный файл базы: вся база (с файлами документов) и отметка «до какой записи устройств дошёл файл»
+async function fsyncBuild() {
+  const pass = fsyncPass(); if (!pass) throw new Error('нужен пароль файла');
+  const dump = await collectAll(), stamp = Math.max(Date.now(), Number(localStorage.getItem(FS_K.mine) || 0) + 1);
+  dump._fsync = { v: 1, map: Object.assign({}, lsJSON(FS_K.map, {}), { [fsyncDev()]: stamp }) };
+  return { text: await encryptDump(dump, pass), stamp, map: dump._fsync.map };
+}
+// записать главный файл. Отметка «есть что записать» снимается до сборки (урок 73): данные, пришедшие во время записи, поставят её снова
+async function fsyncWriteMain(h) {
+  const revAt = syncRevision(); localStorage.removeItem(FS_K.fwd);
+  try {
+    const b = await fsyncBuild(), fh = await h.getFileHandle(FSYNC_MAIN, { create: true }), w = await fh.createWritable();
+    await w.write(b.text); await w.close();
+    const f = await fh.getFile();
+    localStorage.setItem(FS_K.sig, fsyncSig(f)); localStorage.setItem(FS_K.mine, String(b.stamp)); localStorage.setItem(FS_K.map, JSON.stringify(b.map));
+    localStorage.setItem(FS_K.rev, revAt); localStorage.setItem(FS_K.writeAt, String(Date.now()));
+    return { ok: true, bytes: b.text.length };
+  } catch (e) { localStorage.setItem(FS_K.fwd, '1'); throw e; }
+}
+// обмен с папкой: главный файл → файлы телефонов → запись, если есть что. opts: { ask } — по нажатию (можно спросить разрешение), { force }
+async function fsyncExchange(reason, opts) {
+  const o = opts || {};
+  if (!fsyncBound()) return { ok: false, error: 'папка облака не выбрана' };
+  if (!fsyncSupported()) return { ok: false, error: 'этот браузер не даёт доступа к папке — обмен вручную' };
+  if (FSYNC.busy || (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy)) { fsyncLater(); return { ok: false, error: 'идёт другой обмен — повторю через несколько секунд', busy: true }; }
+  const h = FSYNC.handle || (FSYNC.handle = await fsyncHandleGet());
+  if (!h) { fsyncNote('err', 'папка облака не найдена на этом устройстве — выберите её заново'); return { ok: false, error: 'папка не найдена' }; }
+  FSYNC.perm = await fsyncPerm(h, !!o.ask);
+  if (FSYNC.perm !== 'granted') { try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } return { ok: false, perm: true, error: 'нет доступа к папке — нажмите «Разрешить доступ к папке»' }; }
+  if (!fsyncPass()) { fsyncNote('err', 'нужен пароль файла'); return { ok: false, error: 'нужен пароль файла' }; }
+  FSYNC.busy = true; if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = true; try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
+  const res = { ok: true, added: 0, updated: 0, files: 0, wrote: false, reason: reason || '' };
+  try {
+    const hadLocal = fsyncHadLocal(), revBefore = syncRevision();
+    const m = await fsyncReadMain(h, !!o.force);
+    if (m.state === 'bad') { fsyncNote('err', 'файл ' + FSYNC_MAIN + ': ' + m.error); return { ok: false, error: m.error, badPass: m.badPass }; }
+    if (m.state === 'failed') { fsyncNote('err', 'из файла не записано записей: ' + m.r.failed + ' — повторю'); return { ok: false, error: 'не записано записей: ' + m.r.failed }; }
+    if (m.state === 'empty') { fsyncNote('err', 'файл ' + FSYNC_MAIN + ' пуст — облако ещё не скачало его; повторю'); return { ok: false, error: 'файл пуст — облако ещё не скачало его' }; }
+    if (m.state === 'merged') { res.added += m.r.added || 0; res.updated += m.r.updated || 0; if (!hadLocal && !m.lost) localStorage.setItem(FS_K.rev, syncRevisionAfterPull(revBefore, m.r)); }
+    const inc = await fsyncReadIncoming(h, !!o.force);
+    res.files = inc.files; res.added += inc.added; res.updated += inc.updated; res.bad = inc.bad;
+    if (m.state === 'none' || fsyncNeedsWrite()) { const w = await fsyncWriteMain(h); res.wrote = true; res.bytes = w.bytes; }
+    // правка во время записи (или метка защищённой настройки, которую сборка базы поставила сама) — ещё одна запись через несколько секунд;
+    // подряд не больше трёх, чтобы сбой меток не превратился в запись без конца
+    FSYNC.again = res.wrote && fsyncNeedsWrite() ? (FSYNC.again || 0) + 1 : 0;
+    if (FSYNC.again && FSYNC.again <= 3) fsyncTouch();
+    fsyncNote(inc.bad.length ? 'err' : 'ok', inc.bad.length ? 'не прочитан файл: ' + inc.bad[0] : '');
+    return res;
+  } catch (e) {
+    logErr('fsync:exchange', e);
+    const busyFile = e && (e.name === 'NotReadableError' || e.name === 'NoModificationAllowedError' || e.name === 'InvalidStateError');
+    fsyncNote('err', busyFile ? 'файл занят приложением облака — повторю' : 'обмен с файлом не удался: ' + String((e && e.message) || e).slice(0, 100));
+    if (busyFile) fsyncLater(15000);
+    return { ok: false, error: String((e && e.message) || e).slice(0, 100) };
+  } finally { FSYNC.busy = false; if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = false; try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } }
+}
+function fsyncLater(ms) { clearTimeout(FSYNC.timer); FSYNC.timer = setTimeout(() => { fsyncExchange('повтор').catch(e => logErr('fsync:auto', e)); }, ms || 3000); }
+// прежняя программа зовёт fsyncTouch после каждой записи (sync/cloud.js → cloudTouch); здесь он ведёт к записи в файл через несколько секунд
+function fsyncTouch() { if (!fsyncBound() || !fsyncSupported()) return; clearTimeout(FSYNC.timer); FSYNC.timer = setTimeout(() => { fsyncExchange('правка').catch(e => logErr('fsync:auto', e)); }, FSYNC_DELAY); }
+// запуск: дескриптор, разрешение (только проверка), проверка раз в 2 минуты и при возврате в программу
+async function fsyncStart() {
+  if (!fsyncBound() || !fsyncSupported()) return false;
+  FSYNC.handle = await fsyncHandleGet();
+  if (!FSYNC.handle) { fsyncNote('err', 'папка облака не найдена на этом устройстве — выберите её заново'); return false; }
+  FSYNC.perm = await fsyncPerm(FSYNC.handle, false); try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
+  clearInterval(FSYNC.loop); FSYNC.loop = setInterval(() => { if (document.visibilityState === 'visible') fsyncExchange('проверка').catch(e => logErr('fsync:auto', e)); }, FSYNC_POLL_MS);
+  await fsyncExchange('запуск');
+  return true;
+}
+if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !fsyncBound() || Date.now() - FSYNC.backAt < FSYNC_BACK_MS) return;
+  FSYNC.backAt = Date.now(); fsyncExchange('возврат').catch(e => logErr('fsync:auto', e));
+});
+
+// ── состояние для шапки и листа ──
+function fsyncState() {
+  if (!fsyncUsed()) return 'off';
+  if (lsJSON(FS_K.err, null)) return 'err';
+  if (fsyncBound() && FSYNC.perm && FSYNC.perm !== 'granted') return 'perm';
+  return fsyncNeedsWrite() ? 'pending' : 'ok';
+}
+function fsyncWhen(ts, now) { const d = new Date(ts), t = new Date(now || Date.now()), p = n => String(n).padStart(2, '0'); return t.toDateString() === d.toDateString() ? p(d.getHours()) + ':' + p(d.getMinutes()) : p(d.getDate()) + '.' + p(d.getMonth() + 1) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()); }
+function fsyncLast() { return Math.max(...[FS_K.readAt, FS_K.writeAt, FS_K.takeAt, FS_K.putAt].map(k => Number(localStorage.getItem(k) || 0))); }
+function fsyncStateText(now) {
+  const st = fsyncState(), last = fsyncLast(), e = lsJSON(FS_K.err, null);
+  if (st === 'off') return 'не используется';
+  if (st === 'err') return 'обмен не удался' + (e.at ? ' в ' + fsyncWhen(e.at, now) : '') + ': ' + e.msg;
+  if (st === 'perm') return 'браузер ждёт разрешения на папку облака — нажмите «Разрешить доступ к папке»';
+  if (st === 'pending') return fsyncBound() ? 'правки запишутся в файл через несколько секунд' : 'на этом устройстве есть правки, которых нет в облаке — нажмите «Положить в облако»';
+  return (fsyncBound() ? 'все правки этого устройства записаны в файл' : 'все правки этого устройства положены в облако') + (last ? ', последний обмен ' + fsyncWhen(last, now) : '');
+}
+// строка под шапкой, когда своего сервера нет (с сервером — строка сервера, файл — в листе «Синхронизация»)
+function fsyncStatusModel(now) {
+  const st = fsyncState(), last = fsyncLast(); if (st === 'off') return null;
+  const title = 'Файл в облаке: ' + fsyncStateText(now);
+  if (st === 'err') return { icon: 'circle-alert', text: 'Ошибка файла', cls: 'bad', title };
+  if (st === 'perm') return { icon: 'circle-alert', text: 'Нужен доступ к папке', cls: 'warn', title };
+  if (st === 'pending') return { icon: 'files', text: fsyncBound() ? 'Ждёт записи в файл' : 'Положить в облако', cls: 'warn', title };
+  return { icon: 'files', text: 'Файл ' + (last ? fsyncWhen(last, now).split(' ').pop() : ''), cls: 'good', title };
+}
+
+// ── компьютер: выбрать папку, разрешить доступ, обменяться, отключить ──
+// пароль из полей листа: сохранённый — или введённый (новый — дважды)
+function fsyncPassFromForm(needRepeat) {
+  if (fsyncPass()) return { pass: fsyncPass() };
+  const p1 = fv('fs-p1'), p2 = fv('fs-p2');
+  if (String(p1 || '').length < BACKUP_MIN_PASS) return { error: 'Пароль файла — не короче ' + BACKUP_MIN_PASS + ' знаков' };
+  if (needRepeat && p1 !== p2) return { error: 'Пароли не совпадают' };
+  return { pass: p1, fresh: true };
+}
+async function fsyncPickDir() {
+  if (!fsyncSupported()) { openFsyncSheet('replace', { text: 'Этот браузер не даёт программе доступа к папке. На компьютере откройте программу в Chrome или Edge; на телефоне пользуйтесь кнопками «Взять из облака» и «Положить в облако».', bad: true }); return null; }
+  const pp = fsyncPassFromForm(false); if (pp.error) { openFsyncSheet('replace', { text: pp.error, bad: true }); return null; }
+  let h; try { h = await window.showDirectoryPicker({ id: 'crm-sync', mode: 'readwrite' }); } catch (e) { if (e && e.name === 'AbortError') return null; logErr('fsync:pick', e); openFsyncSheet('replace', { text: 'Папка не выбрана: ' + String((e && e.message) || e).slice(0, 100), bad: true }); return null; }
+  if ((await fsyncPerm(h, true)) !== 'granted') { openFsyncSheet('replace', { text: 'Браузер не дал доступа к папке — без него программа не сможет записывать файл. Выберите папку ещё раз и разрешите изменение файлов.', bad: true }); return null; }
+  // защита от потери данных (как в прежней программе): существующий файл сначала читается тем же паролем; не прочитан — папка не привязывается
+  let main = null; try { main = await (await h.getFileHandle(FSYNC_MAIN)).getFile(); } catch (e) { if (!(e && (e.name === 'NotFoundError' || e.name === 'TypeError'))) logErr('fsync:pick', e); }
+  if (main && !main.size) { openFsyncSheet('replace', { text: 'Файл ' + FSYNC_MAIN + ' в этой папке пуст — облако, вероятно, ещё не скачало его. Подождите минуту-две и выберите папку снова.', bad: true }); return null; }
+  if (main) { const d = await fsyncDecrypt(await main.text(), pp.pass); if (!d.ok) { openFsyncSheet('replace', { text: 'В папке есть ' + FSYNC_MAIN + ', но открыть его не удалось: ' + d.error + '. Нужен тот же пароль, что на других устройствах. Папка не подключена, файл не изменён.', bad: true }); return null; } }
+  else if (pp.fresh) { const again = fsyncPassFromForm(true); if (again.error) { openFsyncSheet('replace', { text: again.error + ' — в папке ещё нет файла, программа создаст его с этим паролем', bad: true }); return null; } }
+  if (pp.fresh) fsyncPassSet(pp.pass);
+  FSYNC.handle = h; FSYNC.perm = 'granted'; await fsyncHandleSave(h);
+  localStorage.setItem(FS_K.on, '1'); localStorage.setItem(FS_K.dir, String(h.name || '').slice(0, 80));
+  // другая папка — учёт обмена с нуля (база коллизий остаётся: слияние по полям с прежней базой безопасно)
+  for (const k of [FS_K.sig, FS_K.seen, FS_K.mine, FS_K.map, FS_K.err]) localStorage.removeItem(k);
+  // база устройства записывается в файл при любой привязке: в другой папке её может не быть, хотя в прежнюю она уже записана
+  localStorage.setItem(FS_K.fwd, '1');
+  const r = await fsyncExchange('выбор папки', { force: true });
+  clearInterval(FSYNC.loop); FSYNC.loop = setInterval(() => { if (document.visibilityState === 'visible') fsyncExchange('проверка').catch(e => logErr('fsync:auto', e)); }, FSYNC_POLL_MS);
+  openFsyncSheet('replace', r.ok ? { text: (main ? 'Папка подключена, файл прочитан: новых записей — ' + r.added + ', обновлено — ' + r.updated + '.' : 'Папка подключена, файл ' + FSYNC_MAIN + ' создан.') + (r.wrote ? ' База этого устройства записана в файл.' : '') + ' Дальше программа обменивается с файлом сама.' } : { text: 'Папка подключена, но обмен не удался: ' + r.error, bad: true });
+  return r;
+}
+async function fsyncAllowNow() { const r = await fsyncExchange('разрешение', { ask: true }); openFsyncSheet('replace', r.ok ? { text: 'Доступ к папке есть, обмен прошёл.' } : { text: r.error, bad: true }); return r; }
+async function fsyncExchangeNow() {
+  const b = document.getElementById('fs-sync'); if (b) b.disabled = true;
+  const r = await fsyncExchange('кнопка', { ask: true, force: true });
+  openFsyncSheet('replace', r.ok ? { text: 'Обмен с файлом прошёл: новых записей — ' + r.added + ', обновлено — ' + r.updated + (r.files ? '; объединено файлов с других устройств — ' + r.files : '') + (r.wrote ? '; база устройства записана в файл.' : '; записывать было нечего.') } : { text: 'Обмен не удался: ' + r.error, bad: true });
+  return r;
+}
+function fsyncForget() {
+  openSheet('Отключить файл в облаке?', `<p>Программа перестанет читать и записывать файл в папке облака на этом устройстве. Записи на устройстве и файл в облаке останутся.</p>
+    <div class="form-actions"><button type="button" class="button danger" id="fs-forget-go" onclick="fsyncForgetGo()">${icon('x')}Отключить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
+}
+async function fsyncForgetGo() {
+  clearInterval(FSYNC.loop); clearTimeout(FSYNC.timer); FSYNC.handle = null; FSYNC.perm = ''; await fsyncHandleClear();
+  for (const k of [FS_K.on, FS_K.dir, FS_K.sig, FS_K.seen, FS_K.err, FS_K.fwd, FS_K.mine, FS_K.map]) localStorage.removeItem(k);
+  try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
+  sheetBack(true); openFsyncSheet('replace', { text: 'Файл в облаке отключён на этом устройстве.' });
+}
+// файлы с телефонов, уже объединённые с базой: убрать из папки, чтобы не копились
+async function fsyncProcessed(h) { const seen = lsJSON(FS_K.seen, {}), out = []; for await (const e of h.values()) { if (e && e.kind === 'file' && e.name !== FSYNC_MAIN && FSYNC_FILE_RE.test(e.name)) { try { const f = await e.getFile(); if (seen[e.name] === fsyncSig(f)) out.push(e.name); } catch (er) { logErr('fsync:list', er); } } } return out; }
+async function fsyncCleanup() {
+  const h = FSYNC.handle || (FSYNC.handle = await fsyncHandleGet()); if (!h || (await fsyncPerm(h, true)) !== 'granted') { openFsyncSheet('replace', { text: 'Нет доступа к папке', bad: true }); return 0; }
+  const names = await fsyncProcessed(h); let n = 0;
+  for (const name of names) { try { await h.removeEntry(name); n++; } catch (e) { logErr('fsync:cleanup', e); } }
+  const seen = lsJSON(FS_K.seen, {}); for (const name of names) delete seen[name]; localStorage.setItem(FS_K.seen, JSON.stringify(seen));
+  openFsyncSheet('replace', { text: n ? 'Убрано файлов, уже объединённых с базой: ' + n + '. Главный файл ' + FSYNC_MAIN + ' не тронут.' : 'Убирать нечего.' });
+  return n;
+}
+
+// ── телефон (и браузер без доступа к папкам): обмен вручную ──
+async function fsyncTake() {
+  const inp = document.getElementById('fs-file'), file = inp && inp.files && inp.files[0];
+  if (!file) { fErr('Выберите файл ' + FSYNC_MAIN + ' в папке облака'); return null; }
+  { const bad = backupSizeCheck(Number(file.size || 0), backupIsMobile()); if (bad) { fErr(bad); return null; } }
+  const pp = fsyncPassFromForm(false); if (pp.error) { fErr(pp.error); return null; }
+  if (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) { fErr('Идёт другой обмен — дождитесь его окончания и нажмите ещё раз'); return null; }
+  let text; try { text = await file.text(); } catch (e) { logErr('fsync:take', e); fErr('Файл не прочитан'); return null; }
+  const d = await fsyncDecrypt(text, pp.pass); if (!d.ok) { fErr('Файл не открыт: ' + d.error); return null; }
+  if (pp.fresh) fsyncPassSet(pp.pass);
+  if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = true;
+  try {
+    const hadLocal = fsyncHadLocal(), revBefore = syncRevision();
+    const r = await fsyncMergeDump(d.dump);
+    if (r.failed) { fErr('Не записано записей: ' + r.failed + ' — возьмите файл ещё раз'); return r; }
+    const lost = fsyncCheckMap(d.dump);
+    if (!hadLocal && !lost) localStorage.setItem(FS_K.rev, syncRevisionAfterPull(revBefore, r));
+    localStorage.setItem(FS_K.takeAt, String(Date.now())); fsyncNote('ok');
+    openFsyncSheet('replace', { text: 'Из облака: новых записей — ' + r.added + ', обновлено — ' + r.updated + '.' + (fsyncNeedsWrite() ? ' На этом устройстве есть правки, которых нет в облаке, — нажмите «Положить в облако».' : '') });
+    return r;
+  } catch (e) { logErr('fsync:take', e); fErr('Не удалось объединить: ' + String((e && e.message) || e).slice(0, 100)); return null; }
+  finally { if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = false; try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } }
+}
+// имя файла с устройства: латиницей, своё у каждой отправки — облака не перезаписывают и не путают такие файлы
+function fsyncPutName(ts) { const d = new Date(ts || Date.now()), p = n => String(n).padStart(2, '0'); return 'crm-advocate-sync-' + fsyncDev().replace(/[^a-z0-9]/gi, '').slice(-6).toLowerCase() + '-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.crm'; }
+async function fsyncPut() {
+  const pp = fsyncPassFromForm(true); if (pp.error) { fErr(pp.error); return null; }
+  if (pp.fresh) fsyncPassSet(pp.pass);
+  const b = document.getElementById('fs-put'); if (b) b.disabled = true;
+  try {
+    const revAt = syncRevision(), fwdBefore = localStorage.getItem(FS_K.fwd) === '1';
+    const built = await fsyncBuild(), name = fsyncPutName();
+    const how = await fileShare(name, built.text);
+    if (how === 'shared' || how === 'saved') {
+      localStorage.setItem(FS_K.rev, revAt); if (fwdBefore) localStorage.removeItem(FS_K.fwd);
+      localStorage.setItem(FS_K.mine, String(built.stamp)); localStorage.setItem(FS_K.putAt, String(Date.now())); fsyncNote('ok');
+      openFsyncSheet('replace', { text: how === 'shared' ? 'Файл ' + name + ' передан в меню «Поделиться» — сохраните его в папку облака (туда же, где лежит ' + FSYNC_MAIN + '). Компьютер сам объединит его с базой.' : 'Файл ' + name + ' сохранён в загрузки. Переложите его в папку облака (туда же, где лежит ' + FSYNC_MAIN + ') — компьютер сам объединит его с базой.' });
+    } else if (how === 'again') { const g = document.getElementById('bk-share-go'); if (g) g.hidden = false; fErr('Файл готов. Нажмите «Открыть меню «Поделиться»» — браузер открывает меню только сразу после нажатия'); }
+    else if (how === 'cancel') toast('Отправка отменена — в облако ничего не ушло');
+    else fErr('Браузер не дал сохранить файл');
+    return { how, name, bytes: built.text.length };
+  } catch (e) { logErr('fsync:put', e); fErr('Файл не собран: ' + String((e && e.message) || e).slice(0, 100)); return null; }
+  finally { if (b) b.disabled = false; }
+}
+
+// ── лист «Файл в облаке» ──
+async function openFsyncSheet(sub, msg) {
+  const sup = fsyncSupported(), bound = fsyncBound(), st = fsyncState(), e = lsJSON(FS_K.err, null), saved = fsyncPass();
+  let processed = 0; if (bound && sup && FSYNC.handle && FSYNC.perm === 'granted') { try { processed = (await fsyncProcessed(FSYNC.handle)).length; } catch (er) { logErr('fsync:list', er); } }
+  const passHtml = !saved || (e && e.pass) ? `<div class="section-label step-label">Пароль файла</div>
+    <p class="small muted">Файл шифруется этим паролем: облако хранит файл, но прочитать его не может. Пароль одинаковый на всех устройствах, не короче ${BACKUP_MIN_PASS} знаков; запишите его — без пароля файл не открыть.${saved ? ' Сохранённый пароль не подошёл к файлу — введите тот, что на других устройствах.' : ''}</p>
+    <div class="form-grid">${fInput('fs-p1', 'Пароль файла', '', 'type="password" autocomplete="new-password"')}${fInput('fs-p2', 'Пароль ещё раз (для нового файла)', '', 'type="password" autocomplete="new-password"')}</div>
+    ${saved ? `<div class="form-actions">${btn('Заменить пароль на этом устройстве', 'fsyncPassReplace()', '', 'shield-check')}</div>` : ''}` : '';
+  const m = fsyncStatusModel() || { cls: '', icon: 'files', title: 'Файл в облаке ещё не используется на этом устройстве' };
+  const pcBlock = sup ? `<div class="section-label step-label">${bound ? icon('check', 'icon-sm') : ''}На этом компьютере — папка облака</div>
+    ${bound ? `<div class="list-rows" id="fs-state"><div><span>Папка</span><span class="muted">${esc(localStorage.getItem(FS_K.dir) || '—')} · файл ${esc(FSYNC_MAIN)}</span></div><div><span>Состояние</span><span class="muted">${esc(fsyncStateText())}</span></div>${processed ? `<div><span>Файлы с других устройств</span><span class="muted">объединено и можно убрать: ${processed}</span></div>` : ''}</div>
+      <div class="form-actions">${st === 'perm' ? btn('Разрешить доступ к папке', 'fsyncAllowNow()', 'primary', 'shield-check') : ''}<button type="button" class="button${st === 'perm' ? '' : ' primary'}" id="fs-sync" onclick="fsyncExchangeNow()"${FSYNC.busy ? ' disabled' : ''}>${icon('refresh-cw')}Обменяться сейчас</button>${processed ? btn('Убрать обработанные файлы телефонов', 'fsyncCleanup()', '', 'trash-2') : ''}${btn('Отключить', 'fsyncForget()', '', 'x')}</div>
+      <p class="small muted">Программа записывает правки в файл через несколько секунд и читает правки других устройств при запуске, при возврате в программу и раз в 2 минуты. Браузер может спрашивать разрешение на папку после перезапуска — нажмите «Разрешить доступ к папке» (если браузер предложит разрешать при каждом посещении, выберите это — спрашивать перестанет).</p>`
+    : `<p class="small muted">Первое устройство: создайте в папке облака папку, например CRM, и выберите её — программа создаст в ней файл ${esc(FSYNC_MAIN)}. Следующее устройство: дождитесь, пока облако скачает этот файл, и выберите ту же папку — программа прочитает файл и объединит с базой устройства; ничего не стирается.</p>
+      <div class="form-actions">${btn('Выбрать папку облака', 'fsyncPickDir()', 'primary', 'files')}</div>`}` : '';
+  const phoneBlock = `<div class="section-label step-label">${sup ? 'Обмен вручную (если папка недоступна)' : 'На этом устройстве — обмен вручную'}</div>
+    <p class="small muted">${sup ? 'Пригодится, если на этом компьютере нет приложения облака.' : 'Браузер телефона не даёт программам доступа к папкам, поэтому файлом обмениваются вручную: перед работой — «Взять из облака», после работы — «Положить в облако».'}</p>
+    <div class="form-grid"><label class="field wide"><span>Файл ${esc(FSYNC_MAIN)} из папки облака</span><input type="file" id="fs-file" accept=".crm,application/octet-stream,application/json"></label></div>
+    <div class="info-box warning" id="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button type="button" class="button primary" id="fs-take" onclick="fsyncTake()">${icon('cloud-download')}Взять из облака</button><button type="button" class="button" id="fs-put" onclick="fsyncPut()">${icon('send')}Положить в облако</button><button type="button" class="button" id="bk-share-go" onclick="backupShareAgain()" hidden>${icon('files')}Открыть меню «Поделиться»</button></div>
+    <p class="small muted">«Положить в облако» собирает файл crm-advocate-sync-…crm и открывает меню «Поделиться» (или сохраняет в загрузки): сохраните его в ту же папку облака. Компьютер с подключённой папкой сам объединит такие файлы с базой и запишет общий файл.</p>`;
+  openSheet('Файл в облаке', `<div class="status-line ${m.cls}" id="fs-status" role="status">${icon(m.icon)}<span>${esc(m.title)}</span></div>
+    ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="fs-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
+    <p class="small muted">Синхронизация без своего сервера, как в прежней программе: база лежит одним зашифрованным файлом в папке вашего облака — Google Диска, Яндекс Диска, Dropbox, OneDrive или другого. Переносит файл между устройствами приложение облака; программа сама в облако не обращается.</p>
+    <div class="form-actions">${btn('Инструкция по облакам', 'openFsyncHelpSheet()', '', 'circle-help')}</div>
+    ${passHtml}${pcBlock}${phoneBlock}
+    ${typeof SRV === 'object' && SRV.url ? '<p class="small muted">Личный сервер тоже подключён: правки, пришедшие из файла, уходят на сервер, а пришедшие с сервера — в файл.</p>' : ''}`, sub);
+}
+function fsyncPassReplace() {
+  const p1 = fv('fs-p1'), p2 = fv('fs-p2');
+  if (String(p1 || '').length < BACKUP_MIN_PASS) { openFsyncSheet('replace', { text: 'Пароль файла — не короче ' + BACKUP_MIN_PASS + ' знаков', bad: true }); return false; }
+  if (p1 !== p2) { openFsyncSheet('replace', { text: 'Пароли не совпадают', bad: true }); return false; }
+  fsyncPassSet(p1); localStorage.removeItem(FS_K.err); localStorage.removeItem(FS_K.sig); localStorage.setItem(FS_K.seen, '{}');
+  if (fsyncBound()) fsyncExchange('новый пароль', { force: true }).catch(e => logErr('fsync:auto', e));
+  openFsyncSheet('replace', { text: 'Пароль файла на этом устройстве заменён.' }); return true;
+}
+// блок в листе «Синхронизация»
+function fsyncSyncHtml() {
+  const st = fsyncState();
+  return `<div class="section-label">Файл в облаке — без своего сервера</div>
+    <p class="small muted">Google Диск, Яндекс Диск, Dropbox, OneDrive: база одним зашифрованным файлом в папке облака. ${st === 'off' ? 'Не используется на этом устройстве.' : 'Сейчас: ' + esc(fsyncStateText()) + '.'}</p>
+    <div class="form-actions"><button type="button" class="button${st === 'off' && !(typeof SRV === 'object' && SRV.url) ? ' primary' : ''}" id="sy-fs" onclick="openFsyncSheet(true)">${icon('files')}Файл в облаке</button></div>`;
+}
+
+// ── инструкция по облакам (лист и раздел встроенной инструкции) ──
+const FSYNC_GUIDE = [
+  { id: 'how', title: 'Как это устроено', html: `<ol><li>Придумайте пароль файла (не короче 8 знаков) и запишите его. Он один на всех устройствах; облако без него файл не прочитает.</li>
+<li>На компьютере установите приложение облака (ниже — по каждому облаку) и войдите в него. В папке облака создайте папку, например <b>CRM</b>.</li>
+<li>Откройте программу в Chrome или Edge: «Синхронизация» → «Файл в облаке» → пароль → «Выбрать папку облака» → выберите папку CRM → разрешите браузеру изменять файлы. Программа создаст в папке файл crm-advocate-sync.crm.</li>
+<li>Дальше программа сама: правки записывает в файл через несколько секунд, правки других устройств читает при запуске, при возврате в программу и раз в 2 минуты. Приложение облака переносит файл на другие устройства.</li>
+<li>Второй компьютер: установите то же облако, дождитесь, пока в папке CRM появится crm-advocate-sync.crm, и выберите эту папку в программе (с тем же паролем). Программа объединит файл с базой компьютера — ничего не стирается.</li>
+<li>Телефон: установите приложение того же облака. Перед работой — «Взять из облака» (выберите crm-advocate-sync.crm в папке CRM), после работы — «Положить в облако» (сохраните файл в папку CRM). Компьютер с подключённой папкой сам объединит файл с телефона с общим файлом.</li></ol>
+<p>Если есть и личный сервер, они работают вместе: правки из файла уходят на сервер, правки с сервера — в файл.</p>` },
+  { id: 'gdrive', title: 'Google Диск', html: `<p><b>Компьютер.</b> Установите «Google Диск для компьютера» (Drive for desktop) с сайта Google и войдите своим аккаунтом. У приложения два режима: потоковая передача — файлы лежат на виртуальном диске и скачиваются при открытии, и зеркальное копирование — файлы хранятся в папке на компьютере. Для программы надёжнее зеркальное: оно включается в настройках приложения, в разделе папок с Google Диска (названия пунктов могут немного отличаться). В «Моём диске» создайте папку CRM и выберите её в программе.</p>
+<p><b>iPhone.</b> Установите приложение «Google Диск» и войдите. В приложении «Файлы»: «Обзор» → «…» → «Изменить» → включите Google Диск. «Взять из облака» → выбор файла → «Обзор» → Google Диск → CRM → crm-advocate-sync.crm. «Положить в облако» → «Сохранить в Файлы» → Google Диск → CRM → «Сохранить».</p>
+<p><b>Android.</b> «Взять из облака» → в окне выбора файла откройте Google Диск (обычно он там есть) → CRM → crm-advocate-sync.crm. «Положить в облако» → в меню «Поделиться» выберите Google Диск → папка CRM → сохранить.</p>` },
+  { id: 'yadisk', title: 'Яндекс Диск', html: `<p>Если ваш личный сервер тоже в Яндекс Облаке, Яндекс Диск не застрахует от сбоя у Яндекса — при сбое могут не работать оба способа. В этом случае лучше выбрать другое облако.</p>
+<p><b>Компьютер.</b> Установите приложение «Яндекс Диск» для Windows или macOS с сайта Яндекс Диска и войдите. Приложение создаёт на компьютере папку Яндекс Диска и держит её в согласии с облаком. Создайте в ней папку CRM и выберите её в программе.</p>
+<p><b>iPhone.</b> Установите приложение «Яндекс Диск» и войдите. Включите его в «Файлах» («Обзор» → «…» → «Изменить»), если оно там есть. Если Яндекса Диска в «Файлах» нет: откройте файл в приложении Яндекс Диска, «Поделиться» → «Сохранить в Файлы», и выберите его оттуда; файл с телефона сохраняйте через «Поделиться» → Яндекс Диск → папка CRM.</p>
+<p><b>Android.</b> Если Яндекса Диска нет в окне выбора файла — скачайте crm-advocate-sync.crm на телефон в приложении Яндекс Диска и выберите его из «Загрузок». «Положить в облако» → «Поделиться» → Яндекс Диск → папка CRM.</p>` },
+  { id: 'dropbox', title: 'Dropbox', html: `<p><b>Компьютер.</b> Установите приложение Dropbox для компьютера с сайта Dropbox и войдите. Оно создаёт папку Dropbox; создайте в ней папку CRM и выберите её в программе. Бесплатный тариф — 2 ГБ; на бесплатном тарифе приложение Dropbox можно поставить не больше чем на три устройства.</p>
+<p><b>iPhone.</b> Установите приложение Dropbox, войдите и включите Dropbox в «Файлах» («Обзор» → «…» → «Изменить»). Дальше — как с Google Диском: выбор файла → Dropbox → CRM; «Сохранить в Файлы» → Dropbox → CRM.</p>
+<p><b>Android.</b> Если Dropbox есть в окне выбора файла — выберите файл там; если нет — скачайте его в приложении Dropbox и выберите из «Загрузок». «Положить в облако» → «Поделиться» → Dropbox → папка CRM.</p>` },
+  { id: 'onedrive', title: 'OneDrive', html: `<p><b>Компьютер.</b> OneDrive встроен в Windows 10 и 11: войдите учётной записью Microsoft, на компьютере появится папка OneDrive. Создайте в ней папку CRM и выберите её в программе. Чтобы файл всегда лежал на компьютере, в меню папки CRM (правая кнопка мыши) выберите вариант «Всегда сохранять на этом устройстве», если он есть.</p>
+<p><b>iPhone и Android.</b> Приложение OneDrive; дальше — как с Google Диском: выбор файла → OneDrive → CRM; сохранение файла с телефона — через «Поделиться» (Android) или «Сохранить в Файлы» (iPhone) в папку CRM.</p>` },
+  { id: 'other', title: 'Другое облако или папка', html: `<p>Подойдёт любое облако, у которого есть приложение для компьютера с папкой, которую оно держит в согласии с облаком (Облако Mail.ru, MEGA, pCloud и другие), — и даже общая папка в сети офиса. Программе нужна только папка: выберите её через «Выбрать папку облака». На телефоне — приложение того же облака и кнопки «Взять из облака» / «Положить в облако».</p>` },
+  { id: 'trouble', title: 'Если что-то не так', html: `<ul><li><b>«Нужен доступ к папке»</b> — браузер после перезапуска снова спрашивает разрешение: «Синхронизация» → «Файл в облаке» → «Разрешить доступ к папке».</li>
+<li><b>«Пароль файла не подошёл»</b> — на всех устройствах должен быть один пароль. «Заменить пароль на этом устройстве» — ввести тот, что на других.</li>
+<li><b>«Файл пуст»</b> — облако ещё не скачало файл на это устройство; подождите и нажмите «Обменяться сейчас».</li>
+<li><b>«Файл занят приложением облака»</b> — облако как раз передаёт файл; программа повторит сама.</li>
+<li><b>В папке появились crm-advocate-sync (1).crm или «конфликтующая копия»</b> — облако сохранило обе версии одновременной записи; программа объединит и их. Когда строка состояния говорит, что все правки записаны, такие файлы можно удалить — «Убрать обработанные файлы телефонов».</li>
+<li><b>Копятся файлы crm-advocate-sync-…crm с телефонов</b> — после того как компьютер их объединил, их можно убрать той же кнопкой.</li>
+<li><b>Файл большой</b> — в нём вся база вместе с файлами документов; на телефоне программа открывает файл до 120 МБ.</li></ul>` }
+];
+function fsyncGuideHtml(open) { return FSYNC_GUIDE.map(s => `<details class="fgroup guide"${s.id === open ? ' open' : ''}><summary>${icon('chevron-down', 'icon-sm')}<span>${esc(s.title)}</span></summary><div class="card-more-body">${s.html}</div></details>`).join(''); }
+function openFsyncHelpSheet(open) { openSheet('Файл в облаке — инструкция', `<p class="small muted">Выберите облако. Порядок для всех одинаковый: приложение облака на компьютере → папка CRM → «Выбрать папку облака» в программе; на телефоне — приложение того же облака и обмен вручную.</p>${fsyncGuideHtml(open || 'how')}`, true); }
 
 // ▼▼▼ sync/dadata.js
 // ═══ sync/dadata.js — реквизиты по ИНН и подсказки адресов (DaData), как в v312 (поручение пользователя 30.09.2026) ═══
@@ -6818,14 +7222,14 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
   phoneWidths: [360, 390, 412], desktopWidth: 1280, phoneTheme: 'dark', desktopTheme: 'light',
   sidebarAlign: 'top', minTouch: 44, seedFile: 'ui_seed_next.js', readyExpr: 'window.NEXT_READY', lsPrefix: NEXT_NS.ls,
   variants: [{ name: 'monitoring-all', screen: 'monitoring', js: "monSet('f','all')" }, { name: 'monitoring-linksbad', screen: 'monitoring', js: "localStorage.setItem('crm_collector_url','https://functions.yandexcloud.net/d4e-ui-col');localStorage.setItem('crm_collector_secret','ui');nav('monitoring')" }, { name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
-    { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'sync-error', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за минуту' }; syncStatusRender()" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }, { name: 'sync-two', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRV2.url = 'https://functions.yandexcloud.net/y2'; SRV2.secret = 'k2'; localStorage.setItem('crm_next_srv_checked_s2', SRV2.url); SRVDB2.lastPush = Date.now(); localStorage.setItem('crm_next_push_at_s2', '1'); localStorage.setItem('crm_next_pull_rev_s2', syncRevision()); SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за 20 секунд' }; syncStatusRender()" }, { name: 'sync-two-sheet', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRV2.url = 'https://functions.yandexcloud.net/y2'; SRV2.secret = 'k2'; localStorage.setItem('crm_next_srv_checked_s2', SRV2.url); SRVDB2.lastPush = Date.now(); localStorage.setItem('crm_next_push_at_s2', '1'); localStorage.setItem('crm_next_pull_rev_s2', syncRevision()); SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за 20 секунд' }; syncStatusRender(); openSyncSheet()" }],
+    { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'sync-error', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за минуту' }; syncStatusRender()" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }, { name: 'sync-two', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRV2.url = 'https://functions.yandexcloud.net/y2'; SRV2.secret = 'k2'; localStorage.setItem('crm_next_srv_checked_s2', SRV2.url); SRVDB2.lastPush = Date.now(); localStorage.setItem('crm_next_push_at_s2', '1'); localStorage.setItem('crm_next_pull_rev_s2', syncRevision()); SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за 20 секунд' }; syncStatusRender()" }, { name: 'sync-file', screen: 'today', js: "localStorage.setItem('crm_fsync_put_at', String(Date.now() - 3600000)); localStorage.setItem('crm_fsync_pass', 'пароль-файла'); syncStatusRender()" }, { name: 'sync-file-sheet', screen: 'today', js: "localStorage.setItem('crm_fsync_put_at', String(Date.now() - 3600000)); localStorage.setItem('crm_fsync_pass', 'пароль-файла'); syncStatusRender(); openFsyncSheet()" }, { name: 'sync-two-sheet', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRV2.url = 'https://functions.yandexcloud.net/y2'; SRV2.secret = 'k2'; localStorage.setItem('crm_next_srv_checked_s2', SRV2.url); SRVDB2.lastPush = Date.now(); localStorage.setItem('crm_next_push_at_s2', '1'); localStorage.setItem('crm_next_pull_rev_s2', syncRevision()); SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за 20 секунд' }; syncStatusRender(); openSyncSheet()" }],
 };
 
 const UI = { screen: 'today', ready: false, stack: [], hist: false };
@@ -7296,7 +7700,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     </div>
     <div class="section-label">Данные</div>
-    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button><button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" id="set-orders" onclick="openOrdersSheet()"><span>Журнал ордеров</span><span class="muted">выписать, найти, распечатать реестр</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
@@ -7344,6 +7748,7 @@ async function openSyncSheet(sub, msg) {
     <div class="status-line ${m.cls}" id="sync-state" role="status">${icon(m.icon)}<span>${esc(m.title)}</span></div>
     ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="sync-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
     <p class="small muted">${NEXT_ROOT ? 'Программа читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5).' : 'Новая версия читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5). Прежняя программа работает как раньше.'}</p>
+    ${typeof fsyncSyncHtml === 'function' ? fsyncSyncHtml() : ''}
     ${step(1, 'Подключить сервер', checked)}
     <p class="small muted">Адрес и секретный код — те же, что в прежней программе: «Синхронизация» → «Личный сервер». Пароль шифрования — тот, которым прежняя программа шифрует базу при синхронизации. Сервер пароля не знает: без него базу не прочитать.</p>
     <div class="form-grid">
@@ -7456,6 +7861,7 @@ async function openSearchSheet(q) {
 // ключевые слова — по функции, которую открывает пункт (синонимы, которыми пункт ищут, но которых нет в его названии)
 const SETTINGS_WORDS = {
   openBackupSheet: 'копия резервная бэкап экспорт импорт файл восстановить перенести поделиться telegram телеграм',
+  openFsyncSheet: 'синхронизация файл облако папка google гугл диск яндекс dropbox дропбокс onedrive без сервера телефон iphone айфон',
   openPrintSheet: 'печать реестр выписка csv excel выгрузка кассовая книга', openSecuritySheet: 'pin пин код пароль блокировка вход защита',
   appUpdCheckManual: 'обновление обновить новая версия программа сборка приложение apk android андроид', openLicenseSheet: 'лицензия ключ пропуск подписка оплата тариф демо купить',
   openRemindSheet: 'telegram телеграм бот уведомления напоминания', openDevRemindSheet: 'уведомления напоминания будильник устройство телефон',
@@ -11899,6 +12305,9 @@ const HELP_SECTIONS = [
 <p>Строка под шапкой говорит, что с данными: «На устройстве», «Ждёт отправки», «Синхронизировано», «Обмен не удался» (с кнопкой «Повторить»). Настройки → «О программе» → «Обмен с сервером» — последняя подтверждённая отправка и есть ли неотправленные правки.</p>
 <p>С сервера 186 устройство, которое уже получало базу, скачивает не весь снимок, а только изменения после своей версии — это быстрее и меньше расходует связь. Весь снимок скачивается, если цепочка изменений прервана (базу отправила прежняя программа), изменений больше половины снимка, устройство получает базу впервые или сменился сервер или пароль. Что было в последний раз и почему — Настройки → «О программе» → «Получение с сервера». Отправка по-прежнему передаёт снимок целиком: прежняя программа читает только его.</p>
 <p><b>Запасной сервер</b> (необязательно) — второй личный сервер с той же зашифрованной базой и тем же паролем шифрования: если один сервер недоступен, правки уходят на другой, и другие устройства получают их оттуда. «Синхронизация» → «Запасной сервер» → адрес и секретный код → «Сохранить и проверить связь» → «Обменяться с запасным сервером»; автообмен обменивается с обоими. Серверы между собой не обмениваются — их выравнивают ваши устройства, поэтому запасной сервер подключается на каждом устройстве. Строка под шапкой: «2 из 2» — оба сервера получили все правки, «1 из 2» — один (какой и почему — в подсказке и в листе «Синхронизация»), «Ошибка серверов» — правки пока только на устройстве. На запасной сервер уходит только база: события судов, напоминания в Telegram, онлайн-запись и отслеживание писем идут через основной, файлы документов на запасной сервер пока не передаются. Прежняя программа запасного сервера не знает.</p>
+<h3>Без своего сервера: файл в облаке</h3>
+<p>Как в прежней программе: база лежит одним зашифрованным файлом в папке вашего облака — Google Диска, Яндекс Диска, Dropbox, OneDrive или другого, а между устройствами его переносит приложение облака. «Синхронизация» → «Файл в облаке». На компьютере (Chrome или Edge) — «Выбрать папку облака», дальше программа обменивается с файлом сама; «Обменяться сейчас» — по кнопке; после перезапуска браузер может попросить «Разрешить доступ к папке». На телефоне — вручную: «Взять из облака» перед работой и «Положить в облако» после. Подробно по каждому облаку — кнопка «Инструкция по облакам» и ниже.</p>
+${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p><b>Второе устройство (телефон):</b> откройте программу, «Синхронизация» → те же адрес, код и пароль → «Сохранить и проверить связь» → «Загрузить базу с сервера». Смена секретного кода — отдельная инструкция у автора: код меняется на сервере, во всех устройствах и в коллекторе одновременно.</p>` },
   { id: 'monitor', title: 'Мониторинг судов', html: `
 <p>Функция-коллектор в вашем облаке по расписанию (07:30 и 15:30 по Москве) открывает карточки дел на сайтах судов общей юрисдикции (ГАС «Правосудие», суды Москвы), сравнивает с прошлым разом и передаёт события — назначенные заседания, движение дела, даты решений и мотивированных актов — на ваш сервер. Программа забирает их оттуда.</p>
@@ -12544,7 +12953,9 @@ const NEXT_BOOT = {
 };
 document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() => { if (typeof nextAutoStart === 'function') setTimeout(() => { try { nextAutoStart(); } catch (e) { logErr('auto:start', e); } }, 2500);
   // 09.10.2026: события судов с личного сервера — сами (sync/monauto.js), через 4 секунды после запуска, чтобы не мешать первому экрану
-  if (typeof monAutoStart === 'function') setTimeout(() => { try { monAutoStart(); } catch (e) { logErr('monitor:start', e); } }, 4000); }); });
+  if (typeof monAutoStart === 'function') setTimeout(() => { try { monAutoStart(); } catch (e) { logErr('monitor:start', e); } }, 4000);
+  // 12.10.2026: файл в папке облака (sync/fsync.js) — проверка разрешения без вопросов и первый обмен через 3 секунды после запуска
+  if (typeof fsyncStart === 'function') setTimeout(() => { fsyncStart().catch(e => logErr('fsync:start', e)); }, 3000); }); });
 // Обновление программы (аудит 02.10.2026): новая версия service worker ждёт согласия пользователя — полоса «Доступна новая
 // версия» с кнопками «Обновить» и «Позже». Раньше программа согласия не спрашивала, и новая версия включалась только после
 // закрытия всех вкладок. «Позже» убирает полосу до следующего запуска.
