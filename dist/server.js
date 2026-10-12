@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v187: лента календаря по ссылке самой функции — GET ?cal=<метка>; метка — HMAC от SECRET, кода сервера в ссылке нет (А1)
 //  v186: изменения базы между версиями — устройство берёт только их (deltaget), а не весь снимок; разрыв цепочки — снимок целиком
 //  (план переноса 11.10.2026, Д6, этап 1)
 //  v185: условная запись (If-Match / If-None-Match): отметка «принято» базы и файл заявок онлайн-записи не перезаписываются поверх
@@ -100,6 +101,11 @@ module.exports.handler = async function (event, context) {
   if (!event.httpMethod && event.messages) { try { return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
 
   const q0 = event.queryStringParameters || {};
+  // v187: лента календаря для подписки (Google, Яндекс, телефон) — без секрета, по метке; только чтение готового файла
+  if (q0.cal !== undefined) {
+    try { return method === 'GET' || method === 'HEAD' ? await calServe(String(q0.cal), method === 'HEAD') : reply({ ok: false, error: 'method' }, 405); }
+    catch (err) { return { statusCode: 500, headers: CAL_TEXT, body: 'Ошибка: ' + (err && err.message || err) }; }
+  }
   if (q0.book) { // v174: публичная страница записи (без секрета)
     try { return method === 'GET' ? await bookPage(q0) : reply({ ok: false, error: 'method' }, 405); }
     catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + (err && err.message || err) }; }
@@ -116,7 +122,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 186,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 187,
       ready: readiness()
     });
   }
@@ -135,7 +141,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 186 });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 187, cal: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -282,6 +288,31 @@ function pickAfter(s, outer, inner) {
 //  Объект: cal-<SECRET>.ics; наружу отдаётся API-шлюзом по адресу
 //  https://<шлюз>/cal/<SECRET>  (секретная ссылка для подписки).
 // ════════════════════════════════════════════════════════════
+// ── v187: отдача ленты по ссылке функции ──
+// Метка = первые 32 знака base64url от HMAC-SHA256(SECRET, «crm-cal-feed-v1»). Программа считает ту же метку (WebCrypto) и
+// показывает адрес «<адрес сервера>?cal=<метка>». Сравнение — по SHA-256 через timingSafeEqual, как у секретного кода.
+const CAL_LABEL = 'crm-cal-feed-v1';
+const CAL_TEXT = { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' };
+function calToken() {
+  const s = process.env.SECRET;
+  if (typeof s !== 'string' || !s.length) return '';
+  return crypto.createHmac('sha256', s).update(CAL_LABEL, 'utf8').digest('base64url').slice(0, 32);
+}
+function calTokenOk(given) {
+  const t = calToken();
+  if (!t || typeof given !== 'string' || !given.length) return false;
+  const a = crypto.createHash('sha256').update(given, 'utf8').digest(), b = crypto.createHash('sha256').update(t, 'utf8').digest();
+  return crypto.timingSafeEqual(a, b);
+}
+async function calServe(token, head) {
+  if (!calTokenOk(token)) return { statusCode: 403, headers: CAL_TEXT, body: 'Неверная ссылка на ленту календаря. Возьмите адрес заново в программе: «Настройки» -> «Лента календаря». Ссылка меняется при смене секретного кода сервера.' };
+  if (!process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) return { statusCode: 503, headers: CAL_TEXT, body: 'Хранилище сервера не настроено: нет переменных BUCKET / S3_KEY_ID / S3_SECRET у функции.' };
+  const r = await s3Get('cal-' + storeId() + '.ics');
+  if (r.status === 404) return { statusCode: 404, headers: CAL_TEXT, body: 'Лента ещё не опубликована: включите её в программе («Настройки» -> «Лента календаря») и нажмите «Опубликовать сейчас».' };
+  if (!r.ok) { const t = await r.text().catch(() => ''); return { statusCode: 502, headers: CAL_TEXT, body: 'Хранилище ответило ' + r.status + ': ' + t.slice(0, 160) }; }
+  const txt = await r.text();
+  return { statusCode: 200, headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store', 'Content-Disposition': 'inline; filename="crm-calendar.ics"' }, body: head ? '' : txt };
+}
 async function publishIcs(ics) {
   if (typeof ics !== 'string' || !ics.startsWith('BEGIN:VCALENDAR')) {
     return { ok: false, error: 'bad_ics' };
@@ -1217,4 +1248,4 @@ form{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:12px;ma
 }
 
 // Экспорт внутренностей для автотестов (на работу функции не влияет)
-module.exports._test = { deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
+module.exports._test = { calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
