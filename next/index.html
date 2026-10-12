@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="12.10.2026 10:00 · a930d9d">
+<meta name="build" content="12.10.2026 12:05 · 42919d8">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -1295,7 +1295,10 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
   // База для детекта коллизий: время прошлого успешного слияния.
   // Если запись менялась и здесь, и там после этой точки — была коллизия:
   // побеждает более поздняя правка, но мы честно сообщаем о перезаписи.
-  const base = Number(localStorage.getItem('crm_merge_base') || 0);
+  // 12.10.2026 (новая версия, запасной сервер): у каждого источника своя метка — opts.baseKey (null — метку не сдвигать, база — opts.base).
+  // Без opts — как прежде: общая метка crm_merge_base (прежняя программа их не передаёт).
+  const baseKey = opts && opts.baseKey !== undefined ? opts.baseKey : 'crm_merge_base';
+  const base = opts && opts.base !== undefined ? Number(opts.base || 0) : Number((baseKey && localStorage.getItem(baseKey)) || 0);
   const conflicts = [];
   for (const s of STORES) {
     const incoming = parsed.data[s] || [];
@@ -1336,7 +1339,8 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
     }
   }
   if (dry) return { added, updated, skipped, conflicts: conflicts.length, conflictList: conflicts, settingsChanged: false, secretsChanged: false, dryRun: true }; // v297
-  if (!failed) localStorage.setItem('crm_merge_base', String(Date.now())); // v299: при сбое записи метка не сдвигается — повтор дозапишет
+  // v299: при сбое записи метка не сдвигается — повтор дозапишет
+  if (!failed && baseKey) localStorage.setItem(baseKey, String(Date.now()));
   // Настройки и защищённые доступы синхронизируются независимо по своим меткам.
   const settingsResult = applyIncomingSettings(parsed.settings, !!allowSecrets);
   const settingsChanged = settingsResult.changed;
@@ -2881,9 +2885,10 @@ const NEXT_BOOK = { on: false };
 // до 90 секунд; все прочие запросы идут через srvCall с прежним пределом.
 // v180: сервер ≥ 180 отдаёт подписанную ссылку (snapget), снимок скачивается из хранилища напрямую — предел функции не действует.
 // Сервер старше (unknown_action) — прежний путь через функцию; ответ запоминается, чтобы не спрашивать дважды.
+// запасной сервер (12.10.2026, sync/srv2.js): slot — номер сервера, 0 — основной (прежний ключ), 1 — запасной (ключ с окончанием _s2)
 const NEXT_SNAP = { key: 'crm_next_snap_srv' };
-function nextSnapKnown() { const v = localStorage.getItem(NEXT_SNAP.key); return v === '1' ? true : v === '0' ? false : null; }
-function nextSnapSet(on) { try { localStorage.setItem(NEXT_SNAP.key, on ? '1' : '0'); } catch (e) { logErr('snap:set', e); } }
+function nextSnapKnown(slot) { const v = localStorage.getItem(slot ? NEXT_SNAP.key + '_s2' : NEXT_SNAP.key); return v === '1' ? true : v === '0' ? false : null; }
+function nextSnapSet(on, slot) { try { localStorage.setItem(slot ? NEXT_SNAP.key + '_s2' : NEXT_SNAP.key, on ? '1' : '0'); } catch (e) { logErr('snap:set', e); } }
 async function nextSnapFetch(url, bytes) {
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 180000);
   try {
@@ -2892,32 +2897,200 @@ async function nextSnapFetch(url, bytes) {
     const data = await r.text();
     if (bytes && new TextEncoder().encode(data).length !== bytes) return { ok: false, error: 'снимок скачан не полностью — повторите' };
     return { ok: true, data };
-  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не скачался за 3 минуты — медленная связь, повторите' : 'хранилище недоступно (сеть или правило CORS бакета — сервер 180 ставит его сам при первой отправке)' }; }
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не скачался за 3 минуты — медленная связь, повторите' : 'хранилище недоступно: нет связи, сбой Яндекс Облака (status.yandex.cloud) или правило CORS бакета (сервер ставит его сам при первой отправке)' }; }
   finally { clearTimeout(timer); }
 }
-async function nextDbGet(histVer) {
-  if (!SRV.url) return null;
-  if (nextSnapKnown() !== false) {
-    const g = await nextDbGetVia(histVer ? { action: 'snapget', ver: Number(histVer) } : { action: 'snapget' });
+async function nextDbGet(histVer, slot) {
+  const S = slot ? SRV2 : SRV;
+  if (!S.url) return null;
+  if (nextSnapKnown(slot) !== false) {
+    const g = await nextDbGetVia(histVer ? { action: 'snapget', ver: Number(histVer) } : { action: 'snapget' }, slot);
     // ответ без признака exists — сервер действия не знает (прежний ответ «ok» на неизвестное действие) → прежний путь
-    if (g && (g.error === 'unknown_action' || (g.ok && g.exists === undefined))) nextSnapSet(false);
-    else if (g && g.ok) { nextSnapSet(true); if (!g.exists) return { ok: true, exists: false, ver: Number(g.ver || 0) }; const f = await nextSnapFetch(g.url, g.bytes); return f.ok ? { ok: true, exists: true, data: f.data, ver: Number(g.ver || 0), bytes: g.bytes, direct: true } : f; }
+    if (g && (g.error === 'unknown_action' || (g.ok && g.exists === undefined))) nextSnapSet(false, slot);
+    else if (g && g.ok) { nextSnapSet(true, slot); if (!g.exists) return { ok: true, exists: false, ver: Number(g.ver || 0) }; const f = await nextSnapFetch(g.url, g.bytes); return f.ok ? { ok: true, exists: true, data: f.data, ver: Number(g.ver || 0), bytes: g.bytes, direct: true } : f; }
     else return g;
   }
-  return nextDbGetVia(histVer ? { action: 'dbhistget', ver: Number(histVer) } : { action: 'dbget' });
+  return nextDbGetVia(histVer ? { action: 'dbhistget', ver: Number(histVer) } : { action: 'dbget' }, slot);
 }
-async function nextDbGetVia(req) {
-  if (!SRV.url) return null;
-  const endpoint = safeExternalUrl(SRV.url);
+async function nextDbGetVia(req, slot) {
+  const S = slot ? SRV2 : SRV;
+  if (!S.url) return null;
+  const endpoint = safeExternalUrl(S.url);
   if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 90000);
   try {
-    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ secret: SRV.secret }, req)), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ secret: S.secret }, req)), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
     const j = await r.json().catch(() => null);
     if (j && typeof j === 'object' && j.ok === undefined && j.error === undefined && j.errorMessage) return { ok: false, error: srvCloudError(j.errorMessage) };
     return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
   } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'база не загрузилась за 90 секунд — медленная связь, повторите' : 'network' }; }
   finally { clearTimeout(timer); }
+}
+
+// ▼▼▼ sync/srv2.js
+// ═══ sync/srv2.js — запасной (второй) сервер: свой учёт обмена у каждого сервера (12.10.2026) ═══
+// Сбой Yandex Cloud 08–12.10.2026 (раздел 15 правил): база должна жить на двух серверах. С каждым программа обменивается так же, как с одним:
+// получить → объединить → отправить с номером версии. Учёт обмена у каждого сервера свой: адрес и код, версия базы на сервере, цепочка
+// изменений, снимки по ссылке, отметки «получено/отправлено», последняя ошибка И база определения коллизий (метка прошлого слияния).
+// Перечень собран по всем обращениям к хранилищу в sync/*.js, data/merge.js, next/guard.js (урок 117). Основной сервер — прежние ключи
+// (ничего не переносится), запасной — те же ключи с окончанием _s2. Пароль шифрования общий: на обоих серверах одна и та же база.
+// Данные, которые слияние записало с одного сервера (или из файла копии), должны дойти до другого: такое слияние ставит остальным серверам
+// отметку «есть что отправить» (crm_next_fwd…); её снимает только подтверждённая сервером отправка. Серверы между собой не обмениваются —
+// их выравнивают устройства.
+// На запасной сервер уходит только зашифрованная база (раздел 1, п. 6): события судов, лента календаря, заявки онлайн-записи, список
+// напоминаний, отслеживание писем — только через основной. Файлы документов на запасной сервер — отдельным выпуском (свой учёт по серверу).
+const SRV_S2 = '_s2';
+const srvKey = (k, slot) => slot ? k + SRV_S2 : k;
+const SRV2 = {
+  get url() { return localStorage.getItem('crm_srv_url_s2') || ''; },
+  set url(v) { if (v) localStorage.setItem('crm_srv_url_s2', v); else localStorage.removeItem('crm_srv_url_s2'); },
+  get secret() { return localStorage.getItem('crm_srv_secret_s2') || ''; },
+  set secret(v) { if (v) localStorage.setItem('crm_srv_secret_s2', v); else localStorage.removeItem('crm_srv_secret_s2'); }
+};
+// код запасного сервера — в защищённом хранилище секретов, как код основного: слой секретов сверяется со списком при каждом обращении
+if (typeof SECRET_KEYS_PROTECTED !== 'undefined' && !SECRET_KEYS_PROTECTED.includes('crm_srv_secret_s2')) SECRET_KEYS_PROTECTED.push('crm_srv_secret_s2');
+const SRVDB2 = {
+  get pass() { return SRVDB.pass; },
+  get ver() { return Number(localStorage.getItem('crm_srvdb_ver_s2') || 0); }, set ver(v) { localStorage.setItem('crm_srvdb_ver_s2', String(v)); },
+  get lastAt() { return Number(localStorage.getItem('crm_srvdb_lastat_s2') || 0); }, set lastAt(v) { localStorage.setItem('crm_srvdb_lastat_s2', String(v)); },
+  get lastPush() { return Number(localStorage.getItem('crm_srvdb_lastpush_s2') || 0); }, set lastPush(v) { localStorage.setItem('crm_srvdb_lastpush_s2', String(v)); },
+  get lastPull() { return Number(localStorage.getItem('crm_srvdb_lastpull_s2') || 0); }, set lastPull(v) { localStorage.setItem('crm_srvdb_lastpull_s2', String(v)); },
+  get lastErr() { return lsJSON('crm_srvdb_lasterr_s2', null); }, set lastErr(v) { v ? localStorage.setItem('crm_srvdb_lasterr_s2', JSON.stringify(v)) : localStorage.removeItem('crm_srvdb_lasterr_s2'); }
+};
+const srvOf = slot => slot ? SRV2 : SRV;
+const srvdbOf = slot => slot ? SRVDB2 : SRVDB;
+const SRV_NAMES = ['основной сервер', 'запасной сервер'];
+// запасной сервер подключён: адрес и код сохранены (пароль общий)
+const srv2Configured = () => !!(SRV2.url && SRV2.secret && SRVDB.pass);
+const srvChecked = slot => { const S = srvOf(slot); return !!S.url && localStorage.getItem(srvKey('crm_next_srv_checked', slot)) === S.url; };
+// серверы, с которыми идёт обмен: основной — всегда (если подключён), запасной — после проверки связи
+function syncSlots() { const out = []; if (SRV.url && SRV.secret && SRVDB.pass) out.push(0); if (srv2Configured() && srvChecked(1)) out.push(1); return out; }
+// порядок обмена: сервер, у которого прошлый обмен не удался, — вторым (пока он не ответит, другой не ждёт его тайм-аута)
+function syncSlotsOrdered() { const s = syncSlots(); return s.length > 1 && srvdbOf(s[0]).lastErr && !srvdbOf(s[1]).lastErr ? [s[1], s[0]] : s; }
+// отметки «получено / отправлено / ошибка» — как srvdbNote прежней программы, у каждого сервера свои
+function srvNote(slot, kind, err) {
+  if (!slot) return srvdbNote(kind, err);
+  try { if (kind === 'push') { SRVDB2.lastPush = Date.now(); SRVDB2.lastErr = null; } else if (kind === 'pull') { SRVDB2.lastPull = Date.now(); SRVDB2.lastErr = null; } else if (kind === 'err') SRVDB2.lastErr = { at: Date.now(), msg: String(err || 'нет связи').slice(0, 80) }; } catch (e) { logErr('srvNote', e); }
+  try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
+}
+// «есть что отправить» на сервер slot: данные, записанные слиянием с другого сервера или из файла (записи слияния ревизию не двигают — putRaw)
+const SRV_FWD_KEY = 'crm_next_fwd';
+const srvFwd = slot => localStorage.getItem(srvKey(SRV_FWD_KEY, slot)) === '1';
+function srvFwdMark(fromSlot) {
+  for (const s of [0, 1]) { if (s === fromSlot) continue; const S = srvOf(s); if (S.url && S.secret) localStorage.setItem(srvKey(SRV_FWD_KEY, s), '1'); }
+}
+// база определения коллизий для слияния из файла: самая ранняя из баз серверов. Более ранняя база безопасна (запись, правленная с обеих
+// сторон, объединяется по полям), более поздняя — теряет правку поля. Загрузка из файла базы серверов не сдвигает.
+function syncMergeBaseForFile() { const b = [0, 1].map(s => Number(localStorage.getItem(srvKey('crm_merge_base', s)) || 0)).filter(Boolean); return b.length ? Math.min(...b) : 0; }
+// Запросы к запасному серверу. Разрешено только то, что нужно обмену базой: чтение — всегда, запись — только пока идёт отправка (NEXT_PUSH,
+// sync/push.js). Остальные действия (события судов, напоминания, онлайн-запись, письма, файлы документов) — отказ и запись в журнал.
+const SRV2_READ = ['ping', 'dbver', 'dbget', 'snapget', 'corscheck', 'deltaget', 'dbhistlist', 'dbhistget'];
+const SRV2_PUSH = ['dbput', 'snapput', 'snapcommit'];
+function srv2Allowed(action) { return SRV2_READ.includes(action) || (SRV2_PUSH.includes(action) && typeof NEXT_PUSH === 'object' && NEXT_PUSH.on); }
+async function srvCallAt(slot, action, payload) {
+  if (!slot) return srvCall(action, payload);
+  if (!srv2Allowed(action)) { logErr('next:guard', new Error('запасной сервер: действие не разрешено — ' + action)); return { ok: false, blocked: true, error: 'на запасной сервер уходит только база' }; }
+  if (!SRV2.url) return null;
+  const endpoint = safeExternalUrl(SRV2.url);
+  if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 20000);
+  try {
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(Object.assign({ secret: SRV2.secret, action }, payload || {})), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const j = await r.json().catch(() => null);
+    if (j && typeof j === 'object' && j.ok === undefined && j.error === undefined && j.errorMessage) return { ok: false, error: srvCloudError(j.errorMessage) };
+    return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'timeout' : 'network' }; }
+  finally { clearTimeout(timer); }
+}
+// Состояние сервера для строки и листа: off — не подключён; err — последний обмен не удался; new — связь проверена, обмена ещё не было;
+// pending — на устройстве есть правки, которых на сервере нет; ok — сервер получил всё
+function srvSlotState(slot) {
+  const S = srvOf(slot), D = srvdbOf(slot);
+  if (!(S.url && S.secret)) return 'off';
+  if (D.lastErr) return 'err';
+  if (!Math.max(D.lastPull || 0, D.lastPush || 0)) return 'new';
+  return nextLocalChanges(slot) ? 'pending' : 'ok';
+}
+function srvSlotText(slot, now) {
+  const D = srvdbOf(slot), st = srvSlotState(slot), t = now || Date.now();
+  const when = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return new Date(t).toDateString() === d.toDateString() ? p(d.getHours()) + ':' + p(d.getMinutes()) : p(d.getDate()) + '.' + p(d.getMonth() + 1) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()); };
+  const last = Math.max(D.lastPull || 0, D.lastPush || 0);
+  if (st === 'off') return 'не подключён';
+  if (st === 'err') return 'обмен не удался' + (D.lastErr.at ? ' в ' + when(D.lastErr.at) : '') + ': ' + (D.lastErr.msg || 'нет связи');
+  if (st === 'new') return srvChecked(slot) ? 'связь проверена, обмена ещё не было' : 'связь не проверена';
+  return (st === 'ok' ? 'получил все правки, обмен ' : 'ждёт отправки правок, последний обмен ') + when(last);
+}
+// Итог для шапки при двух серверах (при одном — прежняя строка, sync/pull.js)
+function syncStatusModel2(now, auto) {
+  const t = now || Date.now(), a = srvSlotState(0), b = srvSlotState(1), okN = (a === 'ok') + (b === 'ok');
+  const when = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return new Date(t).toDateString() === d.toDateString() ? p(d.getHours()) + ':' + p(d.getMinutes()) : p(d.getDate()) + '.' + p(d.getMonth() + 1); };
+  const lines = 'Основной: ' + srvSlotText(0, t) + '. Запасной: ' + srvSlotText(1, t) + '.';
+  const last = Math.max(SRVDB.lastPull || 0, SRVDB.lastPush || 0, SRVDB2.lastPull || 0, SRVDB2.lastPush || 0);
+  if (okN === 2) return { icon: 'cloud-download', text: (auto ? 'Авто · ' : '') + '2 из 2 · ' + when(last), cls: 'good', title: 'Синхронизировано: 2 из 2 серверов. ' + lines + (auto ? ' Автообмен.' : '') };
+  if (okN === 1) return { icon: 'cloud-download', text: '1 из 2', cls: 'warn', title: 'Сохранено на одном сервере из двух. ' + lines + (auto ? ' Автообмен повторит попытку сам.' : '') };
+  if (a === 'err' && b === 'err') return { icon: 'circle-alert', text: 'Ошибка серверов', cls: 'bad', title: 'Сохранено только на этом устройстве. ' + lines };
+  return { icon: 'cloud-download', text: 'Ждёт отправки', cls: 'warn', title: 'Сохранено на этом устройстве, на серверы ещё не ушло. ' + lines };
+}
+
+// ── Лист «Синхронизация»: раздел «Запасной сервер» (ui/sheets.js вставляет его после шага 5) ──
+// Адрес: как у основного — только площадка, разрешённая в CSP (connect-src); другая площадка добавится вместе с её сервером
+function srv2UrlCheck(url) {
+  const bad = nextSrvUrlCheck(url); if (bad) return bad.replace('Адрес сервера', 'Адрес запасного сервера').replace('Укажите адрес сервера', 'Укажите адрес запасного сервера');
+  const norm = u => String(u || '').trim().replace(/\/+$/, '');
+  if (norm(url) === norm(SRV.url)) return 'Это адрес основного сервера — для запасного нужен другой сервер';
+  return '';
+}
+function syncSrv2Html() {
+  if (!nextSrvConfigured()) return '';
+  const checked = srv2Configured() && srvChecked(1), saved = v => v ? 'placeholder="сохранён"' : '';
+  return `<div class="section-label step-label">${checked ? icon('check', 'icon-sm') : ''}Запасной сервер — необязательно</div>
+    <p class="small muted">Второй личный сервер с той же зашифрованной базой — пароль шифрования тот же. Программа обменивается с обоими: если один недоступен, правки уходят на другой, и другие устройства получают их оттуда. Серверы между собой не обмениваются — их выравнивают ваши устройства, поэтому запасной сервер подключается на каждом устройстве.</p>
+    <p class="small muted">На запасной сервер уходит только база. События судов, напоминания в Telegram, онлайн-запись и отслеживание писем идут через основной; файлы документов на запасной сервер пока не передаются.</p>
+    ${SRV2.url ? `<div class="list-rows" id="sy2-state"><div><span>Основной сервер</span><span class="muted">${esc(srvSlotText(0))}</span></div><div><span>Запасной сервер</span><span class="muted">${esc(srvSlotText(1))}</span></div></div>` : ''}
+    <div class="form-grid">
+      ${wide(fInput('sy2-url', 'Адрес запасного сервера', SRV2.url, 'type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="' + NEXT_SRV_HOST + '…"'))}
+      ${fInput('sy2-secret', 'Секретный код запасного сервера', '', 'type="password" autocomplete="off" ' + saved(SRV2.secret))}
+    </div>
+    <p class="small muted">Сейчас программа принимает адрес запасного сервера только у Яндекс Облака (${esc(NEXT_SRV_HOST)}); адрес другой площадки она примет, когда для неё будет готов сервер.</p>
+    <div class="form-actions">${btn('Сохранить и проверить связь', 'srv2SaveAndCheck()', checked ? '' : 'primary', 'shield-check')}<button type="button" class="button${checked && nextLocalChanges(1) ? ' primary' : ''}" id="sy2-sync" onclick="srv2ExchangeNow()"${checked && !NEXT_SYNC.busy ? '' : ' disabled'}>${icon('refresh-cw')}Обменяться с запасным сервером</button>${SRV2.url || SRV2.secret ? btn('Отключить запасной сервер', 'srv2Forget()', '', 'x') : ''}</div>
+    <p class="small muted">${checked ? 'Обмен: сначала база с запасного сервера объединяется с базой устройства, затем база устройства уходит на запасной сервер.' + (typeof nextAutoOn === 'function' && nextAutoOn() ? ' Автообмен (шаг 5) обменивается и с запасным сервером.' : '') : 'Обмен станет доступен после проверки связи.'}</p>`;
+}
+async function srv2SaveAndCheck() {
+  const url = fv('sy2-url'), secret = fv('sy2-secret') || SRV2.secret;
+  const bad = srv2UrlCheck(url) || (!secret ? 'Укажите секретный код запасного сервера' : '');
+  if (bad) { openSyncSheet('replace', { text: bad, bad: true }); return; }
+  // другой сервер — изменения прежнего не применяются, база коллизий и отметки обмена — с нуля
+  if (url !== SRV2.url) { for (const k of SRV2_STATE_KEYS) localStorage.removeItem(k); }
+  SRV2.url = url; if (secret !== SRV2.secret) SRV2.secret = secret;
+  const r = await nextServerCheck(1);
+  openSyncSheet('replace', r.ok ? { text: 'Запасной сервер отвечает: версия ' + r.srvVer + (r.dbVer ? ', база на нём есть.' : ', базы на нём пока нет — первый обмен отправит базу этого устройства.') + ' Нажмите «Обменяться с запасным сервером».' }
+    : { text: 'Связь с запасным сервером не установлена: ' + r.error + '.', bad: true });
+}
+// обмен по кнопке: получить и влить базу запасного сервера, затем отправить базу устройства, если ему есть что отправить
+async function srv2ExchangeNow() {
+  const b = document.getElementById('sy2-sync'); if (b) b.disabled = true;
+  const r = await nextServerExchange(1);
+  openSyncSheet('replace', r.ok ? { text: 'Обмен с запасным сервером прошёл: с сервера новых записей — ' + (r.added || 0) + ', обновлено — ' + (r.updated || 0) + (r.pushed ? '; база устройства отправлена на запасной сервер.' : '; отправлять было нечего.') }
+    : { text: 'Обмен с запасным сервером не удался (' + (r.step || 'обмен') + '): ' + r.error + '.', bad: true });
+}
+// получить → влить → отправить, если есть что; один сервер. { ok, added, updated, pushed } | { ok:false, step, error }
+async function nextServerExchange(slot) {
+  const g = await nextServerPull(slot);
+  if (!g.ok) return { ok: false, step: 'получение', error: g.error };
+  if (!nextLocalChanges(slot)) return { ok: true, added: g.added || 0, updated: g.updated || 0, pushed: false };
+  const p = await nextServerPush(slot);
+  if (!p.ok) return { ok: false, step: p.step || 'отправка', error: p.error };
+  return { ok: true, added: (g.added || 0) + (p.added || 0), updated: (g.updated || 0) + (p.updated || 0), pushed: true };
+}
+// всё, что программа хранит об обмене с запасным сервером (кроме адреса и кода)
+const SRV2_STATE_KEYS = ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_next_push_at', 'crm_srvdb_lastpull', 'crm_srvdb_lastpush', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver', 'crm_next_snap_srv', 'crm_next_delta_last', 'crm_next_delta_srv', 'crm_merge_base', SRV_FWD_KEY].map(k => k + SRV_S2);
+function srv2Forget() {
+  openSheet('Отключить запасной сервер?', `<p>Адрес и код запасного сервера будут удалены с этого устройства. Записи на устройстве и база на запасном сервере останутся; обмен пойдёт только с основным сервером.</p>
+    <div class="form-actions"><button type="button" class="button danger" id="srv2-forget-go" onclick="srv2ForgetGo()">${icon('x')}Отключить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
+}
+function srv2ForgetGo() {
+  SRV2.url = ''; SRV2.secret = ''; for (const k of SRV2_STATE_KEYS) localStorage.removeItem(k);
+  syncStatusRender(); sheetBack(true); openSyncSheet('replace', { text: 'Запасной сервер отключён.' });
 }
 
 // ▼▼▼ sync/pull.js
@@ -2950,8 +3123,9 @@ function nextSrvError(j) {
   const e = String(j.error || '');
   if (j.blocked) return 'запись на сервер в новой версии отключена';
   if (e === 'auth') return 'неверный секретный код';
-  if (e === 'network') return 'нет связи с сервером';
-  if (e === 'timeout') return 'сервер не ответил за 20 секунд';
+  // урок 116: сбой связи называет все причины, включая сбой самого Облака (состояние — status.yandex.cloud); строка состояния — до 80 знаков
+  if (e === 'network') return 'нет связи: нет интернета, VPN или сбой Яндекс Облака (status.yandex.cloud)';
+  if (e === 'timeout') return 'нет ответа за 20 с: медленная связь или сбой Яндекс Облака (status.yandex.cloud)';
   if (e === 'invalid_url') return 'адрес сервера указан неверно';
   if (e === 'decrypt') return 'пароль шифрования не подошёл';
   if (e === 'format') return 'на сервере файл другого формата';
@@ -2970,31 +3144,37 @@ function nextSrvError(j) {
 const nextSrvConfigured = () => !!(SRV.url && SRV.secret && SRVDB.pass);
 
 // Проверка связи: сервер отвечает и принимает секретный код. Ничего не меняет ни здесь, ни на сервере.
-async function nextServerCheck() {
-  const p = await srvCall('ping');
-  if (!p || !p.ok) { const msg = nextSrvError(p); srvdbNote('err', msg); return { ok: false, error: msg }; }
-  const v = await srvCall('dbver');
-  if (!v || !v.ok) { const msg = nextSrvError(v); srvdbNote('err', msg); return { ok: false, error: msg }; }
-  localStorage.setItem('crm_next_srv_checked', SRV.url); SRVDB.lastErr = null; syncStatusRender();
-  if (typeof nextSnapSet === 'function') nextSnapSet(Number(p.ver || 0) >= 180); // v180: снимки по ссылке
+// slot — номер сервера (sync/srv2.js): 0 или не указан — основной, 1 — запасной; у каждого свои отметки
+async function nextServerCheck(slot) {
+  const call = (a, p) => slot ? srvCallAt(slot, a, p) : srvCall(a, p), note = (k, e) => slot ? srvNote(slot, k, e) : srvdbNote(k, e);
+  const p = await call('ping');
+  if (!p || !p.ok) { const msg = nextSrvError(p); note('err', msg); return { ok: false, error: msg }; }
+  const v = await call('dbver');
+  if (!v || !v.ok) { const msg = nextSrvError(v); note('err', msg); return { ok: false, error: msg }; }
+  localStorage.setItem(slot ? 'crm_next_srv_checked_s2' : 'crm_next_srv_checked', (slot ? SRV2 : SRV).url); (slot ? SRVDB2 : SRVDB).lastErr = null; syncStatusRender();
+  if (typeof nextSnapSet === 'function') nextSnapSet(Number(p.ver || 0) >= 180, slot); // v180: снимки по ссылке
   // v181: состояние правила CORS бакета — хранилище отвечает на предварительный запрос или нет (снимок пользователя 03.10.2026)
-  let cors = null; if (Number(p.ver || 0) >= 181) { const c = await srvCall('corscheck'); if (c && c.ok) cors = { enabled: !!c.enabled, text: c.probe ? (c.probe.status + (c.probe.text ? ' «' + c.probe.text + '»' : '')) : '' }; }
+  let cors = null; if (Number(p.ver || 0) >= 181) { const c = await call('corscheck'); if (c && c.ok) cors = { enabled: !!c.enabled, text: c.probe ? (c.probe.status + (c.probe.text ? ' «' + c.probe.text + '»' : '')) : '' }; }
   return { ok: true, srvVer: Number(p.ver || 0), dbVer: Number(v.ver || 0), cors };
 }
 const nextSrvChecked = () => !!SRV.url && localStorage.getItem('crm_next_srv_checked') === SRV.url;
 
-// Расшифровать снимок с сервера и влить в базу новой версии
-async function srvdbMergeSnapshot(snapshot, silent) {
+// Расшифровать снимок с сервера и влить в базу новой версии. slot — с какого сервера: у каждого своя база определения коллизий
+// (метка прошлого слияния) и своя версия; общая метка дала бы потерю правки поля, пришедшей со второго сервера (урок 117)
+async function srvdbMergeSnapshot(snapshot, silent, slot) {
   if (!snapshot || !snapshot.ok || !snapshot.exists || (!snapshot.data && !snapshot.dump)) return { ok: true, empty: true, added: 0, updated: 0 };
   // Д6: изменения с сервера 186 приходят уже расшифрованными и сведёнными в одну пачку (sync/delta.js)
   let dump = snapshot.dump || null;
   if (!dump) { try { dump = await decryptDump(snapshot.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextDecryptWhy(e) }; } }
   if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: 'format' };
-  const merged = await mergeIncoming(dump, false);
+  const merged = await mergeIncoming(dump, false, slot ? { baseKey: 'crm_merge_base_s2' } : undefined);
+  const D = slot ? SRVDB2 : SRVDB;
   // аудит GPT 03.10.2026: при недосохранённых записях (failed) версия сервера не считается полученной — следующая проверка загрузит снова
-  if (!merged.failed) SRVDB.ver = Number(snapshot.ver || 0);
-  SRVDB.lastAt = Date.now();
+  if (!merged.failed) D.ver = Number(snapshot.ver || 0);
+  D.lastAt = Date.now();
   if (merged.added || merged.updated || merged.settingsChanged) {
+    // записанное с этого сервера должно дойти до другого: записи слияния ревизию не двигают (putRaw), поэтому — отметка (sync/srv2.js)
+    if (typeof srvFwdMark === 'function') srvFwdMark(slot || 0);
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('pull:refresh', e); }
     // открытый лист или форма в боковой панели не закрываются фоновым обновлением (nav закрывает панель); экран обновится при следующем переходе
     if (UI.ready && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav(UI.screen);
@@ -3006,27 +3186,28 @@ async function srvdbMergeSnapshot(snapshot, silent) {
 }
 
 // Загрузить базу с сервера (по кнопке). Возвращает { ok, added, updated, … } или { ok:false, error: 'текст' }.
-async function nextServerPull() {
+async function nextServerPull(slot) {
+  const S = slot ? SRV2 : SRV, sk = k => slot ? k + '_s2' : k, note = (k, e) => slot ? srvNote(slot, k, e) : srvdbNote(k, e);
   if (NEXT_SYNC.busy) return { ok: false, error: 'загрузка уже идёт' };
-  if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
+  if (!S.url || !S.secret) return { ok: false, error: slot ? 'сначала укажите адрес и код запасного сервера' : 'сначала укажите адрес сервера и секретный код' };
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
   // аудит GPT 03.10.2026: неотправленные правки устройства не считаются отправленными после загрузки — отметку снимает только отправка
-  const hadLocal = nextLocalChanges(), revBefore = syncRevision();
+  const hadLocal = nextLocalChanges(slot), revBefore = syncRevision();
   try {
     // Д6: сначала одни изменения с версии устройства (sync/delta.js), при любом сомнении — снимок целиком
-    const pm = typeof nextPullMerge === 'function' ? await nextPullMerge() : null;
-    const g = pm ? pm.g : await nextDbGet();
-    if (!g || !g.ok) { const msg = nextSrvError(g); srvdbNote('err', msg); return { ok: false, error: msg }; }
-    const r = pm ? pm.r : await srvdbMergeSnapshot(g, true);
-    if (!r.ok) { const msg = nextSrvError(r); srvdbNote('err', msg); return { ok: false, error: msg }; }
-    if (r.empty) { SRVDB.lastErr = null; return r; }
-    if (r.failed) { const msg = (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей: ' + r.failed) : 'не записано записей: ' + r.failed) + ' — повторите загрузку'; srvdbNote('err', msg); return { ...r, ok: false, error: msg }; }
-    if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore, r));
-    localStorage.setItem('crm_next_pull_res', JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
-    srvdbNote('pull');
+    const pm = typeof nextPullMerge === 'function' ? await nextPullMerge(slot) : null;
+    const g = pm ? pm.g : await nextDbGet(undefined, slot);
+    if (!g || !g.ok) { const msg = nextSrvError(g); note('err', msg); return { ok: false, error: msg }; }
+    const r = pm ? pm.r : await srvdbMergeSnapshot(g, true, slot);
+    if (!r.ok) { const msg = nextSrvError(r); note('err', msg); return { ok: false, error: msg }; }
+    if (r.empty) { (slot ? SRVDB2 : SRVDB).lastErr = null; return r; }
+    if (r.failed) { const msg = (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей: ' + r.failed) : 'не записано записей: ' + r.failed) + ' — повторите загрузку'; note('err', msg); return { ...r, ok: false, error: msg }; }
+    if (!hadLocal) localStorage.setItem(sk('crm_next_pull_rev'), syncRevisionAfterPull(revBefore, r));
+    localStorage.setItem(sk('crm_next_pull_res'), JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
+    note('pull');
     return r;
-  } catch (e) { logErr('pull', e); const msg = String((e && e.message) || e).slice(0, 80); srvdbNote('err', msg); return { ok: false, error: msg }; }
+  } catch (e) { logErr('pull', e); const msg = String((e && e.message) || e).slice(0, 80); note('err', msg); return { ok: false, error: msg }; }
   finally { NEXT_SYNC.busy = false; syncStatusRender(); }
 }
 // ── Проверка слияния без записи (этап 4, часть 2б) ──
@@ -3132,9 +3313,12 @@ function syncDiagLine() {
   if (typeof secretsStale === 'function' && secretsStale()) return 'секреты закрыты прежним PIN-кодом — Настройки → «Защита входа»';
   if (!nextSrvConfigured()) return 'сервер не подключён';
   const at = Number(localStorage.getItem('crm_next_push_at') || 0), rev = localStorage.getItem('crm_next_pull_rev') || '';
-  return (at ? 'последняя подтверждённая отправка ' + new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'отправки ещё не было') + (rev ? ' · версия на сервере ' + String(rev).slice(0, 12) : '') + (nextLocalChanges() ? ' · есть неотправленные правки' : ' · неотправленных правок нет');
+  return (at ? 'последняя подтверждённая отправка ' + new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'отправки ещё не было') + (rev ? ' · версия на сервере ' + String(rev).slice(0, 12) : '') + (nextLocalChanges() ? ' · есть неотправленные правки' : ' · неотправленных правок нет')
+    + (typeof srv2Configured === 'function' && srv2Configured() ? ' · запасной сервер: ' + srvSlotText(1) : '');
 }
-const nextLocalChanges = () => !!(SRVDB.lastPull || localStorage.getItem('crm_next_push_at')) && localStorage.getItem('crm_next_pull_rev') !== syncRevision();
+// slot — номер сервера (sync/srv2.js). Кроме своих правок, «есть что отправить» — данные, записанные слиянием с другого сервера или из файла
+// (отметка crm_next_fwd…). Запасной сервер, с которым обмена ещё не было, ждёт всю базу устройства.
+const nextLocalChanges = slot => { const D = slot ? SRVDB2 : SRVDB, sk = k => slot ? k + '_s2' : k; if (slot && !(typeof srvChecked === 'function' && srvChecked(slot) && SRV2.secret)) return false; if (!(D.lastPull || localStorage.getItem(sk('crm_next_push_at')))) return !!slot; return localStorage.getItem(sk('crm_next_pull_rev')) !== syncRevision() || localStorage.getItem(sk('crm_next_fwd')) === '1'; };
 // Отметка «синхронизировано» после загрузки (разбор GPT 03.10.2026): часть записей — какой она была ДО запроса (записи слияния её не
 // двигают — putRaw), части настроек — после слияния (настройки с сервера приняты). Правка, сделанная, пока шла загрузка, сдвигает
 // отметку записей (put) — и остаётся «не отправленной».
@@ -3144,7 +3328,7 @@ function syncRevisionAfterPull(before, merged) { const a = String(before || '').
 // Отключить сервер в новой версии: адрес, код, пароль и отметки удаляются; база на устройстве остаётся
 function nextServerForget() {
   SRV.url = ''; SRV.secret = ''; CLOUD.pass = '';
-  for (const k of ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_next_push_at', 'crm_next_preview_at', 'crm_srvdb_lastpull', 'crm_srvdb_lastpush', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver', 'crm_next_auto']) localStorage.removeItem(k);
+  for (const k of ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_next_push_at', 'crm_next_preview_at', 'crm_srvdb_lastpull', 'crm_srvdb_lastpush', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver', 'crm_next_auto', 'crm_next_fwd']) localStorage.removeItem(k);
   syncStatusRender();
 }
 
@@ -3154,6 +3338,8 @@ function syncStatusModel(now) {
   const when = ts => { const d = new Date(ts), p = n => String(n).padStart(2, '0'); return new Date(t).toDateString() === d.toDateString() ? p(d.getHours()) + ':' + p(d.getMinutes()) : p(d.getDate()) + '.' + p(d.getMonth() + 1); };
   const auto = typeof nextAutoOn === 'function' && nextAutoOn() ? ' · автообмен' : '';
   if (NEXT_SYNC.busy) return { icon: 'refresh-cw', text: 'Обмен…', cls: '', title: 'Идёт обмен с сервером' + auto };
+  // запасной сервер подключён и проверен — итог по двум серверам: «2 из 2», «1 из 2» (sync/srv2.js)
+  if (typeof syncTwoServers === 'function' && syncTwoServers()) return syncStatusModel2(t, !!auto);
   // успешная загрузка стирает прошлую ошибку (srvdbNote), поэтому ошибка, которая есть, — всегда последнее событие
   // время ошибки — в самой строке: запомненную ошибку легко принять за новую (снимки пользователя 02.10.2026)
   if (err) return { icon: 'circle-alert', text: 'Ошибка сервера', cls: 'bad', title: 'Сервер: ' + err.msg + (err.at ? ' (ошибка от ' + when(err.at) + '; исчезнет после удачного обмена)' : '') };
@@ -3179,16 +3365,23 @@ function syncErrBarRender() {
   if (typeof document === 'undefined') return;
   const ws = document.querySelector('.workspace'), top = ws && ws.querySelector('.topbar'); if (!top) return;
   let bar = document.getElementById('sync-err-bar');
-  const err = SRVDB.lastErr; let hidden = ''; try { hidden = sessionStorage.getItem(SYNC_ERR_HIDE_KEY) || ''; } catch (e) { hidden = ''; }
+  const two = syncTwoServers(), errTop = syncErrTop(), err = errTop && errTop.e; let hidden = ''; try { hidden = sessionStorage.getItem(SYNC_ERR_HIDE_KEY) || ''; } catch (e) { hidden = ''; }
   if (!err || !nextSrvConfigured() || String(err.at || '') === hidden) { if (bar) bar.remove(); return; }
   if (!bar) { bar = document.createElement('div'); bar.id = 'sync-err-bar'; bar.className = 'sync-err-bar'; bar.setAttribute('role', 'alert'); top.insertAdjacentElement('afterend', bar); }
   const when = err.at ? new Date(err.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
-  bar.innerHTML = `${icon('circle-alert', 'icon-sm')}<div class="grow"><strong>Обмен с сервером не удался${when ? ' в ' + esc(when) : ''}</strong><div class="small">${esc(err.msg || 'нет связи')}. Данные на устройстве сохранены.</div></div><div class="actions">${btn('Повторить', 'syncRetry()', 'small-btn primary', 'refresh-cw')}${btn('Подробнее', 'openSyncSheet()', 'small-btn', 'info')}${iconBtn('Скрыть эту ошибку', 'syncErrBarHide()', 'x')}</div>`;
+  // два сервера: какой сервер не ответил и что со вторым (sync/srv2.js)
+  const head = two ? 'Обмен с ' + (errTop.s ? 'запасным' : 'основным') + ' сервером не удался' : 'Обмен с сервером не удался';
+  const other = two ? ' ' + (errTop.s ? 'Основной' : 'Запасной') + ' сервер: ' + srvSlotText(errTop.s ? 0 : 1) + '.' : '';
+  bar.innerHTML = `${icon('circle-alert', 'icon-sm')}<div class="grow"><strong>${esc(head)}${when ? ' в ' + esc(when) : ''}</strong><div class="small">${esc(err.msg || 'нет связи')}.${esc(other)} Данные на устройстве сохранены.</div></div><div class="actions">${btn('Повторить', 'syncRetry()', 'small-btn primary', 'refresh-cw')}${btn('Подробнее', 'openSyncSheet()', 'small-btn', 'info')}${iconBtn('Скрыть эту ошибку', 'syncErrBarHide()', 'x')}</div>`;
 }
-function syncErrBarHide() { try { sessionStorage.setItem(SYNC_ERR_HIDE_KEY, String((SRVDB.lastErr && SRVDB.lastErr.at) || '')); } catch (e) { logErr('errbar', e); } syncErrBarRender(); }
+// запасной сервер подключён и проверен
+function syncTwoServers() { return typeof srv2Configured === 'function' && srv2Configured() && srvChecked(1); }
+// последняя ошибка обмена: { s — номер сервера, e — { at, msg } } или null
+function syncErrTop() { const list = (syncTwoServers() ? [0, 1] : [0]).map(s => ({ s, e: (s ? SRVDB2 : SRVDB).lastErr })).filter(x => x.e); list.sort((a, b) => (b.e.at || 0) - (a.e.at || 0)); return list[0] || null; }
+function syncErrBarHide() { const t = syncErrTop(); try { sessionStorage.setItem(SYNC_ERR_HIDE_KEY, String((t && t.e.at) || '')); } catch (e) { logErr('errbar', e); } syncErrBarRender(); }
 // «Повторить»: с автообменом — проверить сервер и отправить свои правки; без него — открыть лист «Синхронизация» (обмен по кнопкам)
 async function syncRetry() {
-  if (typeof nextAutoOn === 'function' && nextAutoOn()) { toast('Повторяю обмен с сервером…'); try { await nextAutoPull(true); if (nextLocalChanges() && typeof nextAutoPush === 'function') await nextAutoPush('повтор'); } catch (e) { logErr('errbar:retry', e); } syncStatusRender(); if (!SRVDB.lastErr) toast('Обмен с сервером прошёл'); return; }
+  if (typeof nextAutoOn === 'function' && nextAutoOn()) { toast('Повторяю обмен с сервером…'); try { await nextAutoPull(true); if ((typeof nextAnyLocalChanges === 'function' ? nextAnyLocalChanges() : nextLocalChanges()) && typeof nextAutoPush === 'function') await nextAutoPush('повтор'); } catch (e) { logErr('errbar:retry', e); } syncStatusRender(); if (!syncErrTop()) toast('Обмен с сервером прошёл'); return; }
   openSyncSheet();
 }
 
@@ -3234,13 +3427,16 @@ function pushStage(k, note) {
   if (note != null) PUSH_RUN.notes[k] = note;
   if (typeof pushStagesRender === 'function') pushStagesRender();
 }
-async function nextSrvPost(action, payload, timeoutMs) {
+// slot — номер сервера (sync/srv2.js): 0 или не указан — основной, 1 — запасной (на него — только база)
+async function nextSrvPost(action, payload, timeoutMs, slot) {
   if (!NEXT_PUSH.on) { logErr('next:guard', new Error('запись базы вне отправки по кнопке: ' + action)); return { ok: false, blocked: true, error: 'запись на сервер вне отправки по кнопке закрыта' }; }
-  const endpoint = safeExternalUrl(SRV.url);
+  if (slot && !(typeof srv2Allowed === 'function' && srv2Allowed(action))) { logErr('next:guard', new Error('запасной сервер: действие не разрешено — ' + action)); return { ok: false, blocked: true, error: 'на запасной сервер уходит только база' }; }
+  const S = slot ? SRV2 : SRV;
+  const endpoint = safeExternalUrl(S.url);
   if (!endpoint || !endpoint.startsWith('https://')) return { ok: false, error: 'invalid_url' };
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), timeoutMs || 60000);
   try {
-    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ secret: SRV.secret, action }, payload || {})), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
+    const r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ secret: S.secret, action }, payload || {})), cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
     const j = await r.json().catch(() => null);
     return j && typeof j === 'object' ? j : { ok: false, error: r.ok ? 'bad_response' : 'http_' + r.status };
   } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'сервер не ответил за минуту' : 'network' }; }
@@ -3248,17 +3444,17 @@ async function nextSrvPost(action, payload, timeoutMs) {
 }
 // v180: snapput (ссылка) → PUT шифротекста в хранилище → snapcommit с размером и суммой sha256; «busy» (замок занят другим
 // устройством) — один повтор через 1–3 секунды. Возвращает ответ сервера в том же виде, что dbput ({ok, ver} | {error}).
-async function nextSnapSend(enc, baseVer, encDelta) {
+async function nextSnapSend(enc, baseVer, encDelta, slot) {
   const bytesArr = new TextEncoder().encode(enc), bytes = bytesArr.length, dArr = encDelta ? new TextEncoder().encode(encDelta) : null;
   pushStage('upload', mbText(bytes));
-  const p = await nextSrvPost('snapput', { bytes, ...(dArr ? { deltaBytes: dArr.length } : {}) });
+  const p = await nextSrvPost('snapput', { bytes, ...(dArr ? { deltaBytes: dArr.length } : {}) }, undefined, slot);
   if (!p || !p.ok) return p || { ok: false, error: 'network' };
-  nextSnapSet(true);
+  nextSnapSet(true, slot);
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 600000);
   try {
     const r = await fetch(p.url, { method: 'PUT', body: bytesArr, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: ctl.signal });
     if (!r.ok) return { ok: false, error: 'хранилище не приняло снимок: HTTP ' + r.status };
-  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не загрузился за 10 минут — медленная связь, повторите' : 'хранилище недоступно (сеть или правило CORS бакета — сервер ставит его сам; если ошибка повторяется, пришлите журнал)' }; }
+  } catch (e) { return { ok: false, error: e && e.name === 'AbortError' ? 'снимок не загрузился за 10 минут — медленная связь, повторите' : 'хранилище недоступно: нет связи, сбой Яндекс Облака (status.yandex.cloud) или правило CORS бакета — сервер ставит его сам; если повторяется, пришлите журнал' }; }
   finally { clearTimeout(timer); }
   // Д6 (сервер 186): изменения — рядом со снимком; не загрузились — фиксация без них (у других устройств цепочка прервётся, они возьмут
   // снимок целиком)
@@ -3267,34 +3463,39 @@ async function nextSnapSend(enc, baseVer, encDelta) {
   const dPay = deltaToken ? { deltaToken, deltaBytes: dArr.length } : {};
   pushStage('confirm');
   let sha = ''; try { sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytesArr))).map(b => b.toString(16).padStart(2, '0')).join(''); } catch (e) { logErr('snap:sha', e); }
-  let c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha, ...dPay });
-  if (c && c.error === 'conflict' && c.busy) { await new Promise(res => setTimeout(res, 1000 + Math.random() * 2000)); c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha, ...dPay }); }
+  let c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha, ...dPay }, undefined, slot);
+  if (c && c.error === 'conflict' && c.busy) { await new Promise(res => setTimeout(res, 1000 + Math.random() * 2000)); c = await nextSrvPost('snapcommit', { token: p.token, baseVer, bytes, sha256: sha, ...dPay }, undefined, slot); }
   if (c && !c.ok && c.error === 'size_mismatch') c.error = 'снимок в хранилище повреждён при загрузке (размер не совпал) — повторите отправку';
   if (c && !c.ok && c.error === 'sha_mismatch') c.error = 'снимок в хранилище повреждён при загрузке (контрольная сумма не совпала) — повторите отправку';
   if (c && !c.ok && c.error === 'not_uploaded') c.error = 'хранилище не получило снимок — повторите отправку';
   return c || { ok: false, error: 'network' };
 }
-async function nextServerPush() {
+// slot — номер сервера (sync/srv2.js): 0 или не указан — основной, 1 — запасной. У каждого свои версия, отметки и база коллизий;
+// файлы документов отдельными объектами кладутся только на основной (на запасной — следующим выпуском, своим учётом)
+async function nextServerPush(slot) {
+  const S = slot ? SRV2 : SRV, D = slot ? SRVDB2 : SRVDB, sk = k => slot ? k + '_s2' : k, note = (k, e) => slot ? srvNote(slot, k, e) : srvdbNote(k, e);
   if (NEXT_SYNC.busy) return { ok: false, error: 'идёт обмен с сервером — дождитесь его окончания' };
-  if (!SRV.url || !SRV.secret) return { ok: false, error: 'сначала укажите адрес сервера и секретный код' };
+  if (!S.url || !S.secret) return { ok: false, error: slot ? 'сначала укажите адрес и код запасного сервера' : 'сначала укажите адрес сервера и секретный код' };
   if (!SRVDB.pass) return { ok: false, error: 'сначала укажите пароль шифрования' };
   NEXT_SYNC.busy = true; syncStatusRender();
   PUSH_RUN = { start: Date.now(), at: Date.now(), cur: '', seen: [], notes: {}, fail: '', done: false };
+  // отметка «данные с другого сервера или из файла ждут отправки сюда» — снимается только подтверждённой отправкой (sync/srv2.js)
+  const fwdBefore = localStorage.getItem(sk('crm_next_fwd')) === '1';
   // unconfirmed — ответа сервера нет (сеть, время): принял ли он снимок, неизвестно; при явном отказе сервера версия на нём прежняя
-  const fail = (step, msg, unconfirmed) => { srvdbNote('err', msg); PUSH_RUN.fail = msg; PUSH_RUN.unconfirmed = !!unconfirmed; if (typeof pushStagesRender === 'function') pushStagesRender(); return { ok: false, step, error: msg, unconfirmed: !!unconfirmed }; };
+  const fail = (step, msg, unconfirmed) => { note('err', msg); PUSH_RUN.fail = msg; PUSH_RUN.unconfirmed = !!unconfirmed; if (typeof pushStagesRender === 'function') pushStagesRender(); return { ok: false, step, error: msg, unconfirmed: !!unconfirmed }; };
   try {
     const takeIn = async again => { // шаг «получить и влить»
       pushStage('get', again ? 'повтор: другое устройство записало базу во время отправки' : null);
-      const g = await nextDbGet();
+      const g = await nextDbGet(undefined, slot);
       if (!g || !g.ok) return { err: nextSrvError(g) };
-      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0, remote: r.remoteDump || null }; }
+      if (g.exists && g.data) { pushStage('merge'); const r = await srvdbMergeSnapshot(g, true, slot); if (!r.ok) return { err: nextSrvError(r) }; if (r.failed) return { err: (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — отправка отменена, повторите' }; return { ver: Number(g.ver || 0), added: r.added || 0, updated: r.updated || 0, remote: r.remoteDump || null }; }
       return { ver: 0, added: 0, updated: 0, remote: null };
     };
     let blobs = null; // v8: файлы документов — отдельными объектами, один раз (sync/blobs.js)
     const send = async (baseVer, remote) => { // шаг «положить файлы, собрать, зашифровать, отправить»
       NEXT_PUSH.on = true;
       try {
-        if (!blobs && typeof nextBlobsPush === 'function') { pushStage('files'); try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
+        if (!slot && !blobs && typeof nextBlobsPush === 'function') { pushStage('files'); try { blobs = await nextBlobsPush(); } catch (e) { logErr('push:blobs', e); blobs = { ok: false, uploaded: 0, failed: 0, total: 0 }; } }
         // ревизия — ДО сборки (разбор GPT 03.10.2026): правка, сделанная во время сборки снимка, могла не попасть в него, но попадала в
         // отметку «отправлено»; теперь она остаётся «не отправленной» и уйдёт следующей отправкой
         if (blobs && PUSH_RUN) PUSH_RUN.notes.files = blobs.skipped ? 'внутри снимка (сервер старше 180)' : blobs.total ? 'положено ' + blobs.uploaded + (blobs.failed ? ', не удалось ' + blobs.failed : '') : 'новых файлов нет';
@@ -3304,11 +3505,11 @@ async function nextServerPush() {
         const enc = await encryptDump(dump, SRVDB.pass), omitted = dump._blobsOmitted || 0;
         // Д6: изменения этой отправки относительно снимка сервера, с которого шли (сервер 186 хранит их для других устройств)
         let encDelta = null, deltaN = 0;
-        if (remote && typeof syncDeltaOf === 'function' && nextSnapKnown() !== false) { try { const dl = syncDeltaOf(remote, dump, baseVer); if (dl) { encDelta = await encryptDump(dl.dump, SRVDB.pass); deltaN = dl.n; } } catch (e) { logErr('push:delta', e); encDelta = null; } }
+        if (remote && typeof syncDeltaOf === 'function' && nextSnapKnown(slot) !== false) { try { const dl = syncDeltaOf(remote, dump, baseVer); if (dl) { encDelta = await encryptDump(dl.dump, SRVDB.pass); deltaN = dl.n; } } catch (e) { logErr('push:delta', e); encDelta = null; } }
         // v180: снимок — напрямую в хранилище по подписанной ссылке; сервер старше 180 — через функцию (dbput)
-        if (nextSnapKnown() !== false) { const j = await nextSnapSend(enc, baseVer, encDelta); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted, deltaN: encDelta ? deltaN : null }; nextSnapSet(false); }
+        if (nextSnapKnown(slot) !== false) { const j = await nextSnapSend(enc, baseVer, encDelta, slot); if (j && j.error !== 'unknown_action') return { revision, bytes: enc.length, j, direct: true, omitted, deltaN: encDelta ? deltaN : null }; nextSnapSet(false, slot); }
         pushStage('upload', mbText(enc.length) + ' через функцию');
-        return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }), omitted };
+        return { revision, bytes: enc.length, j: await nextSrvPost('dbput', { data: enc, baseVer }, undefined, slot), omitted };
       } finally { NEXT_PUSH.on = false; }
     };
     let got = await takeIn(); if (got.err) return fail('получение базы с сервера', got.err);
@@ -3319,10 +3520,11 @@ async function nextServerPush() {
     }
     const j = sent.j;
     if (!j || !j.ok) return fail('отправка', j && j.error === 'conflict' ? 'другое устройство записывает базу одновременно — повторите через минуту' : j && j.error === 'db_too_big' ? 'база больше, чем сервер принимает за один раз (3,5 МБ шифротекста)' : nextSrvError(j), !j || j.error === 'network' || /не ответил|не загрузился|недоступно/.test(String(j.error || '')));
-    SRVDB.ver = Number(j.ver || 0); SRVDB.lastAt = Date.now();
-    localStorage.setItem('crm_next_pull_rev', sent.revision); localStorage.setItem('crm_next_push_at', String(Date.now()));
-    srvdbNote('push'); pushStage('confirm'); PUSH_RUN.done = true;
-    return { ok: true, ver: SRVDB.ver, bytes: sent.bytes, added: got.added, updated: got.updated, retried, blobs: blobs || null, blobsOmitted: sent.omitted || 0 };
+    D.ver = Number(j.ver || 0); D.lastAt = Date.now();
+    localStorage.setItem(sk('crm_next_pull_rev'), sent.revision); localStorage.setItem(sk('crm_next_push_at'), String(Date.now()));
+    if (fwdBefore) localStorage.removeItem(sk('crm_next_fwd'));
+    note('push'); pushStage('confirm'); PUSH_RUN.done = true;
+    return { ok: true, ver: D.ver, bytes: sent.bytes, added: got.added, updated: got.updated, retried, blobs: blobs || null, blobsOmitted: sent.omitted || 0 };
   } catch (e) { logErr('push', e); return fail('отправка', String((e && e.message) || e).slice(0, 120)); }
   finally { NEXT_PUSH.on = false; NEXT_SYNC.busy = false; syncStatusRender(); }
 }
@@ -3541,24 +3743,25 @@ function syncDeltaUnion(parts) {
   const out = {}; for (const st of Object.keys(data)) out[st] = [...data[st].values()];
   return { _fmt: last._fmt, _ver: last._ver, _exportedAt: last._exportedAt, data: out, settings: last.settings || {}, _delta: { ...(last._delta || {}), parts: parts.length } };
 }
-function deltaLastSet(v) { try { localStorage.setItem(DELTA_LAST_KEY, JSON.stringify({ ...v, at: Date.now() })); } catch (e) { logErr('delta:last', e); } }
-function deltaLast() { return lsJSON(DELTA_LAST_KEY, null); }
+// slot — номер сервера (sync/srv2.js): у запасного свои ключи с окончанием _s2
+function deltaLastSet(v, slot) { try { localStorage.setItem(slot ? DELTA_LAST_KEY + '_s2' : DELTA_LAST_KEY, JSON.stringify({ ...v, at: Date.now() })); } catch (e) { logErr('delta:last', e); } }
+function deltaLast(slot) { return lsJSON(slot ? DELTA_LAST_KEY + '_s2' : DELTA_LAST_KEY, null); }
 // сервер старше 186 (deltaget не знает) — не спрашивать сутки
-function deltaSrvSkip() { const v = lsJSON(DELTA_SRV_KEY, null); return !!(v && v.no && Date.now() - (v.at || 0) < DELTA_RETRY); }
+function deltaSrvSkip(slot) { const v = lsJSON(slot ? DELTA_SRV_KEY + '_s2' : DELTA_SRV_KEY, null); return !!(v && v.no && Date.now() - (v.at || 0) < DELTA_RETRY); }
 // получить изменения с версии устройства: { ok, exists, dump, ver, counts, delta, bytes } | { ok, upToDate, ver } | null — брать снимок целиком
-async function nextDbGetDelta() {
-  const since = SRVDB.ver;
-  if (!since || !SRV.url || !SRVDB.pass || typeof nextSnapKnown !== 'function' || nextSnapKnown() !== true || deltaSrvSkip()) return null;
-  let j = null; try { j = await srvCall('deltaget', { since }); } catch (e) { logErr('delta:get', e); return null; }
-  if (j && (j.error === 'unknown_action' || (j.ok && !j.gap && !Array.isArray(j.chain)))) { try { localStorage.setItem(DELTA_SRV_KEY, JSON.stringify({ no: true, at: Date.now() })); } catch (e) { logErr('delta:srv', e); } deltaLastSet({ full: true, reason: 'сервер старше 186' }); return null; }
+async function nextDbGetDelta(slot) {
+  const since = (slot ? SRVDB2 : SRVDB).ver, note = v => deltaLastSet(v, slot);
+  if (!since || !(slot ? SRV2 : SRV).url || !SRVDB.pass || typeof nextSnapKnown !== 'function' || nextSnapKnown(slot) !== true || deltaSrvSkip(slot)) return null;
+  let j = null; try { j = await (slot ? srvCallAt(slot, 'deltaget', { since }) : srvCall('deltaget', { since })); } catch (e) { logErr('delta:get', e); return null; }
+  if (j && (j.error === 'unknown_action' || (j.ok && !j.gap && !Array.isArray(j.chain)))) { try { localStorage.setItem(slot ? DELTA_SRV_KEY + '_s2' : DELTA_SRV_KEY, JSON.stringify({ no: true, at: Date.now() })); } catch (e) { logErr('delta:srv', e); } note({ full: true, reason: 'сервер старше 186' }); return null; }
   if (!j || !j.ok) return null;
-  if (j.gap) { deltaLastSet({ full: true, reason: j.reason === 'large' ? 'изменений больше половины снимка' : 'цепочка изменений прервана (запись без изменений — прежней программой или сбой)' }); return null; }
+  if (j.gap) { note({ full: true, reason: j.reason === 'large' ? 'изменений больше половины снимка' : 'цепочка изменений прервана (запись без изменений — прежней программой или сбой)' }); return null; }
   if (!j.chain.length) return { ok: true, exists: true, upToDate: true, ver: Number(j.ver || since) };
   const parts = []; let bytes = 0;
   for (const d of j.chain) {
-    const f = await nextSnapFetch(d.url, d.bytes); if (!f || !f.ok) { deltaLastSet({ full: true, reason: 'изменения не скачались' }); return null; }
-    let dump = null; try { dump = await decryptDump(f.data, SRVDB.pass); } catch (e) { logErr('delta:decrypt', e); deltaLastSet({ full: true, reason: 'изменения не расшифровались' }); return null; }
-    if (!dump || dump._fmt !== SYNC_FMT || !dump.data) { deltaLastSet({ full: true, reason: 'изменения другого формата' }); return null; }
+    const f = await nextSnapFetch(d.url, d.bytes); if (!f || !f.ok) { note({ full: true, reason: 'изменения не скачались' }); return null; }
+    let dump = null; try { dump = await decryptDump(f.data, SRVDB.pass); } catch (e) { logErr('delta:decrypt', e); note({ full: true, reason: 'изменения не расшифровались' }); return null; }
+    if (!dump || dump._fmt !== SYNC_FMT || !dump.data) { note({ full: true, reason: 'изменения другого формата' }); return null; }
     parts.push(dump); bytes += Number(d.bytes) || 0;
   }
   const dump = syncDeltaUnion(parts), last = parts[parts.length - 1]._delta || {};
@@ -3572,23 +3775,23 @@ async function syncCountsShort(counts) {
   return short;
 }
 // получение для «Загрузить» и автообмена: сначала изменения, при любом сомнении — снимок целиком. { g, r } — ответ сервера и итог слияния
-async function nextPullMerge() {
-  const d = await nextDbGetDelta();
-  if (d && d.upToDate) { SRVDB.lastAt = Date.now(); return { g: d, r: { ok: true, empty: true, added: 0, updated: 0, upToDate: true } }; }
+async function nextPullMerge(slot) {
+  const d = await nextDbGetDelta(slot);
+  if (d && d.upToDate) { (slot ? SRVDB2 : SRVDB).lastAt = Date.now(); return { g: d, r: { ok: true, empty: true, added: 0, updated: 0, upToDate: true } }; }
   if (d) {
-    const r = await srvdbMergeSnapshot(d, true);
+    const r = await srvdbMergeSnapshot(d, true, slot);
     if (!r.ok || r.failed) return { g: d, r };
     const short = await syncCountsShort(d.counts);
-    if (!short.length) { deltaLastSet({ full: false, parts: d.delta, n: d.n, bytes: d.bytes, ver: d.ver }); return { g: d, r: { ...r, delta: d.delta } }; }
-    deltaLastSet({ full: true, reason: 'на устройстве не хватает записей (' + short.join(', ') + ') — загружен весь снимок' });
+    if (!short.length) { deltaLastSet({ full: false, parts: d.delta, n: d.n, bytes: d.bytes, ver: d.ver }, slot); return { g: d, r: { ...r, delta: d.delta } }; }
+    deltaLastSet({ full: true, reason: 'на устройстве не хватает записей (' + short.join(', ') + ') — загружен весь снимок' }, slot);
   }
-  const g = await nextDbGet();
+  const g = await nextDbGet(undefined, slot);
   if (!g || !g.ok) return { g, r: null };
-  return { g, r: await srvdbMergeSnapshot(g, true) };
+  return { g, r: await srvdbMergeSnapshot(g, true, slot) };
 }
 // строка для листа «Синхронизация»
-function deltaLastText() {
-  const v = deltaLast(); if (!v) return '';
+function deltaLastText(slot) {
+  const v = deltaLast(slot); if (!v) return '';
   const when = new Date(v.at || 0).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   return v.full ? 'последнее получение ' + when + ': весь снимок — ' + (v.reason || 'изменений нет на сервере') : 'последнее получение ' + when + ': только изменения — записей ' + (v.n || 0) + ' (' + (typeof mbText === 'function' ? mbText(v.bytes || 0) : (v.bytes || 0) + ' Б') + ')';
 }
@@ -3809,9 +4012,15 @@ async function blobAuditFetch() {
 // Включается переключателем в листе «Синхронизация» и только после хотя бы одной удачной отправки по кнопке; по умолчанию
 // выключен. Сбой не повторяется бесконечно: пауза растёт до 10 минут, причина — в строке состояния. Отправка идёт тем же
 // nextServerPush (получить → влить → отправить с версией), запись на сервер открыта только на время отправки.
+// Запасной сервер (12.10.2026, sync/srv2.js): автообмен идёт с каждым подключённым сервером по очереди — проверка версии и получение,
+// затем отправка туда, где есть что отправить. Недоступный сервер не останавливает обмен с другим.
 const AUTO_KEY = 'crm_next_auto', AUTO_PUSH_DELAY = 4000, AUTO_PULL_MS = 5 * 60000, AUTO_RETRY_MIN = 60000, AUTO_RETRY_MAX = 10 * 60000;
 const NEXT_AUTO = { dirty: false, timer: null, loop: null, fails: 0, lastPullCheck: 0 };
 function nextAutoOn() { return localStorage.getItem(AUTO_KEY) === '1' && !!(SRV.url && SRV.secret && SRVDB.pass); }
+// серверы автообмена: основной и, если подключён и проверен, запасной (порядок — sync/srv2.js)
+const autoSlots = () => typeof syncSlotsOrdered === 'function' ? syncSlotsOrdered() : [0];
+// есть ли что отправить хоть на один сервер
+function nextAnyLocalChanges() { return autoSlots().some(s => nextLocalChanges(s)); }
 // сколько ждать перед повтором после n сбоев подряд: 1, 2, 4, 8, 10, 10… минут
 function nextAutoRetryMs(fails) { return Math.min(AUTO_RETRY_MAX, AUTO_RETRY_MIN * Math.pow(2, Math.max(0, fails - 1))); }
 // прежняя программа зовёт srvdbTouch после каждой записи (cloud.js → cloudTouch); здесь он ведёт к автоотправке
@@ -3831,39 +4040,53 @@ async function nextAutoPush(reason) {
   if (size && size.snap && size.fitsFn === false && localStorage.getItem('crm_next_old_off') !== '1') { NEXT_AUTO.dirty = true; srvdbNote('err', 'автообмен остановлен: база больше предела прежней программы (3,5 МБ) — она не сможет её получить. Отправьте вручную («Синхронизация», шаг 4) и отметьте, что прежней программой больше не пользуетесь'); return { ok: false, blocked: true }; }
   NEXT_AUTO.dirty = false;
   // вливание с сервера тоже пишет в базу и зовёт srvdbTouch — без этой проверки два устройства гоняли бы базу по кругу
-  if (!nextLocalChanges()) return { ok: true, skipped: true };
-  const r = await nextServerPush();
-  if (r && r.ok) { NEXT_AUTO.fails = 0; if (nextLocalChanges()) srvdbTouch(); if (UI.ready && !sheetIsOpen()) nav(UI.screen); return r; }
+  const todo = autoSlots().filter(s => nextLocalChanges(s));
+  if (!todo.length) return { ok: true, skipped: true };
+  // с каждым сервером, которому есть что отправить; ответ — основного (или единственного отправленного), сбой любого — повтор
+  let first = null, failedAny = false;
+  for (const s of todo) {
+    const r = await nextServerPush(s);
+    if (!first || !s) first = r;
+    if (!(r && r.ok)) failedAny = true;
+  }
+  if (!failedAny) { NEXT_AUTO.fails = 0; if (nextAnyLocalChanges()) srvdbTouch(); if (UI.ready && !sheetIsOpen()) nav(UI.screen); return first; }
   NEXT_AUTO.dirty = true; NEXT_AUTO.fails++;
   clearTimeout(NEXT_AUTO.timer); NEXT_AUTO.timer = setTimeout(() => nextAutoPush('повтор').catch(e => logErr('auto:push', e)), nextAutoRetryMs(NEXT_AUTO.fails));
-  return r;
+  return first && !first.ok ? first : { ok: false, error: 'запасной сервер: обмен не удался', partial: true };
 }
-// проверка сервера: другая версия — получить и влить; затем отправить своё, если есть
+// проверка одного сервера: другая версия — получить и влить. Возвращает ответ dbver (или ошибку получения)
+async function nextAutoPullSlot(slot, force) {
+  const D = slot ? SRVDB2 : SRVDB, note = (k, e) => slot ? srvNote(slot, k, e) : srvdbNote(k, e), sk = k => slot ? k + '_s2' : k;
+  const v = await (slot ? srvCallAt(slot, 'dbver') : srvCall('dbver'));
+  if (!v || !v.ok) { note('err', nextSrvError(v)); return v; }
+  if (v.ver && (force || Number(v.ver) !== D.ver)) {
+    // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
+    const hadLocal = nextLocalChanges(slot), revBefore = syncRevision();
+    // Д6: сначала одни изменения с версии устройства (sync/delta.js), при любом сомнении — снимок целиком
+    const pm = typeof nextPullMerge === 'function' ? await nextPullMerge(slot) : null;
+    const g = pm ? pm.g : await nextDbGet(undefined, slot);
+    if (!g || !g.ok) { note('err', nextSrvError(g)); return g; }
+    const r = pm ? pm.r : await srvdbMergeSnapshot(g, true, slot);
+    if (!r.ok) { note('err', nextSrvError(r)); return r; }
+    if (r.failed) { note('err', (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
+    if (!hadLocal) localStorage.setItem(sk('crm_next_pull_rev'), syncRevisionAfterPull(revBefore, r)); note('pull');
+    if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
+  }
+  return v;
+}
+// проверка серверов: другая версия — получить и влить; затем отправить своё, если есть. Ответ — основного сервера
 async function nextAutoPull(force) {
   if (!nextAutoOn() || NEXT_SYNC.busy) return null;
   // разбор GPT 06.10.2026, п. 1: занятость берётся ДО первого сетевого запроса. Раньше она ставилась после ответа dbver — пока ответ
   // ждали, могла начаться отправка или загрузка из файла, и два слияния шли бы одновременно с общим MERGE_SEEN
   NEXT_SYNC.busy = true; syncStatusRender();
-  let v = null;
+  let main = null, anyOk = false;
   try {
-    v = await srvCall('dbver');
-    if (!v || !v.ok) { srvdbNote('err', nextSrvError(v)); return v; }
-    if (v.ver && (force || Number(v.ver) !== SRVDB.ver)) {
-      // аудит GPT 03.10.2026: неотправленные правки не считаются отправленными после загрузки; недосохранённые записи — ошибка и повтор
-      const hadLocal = nextLocalChanges(), revBefore = syncRevision();
-      // Д6: сначала одни изменения с версии устройства (sync/delta.js), при любом сомнении — снимок целиком
-      const pm = typeof nextPullMerge === 'function' ? await nextPullMerge() : null;
-      const g = pm ? pm.g : await nextDbGet();
-      if (!g || !g.ok) { srvdbNote('err', nextSrvError(g)); return g; }
-      const r = pm ? pm.r : await srvdbMergeSnapshot(g, true);
-      if (!r.ok) { srvdbNote('err', nextSrvError(r)); return r; }
-      if (r.failed) { srvdbNote('err', (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей с сервера: ' + r.failed) : 'не записано записей с сервера: ' + r.failed) + ' — повторю при следующей проверке'); return { ...r, ok: false }; }
-      if (!hadLocal) localStorage.setItem('crm_next_pull_rev', syncRevisionAfterPull(revBefore, r)); srvdbNote('pull');
-      if (UI.ready && !sheetIsOpen() && (r.added || r.updated)) nav(UI.screen);
-    }
+    for (const s of autoSlots()) { const v = await nextAutoPullSlot(s, force); if (!s) main = v; if (v && v.ok) anyOk = true; }
   } finally { NEXT_SYNC.busy = false; syncStatusRender(); }
-  if (NEXT_AUTO.dirty || nextLocalChanges()) srvdbTouch();
-  return v;
+  // ни один сервер не ответил — отправку не затеваем (как и с одним сервером: следующая проверка — по таймеру)
+  if (anyOk && (NEXT_AUTO.dirty || nextAnyLocalChanges())) srvdbTouch();
+  return main;
 }
 function nextAutoStart() {
   clearInterval(NEXT_AUTO.loop); NEXT_AUTO.loop = null;
@@ -4249,13 +4472,17 @@ async function backupPreviewModel(text, pass) {
   }
   const checked = validateBackup(parsed);
   if (!checked.ok) return { error: checked.error };
-  const dry = await mergeIncoming(JSON.parse(JSON.stringify(checked.parsed)), false, { dryRun: true });
+  const dry = await mergeIncoming(JSON.parse(JSON.stringify(checked.parsed)), false, backupMergeOpts({ dryRun: true }));
   const per = []; for (const st of STORES) { const n = (checked.parsed.data[st] || []).length; if (n) per.push({ store: st, title: PREVIEW_TITLES[st] || st, count: n }); }
   // статус полноты, записанный при создании копии (_files; validateBackup его отбрасывает, поэтому читается из исходного разбора)
   const files = parsed && parsed._files && typeof parsed._files === 'object' ? { state: String(parsed._files.state || 'unknown'), text: String(parsed._files.text || '').slice(0, 300), total: Number(parsed._files.total || 0), have: Number(parsed._files.have || 0), missing: Number(parsed._files.missing || 0) } : null;
   return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files };
 }
 let BACKUP_PENDING = null;
+// слияние из файла не сдвигает базу определения коллизий серверов (второй разбор GPT 12.10.2026, урок 117): иначе одновременная правка поля,
+// пришедшая потом с сервера, решалась бы «новее целиком» и терялась. Читается самая ранняя база серверов (sync/srv2.js) — более ранняя
+// база безопасна: запись, правленная с обеих сторон, объединяется по полям
+function backupMergeOpts(o) { return typeof syncMergeBaseForFile === 'function' ? Object.assign({ baseKey: null, base: syncMergeBaseForFile() }, o || {}) : (o || undefined); }
 function openBackupSheet(sub) {
   const last = Number(localStorage.getItem('crm_next_backup_at') || 0), checked = Number(localStorage.getItem('crm_next_backup_checked') || 0);
   openSheet('Копии базы', `<p class="small muted">Копия — один зашифрованный файл со всей базой. Его можно хранить отдельно, перенести на другое устройство или открыть в прежней программе («Восстановить из файла»). Без пароля копии файл не открыть — запишите пароль отдельно.</p>
@@ -4325,7 +4552,9 @@ async function backupApply() {
   const b = document.getElementById('bk-apply'); if (b) { if (b.disabled) return null; b.disabled = true; }
   if (typeof NEXT_SYNC === 'object') { NEXT_SYNC.busy = true; if (typeof syncStatusRender === 'function') syncStatusRender(); }
   try {
-    const r = await mergeIncoming(m.parsed, false);
+    const r = await mergeIncoming(m.parsed, false, backupMergeOpts());
+    // записанное из файла должно дойти до серверов: записи слияния ревизию не двигают — отметка «есть что отправить» каждому серверу
+    if ((r.added || r.updated || r.settingsChanged) && typeof srvFwdMark === 'function') srvFwdMark(-1);
     if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
     BACKUP_PENDING = null;
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('backup:refresh', e); }
@@ -4996,9 +5225,9 @@ function crmCollectorNetHint(e) {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return 'нет интернета';
   if (/failed to fetch|networkerror|load failed|network request failed/i.test(m)) {
     const at = typeof monPullLastAt === 'function' ? monPullLastAt() : 0, fresh = at && Date.now() - at < 3 * 3600000;
-    const head = 'функция коллектора не ответила так, чтобы программа могла прочитать ответ. Возможные причины: функция упала или не успела запуститься; адрес неверный или функция не публичная; нет связи с Облаком (VPN, сеть).';
+    const head = 'функция коллектора не ответила так, чтобы программа могла прочитать ответ. Возможные причины: функция упала или не успела запуститься; адрес неверный или функция не публичная; нет связи с Облаком (VPN, сеть); сбой самого Яндекс Облака — состояние на status.yandex.cloud.';
     const check = ' Проверка без секрета: адрес функции collector-sud, открытый в браузере, у живой функции показывает {"ok":false,"error":"forbidden"}; журнал — Яндекс Облако → collector-sud → «Логи».';
-    return head + (fresh ? ' Личный сервер в том же Облаке отвечал в ' + new Date(at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) + ' — связь с Облаком есть.' : '') + check;
+    return head + (fresh ? ' Личный сервер в том же Облаке отвечал в ' + new Date(at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) + ' — связь с Облаком есть (но при сбое Облака чтение может проходить, а запись — нет).' : '') + check;
   }
   return m || 'сбой сети';
 }
@@ -6596,7 +6825,7 @@ window.UI_MANIFEST = {
   phoneWidths: [360, 390, 412], desktopWidth: 1280, phoneTheme: 'dark', desktopTheme: 'light',
   sidebarAlign: 'top', minTouch: 44, seedFile: 'ui_seed_next.js', readyExpr: 'window.NEXT_READY', lsPrefix: NEXT_NS.ls,
   variants: [{ name: 'monitoring-all', screen: 'monitoring', js: "monSet('f','all')" }, { name: 'monitoring-linksbad', screen: 'monitoring', js: "localStorage.setItem('crm_collector_url','https://functions.yandexcloud.net/d4e-ui-col');localStorage.setItem('crm_collector_secret','ui');nav('monitoring')" }, { name: 'finance-expenses', screen: 'finance', js: "finSet('tab','expenses')" }, { name: 'finance-payments', screen: 'finance', js: "finSet('tab','payments');finSet('period','custom')" }, { name: 'finance-all', screen: 'finance', js: "finSet('tab','bills');finSet('f','all')" }, { name: 'leads-all', screen: 'leads', js: "leadsSet('f','all')" }, { name: 'clients-legal', screen: 'clients', js: "clientsSet('f','legal')" }, { name: 'tasks-deadlines', screen: 'tasks', js: "tasksSet('tab','deadlines');tasksSet('range','all')" }, { name: 'tasks-done', screen: 'tasks', js: "tasksSet('tab','all');tasksSet('range','done')" }, { name: 'mail-all', screen: 'correspondence', js: "mailSet('chip','all')" }, { name: 'cases-table', screen: 'cases', js: "casesSet('view','table')" }, { name: 'cases-board', screen: 'cases', js: "casesSet('view','board')" }, { name: 'cases-archive', screen: 'cases', js: "casesSet('view','list');casesSet('status','archive')" },
-    { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'sync-error', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за минуту' }; syncStatusRender()" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }],
+    { name: 'calendar-week', screen: 'calendar', js: "calSet('view','week')" }, { name: 'calendar-list', screen: 'calendar', js: "calSet('view','list')" }, { name: 'calendar-month', screen: 'calendar', js: "calSet('view','month')" }, { name: 'update-bar', screen: 'today', js: "nextUpdateOffer(null)" }, { name: 'sync-error', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за минуту' }; syncStatusRender()" }, { name: 'draft-bar', screen: 'today', js: "localStorage.setItem('crm_next_draft', JSON.stringify({title:'Новое дело', body:'<p>черновик</p>', at: Date.now()})); nav('today')" }, { name: 'sync-two', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRV2.url = 'https://functions.yandexcloud.net/y2'; SRV2.secret = 'k2'; localStorage.setItem('crm_next_srv_checked_s2', SRV2.url); SRVDB2.lastPush = Date.now(); localStorage.setItem('crm_next_push_at_s2', '1'); localStorage.setItem('crm_next_pull_rev_s2', syncRevision()); SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за 20 секунд' }; syncStatusRender()" }, { name: 'sync-two-sheet', screen: 'today', js: "SRV.url = 'https://functions.yandexcloud.net/x'; SRV.secret = 'k'; CLOUD.pass = 'p'; SRV2.url = 'https://functions.yandexcloud.net/y2'; SRV2.secret = 'k2'; localStorage.setItem('crm_next_srv_checked_s2', SRV2.url); SRVDB2.lastPush = Date.now(); localStorage.setItem('crm_next_push_at_s2', '1'); localStorage.setItem('crm_next_pull_rev_s2', syncRevision()); SRVDB.lastErr = { at: Date.now(), msg: 'сервер не ответил за 20 секунд' }; syncStatusRender(); openSyncSheet()" }],
 };
 
 const UI = { screen: 'today', ready: false, stack: [], hist: false };
@@ -7141,6 +7370,7 @@ async function openSyncSheet(sub, msg) {
     <p class="small muted">${localStorage.getItem('crm_next_push_at') ? 'Как в прежней программе. Перед каждой отправкой свежая база с сервера вливается в базу устройства, спорные записи объединяются по полям. При сбое причина появится в строке состояния, повтор — через минуту и реже.' : 'Станет доступно после первой удачной отправки по кнопке на шаге 4.'}</p>
     ${localStorage.getItem('crm_next_push_at') ? `<div class="list-rows"><div><span>Последняя отправка</span><span class="muted">${esc(new Date(Number(localStorage.getItem('crm_next_push_at'))).toLocaleString('ru-RU'))}</span></div></div>` : ''}
     ${nextLocalChanges() ? `<div class="info-box">На этом устройстве есть правки, которых нет на сервере. Они уйдут на сервер по кнопке «Отправить изменения на сервер».</div>` : ''}
+    ${typeof syncSrv2Html === 'function' ? syncSrv2Html() : ''}
     ${nConf ? `<div class="form-actions">${btn('Журнал коллизий · ' + nConf, 'showConflictsSheet()', '', 'info')}</div>` : ''}
     <div class="section-label">${NEXT_ROOT ? 'Записей в базе' : 'Записей в базе новой версии'}</div><div class="list-rows">${rows}</div>
     ${typeof openBlobAuditSheet === 'function' && SRV.url ? `<div class="form-actions">${btn('Файлы документов', 'openBlobAuditSheet()', '', 'files')}</div>` : ''}
@@ -7163,6 +7393,8 @@ async function syncApplyConnection(next, moveRes) {
   if (url !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
   // Д6: другой сервер или пароль — изменения прежнего не применяются: следующее получение — снимком целиком
   if (url !== SRV.url || pass !== SRVDB.pass) SRVDB.ver = 0;
+  // пароль общий для обоих серверов: сменили — и у запасного следующее получение снимком целиком (sync/srv2.js)
+  if (pass !== SRVDB.pass && typeof SRVDB2 === 'object') SRVDB2.ver = 0;
   SRV.url = url; if (secret !== SRV.secret) SRV.secret = secret; if (pass !== SRVDB.pass) CLOUD.pass = pass;
   const r = await nextServerCheck();
   const strandedNote = typeof blobMoveReport === 'function' ? blobMoveReport(moveRes, stranded) : '';
@@ -11666,6 +11898,7 @@ const HELP_SECTIONS = [
 <li>«Размер базы» — сколько занимает снимок и помещается ли в предел Облака; сжатие включается кнопкой там же.</li></ol>
 <p>Строка под шапкой говорит, что с данными: «На устройстве», «Ждёт отправки», «Синхронизировано», «Обмен не удался» (с кнопкой «Повторить»). Настройки → «О программе» → «Обмен с сервером» — последняя подтверждённая отправка и есть ли неотправленные правки.</p>
 <p>С сервера 186 устройство, которое уже получало базу, скачивает не весь снимок, а только изменения после своей версии — это быстрее и меньше расходует связь. Весь снимок скачивается, если цепочка изменений прервана (базу отправила прежняя программа), изменений больше половины снимка, устройство получает базу впервые или сменился сервер или пароль. Что было в последний раз и почему — Настройки → «О программе» → «Получение с сервера». Отправка по-прежнему передаёт снимок целиком: прежняя программа читает только его.</p>
+<p><b>Запасной сервер</b> (необязательно) — второй личный сервер с той же зашифрованной базой и тем же паролем шифрования: если один сервер недоступен, правки уходят на другой, и другие устройства получают их оттуда. «Синхронизация» → «Запасной сервер» → адрес и секретный код → «Сохранить и проверить связь» → «Обменяться с запасным сервером»; автообмен обменивается с обоими. Серверы между собой не обмениваются — их выравнивают ваши устройства, поэтому запасной сервер подключается на каждом устройстве. Строка под шапкой: «2 из 2» — оба сервера получили все правки, «1 из 2» — один (какой и почему — в подсказке и в листе «Синхронизация»), «Ошибка серверов» — правки пока только на устройстве. На запасной сервер уходит только база: события судов, напоминания в Telegram, онлайн-запись и отслеживание писем идут через основной, файлы документов на запасной сервер пока не передаются. Прежняя программа запасного сервера не знает.</p>
 <p><b>Второе устройство (телефон):</b> откройте программу, «Синхронизация» → те же адрес, код и пароль → «Сохранить и проверить связь» → «Загрузить базу с сервера». Смена секретного кода — отдельная инструкция у автора: код меняется на сервере, во всех устройствах и в коллекторе одновременно.</p>` },
   { id: 'monitor', title: 'Мониторинг судов', html: `
 <p>Функция-коллектор в вашем облаке по расписанию (07:30 и 15:30 по Москве) открывает карточки дел на сайтах судов общей юрисдикции (ГАС «Правосудие», суды Москвы), сравнивает с прошлым разом и передаёт события — назначенные заседания, движение дела, даты решений и мотивированных актов — на ваш сервер. Программа забирает их оттуда.</p>
