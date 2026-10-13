@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 01:42 · da9757f">
+<meta name="build" content="13.10.2026 08:30 · 1642753">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -6555,15 +6555,41 @@ function crmCaseApplyCard(c, card, sfx) { // v241: sfx '' — первая ин�
   set('courtNo' + sfx, card.number, 'номер дела в суде' + lbl, true); set('caseUid', card.uid, 'УИД', true); set('judge' + sfx, card.judge, 'судья' + lbl); set('court' + sfx, card.court, 'суд' + lbl);
   if (!sfx) { set('i1FilingDate', card.registered, 'дата поступления'); set('courtCategory', crmDecodeEntities(card.category), 'категория по классификатору суда'); }
   const client = crmMonNorm(c.client || '');
+  // 13.10.2026: доверитель среди сторон сайта узнаётся и в другом написании (partySame, screens/cases.js: фамилия и инициалы, «ООО» и полное название)
+  const isClient = n => crmMonNorm(n) === client || partySame(n, c.client);
+  // противная сторона дела до записи: поле формы или участник (caseOpponentOf) — «заполненное не меняется» касается и её
+  const curOpp = caseOpponentName(c);
   c.participants = Array.isArray(c.participants) ? c.participants : [];
   // Б9 (11.10.2026): участник, которого пользователь убрал из дела (надгробие), с сайта суда снова не добавляется
   const delP = (c._delItems && c._delItems.participants) || {};
   for (const p of (card.parties || [])) {
-    if (!p || !p.name || crmMonNorm(p.name) === client || delP[crmMonNorm(p.name)]) continue;
-    if (c.participants.some(x => crmMonNorm(x.name) === crmMonNorm(p.name))) continue;
+    if (!p || !p.name || isClient(p.name) || delP[crmMonNorm(p.name)]) continue;
+    if (c.participants.some(x => crmMonNorm(x.name) === crmMonNorm(p.name) || partySame(x.name, p.name))) continue;
     c.participants.push({ name: p.name, role: p.role || 'Иное лицо', inn: '', phone: '', email: '', note: 'с сайта суда' }); done.push('участник: ' + p.name + ' (' + (p.role || '') + ')');
   }
-  return { done, diff, ask };
+  // противная сторона и роль доверителя (жалоба 13.10.2026 «Отсутствует противная сторона»): пустые поля заполняются по сторонам сайта.
+  // Доверитель найден среди сторон — его роль, противная сторона — сторона противоположной роли (CASE_OPP_ROLES); не найден — по роли
+  // доверителя из дела; ни того, ни другого — не угадывается: oppUnknown — стороны сайта для подсказки в листе. Заполненное не меняется.
+  const ps = (card.parties || []).filter(p => p && p.name), me = ps.find(p => isClient(p.name)), myRole = (me && me.role) || c.clientRole || '';
+  if (me && me.role && !c.clientRole) { c.clientRole = me.role; done.push('роль доверителя: ' + me.role); }
+  const cand = ps.filter(p => !isClient(p.name) && (CASE_OPP_ROLES[myRole] || []).includes(p.role));
+  let oppUnknown = null;
+  if (!curOpp && cand.length) {
+    const had = c.participants.find(x => partySame(x.name, cand[0].name));
+    c.opponent = had ? had.name : cand[0].name; done.push('противная сторона: ' + c.opponent + (cand.length > 1 ? ' (ещё ' + (cand.length - 1) + ' — в участниках)' : ''));
+  } else if (curOpp && cand.length && !cand.some(p => partySame(p.name, curOpp))) diff.push('противная сторона — в деле «' + curOpp + '», на сайте «' + cand.map(p => p.name).join('; ') + '»');
+  else if (!curOpp && !cand.length && !CASE_OPP_ROLES[myRole]) { const sides = ps.filter(p => CASE_OPP_ROLES[p.role] && !isClient(p.name)); if (sides.length) oppUnknown = sides.map(p => ({ role: p.role, name: p.name, me: me ? me.role : '' })); }
+  return { done, diff, ask, oppUnknown };
+}
+// строка листа, когда противную сторону по сайту не определить (доверителя нет среди сторон или его роль — третье лицо, иное лицо; роль
+// доверителя в деле не указана); shown — кого карточка дела показывает противной стороной по ролям участников (caseOpponentName),
+// чтобы лист и карточка не расходились
+function crmOppUnknownText(client, sides, shown) {
+  const meRole = sides && sides[0] && sides[0].me;
+  return 'Противная сторона по сайту не определена: ' + (meRole ? 'доверитель «' + (client || '—') + '» на сайте — ' + String(meRole).toLowerCase() + ', стороны спора: '
+    : 'доверителя «' + (client || '—') + '» нет среди сторон (') + (sides || []).map(s => String(s.role || '').toLowerCase() + ' — ' + s.name).join('; ') + (meRole ? '.' : ').') +
+    (shown ? ' Карточка дела сейчас показывает противной стороной «' + shown + '» — по роли участника.' : '') +
+    ' Если доверитель записан в деле иначе, исправьте его ФИО или укажите роль доверителя; противную сторону можно выбрать и самому: «Изменить» → «Противная сторона».';
 }
 function crmFlowActOffers(cases, events) {
   const out = [];
@@ -7071,6 +7097,8 @@ async function kadCardApply(caseId, summary, link) {
   const after = await getOne('cases', caseId), evAfter = (await getAllRaw('monitorEvents')).filter(x => !x._deleted);
   const FIELDS = [['courtNo', 'номер дела в суде'], ['courtNoApp', 'номер дела в суде (апелляция)'], ['courtNoCass', 'номер дела в суде (кассация)'], ['judge', 'судья'], ['judgeApp', 'судья (апелляция)'], ['judgeCass', 'судья (кассация)'],
     ['court', 'суд'], ['courtApp', 'суд (апелляция)'], ['courtCass', 'суд (кассация)'], ['i1FilingDate', 'дата поступления'], ['courtCategory', 'категория'],
+    // 13.10.2026 (жалоба «Отсутствует противная сторона»): противная сторона и роль доверителя по сторонам карточки (crmCaseApplyCard)
+    ['opponent', 'противная сторона'], ['clientRole', 'роль доверителя'],
     // Д3: даты актов из календаря (sync/monitor.js, FLOW_ACT_FIELD)
     ['i1AcceptedDate', 'принят к производству'], ['i1NoMotionDate', 'оставлен без движения'], ['i1DecisionDate', 'дата решения'], ['i1DecisionFullDate', 'мотивированное решение'], ['apDecisionDate', 'апелляционный акт'], ['csDecisionDate', 'кассационный акт']];
   const done = [], diff = [];
@@ -7087,7 +7115,10 @@ async function kadCardApply(caseId, summary, link) {
   const calendar = calRows.length ? { flow: flow.length, flowNew: flow.filter(r => !evBefore.has(r.externalId)).length, hearings: calH.length, hearingsNew: calH.filter(r => !evBefore.has(r.externalId)).length,
     hearingsApplied: appliedOf(calH), ics: icsH.length, icsNew: icsH.filter(r => !evBefore.has(r.externalId)).length, icsApplied: appliedOf(icsH),
     acts: flow.filter(r => { try { const a = JSON.parse(r.raw).act; return !!a && a !== 'none'; } catch (x) { return false; } }).length } : null;
-  return { done, diff, hearing, sideNames: parsed.sideNames, stage: parsed.stage, calendar };
+  // противная сторона по сайту не определена — по делу ДО записи (после записи участники уже есть, и правило ролей что-то покажет)
+  const pre = crmCaseApplyCard(JSON.parse(JSON.stringify(before)), parsed.card, sfx);
+  const oppUnknown = pre.oppUnknown ? crmOppUnknownText(before.client, pre.oppUnknown, caseOpponentName(after || before)) : '';
+  return { done, diff, hearing, sideNames: parsed.sideNames, stage: parsed.stage, calendar, oppUnknown };
 }
 // признаки среды окна КАД (приложение 1.9): только логические значения и числа, имена cookie — строки
 function envOf(e) {
@@ -7393,6 +7424,7 @@ function kadAppliedLines(a) {
   const out = [];
   if (a.done.length) out.push({ kind: 'done', text: 'В дело записано: ' + a.done.join('; ') + '.' });
   if (a.diff.length) out.push({ kind: 'diff', text: 'Расхождения с делом (в деле оставлено как было): ' + a.diff.join('; ') + '.' });
+  if (a.oppUnknown) out.push({ kind: 'diff', text: a.oppUnknown });
   if (a.hearing) out.push({ kind: a.hearing.isNew ? 'done' : 'info', text: 'Ближайшее заседание по карточке: ' + fmtDate(a.hearing.date) + (a.hearing.time ? ' в ' + a.hearing.time : '') + (a.hearing.room ? ', зал ' + a.hearing.room : '') +
     (a.hearing.isNew ? ' — добавлено в события судов' + (a.hearing.status === 'applied' ? ' и записано в заседания дела' : a.hearing.bound ? '; запись заседания — автоприменением (Мониторинг судов)' : '; к делу не привязано — проверьте номер дела в суде') : ' — такое событие уже было') + '.' });
   // приложение 1.19: документы и заседания с вкладки «Календарь»
@@ -7402,7 +7434,7 @@ function kadAppliedLines(a) {
     (a.calendar.hearings ? '; заседаний без времени ' + a.calendar.hearings + ' (новых: ' + a.calendar.hearingsNew + ', сведено с заседаниями дела: ' + a.calendar.hearingsApplied + ')' : '') +
     (a.calendar.acts ? '. Актов с распознанным видом: ' + a.calendar.acts + ' — их даты записываются в пустые поля дела, заполненные поля не меняются (предложение — в «Суды и мониторинг»)' : '. Актов с распознанным видом (принятие к производству, без движения, решение, апелляция, кассация) в календаре нет') + '.' });
   if (a.sideNames && a.sideNames.length) out.push({ kind: 'info', text: 'Стороны по карточке: ' + a.sideNames.join(' · ') + '. Роли сторон в ответе приложения нет, поэтому участники в дело не записаны — нужно приложение 1.15 или новее (Настройки → Проверить обновления).' });
-  if (!a.done.length && !a.diff.length && !a.hearing && !a.calendar && !(a.sideNames && a.sideNames.length)) out.push({ kind: 'info', text: 'Новых данных для дела в карточке нет.' });
+  if (!a.done.length && !a.diff.length && !a.oppUnknown && !a.hearing && !a.calendar && !(a.sideNames && a.sideNames.length)) out.push({ kind: 'info', text: 'Новых данных для дела в карточке нет.' });
   return out;
 }
 function openKadProtoSheet(caseId, res, applied) {
@@ -8877,7 +8909,7 @@ async function openSearchSheet(q) {
   q = String(q || '').trim(); if (!q) { toast('Введите, что искать'); return; }
   const n = s => String(s || '').toLowerCase().replace(/ё/g, 'е'), qq = n(q);
   let cases = [], clients = [];
-  try { cases = (await getAll('cases')).filter(c => [c.number, c.client, c.courtNo, c.court, c.subject, c.opponent].some(v => n(v).includes(qq))); clients = (await getAll('clients')).filter(c => [c.name, c.phone, c.inn].some(v => n(v).includes(qq))); }
+  try { cases = (await getAll('cases')).filter(c => [c.number, c.client, c.courtNo, c.court, c.subject, caseOpponentName(c)].some(v => n(v).includes(qq))); clients = (await getAll('clients')).filter(c => [c.name, c.phone, c.inn].some(v => n(v).includes(qq))); }
   catch (e) { logErr('search', e); }
   // строки — кнопки: дело и доверитель открываются (замечание пользователя 30.09.2026)
   const row = (a, b, fn) => `<button type="button" class="search-result list-btn" onclick="${fn}"><span class="task-title">${esc(a)}</span><span class="task-sub">${esc(b)}</span></button>`;
@@ -8990,7 +9022,9 @@ function formModelCase(v, prev, ctx) {
   if (!obj.initialStatus) obj.initialStatus = (prev && (prev.initialStatus || prev.status)) || obj.status;
   // противная сторона — участник с ролью «Ответчик», как в v310
   obj.participants = Array.isArray(prev && prev.participants) ? prev.participants.map(p => ({ ...p })) : [];
-  const oppIdx = obj.participants.findIndex(p => p && !String(p.role || '').startsWith('Доверитель') && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
+  // 13.10.2026: какой участник — противная сторона, решает caseOpponentOf (screens/cases.js) — то же правило, что у карточки дела
+  const oppP0 = caseOpponentOf({ client: obj.client, clientRole: obj.clientRole, opponent: prev && prev.opponent, participants: obj.participants });
+  const oppIdx = oppP0 ? obj.participants.indexOf(oppP0) : -1;
   const opp = String(v.opponent || '').trim();
   // реквизиты противной стороны (ИНН, адрес, ОГРН, КПП — как участник v312): пустое поле формы прежнее значение не стирает
   const oppReq = {}; [['oppInn', 'inn'], ['oppAddr', 'addr'], ['oppOgrn', 'ogrn'], ['oppKpp', 'kpp']].forEach(([f, k]) => { const val = String(v[f] || '').trim(); if (val) oppReq[k] = k === 'inn' ? val.replace(/\D/g, '') : val; });
@@ -9123,7 +9157,7 @@ async function openCaseForm(id, full) {
   // автонумерация (03.10.2026): новому делу — следующий свободный номер дела и номер соглашения; оба можно править
   if (!prev && typeof nextCaseNo === 'function') { const all = await getAll('cases'); c.number = nextCaseNo(all, await orphanCaseNums(all)); c.agreementNo = nextAgreementNo(all); c.agreementDate = c.agreementDate || todayISO(); }
   if (full === undefined) full = id ? localStorage.getItem(CASE_FORM_BRIEF_KEY) === '0' : false;
-  const opp = (c.participants || []).find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
+  const opp = caseOpponentOf(c);
   const cl = clients.find(x => x && (x.id === c.clientId || x.name === c.client)) || {};
   // подсказки для противной стороны — участники всех дел и реестр; при выборе известного лица его реквизиты подставляются
   FORM_PARTIES = {}; for (const x of (await getAll('cases'))) for (const p of (x.participants || [])) if (p && p.name && !FORM_PARTIES[p.name]) FORM_PARTIES[p.name] = { inn: p.inn || '', addr: p.addr || '', ogrn: p.ogrn || '', kpp: p.kpp || '' };
@@ -10666,6 +10700,40 @@ const CASE_STAGES_NEXT = ['Досудебная', 'Первая инстанци
 const CASE_FILTERS = [['active', 'В работе'], ['new', 'Новые'], ['waiting', 'Ожидание'], ['done', 'Завершённые'], ['all', 'Все'], ['archive', 'Архив']];
 
 function casesNorm(s) { return String(s || '').toLowerCase().replace(/ё/g, 'е').trim(); }
+// ── противная сторона (жалоба 13.10.2026 «Отсутствует противная сторона») ──
+// В данных противная сторона — участник дела: так хранит прежняя программа, так пишут карточка суда и обращение; поле opponent ставит
+// форма новой версии и запись карточки суда. Карточка, поиск, печать, сводка и форма берут её одной функцией: участник с именем из
+// opponent → участник роли, противоположной роли доверителя → «Ответчик», «Истец», «Противная сторона». Доверитель (и в другом
+// написании — фамилия и инициалы, «ООО» и полное название) противной стороной не бывает.
+const CASE_OPP_ROLES = { 'Истец': ['Ответчик'], 'Ответчик': ['Истец'], 'Заявитель': ['Должник', 'Заинтересованное лицо', 'Ответчик'], 'Взыскатель': ['Должник'], 'Кредитор': ['Должник'],
+  'Должник': ['Взыскатель', 'Кредитор', 'Заявитель', 'Истец'], 'Административный истец': ['Административный ответчик'], 'Административный ответчик': ['Административный истец'],
+  'Гражданский истец': ['Гражданский ответчик'], 'Гражданский ответчик': ['Гражданский истец'] };
+const CASE_OPP_DEFAULT = ['Ответчик', 'Истец', 'Противная сторона'];
+const PARTY_FORMS = [['общество с ограниченной ответственностью', 'ооо'], ['непубличное акционерное общество', 'ао'], ['публичное акционерное общество', 'пао'],
+  ['закрытое акционерное общество', 'зао'], ['открытое акционерное общество', 'оао'], ['акционерное общество', 'ао'], ['индивидуальный предприниматель', 'ип']];
+function partyNameKey(s) {
+  let t = String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[«»"'„“”`]/g, ' ').replace(/\s+/g, ' ');
+  for (const [a, b] of PARTY_FORMS) t = t.split(a).join(b);
+  return t.replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+// одно лицо: одинаковое имя после приведения; человек — та же фамилия, у имени и отчества совпадают первые буквы (полностью — если оба полные)
+function partySame(a, b) {
+  const x = partyNameKey(a), y = partyNameKey(b); if (!x || !y) return false; if (x === y) return true;
+  const wx = x.split(' '), wy = y.split(' ');
+  if (wx.length < 2 || wy.length < 2 || wx.length > 3 || wy.length > 3 || wx[0] !== wy[0]) return false;
+  if (PARTY_FORMS.some(f => f[1] === wx[0]) || ![...wx, ...wy].every(w => /^[а-яa-z-]+$/.test(w))) return false;
+  for (let i = 1; i < Math.min(wx.length, wy.length); i++) if (wx[i][0] !== wy[i][0] || (wx[i].length > 1 && wy[i].length > 1 && wx[i] !== wy[i])) return false;
+  return true;
+}
+function caseOpponentOf(c) {
+  if (!c) return null;
+  const ps = (Array.isArray(c.participants) ? c.participants : []).filter(p => p && p.name && !String(p.role || '').startsWith('Доверитель') && !partySame(p.name, c.client));
+  if (c.opponent) return ps.find(p => partySame(p.name, c.opponent)) || { name: c.opponent, role: '' };
+  for (const r of [...new Set([...(CASE_OPP_ROLES[c.clientRole] || []), ...CASE_OPP_DEFAULT])]) { const p = ps.find(x => x.role === r); if (p) return p; }
+  return null;
+}
+function caseOpponentName(c) { const p = caseOpponentOf(c); return p ? String(p.name) : ''; }
+// ── конец: противная сторона ──
 // Фильтр, поиск и порядок. Порядок: сначала просроченное действие, потом по дате действия, потом без даты — по номеру.
 function casesModel(cases, opts, now) {
   const today = localISO(now), q = casesNorm(opts.q), f = opts.status || 'active';
@@ -10679,7 +10747,7 @@ function casesModel(cases, opts, now) {
     if (f === 'waiting') return c.status === 'Ожидание';
     return c.status !== 'Завершено'; // active: всё, что не завершено (включая новые и ожидание)
   };
-  const hit = c => !q || [c.number, c.client, c.subject, c.court, c.courtNo, c.opponent, c.judge, c.category].some(v => casesNorm(v).includes(q));
+  const hit = c => !q || [c.number, c.client, c.subject, c.court, c.courtNo, caseOpponentName(c), c.judge, c.category].some(v => casesNorm(v).includes(q));
   const due = c => c.nextActionDue || '';
   const rows = cases.filter(c => pass(c) && hit(c)).map(c => {
     const k = due(c) ? todayDayDiff(due(c), today) : null;
@@ -10824,7 +10892,8 @@ async function openCaseSheet(id, keep) {
   const cl = (await getAll('clients')).find(x => x && (c.clientId ? x.id === c.clientId : clientKey(x.name) === clientKey(c.client))) || null;
   const row = (k, v) => v ? `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>` : '';
   const jm = caseJudgeModel(c, d.hearings), hasLink = !!(c.link || c.linkApp || c.linkCass);
-  const oppP = m.participants.find(p => p && (p.role === 'Ответчик' || p.role === 'Истец' || p.role === 'Противная сторона'));
+  // противная сторона — участник по правилу caseOpponentOf (13.10.2026: раньше имя бралось только из поля opponent формы новой версии)
+  const oppP = caseOpponentOf(c);
   const sec = (title, html, count) => html ? `<div class="section-label">${esc(title)}${count !== undefined ? ' · ' + count : ''}</div>${html}` : '';
   // снимок пользователя 04.10.2026: плашки стадий нажимаются — выбор стадии прямо в карточке (data/stageauto.js, caseStageSet)
   const steps = `<ol class="stage-track" aria-label="Стадия — нажмите, чтобы сменить">${CASE_STAGES_NEXT.map((s, i) => `<li class="${i < m.stageIdx ? 'past' : i === m.stageIdx ? 'cur' : ''}"><button type="button" class="stage-btn" aria-pressed="${i === m.stageIdx}" onclick="caseStageSet('${jsq(c.id)}', '${jsq(s)}')">${esc(s)}</button></li>`).join('')}</ol>`;
@@ -10852,7 +10921,7 @@ async function openCaseSheet(id, keep) {
     <div id="case-feed">${caseFeedHtml(feedM, caseFeedFilter(), false)}</div>
     ${cardGroup('cm-details', 'Суд, стороны, инстанции', [
       `${cl ? sec('Доверитель', `<div class="list-rows"><button type="button" class="list-btn" onclick="openClientSheet('${jsq(cl.id)}')"><span class="muted">Доверитель</span><span>${esc(cl.name)}</span></button>${row('Телефон', cl.phone)}${contactRow(cl.phone)}${row('Email', cl.email)}</div>`) : ''}`,
-      `${sec('Суд и стороны', `<div class="list-rows">${row('Суд', c.court)}${row('№ в суде', c.courtNo)}${row('УИД', c.caseUid)}${row('Судья', jm.text)}${row('Помощник судьи', [c.secretary, c.secretaryPhone, c.cabinet ? 'каб. ' + c.cabinet : ''].filter(Boolean).join(' · '))}${row('Противная сторона', [c.opponent, oppP && oppP.inn ? 'ИНН ' + oppP.inn : '', oppP && oppP.ogrn ? 'ОГРН ' + oppP.ogrn : ''].filter(Boolean).join(' · '))}${row('Адрес противной стороны', oppP && oppP.addr)}${row('Роль доверителя', c.clientRole || c.role)}${row('Сумма', c.amount ? fmtMoney(c.amount) : '')}${row('Соглашение', [c.agreementNo, c.agreementDate ? fmtDate(c.agreementDate) : ''].filter(Boolean).join(' от '))}</div>${hasLink ? `<div class="actions" style="margin-top:8px"><button type="button" class="button small-btn" id="case-card-fetch-old" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button></div>` : ''}${!jm.judge && c.court ? `<p class="small muted" style="margin-top:8px">Судья не указан. Впишите его в форме дела («Изменить») ${hasLink ? 'или нажмите «Данные с сайта суда»' : 'или добавьте в форме дела ссылку на дело на сайте суда — тогда программа прочитает судью, номер и УИД сама'}.</p>` : ''}`)}`,
+      `${sec('Суд и стороны', `<div class="list-rows">${row('Суд', c.court)}${row('№ в суде', c.courtNo)}${row('УИД', c.caseUid)}${row('Судья', jm.text)}${row('Помощник судьи', [c.secretary, c.secretaryPhone, c.cabinet ? 'каб. ' + c.cabinet : ''].filter(Boolean).join(' · '))}${row('Противная сторона', [oppP && oppP.name, oppP && oppP.inn ? 'ИНН ' + oppP.inn : '', oppP && oppP.ogrn ? 'ОГРН ' + oppP.ogrn : ''].filter(Boolean).join(' · '))}${row('Адрес противной стороны', oppP && oppP.addr)}${row('Роль доверителя', c.clientRole || c.role)}${row('Сумма', c.amount ? fmtMoney(c.amount) : '')}${row('Соглашение', [c.agreementNo, c.agreementDate ? fmtDate(c.agreementDate) : ''].filter(Boolean).join(' от '))}</div>${hasLink ? `<div class="actions" style="margin-top:8px"><button type="button" class="button small-btn" id="case-card-fetch-old" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button></div>` : ''}${!jm.judge && c.court ? `<p class="small muted" style="margin-top:8px">Судья не указан. Впишите его в форме дела («Изменить») ${hasLink ? 'или нажмите «Данные с сайта суда»' : 'или добавьте в форме дела ссылку на дело на сайте суда — тогда программа прочитает судью, номер и УИД сама'}.</p>` : ''}`)}`,
       `${c.kind === 'Уголовное' ? sec('Уголовное дело', `<div class="list-rows">${row('Кто ведёт расследование', c.crimAgencyKind)}${row('Орган', c.agency)}${row('Форма расследования', c.crimForm)}${row('Следователь / дознаватель', c.crimInvestigator)}${row('№ у органа', c.crimAgencyNum)}${row('Возбуждено', c.crimStartDate ? fmtDate(c.crimStartDate) : '')}${row('Статья УК', c.crimArticle)}${row('Стадия расследования', c.crimStage)}${row('Обвинение', c.crimChargeDate ? fmtDate(c.crimChargeDate) + (c.crimCharge ? ' · ' + c.crimCharge : '') : c.crimCharge)}${row('Мера пресечения', [c.crimMeasure, c.crimMeasureUntil ? 'до ' + fmtDate(c.crimMeasureUntil) : ''].filter(Boolean).join(' · '))}${row('В суде', [c.crimCourtStage, c.crimVerdictDate ? 'приговор ' + fmtDate(c.crimVerdictDate) : '', c.crimVerdict].filter(Boolean).join(' · '))}</div>`) : ''}`,
       `${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}`,
       `${(c.i1FilingDate || c.i1DecisionDate || c.i1Result || c.apFilingDate || c.apCourt || c.courtApp || c.csFilingDate || c.courtCass || c.judgeApp || c.judgeCass || c.fsspNo || c.ipStatus) ? sec('Инстанции', `<div class="list-rows">${row('Первая инстанция', [c.i1FilingDate ? 'подано ' + fmtDate(c.i1FilingDate) : '', c.i1DecisionDate ? 'решение ' + fmtDate(c.i1DecisionDate) : '', c.i1Result].filter(Boolean).join(' · '))}${row('Апелляция', [c.apCourt || c.courtApp, c.courtNoApp ? '№ ' + c.courtNoApp : '', c.judgeApp ? 'судья ' + c.judgeApp : '', c.apFilingDate ? 'жалоба ' + fmtDate(c.apFilingDate) : '', c.apDecisionDate ? 'определение ' + fmtDate(c.apDecisionDate) : '', c.apResult].filter(Boolean).join(' · '))}${row('Кассация', [c.courtCass, c.courtNoCass ? '№ ' + c.courtNoCass : '', c.judgeCass ? 'судья ' + c.judgeCass : '', c.csFilingDate ? 'жалоба ' + fmtDate(c.csFilingDate) : '', c.csDecisionDate ? 'определение ' + fmtDate(c.csDecisionDate) : '', c.csResult].filter(Boolean).join(' · '))}${row('Исполнение', [c.fsspNo ? 'ИП № ' + c.fsspNo : '', c.ipOsp, c.ipStatus].filter(Boolean).join(' · '))}</div>`) : ''}`,
@@ -12887,7 +12956,7 @@ function registerHtml(kind, d, today) {
   if (kind === 'cases') {
     title = 'Реестр дел'; const list = live(d.cases).filter(c => !c.archived).sort((a, b) => String(a.number || '').localeCompare(String(b.number || ''), 'ru', { numeric: true }));
     head = '<tr><th>№</th><th>Номер</th><th>Доверитель</th><th>Противная сторона</th><th>Суд / орган</th><th>Вид</th><th>Стадия</th><th>Статус</th></tr>';
-    rows = list.map((c, i) => `<tr><td>${i + 1}</td><td><b>${prEsc(c.number)}</b>${c.courtNo ? '<br><small>' + prEsc(c.courtNo) + '</small>' : ''}</td><td>${prEsc(c.client)}</td><td>${prEsc(c.opponent || '')}</td><td>${prEsc(c.court || c.agency || '')}</td><td>${prEsc(c.kind || '')}</td><td>${prEsc(c.stage || '')}</td><td>${prEsc(c.status || '')}</td></tr>`).join('');
+    rows = list.map((c, i) => `<tr><td>${i + 1}</td><td><b>${prEsc(c.number)}</b>${c.courtNo ? '<br><small>' + prEsc(c.courtNo) + '</small>' : ''}</td><td>${prEsc(c.client)}</td><td>${prEsc(caseOpponentName(c))}</td><td>${prEsc(c.court || c.agency || '')}</td><td>${prEsc(c.kind || '')}</td><td>${prEsc(c.stage || '')}</td><td>${prEsc(c.status || '')}</td></tr>`).join('');
     n = list.length; if (!n) rows = '<tr><td colspan="8">Дел нет</td></tr>';
   } else if (kind === 'hearings') {
     title = 'Реестр заседаний'; const list = live(d.hearings).filter(h => h.date && h.date >= today && h.status !== 'Проведено' && h.status !== 'Отменено' && h.status !== 'Дата прошла').sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')));
@@ -12951,7 +13020,8 @@ const CSV_TITLES = { cases: 'Дела', clients: 'Доверители и уча
 function csvCell(v) { if (v === null || v === undefined) v = ''; if (typeof v === 'boolean') v = v ? 'да' : 'нет'; v = String(v); if (/[";\n\r]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"'; return v; }
 function csvText(store, rows) {
   const cols = CSV_COLS[store]; const head = cols.map(c => csvCell(c[1])).join(';');
-  const body = (rows || []).filter(r => r && !r._deleted).map(r => cols.map(c => csvCell(typeof r[c[0]] === 'number' && c[0] === 'createdAt' ? localISO(new Date(r[c[0]])) : r[c[0]])).join(';')).join('\r\n');
+  // противная сторона дела — по правилу caseOpponentOf (screens/cases.js), а не только поле opponent (13.10.2026)
+  const body = (rows || []).filter(r => r && !r._deleted).map(r => cols.map(c => csvCell(store === 'cases' && c[0] === 'opponent' ? caseOpponentName(r) : typeof r[c[0]] === 'number' && c[0] === 'createdAt' ? localISO(new Date(r[c[0]])) : r[c[0]])).join(';')).join('\r\n');
   return '﻿' + head + '\r\n' + body;
 }
 async function exportCSV(store) {
@@ -13117,7 +13187,7 @@ function caseSummaryHtml(c, d, mode, today) {
     <p class="sub" style="text-align:center">${full ? 'служебный документ' : 'для доверителя'} · сформирован ${prEsc(fmtDate(today))} · CRM Адвоката</p>
     <h2>Сведения о деле</h2><table>${row('Вид дела', c.kind)}${row(catLabel, c.category)}${row('Предмет', c.subject)}${row('Суд', c.court)}${row('Судья', full ? c.judge : '')}
     ${row('Правоохранительный орган', c.agency)}${row('№ в суде / у органа', c.courtNo)}${row('УИД', c.caseUid)}${row('Доверитель', c.client)}${full && cl ? row('Телефон доверителя', cl.phone) : ''}
-    ${row('Противная сторона', c.opponent)}${row('Стадия', c.stage)}${row('Статус', c.status)}${row('Дата принятия', date(c.regdate))}
+    ${row('Противная сторона', caseOpponentName(c))}${row('Стадия', c.stage)}${row('Статус', c.status)}${row('Дата принятия', date(c.regdate))}
     ${full ? row('Соглашение', c.agreementNo ? c.agreementNo + (c.agreementDate ? ' от ' + date(c.agreementDate) : '') : '') : ''}</table>`;
   // движение дела — как в прежней программе
   const mov = [];
@@ -13675,7 +13745,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <h3>Карточки всех дел разом</h3>
 <p>«Суды и мониторинг» → «Карточки всех дел»: программа по очереди читает карточку каждого дела в работе со ссылкой на сайт суда — суды общей юрисдикции через коллектор, КАД в приложении для Android или для компьютера — и пишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». В листе — итог по каждому делу; «Остановить» прерывает обход после текущего дела.</p>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
-<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) и в приложении для компьютера (1.3 и новее) карточку можно прочитать: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения для Android 1.15 (в приложении для компьютера — с 1.3, всё перечисленное ниже — тоже). С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) и в приложении для компьютера (1.3 и новее) карточку можно прочитать: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения для Android 1.15 (в приложении для компьютера — с 1.3, всё перечисленное ниже — тоже). Доверителя программа узнаёт среди сторон и в другом написании (фамилия с инициалами, «ООО» вместо полного названия) и записывает в пустые поля его роль и противную сторону — сторону противоположной роли; если доверителя среди сторон нет и роль доверителя в деле не указана, противная сторона не угадывается — лист говорит, как её указать. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
 <p>Автопроверка карточек КАД (приложение для Android 1.22 и новее или для компьютера 1.3 и новее): пока программа открыта, карточки дел в работе со ссылкой на КАД перечитываются сами раз в 6 часов — незаметно, по одной, и записываются в дело так же, как по кнопке «Карточка КАД». Выключатель и время последней проверки — Настройки → «Мониторинг судов». Если сайт попросит проверку браузера, автопроверка ждёт 6 часов: откройте «Карточка КАД» в любом деле и пройдите проверку — автопроверка продолжится.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
@@ -14046,16 +14116,17 @@ let CASE_CARD_ASK = null;
 function caseCardResultModel(r) {
   r = r || {}; const done = r.done || [], diff = r.diff || [], errs = r.errs || [], ask = r.ask || [], kad = r.kad || [], lines = [];
   if (done.length) lines.push({ kind: 'done', text: 'Записано в дело: ' + done.join('; ') + '.' });
-  else if (!errs.length && !ask.length && !diff.length && !r.cfgErr && !kad.length) lines.push({ kind: 'info', text: 'Новых данных нет: пустых полей, которые можно заполнить с сайта суда, в деле не осталось.' });
+  else if (!errs.length && !ask.length && !diff.length && !r.cfgErr && !kad.length && !r.opp) lines.push({ kind: 'info', text: 'Новых данных нет: пустых полей, которые можно заполнить с сайта суда, в деле не осталось.' });
   if (r.evCount) lines.push({ kind: 'info', text: 'Событий суда получено: ' + r.evCount + ' — они в разделе «Мониторинг».' });
   diff.forEach(t => lines.push({ kind: 'diff', text: 'Расхождение: ' + t + '. В деле оставлено прежнее значение — исправьте в форме дела, если верны данные сайта.' }));
+  if (r.opp) lines.push({ kind: 'diff', text: r.opp });
   if (r.cfgErr) lines.push({ kind: 'err', text: 'Карточку не прочитать: ' + String(r.cfgErr).replace(/[.\s]+$/, '') + '.' });
   errs.forEach(t => lines.push({ kind: 'err', text: 'Не прочитано — ' + t + '.' }));
   // ссылка на КАД: не ошибка коллектора, а другой путь — своя строка, общие советы к ней не относятся (урок 99)
   kad.forEach(st => lines.push({ kind: 'diff', text: typeof kadCardLine === 'function' ? kadCardLine(st) : st + ': ссылка ведёт на КАД Арбитр — коллектор в облаке этот сайт не читает.' }));
   if (errs.length && !r.cfgErr) lines.push({ kind: 'hint', text: 'Что проверить: ссылка в форме дела открывает страницу именно этого дела на сайте суда; коллектор настроен (Настройки → «Мониторинг судов» → «Проверить»). Сайты судов часто отвечают медленно — повторите позже.' });
   const toastText = done.length ? 'С сайта суда: ' + done.join('; ') : r.cfgErr ? 'Коллектор настроен неверно — причина в листе' : (kad.length && !errs.length) ? 'Ссылка ведёт на КАД Арбитр — коллектор его не читает, причина в листе' : errs.length ? 'Карточку дела прочитать не удалось' : 'Новых данных на сайте суда нет';
-  return { lines, ask, plain: !diff.length && !errs.length && !ask.length && !r.cfgErr && !kad.length, toast: toastText, bad: (!!errs.length || !!r.cfgErr || !!kad.length) && !done.length };
+  return { lines, ask, plain: !diff.length && !errs.length && !ask.length && !r.cfgErr && !kad.length && !r.opp, toast: toastText, bad: (!!errs.length || !!r.cfgErr || !!kad.length) && !done.length };
 }
 function openCaseCardResult(caseId, res) {
   const m = caseCardResultModel(res); CASE_CARD_ASK = { caseId, items: m.ask };
@@ -14106,13 +14177,15 @@ async function caseFetchCard(caseId, opts) {
   if (!cfg.url || !cfg.secret) { if (!opts.silent) toast('Карточку дела читает коллектор судов. Укажите его адрес и секрет: Настройки → «Мониторинг судов»', true); return null; }
   const fb = document.getElementById('case-card-fetch'); if (fb && !opts.silent) fb.disabled = true;
   if (!opts.silent) toast('Читаю карточку дела на сайте суда — это может занять до минуты…');
-  const before = JSON.parse(JSON.stringify(c)), done = [], diff = [], errs = [], ask = []; let evCount = 0, cfgErr = '';
+  const before = JSON.parse(JSON.stringify(c)), done = [], diff = [], errs = [], ask = []; let evCount = 0, cfgErr = '', oppU = null;
   for (const [f, stage, sfx, noField] of stages) {
     const r = await crmCollectorCall({ action: 'collectone', url: c[f], courtNo: c[noField] || '', number: c.number, stage }, 45000);
     const why = crmCollectorWhy(r);
     if (why) { if (why.cfg) { cfgErr = why.text; break; } errs.push(stage + ': ' + why.text); continue; }
     const res = crmCaseApplyCard(c, r.j.card || {}, sfx), sameCourt = courtNameSame(c['court' + sfx], (r.j.card || {}).court);
     done.push(...res.done); diff.push(...res.diff.filter(t => !(sameCourt && (t.startsWith('суд —') || t.startsWith('суд ('))))); ask.push(...(res.ask || []));
+    // 13.10.2026: противная сторона по сайту не определена — строка в листе (crmOppUnknownText)
+    if (!oppU && res.oppUnknown) oppU = res.oppUnknown;
     if (Array.isArray(r.j.events) && r.j.events.length) { const rows = await crmMonNormalizeRows(r.j.events, 'Коллектор судов'); await crmMonPersist(rows, { quiet: true }); evCount += r.j.events.length; }
   }
   if (done.length) {
@@ -14129,7 +14202,8 @@ async function caseFetchCard(caseId, opts) {
     await crmCaseLogByNum(c.number, 'flow', 'С сайта суда: ' + done.join('; '));
   }
   await refreshCasesCache();
-  const out = { done, diff, errs, ask, evCount, cfgErr, kad: kadStages }, m = caseCardResultModel(out);
+  const opp = oppU ? crmOppUnknownText(before.client, oppU, caseOpponentName((await getOne('cases', caseId)) || c)) : '';
+  const out = { done, diff, errs, ask, evCount, cfgErr, kad: kadStages, opp }, m = caseCardResultModel(out);
   const shown = sheetIsOpen() && UI.cur && UI.cur.caseId === caseId;
   if (opts.silent) {
     // Б25: в пакете «Карточки всех дел» итог показывает лист хода, а не сообщение на каждое дело
