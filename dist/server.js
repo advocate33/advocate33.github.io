@@ -10,6 +10,11 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v191: icalget — закрытая ссылка календаря Google или Apple: события окна дат для «Быстрых записей» программы (этап 6 плана по ЮрТопосу)
+//  v190: «Задать вопрос» — публичная страница ?ask=<страница> и приём вопросов без секрета; askpub/askget/askack для программы
+//  (план по ЮрТопосу 13.10.2026, этап 4)
+//  v189: согласие на обработку ПД на странице записи — отдельный текст, флажок, время и редакция в заявке; уведомление о заявке без имён;
+//  число просроченных задач в утренней сводке (план по ЮрТопосу 13.10.2026, этап 1)
 //  v188: события — одна запись под замком для доставки и очистки (eventsclear), файл событий пишется условно по ETag (аудит 13.10.2026)
 //  v187: лента календаря по ссылке самой функции — GET ?cal=<метка>; метка — HMAC от SECRET, кода сервера в ссылке нет (А1)
 //  v186: изменения базы между версиями — устройство берёт только их (deltaget), а не весь снимок; разрыв цепочки — снимок целиком
@@ -107,6 +112,10 @@ module.exports.handler = async function (event, context) {
     try { return method === 'GET' || method === 'HEAD' ? await calServe(String(q0.cal), method === 'HEAD') : reply({ ok: false, error: 'method' }, 405); }
     catch (err) { return { statusCode: 500, headers: CAL_TEXT, body: 'Ошибка: ' + (err && err.message || err) }; }
   }
+  if (q0.ask) { // v190: публичная страница «Задать вопрос» (без секрета)
+    try { return method === 'GET' ? await askPage(q0) : reply({ ok: false, error: 'method' }, 405); }
+    catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + (err && err.message || err) }; }
+  }
   if (q0.book) { // v174: публичная страница записи (без секрета)
     try { return method === 'GET' ? await bookPage(q0) : reply({ ok: false, error: 'method' }, 405); }
     catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + (err && err.message || err) }; }
@@ -123,7 +132,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 188,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 191,
       ready: readiness()
     });
   }
@@ -136,13 +145,14 @@ module.exports.handler = async function (event, context) {
     body = JSON.parse(raw);
   } catch (e) { return reply({ ok: false, error: 'bad_json' }); }
 
+  if (body && body.action === 'askreq') { try { return reply(await askRequest(body, event)); } catch (err) { return reply({ ok: false, error: String(err && err.message || err) }); } } // v190: вопрос с сайта, без секрета
   if (body && body.action === 'bookreq') { try { return reply(await bookRequest(body, event)); } catch (err) { return reply({ ok: false, error: String(err && err.message || err) }); } } // v174: заявка клиента, без секрета
   // v178: без переменной SECRET сервер не работает вовсе — и говорит об этом словами
   if (!process.env.SECRET) return reply({ ok: false, error: 'сервер не настроен: не задана переменная SECRET функции' });
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 188, cal: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 191, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -169,6 +179,10 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'bookpub')  return reply(await bookPublish(body));   // v174
     if (body.action === 'bookget')  return reply(await bookGet(body));
     if (body.action === 'bookset')  return reply(await bookSet(body));
+    if (body.action === 'askpub')   return reply(await askPublish(body));   // v190
+    if (body.action === 'askget')   return reply(await askGet());
+    if (body.action === 'askack')   return reply(await askAck(body));
+    if (body.action === 'icalget')  return reply(await icalGet(body));       // v191
     if (body.action === 'remindput') return reply(await remindPut(body)); // v177
     if (body.action === 'remindtick') return reply(await remindTick());
     if (body.action === 'blobput')  return reply(await blobPut(body));   // v176
@@ -1085,7 +1099,8 @@ async function remindPut(body) { // список от CRM: [{ id, date (ГГГГ
   needStorage();
   const items = (Array.isArray(body.items) ? body.items : []).filter(x => x && x.id && /^\d{4}-\d{2}-\d{2}$/.test(x.date || '') && !isNaN(Date.parse(x.date))).slice(0, 500)
     .map(x => ({ id: String(x.id).slice(0, 80), date: x.date, time: x.time ? String(x.time).slice(0, 5) : '', title: String(x.title || '').slice(0, 160), text: String(x.text || '').slice(0, 200) }));
-  const prev = await remindLoad(); const keep = {}; const ids = new Set(items.map(i => i.id)); for (const k of Object.keys(prev.sent)) if (ids.has(k)) keep[k] = prev.sent[k];
+  // v189: отметка «строка о просрочке сегодня уже отправлена» (ov:<дата>) переживает новый список — иначе вторая сводка за день повторила бы её
+  const prev = await remindLoad(); const keep = {}; const ids = new Set(items.map(i => i.id)), ovFrom = 'ov:' + mskDateISO(-2); for (const k of Object.keys(prev.sent)) if (ids.has(k) || (k.startsWith('ov:') && k >= ovFrom)) keep[k] = prev.sent[k];
   const r = await s3Put(remindKey(), JSON.stringify({ items, sent: keep, updatedAt: Date.now() }), 'application/json');
   if (!r.ok) throw new Error('s3 ' + r.status);
   return { ok: true, n: items.length, telegram: !!(process.env.TG_TOKEN && process.env.TG_CHAT) };
@@ -1096,13 +1111,18 @@ async function remindTick() { // сегодня и завтра — по одн�
   if (!process.env.BUCKET) return { ok: true, sent: 0, error: 'нет хранилища' };
   const st = await remindLoad(); const today = mskDateISO(0), tomorrow = mskDateISO(1);
   const due = st.items.filter(x => (x.date === today || x.date === tomorrow) && st.sent[x.id] !== x.date).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-  if (!due.length) return { ok: true, sent: 0 };
+  // v189: просроченные задачи считаются здесь каждый день (срок раньше сегодняшнего по Москве) — задача, срок которой прошёл, пока программа
+  // была закрыта, тоже попадает; строка — раз в день. Программа присылает не больше 200 просроченных задач.
+  const over = st.items.filter(x => /^t:/.test(x.id) && x.date < today).length, ovKey = 'ov:' + today, ovNeed = over > 0 && st.sent[ovKey] !== today;
+  if (!due.length && !ovNeed) return { ok: true, sent: 0 };
   const line = x => `${x.date === today ? '🔴 сегодня' : '🟠 завтра'}${x.time ? ' ' + x.time : ''} — ${x.title}${x.text ? ' (' + x.text + ')' : ''}`;
-  const text = '⚖️ CRM Адвоката · напоминание\n' + due.slice(0, 25).map(line).join('\n') + (due.length > 25 ? `\n… и ещё ${due.length - 25}` : '');
+  const text = '⚖️ CRM Адвоката · напоминание' + (due.length ? '\n' + due.slice(0, 25).map(line).join('\n') + (due.length > 25 ? `\n… и ещё ${due.length - 25}` : '') : '')
+    + (ovNeed ? `\n⚠️ Просрочено задач: ${over >= 200 ? 'не меньше 200' : over}` : '');
   const r = await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }) });
   if (!r.ok) return { ok: false, error: 'telegram ' + r.status };
-  due.forEach(x => { st.sent[x.id] = x.date; }); await s3Put(remindKey(), JSON.stringify({ items: st.items, sent: st.sent, updatedAt: st.updatedAt || Date.now() }), 'application/json');
-  return { ok: true, sent: due.length };
+  due.forEach(x => { st.sent[x.id] = x.date; }); if (ovNeed) st.sent[ovKey] = today;
+  await s3Put(remindKey(), JSON.stringify({ items: st.items, sent: st.sent, updatedAt: st.updatedAt || Date.now() }), 'application/json');
+  return { ok: true, sent: due.length, overdue: ovNeed ? over : 0 };
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1156,6 +1176,18 @@ const bookingsKey = () => 'bookings-' + storeId() + '.json';
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ruDate = iso => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || ''); return m ? `${m[3]}.${m[2]}.${m[1]}` : ''; };
 const WD = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'];
+// v189: согласие на обработку ПД (ч. 1 ст. 9 152-ФЗ в ред. от 24.06.2025 — отдельно от иных документов). Текст — от программы; без него —
+// запасной текст из подписей страницы. Редакция — первые 12 знаков SHA-256 текста; каждая редакция хранится своим файлом.
+const bookConsentKey = (pid, ver) => 'book-consent-' + pid + '-' + ver + '.txt';
+const CONSENT_VER_RE = /^[0-9a-f]{12}$/;
+function bookConsentOf(S) {
+  S = S || {}; if (S.consentText) return String(S.consentText);
+  return 'Согласие на обработку персональных данных\n\nЗаполняя форму записи на консультацию на этой странице и отмечая согласие, я даю согласие адвокату, принимающему запись на этой странице'
+    + (S.address ? ' (адрес: ' + S.address + ')' : '') + (S.phone ? ', телефон ' + S.phone : '') + ', на обработку моих имени, номера телефона и сведений, указанных в полях «Вопрос» и «Комментарий», для записи на консультацию и связи со мной по этой записи.'
+    + (S.notifyFull ? ' Уведомление о заявке с моими именем, телефоном и вопросом направляется адвокату через мессенджер Telegram, серверы которого могут находиться за пределами Российской Федерации.' : '')
+    + '\n\nСогласие действует до достижения цели обработки либо до его отзыва; отозвать согласие можно, сообщив об этом адвокату по указанному телефону или адресу.';
+}
+const consentVer = text => sha256hex(String(text || '')).slice(0, 12);
 async function bookLoadPublic(pid) { if (!PID_RE.test(pid)) return null; const r = await s3Get(bookKey(pid)); if (!r.ok) return null; try { return JSON.parse(await r.text()); } catch (e) { return null; } }
 // v185: файл заявок читается с ETag и пишется условно — две одновременные записи (заявка доверителя и ответ адвоката, две заявки
 // на одно время) не затирают друг друга: проигравший перечитывает и повторяет. Повреждённый файл — не пустой список (сохраняется копией).
@@ -1191,10 +1223,18 @@ async function bookPublish(body) {
   needStorage();
   const pid = String(body.publicId || ''); if (!PID_RE.test(pid)) return { ok: false, error: 'bad_publicId' };
   const settings = Object.assign({ title: 'Запись на консультацию', durationMin: 60 }, body.settings || {});
+  // v189: текст согласия и вид уведомления; прежняя программа их не шлёт — остаются от прошлой публикации
+  const given = body.settings || {}, prevPub = await bookLoadPublic(pid), ps = (prevPub && prevPub.settings) || {};
+  for (const k of ['consentText', 'notifyFull']) if (!(k in given) && k in ps) settings[k] = ps[k];
+  settings.consentText = String(settings.consentText || '').slice(0, 8000); if (!settings.consentText) delete settings.consentText;
+  settings.notifyFull = !!settings.notifyFull;
+  settings.consentVer = consentVer(bookConsentOf(settings));
+  // текст редакции — до страницы, которая на него ссылается; та же редакция уже записана — повторно не пишется
+  if (settings.consentVer !== ps.consentVer) { const c = await s3Put(bookConsentKey(pid, settings.consentVer), bookConsentOf(settings), 'text/plain; charset=utf-8'); if (!c.ok) return { ok: false, error: 's3 ' + c.status + ' при записи текста согласия' }; }
   const days = (Array.isArray(body.days) ? body.days : []).filter(d => d && /^\d{4}-\d{2}-\d{2}$/.test(d.date)).map(d => ({ date: d.date, slots: (d.slots || []).filter(t => /^\d{2}:\d{2}$/.test(t)).slice(0, 48) })).slice(0, 60);
   const r = await s3Put(bookKey(pid), JSON.stringify({ settings, days, updatedAt: Date.now() }), 'application/json; charset=utf-8');
   if (!r.ok) return { ok: false, error: 's3 ' + r.status };
-  return { ok: true, publicId: pid, days: days.length, slots: days.reduce((a, d) => a + d.slots.length, 0), url: '?book=' + pid };
+  return { ok: true, publicId: pid, days: days.length, slots: days.reduce((a, d) => a + d.slots.length, 0), url: '?book=' + pid, consentVer: settings.consentVer };
 }
 async function bookGet(body) {
   needStorage(); const st = await bookingsLoad(); const since = Number(body.since) || 0;
@@ -1218,10 +1258,14 @@ async function bookRequest(body, event) {
   const date = String(body.date || ''), time = String(body.time || ''), name = String(body.name || '').trim().slice(0, 120), phone = String(body.phone || '').replace(/[^\d+]/g, '').slice(0, 20);
   const topic = String(body.topic || '').trim().slice(0, 120), comment = String(body.comment || '').trim().slice(0, 1000);
   if (!name || phone.replace(/\D/g, '').length < 10) return { ok: false, error: 'Укажите имя и телефон' };
+  // v189: без согласия на обработку ПД заявка не принимается; согласие — на ту редакцию текста, что сейчас на странице
+  const S = pub.settings || {}, cver = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(bookConsentOf(S));
+  if (!(body.consent === true || body.consent === 'on' || body.consent === '1')) return { ok: false, error: 'Отметьте согласие на обработку персональных данных — без него заявку принять нельзя' };
+  if (String(body.consentVer || '') !== cver) return { ok: false, error: 'Текст согласия на странице обновился — откройте страницу заново и отметьте согласие ещё раз' };
   const day = pub.days.find(d => d.date === date); if (!day || !day.slots.includes(time)) return { ok: false, error: 'Это время недоступно — выберите другое' };
   const ip = ((event && event.headers && (event.headers['X-Forwarded-For'] || event.headers['x-forwarded-for'])) || '').split(',')[0].trim();
   const id = 'З' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex'), code = String(1000 + crypto.randomInt(9000));
-  const item = { id, code, publicId: pid, date, time, name, phone, topic, comment, status: 'new', createdAt: Date.now(), updatedAt: Date.now(), ip };
+  const item = { id, code, publicId: pid, date, time, name, phone, topic, comment, status: 'new', createdAt: Date.now(), updatedAt: Date.now(), ip, consentAt: Date.now(), consentVer: cver };
   // v185: проверка «время свободно» и запись — по одному и тому же прочитанному файлу; файл изменился — перечитать и проверить снова
   const res = await bookingsTx(st => {
     if (bookTaken(st.items, date, time)) return { ok: false, error: 'Это время уже занято — выберите другое' };
@@ -1233,7 +1277,10 @@ async function bookRequest(body, event) {
 }
 async function bookNotify(pub, b) { // Telegram — если в переменных функции моста заданы TG_TOKEN и TG_CHAT
   if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return;
-  const text = `📅 Новая запись на приём\n${ruDate(b.date)} ${b.time} — ${b.name}\n📞 ${b.phone}${b.topic ? '\n' + b.topic : ''}${b.comment ? '\n' + b.comment.slice(0, 200) : ''}\nКод ${b.code}. Подтвердите в CRM.`;
+  // v189: Telegram — зарубежный сервис: имя, телефон и вопрос — только если программа прислала notifyFull (отметка «Полные названия и имена в Telegram»)
+  const full = !!(pub && pub.settings && pub.settings.notifyFull);
+  const text = full ? `📅 Новая запись на приём\n${ruDate(b.date)} ${b.time} — ${b.name}\n📞 ${b.phone}${b.topic ? '\n' + b.topic : ''}${b.comment ? '\n' + b.comment.slice(0, 200) : ''}\nКод ${b.code}. Подтвердите в CRM.`
+    : `📅 Новая запись на приём\n${ruDate(b.date)} ${b.time}\nКод ${b.code}. Имя, телефон и вопрос — в CRM; там же подтвердите запись.`;
   await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }) });
 }
 // публичная страница: календарь окон + форма; с параметром code — статус заявки
@@ -1242,26 +1289,294 @@ async function bookPage(q) {
   const html = h => ({ statusCode: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }, body: h });
   if (!pub) return html(bookShell('Запись', '<p>Страница записи не найдена или ещё не опубликована.</p>'));
   const S = pub.settings || {};
+  // v189: отдельная страница текста согласия; с номером редакции — тот самый текст, на который дано согласие
+  if (q.consent) {
+    const cur = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(bookConsentOf(S)), want = String(q.consent);
+    let text = '', ver = cur;
+    if (want === '1' || want === cur) text = bookConsentOf(S);
+    else if (CONSENT_VER_RE.test(want)) { const r = await s3Get(bookConsentKey(pid, want)); if (r.ok) { text = await r.text(); ver = want; } }
+    if (!text) return html(bookShell('Согласие на обработку персональных данных', '<p>Такой редакции текста согласия нет.</p><p><a href="?book=' + esc(pid) + '&consent=1">Действующая редакция</a></p>'));
+    return html(bookShell('Согласие на обработку персональных данных', `<div class="ctext">${esc(text).replace(/\n/g, '<br>')}</div><p class="fine">Редакция ${esc(ver)}${ver !== cur ? ' (прежняя)' : ''}</p><p><a href="?book=${esc(pid)}">Вернуться к записи</a></p>`));
+  }
   if (q.code) { const st = await bookingsLoad(); const b = st.items.find(x => x.publicId === pid && x.code === String(q.code)); const label = { new: 'ожидает подтверждения', confirmed: 'подтверждена ✅', declined: 'отклонена — выберите другое время', cancelled: 'отменена', done: 'приём состоялся' };
     return html(bookShell(S.title, b ? `<p><b>Заявка ${esc(b.code)}</b>: ${ruDate(b.date)} в ${esc(b.time)} — ${label[b.status] || b.status}.${b.lawyerNote ? '<br>' + esc(b.lawyerNote) : ''}</p>${S.phone ? `<p>Телефон: <a href="tel:${esc(S.phone)}">${esc(S.phone)}</a></p>` : ''}` : '<p>Заявка с таким кодом не найдена.</p>')); }
   const st = await bookingsLoad();
   const today = new Date().toISOString().slice(0, 10);
   const days = pub.days.filter(d => d.date >= today).map(d => ({ date: d.date, slots: d.slots.filter(t => !bookTaken(st.items, d.date, t)) })).filter(d => d.slots.length);
   const daysHtml = days.length ? days.map(d => { const dt = new Date(d.date + 'T00:00:00'); return `<div class="day"><div class="dh">${ruDate(d.date)} · ${WD[dt.getDay()]}</div><div class="slots">${d.slots.map(t => `<button type="button" class="slot" data-d="${d.date}" data-t="${t}">${t}</button>`).join('')}</div></div>`; }).join('') : '<p>Свободных окон сейчас нет — позвоните или напишите.</p>';
+  const cver = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(bookConsentOf(S));
   const topics = Array.isArray(S.topics) && S.topics.length ? `<label>Вопрос<select name="topic"><option value="">— выберите —</option>${S.topics.map(t => `<option>${esc(t)}</option>`).join('')}</select></label>` : `<label>Вопрос (кратко)<input name="topic" maxlength="120"></label>`;
   const body = `${S.note ? `<p class="note">${esc(S.note)}</p>` : ''}${S.address ? `<p class="note">📍 ${esc(S.address)}</p>` : ''}<p>Приём длится ${esc(S.durationMin || 60)} мин. Выберите день и время:</p>${daysHtml}
-<form id="f" style="display:none"><div class="pick">Выбрано: <b id="pick"></b></div><label>Ваше имя<input name="name" required maxlength="120"></label><label>Телефон<input name="phone" required inputmode="tel" placeholder="+7 900 000-00-00"></label>${topics}<label>Комментарий<textarea name="comment" rows="3" maxlength="1000"></textarea></label><input name="site" style="display:none" tabindex="-1" autocomplete="off"><button type="submit" class="go">Записаться</button><p class="fine">Нажимая «Записаться», вы соглашаетесь на обработку имени и телефона для связи по записи.</p></form><div id="out"></div>
-<script>(function(){var d='',t='';var f=document.getElementById('f'),out=document.getElementById('out');document.querySelectorAll('.slot').forEach(function(b){b.onclick=function(){document.querySelectorAll('.slot').forEach(function(x){x.classList.remove('on')});b.classList.add('on');d=b.dataset.d;t=b.dataset.t;document.getElementById('pick').textContent=b.closest('.day').querySelector('.dh').textContent+' '+t;f.style.display='block';f.scrollIntoView({behavior:'smooth'});};});
+<form id="f" style="display:none"><div class="pick">Выбрано: <b id="pick"></b></div><label>Ваше имя<input name="name" required maxlength="120"></label><label>Телефон<input name="phone" required inputmode="tel" placeholder="+7 900 000-00-00"></label>${topics}<label>Комментарий<textarea name="comment" rows="3" maxlength="1000"></textarea></label><input name="site" style="display:none" tabindex="-1" autocomplete="off"><label class="ck"><input type="checkbox" name="consent" id="ck"><span>Даю согласие на обработку моих персональных данных на условиях <a href="?book=${esc(pid)}&consent=${esc(cver)}" target="_blank" rel="noopener">текста согласия</a></span></label><input type="hidden" name="consentVer" value="${esc(cver)}"><button type="submit" class="go" disabled>Записаться</button><p class="fine">Без согласия заявку отправить нельзя. Текст согласия открывается отдельной страницей.</p></form><div id="out"></div>
+<script>(function(){var d='',t='';var f=document.getElementById('f'),out=document.getElementById('out'),ck=document.getElementById('ck'),go=f.querySelector('.go');ck.onchange=function(){go.disabled=!ck.checked;};document.querySelectorAll('.slot').forEach(function(b){b.onclick=function(){document.querySelectorAll('.slot').forEach(function(x){x.classList.remove('on')});b.classList.add('on');d=b.dataset.d;t=b.dataset.t;document.getElementById('pick').textContent=b.closest('.day').querySelector('.dh').textContent+' '+t;f.style.display='block';f.scrollIntoView({behavior:'smooth'});};});
 f.onsubmit=function(e){e.preventDefault();var fd=new FormData(f);var body={book:${JSON.stringify(pid)},action:'bookreq',date:d,time:t};fd.forEach(function(v,k){body[k]=v;});var btn=f.querySelector('.go');btn.disabled=true;btn.textContent='Отправляю…';
-fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(j){if(j.ok){f.style.display='none';out.innerHTML='<div class="ok">Заявка принята: '+j.date.split('-').reverse().join('.')+' в '+j.time+'.<br>Код заявки <b>'+j.code+'</b> — по нему можно проверить статус: <a href="?book=${pid}&code='+j.code+'">открыть</a>.<br>Приём состоится после подтверждения; при изменениях с вами свяжутся по телефону.</div>';}else{out.innerHTML='<div class="err">'+(j.error||'Ошибка')+'</div>';btn.disabled=false;btn.textContent='Записаться';}}).catch(function(){out.innerHTML='<div class="err">Нет связи — попробуйте ещё раз</div>';btn.disabled=false;btn.textContent='Записаться';});};})();</script>`;
+fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(j){if(j.ok){f.style.display='none';out.innerHTML='<div class="ok">Заявка принята: '+j.date.split('-').reverse().join('.')+' в '+j.time+'.<br>Код заявки <b>'+j.code+'</b> — по нему можно проверить статус: <a href="?book=${pid}&code='+j.code+'">открыть</a>.<br>Приём состоится после подтверждения; при изменениях с вами свяжутся по телефону.</div>';}else{out.innerHTML='<div class="err">'+(j.error||'Ошибка')+'</div>';btn.disabled=!ck.checked;btn.textContent='Записаться';}}).catch(function(){out.innerHTML='<div class="err">Нет связи — попробуйте ещё раз</div>';btn.disabled=!ck.checked;btn.textContent='Записаться';});};})();</script>`;
   return html(bookShell(S.title, body));
 }
 function bookShell(title, body) {
   return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${esc(title || 'Запись на приём')}</title><style>
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f5f6fa;color:#1a1d2b}.wrap{max-width:560px;margin:0 auto;padding:20px 16px 40px}h1{font-size:22px;margin:8px 0 12px}.note{color:#555;margin:4px 0}.day{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:10px 12px;margin:10px 0}.dh{font-weight:600;margin-bottom:6px}.slots{display:flex;flex-wrap:wrap;gap:6px}.slot{border:1px solid #c9cde0;background:#fff;border-radius:8px;padding:8px 12px;font-size:15px}.slot.on{background:#4f46e5;color:#fff;border-color:#4f46e5}
-form{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:12px;margin-top:14px}label{display:block;margin:8px 0 4px;font-size:14px;color:#444}input,select,textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c9cde0;border-radius:8px;font-size:16px;font-family:inherit}.go{margin-top:12px;width:100%;padding:12px;border:0;border-radius:10px;background:#4f46e5;color:#fff;font-size:16px}.fine{font-size:12px;color:#777}.pick{margin-bottom:6px}.ok{background:#e8f7ee;border:1px solid #9ad4b0;border-radius:12px;padding:12px;margin-top:12px}.err{background:#fdecec;border:1px solid #f0a0a0;border-radius:12px;padding:12px;margin-top:12px}
+form{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:12px;margin-top:14px}label{display:block;margin:8px 0 4px;font-size:14px;color:#444}input,select,textarea{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c9cde0;border-radius:8px;font-size:16px;font-family:inherit}.go{margin-top:12px;width:100%;padding:12px;border:0;border-radius:10px;background:#4f46e5;color:#fff;font-size:16px}.fine{font-size:12px;color:#777}.ck{display:flex;gap:8px;align-items:flex-start;margin-top:12px}.ck input{width:auto;margin-top:3px;flex:none}.go:disabled{opacity:.5}.ctext{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:12px;line-height:1.5}.pick{margin-bottom:6px}.ok{background:#e8f7ee;border:1px solid #9ad4b0;border-radius:12px;padding:12px;margin-top:12px}.err{background:#fdecec;border:1px solid #f0a0a0;border-radius:12px;padding:12px;margin-top:12px}
 </style></head><body><div class="wrap"><h1>${esc(title || 'Запись на приём')}</h1>${body}</div></body></html>`;
 }
 
+// ════════════════════════════════════════════════════════════
+//  v190: «ЗАДАТЬ ВОПРОС» (план по ЮрТопосу 13.10.2026, этап 4)
+// ════════════════════════════════════════════════════════════
+// Публичная страница без секрета: GET ?ask=<publicId> — форма; POST {ask, action:'askreq', name, phone, tg, method, question, consent,
+// consentVer, nonce} — вопрос. Для программы (с секретом): askpub {publicId, settings} — подписи страницы, способы связи, текст согласия,
+// off — «не принимать»; askget {} — все вопросы (без адреса и метки формы) и время сервера; askack {ids} — отметка «программа приняла».
+// Объекты: ask-<publicId>.json (публичное), ask-consent-<publicId>-<редакция>.txt (каждая редакция текста согласия), asks-<STORE>.json (вопросы:
+// имя, контакты, текст — вне шифрования CRM). Принятый программой вопрос удаляется через 30 дней после отметки, непринятый — через 180 дней.
+// Защита: скрытое поле; не больше 5 вопросов с одного адреса в час и 40 со страницы за сутки; та же форма (метка) или тот же текст с того же
+// телефона или Telegram за сутки — тот же ответ без новой записи. Вложений нет.
+const ASK_KEEP_TAKEN = 30 * 864e5, ASK_KEEP_ALL = 180 * 864e5, ASK_IP_HOUR = 5, ASK_PAGE_DAY = 40;
+const ASK_METHODS = { call: 'позвонить', tg: 'написать в Telegram', wa: 'написать в WhatsApp', sms: 'написать SMS' };
+const askKey = pid => 'ask-' + pid + '.json';
+const asksKey = () => 'asks-' + storeId() + '.json';
+const askConsentKey = (pid, ver) => 'ask-consent-' + pid + '-' + ver + '.txt';
+const askPhone = s => String(s || '').replace(/[^\d+]/g, '').slice(0, 20);
+const askDigits10 = s => String(s || '').replace(/\D/g, '').slice(-10);
+// имя пользователя Telegram: латиница, цифры и «_», от 5 до 32 знаков, первая — буква; «@» и адрес t.me/… снимаются
+const askTg = s => String(s || '').trim().replace(/^https?:\/\/(www\.)?(t|telegram)\.me\//i, '').replace(/^@/, '').replace(/\/+$/, '');
+const ASK_TG_RE = /^[A-Za-z][A-Za-z0-9_]{4,31}$/;
+function askConsentOf(S) {
+  S = S || {}; if (S.consentText) return String(S.consentText);
+  return 'Согласие на обработку персональных данных\n\nЗаполняя форму «Задать вопрос» на этой странице и отмечая согласие, я даю согласие адвокату, принимающему вопросы на этой странице'
+    + (S.phone ? ' (телефон ' + S.phone + ')' : '') + ', на обработку моих имени, номера телефона, имени пользователя Telegram и сведений, указанных в поле «Вопрос», для ответа на мой вопрос и связи со мной по нему.'
+    + (S.notifyFull ? ' Уведомление о вопросе с моими именем, контактами и текстом вопроса направляется адвокату через мессенджер Telegram, серверы которого могут находиться за пределами Российской Федерации.' : '')
+    + '\n\nСогласие действует до достижения цели обработки либо до его отзыва; отозвать согласие можно, сообщив об этом адвокату по указанному телефону.';
+}
+async function askLoadPublic(pid) { if (!PID_RE.test(pid)) return null; const r = await s3Get(askKey(pid)); if (!r.ok) return null; try { return JSON.parse(await r.text()); } catch (e) { return null; } }
+// файл вопросов — как файл заявок (v185): чтение с ETag, условная запись, повреждённый файл сохраняется копией
+async function asksLoad() {
+  const r = await s3Get(asksKey()); if (r.status === 404) return { items: [], exists: false, etag: '' }; if (!r.ok) throw new Error('s3 ' + r.status);
+  const etag = (r.headers && r.headers.get && r.headers.get('etag')) || '', text = await r.text();
+  try { const j = JSON.parse(text); return { items: Array.isArray(j.items) ? j.items : [], exists: true, etag }; } catch (e) { return { items: [], exists: true, etag, corrupt: true, text }; }
+}
+// срок хранения: принятый программой — 30 дней после отметки, любой — 180 дней
+function asksPrune(items, now) {
+  return (items || []).filter(x => { const c = Number(x && x.createdAt) || 0, tk = Number(x && x.takenAt) || 0; return !!x && !(tk && now - tk > ASK_KEEP_TAKEN) && !(now - c > ASK_KEEP_ALL); });
+}
+async function asksSave(st) {
+  if (st.corrupt) { const saved = asksKey().replace(/\.json$/, '.corrupt-' + Date.now() + '.json'); const c = await s3Put(saved, st.text || '', 'application/json; charset=utf-8'); if (!c.ok) throw new Error('файл вопросов повреждён, а копию сохранить не удалось (s3 ' + c.status + ')'); console.log('asks corrupt saved: ' + saved); }
+  const body = JSON.stringify({ items: asksPrune(st.items, Date.now()) }), CT = 'application/json; charset=utf-8';
+  const cond = st.exists ? (st.etag ? { 'If-Match': st.etag } : null) : { 'If-None-Match': '*' };
+  let r = cond ? await s3PutIf(asksKey(), body, CT, cond) : await s3Put(asksKey(), body, CT);
+  if (cond && condFailed(r)) return false;
+  if (cond && condUnsupported(r)) r = await s3Put(asksKey(), body, CT);
+  if (!r.ok) throw new Error('s3 ' + r.status + ' при записи вопросов');
+  return true;
+}
+async function asksTx(fn) {
+  for (let i = 0; i < 4; i++) {
+    const st = await asksLoad(); const out = await fn(st);
+    if (!out || !out.save) return out;
+    if (await asksSave(st)) return out.reply;
+    await new Promise(res => setTimeout(res, 60 + Math.floor(Math.random() * 180)));
+  }
+  return { ok: false, error: 'busy', note: 'вопросы на сервере сейчас меняются — повторите через несколько секунд' };
+}
+// программа публикует страницу: { publicId, settings:{title, intro, phone, methods:[call|tg|wa|sms], consentText?, notifyFull?, off?} }
+async function askPublish(body) {
+  needStorage();
+  const pid = String(body.publicId || ''); if (!PID_RE.test(pid)) return { ok: false, error: 'bad_publicId' };
+  const g = body.settings || {}, prev = await askLoadPublic(pid), ps = (prev && prev.settings) || {};
+  const S = { title: String(g.title || 'Задать вопрос адвокату').slice(0, 120), intro: String(g.intro || '').slice(0, 1000), phone: String(g.phone || '').slice(0, 40),
+    methods: (Array.isArray(g.methods) ? g.methods : []).filter(m => ASK_METHODS[m]).slice(0, 4), off: !!g.off };
+  if (!S.methods.length) S.methods = ['call', 'tg'];
+  // текст согласия и вид уведомления не присланы — остаются прежние (как у записи с 189)
+  S.consentText = String(('consentText' in g ? g.consentText : ps.consentText) || '').slice(0, 8000); if (!S.consentText) delete S.consentText;
+  S.notifyFull = !!('notifyFull' in g ? g.notifyFull : ps.notifyFull);
+  S.consentVer = consentVer(askConsentOf(S));
+  if (S.consentVer !== ps.consentVer) { const c = await s3Put(askConsentKey(pid, S.consentVer), askConsentOf(S), 'text/plain; charset=utf-8'); if (!c.ok) return { ok: false, error: 's3 ' + c.status + ' при записи текста согласия' }; }
+  const r = await s3Put(askKey(pid), JSON.stringify({ settings: S, updatedAt: Date.now() }), 'application/json; charset=utf-8');
+  if (!r.ok) return { ok: false, error: 's3 ' + r.status };
+  return { ok: true, publicId: pid, url: '?ask=' + pid, consentVer: S.consentVer, off: S.off };
+}
+// все вопросы — программа сама решает, что у неё уже есть; адрес и метка формы программе не нужны
+async function askGet() {
+  needStorage(); const st = await asksLoad();
+  if (st.corrupt) return { ok: false, error: 'asks_corrupt', note: 'файл вопросов на сервере повреждён — при следующем вопросе он будет сохранён копией и начат заново' };
+  return { ok: true, now: Date.now(), items: asksPrune(st.items, Date.now()).map(x => { const o = Object.assign({}, x); delete o.ip; delete o.nonce; return o; }) };
+}
+async function askAck(body) {
+  needStorage();
+  const ids = (Array.isArray(body.ids) ? body.ids : []).map(String).slice(0, 500); if (!ids.length) return { ok: true, n: 0 };
+  return asksTx(st => {
+    const now = Date.now(); let n = 0;
+    for (const x of st.items) if (x && ids.includes(x.id) && !x.takenAt) { x.takenAt = now; n++; }
+    return n ? { save: true, reply: { ok: true, n } } : { ok: true, n: 0 };
+  });
+}
+async function askRequest(body, event) {
+  needStorage();
+  const pid = String(body.ask || ''); const pub = await askLoadPublic(pid); if (!pub) return { ok: false, error: 'Страница не найдена' };
+  if (body.site) return { ok: true, code: '0000' }; // робот заполнил скрытое поле — делаем вид, что приняли
+  const S = pub.settings || {};
+  if (S.off) return { ok: false, error: 'Сейчас вопросы через эту страницу не принимаются' + (S.phone ? ' — позвоните: ' + S.phone : '') };
+  const name = String(body.name || '').replace(/\s+/g, ' ').trim().slice(0, 120), phone = askPhone(body.phone), tg = askTg(body.tg), digits = phone.replace(/\D/g, '');
+  const question = String(body.question || '').trim().slice(0, 2000);
+  if (!name) return { ok: false, error: 'Укажите имя' };
+  if (tg && !ASK_TG_RE.test(tg)) return { ok: false, error: 'Имя пользователя Telegram — латинские буквы, цифры и «_», от 5 знаков, например @ivan_petrov' };
+  if (digits.length < 10 && !tg) return { ok: false, error: 'Укажите телефон или имя пользователя Telegram — иначе адвокат не сможет ответить' };
+  const allowed = Array.isArray(S.methods) && S.methods.length ? S.methods.filter(m => ASK_METHODS[m]) : ['call', 'tg'];
+  const method = allowed.includes(body.method) ? body.method : allowed[0];
+  if (method !== 'tg' && digits.length < 10) return { ok: false, error: 'Чтобы адвокат мог ' + ASK_METHODS[method] + ', укажите телефон' };
+  if (question.length < 10) return { ok: false, error: 'Опишите вопрос хотя бы одним предложением' };
+  // согласие — как у записи с 189: флажок и та редакция текста, что сейчас на странице
+  const cver = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(askConsentOf(S));
+  if (!(body.consent === true || body.consent === 'on' || body.consent === '1')) return { ok: false, error: 'Отметьте согласие на обработку персональных данных — без него вопрос принять нельзя' };
+  if (String(body.consentVer || '') !== cver) return { ok: false, error: 'Текст согласия на странице обновился — откройте страницу заново и отметьте согласие ещё раз' };
+  const ip = ((event && event.headers && (event.headers['X-Forwarded-For'] || event.headers['x-forwarded-for'])) || '').split(',')[0].trim();
+  const nonce = /^[a-z0-9]{8,40}$/i.test(String(body.nonce || '')) ? String(body.nonce) : '';
+  const now = Date.now(), id = 'q' + now.toString(36) + crypto.randomBytes(3).toString('hex'), code = String(1000 + crypto.randomInt(9000));
+  const item = { id, code, publicId: pid, name, phone, tg, method, question, createdAt: now, updatedAt: now, ip, nonce, consentAt: now, consentVer: cver };
+  let fresh = false;
+  const res = await asksTx(st => {
+    st.items = asksPrune(st.items, now);
+    // повтор: та же форма (метка) или тот же текст с того же телефона или Telegram за сутки — тот же ответ, новой записи нет
+    const same = st.items.find(x => x && x.publicId === pid && ((nonce && x.nonce === nonce) || (x.question === question && now - (x.createdAt || 0) < 864e5 && ((digits.length >= 10 && askDigits10(x.phone) === digits.slice(-10)) || (tg && String(x.tg || '').toLowerCase() === tg.toLowerCase())))));
+    if (same) return { ok: true, code: same.code, method: same.method, repeat: true };
+    if (ip && st.items.filter(x => x.ip === ip && now - (x.createdAt || 0) < 3600e3).length >= ASK_IP_HOUR) return { ok: false, error: 'Слишком много вопросов с этого устройства — попробуйте позже' + (S.phone ? ' или позвоните: ' + S.phone : '') };
+    if (st.items.filter(x => x.publicId === pid && now - (x.createdAt || 0) < 864e5).length >= ASK_PAGE_DAY) return { ok: false, error: 'Сейчас страница не принимает вопросы' + (S.phone ? ' — позвоните: ' + S.phone : ' — попробуйте завтра') };
+    st.items.push(item); fresh = true;
+    return { save: true, reply: { ok: true, code, method } };
+  });
+  if (res && res.ok && fresh && !res.repeat) await askNotify(pub, item).catch(e => console.log('ask notify: ' + (e && e.message || e)));
+  return res;
+}
+async function askNotify(pub, q) { // Telegram — если в переменных функции заданы TG_TOKEN и TG_CHAT
+  if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return;
+  // Telegram — зарубежный сервис: имя, контакты и вопрос — только если программа прислала notifyFull (как у записи с 189)
+  const full = !!(pub && pub.settings && pub.settings.notifyFull);
+  const text = full ? `Вопрос с сайта\n${q.name}${q.phone ? '\nТелефон: ' + q.phone : ''}${q.tg ? '\nTelegram: @' + q.tg : ''}\nКак связаться: ${ASK_METHODS[q.method] || q.method}\n${q.question.slice(0, 300)}${q.question.length > 300 ? '…' : ''}\nКод ${q.code}.`
+    : `Новый вопрос с сайта\nКод ${q.code}. Имя, контакты и вопрос — в CRM.`;
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
+  try { await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }), signal: ctl.signal }); }
+  finally { clearTimeout(timer); }
+}
+async function askPage(q) {
+  const pid = String(q.ask || ''); const pub = await askLoadPublic(pid);
+  const html = h => ({ statusCode: 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }, body: h });
+  if (!pub) return html(bookShell('Задать вопрос', '<p>Страница не найдена или ещё не опубликована.</p>'));
+  const S = pub.settings || {}, title = S.title || 'Задать вопрос адвокату';
+  const cur = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(askConsentOf(S));
+  if (q.consent) {
+    const want = String(q.consent); let text = '', ver = cur;
+    if (want === '1' || want === cur) text = askConsentOf(S);
+    else if (CONSENT_VER_RE.test(want)) { const r = await s3Get(askConsentKey(pid, want)); if (r.ok) { text = await r.text(); ver = want; } }
+    if (!text) return html(bookShell('Согласие на обработку персональных данных', '<p>Такой редакции текста согласия нет.</p><p><a href="?ask=' + esc(pid) + '&consent=1">Действующая редакция</a></p>'));
+    return html(bookShell('Согласие на обработку персональных данных', `<div class="ctext">${esc(text).replace(/\n/g, '<br>')}</div><p class="fine">Редакция ${esc(ver)}${ver !== cur ? ' (прежняя)' : ''}</p><p><a href="?ask=${esc(pid)}">Вернуться к вопросу</a></p>`));
+  }
+  const tel = S.phone ? `<p class="note">Телефон: <a href="tel:${esc(String(S.phone).replace(/[^\d+]/g, ''))}">${esc(S.phone)}</a></p>` : '';
+  if (S.off) return html(bookShell(title, '<p>Сейчас вопросы через эту страницу не принимаются.</p>' + tel));
+  const methods = (Array.isArray(S.methods) && S.methods.length ? S.methods : ['call', 'tg']).filter(m => ASK_METHODS[m]);
+  const body = `${S.intro ? `<p class="note">${esc(S.intro)}</p>` : ''}${tel}
+<form id="f"><label>Ваше имя<input name="name" required maxlength="120" autocomplete="name"></label><label>Телефон<input name="phone" inputmode="tel" autocomplete="tel" placeholder="+7 900 000-00-00"></label><label>Telegram — имя пользователя, если удобнее писать туда<input name="tg" autocomplete="off" placeholder="@имя_пользователя"></label><label>Как с вами связаться<select name="method">${methods.map(m => `<option value="${m}">${ASK_METHODS[m].charAt(0).toUpperCase() + ASK_METHODS[m].slice(1)}</option>`).join('')}</select></label><label>Ваш вопрос<textarea name="question" rows="5" maxlength="2000" required></textarea></label><p class="fine">Документы прикладывать не нужно — адвокат уточнит подробности, когда свяжется с вами.</p><input name="site" style="display:none" tabindex="-1" autocomplete="off"><input type="hidden" name="nonce" id="nonce"><label class="ck"><input type="checkbox" name="consent" id="ck"><span>Даю согласие на обработку моих персональных данных на условиях <a href="?ask=${esc(pid)}&consent=${esc(cur)}" target="_blank" rel="noopener">текста согласия</a></span></label><input type="hidden" name="consentVer" value="${esc(cur)}"><button type="submit" class="go" disabled>Отправить вопрос</button><p class="fine">Укажите телефон или Telegram. Без согласия вопрос отправить нельзя. Текст согласия открывается отдельной страницей.</p></form><div id="out"></div>
+<script>(function(){var f=document.getElementById('f'),out=document.getElementById('out'),ck=document.getElementById('ck'),go=f.querySelector('.go');document.getElementById('nonce').value=(Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,30);ck.onchange=function(){go.disabled=!ck.checked;};
+f.onsubmit=function(e){e.preventDefault();var fd=new FormData(f);var body={ask:${JSON.stringify(pid)},action:'askreq'};fd.forEach(function(v,k){body[k]=v;});go.disabled=true;go.textContent='Отправляю…';
+fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(j){if(j.ok){f.style.display='none';var how={call:'позвонит',tg:'напишет в Telegram',wa:'напишет в WhatsApp',sms:'напишет SMS'}[j.method]||'свяжется с вами';out.innerHTML='<div class="ok">Вопрос отправлен. Номер обращения <b>'+j.code+'</b>.<br>Адвокат '+how+', как только сможет.</div>';}else{out.innerHTML='<div class="err">'+String(j.error||'Ошибка').replace(/[<>&]/g,'')+'</div>';go.disabled=!ck.checked;go.textContent='Отправить вопрос';}}).catch(function(){out.innerHTML='<div class="err">Нет связи — попробуйте ещё раз</div>';go.disabled=!ck.checked;go.textContent='Отправить вопрос';});};})();</script>`;
+  return html(bookShell(title, body));
+}
+
+// ════════════════════════════════════════════════════════════
+//  v191: ЗАКРЫТАЯ ССЫЛКА КАЛЕНДАРЯ (план по ЮрТопосу 13.10.2026, этап 6)
+// ════════════════════════════════════════════════════════════
+// icalget {url, from, to} (с секретным кодом): сервер скачивает календарь по закрытой ссылке и отдаёт программе события окна дат.
+// Разрешены только адреса календарей Google и Apple — иначе сервер можно было бы заставить обращаться к любым адресам. Адрес — секрет
+// пользователя (по нему календарь читается без входа): в журнал функции не пишется.
+const ICAL_TIMEOUT = 12000, ICAL_MAX_BYTES = 8 * 1024 * 1024, ICAL_MAX_OUT = 3000000, ICAL_REDIRECTS = 3;
+const ICAL_HOSTS = [
+  { host: /^calendar\.google\.com$/i, path: /^\/calendar\/ical\/[^/]{3,200}\/(private-[0-9a-f]{16,64}|public)\/basic\.ics$/i },
+  { host: /^p\d{1,3}-caldav\.icloud\.com$/i, path: /^\/published\/\d\/[A-Za-z0-9_\-]{10,600}$/ }
+];
+// адрес → проверенный https-адрес или '' (webcal:// — то же, что https://)
+function icalUrlOk(raw) {
+  let u; try { u = new URL(String(raw || '').trim().replace(/^webcals?:\/\//i, 'https://')); } catch (e) { return ''; }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port) return '';
+  return ICAL_HOSTS.some(h => h.host.test(u.hostname) && h.path.test(u.pathname)) ? u.href : '';
+}
+async function icalReadCapped(res, max) {
+  if (res.body && typeof res.body.getReader === 'function') {
+    const rd = res.body.getReader(), parts = []; let n = 0;
+    for (;;) { const { done, value } = await rd.read(); if (done) break; n += value.length; if (n > max) { try { await rd.cancel(); } catch (e) { /* штатно: поток уже закрыт */ } return null; } parts.push(value); }
+    return Buffer.concat(parts.map(p => Buffer.from(p))).toString('utf8');
+  }
+  const t = await res.text(); return Buffer.byteLength(t, 'utf8') > max ? null : t;
+}
+// скачивание с переадресацией вручную: каждый следующий адрес проходит ту же проверку
+async function icalFetch(url, timeoutMs) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), timeoutMs || ICAL_TIMEOUT);
+  try {
+    let cur = url;
+    for (let i = 0; i <= ICAL_REDIRECTS; i++) {
+      const r = await fetch(cur, { method: 'GET', redirect: 'manual', headers: { Accept: 'text/calendar, text/plain;q=0.5' }, signal: ctl.signal });
+      if ([301, 302, 303, 307, 308].includes(r.status)) {
+        const loc = r.headers && r.headers.get && r.headers.get('location'); let next = '';
+        try { next = loc ? icalUrlOk(new URL(loc, cur).href) : ''; } catch (e) { next = ''; }
+        if (!next) return { ok: false, error: 'redirect', note: 'календарь переадресовал на адрес, который сервер не открывает' };
+        cur = next; continue;
+      }
+      if (r.status === 404 || r.status === 410) return { ok: false, error: 'not_found', note: 'по ссылке календаря нет — ссылку сбросили или календарь удалён' };
+      if (r.status === 401 || r.status === 403) return { ok: false, error: 'denied', note: 'календарь не открылся по ссылке — для Google нужна «Закрытая ссылка в формате iCal», для Apple — общий доступ «Общедоступный календарь»' };
+      if (!r.ok) return { ok: false, error: 'http_' + r.status };
+      const text = await icalReadCapped(r, ICAL_MAX_BYTES);
+      if (text === null) return { ok: false, error: 'too_big', note: 'календарь больше 8 МБ — для «Быстрых записей» заведите отдельный календарь' };
+      return { ok: true, text };
+    }
+    return { ok: false, error: 'redirect', note: 'слишком много переадресаций' };
+  } catch (e) {
+    return { ok: false, error: e && e.name === 'AbortError' ? 'timeout' : 'network', note: e && e.name === 'AbortError' ? 'календарь не ответил за 12 секунд' : 'сервер не смог открыть ссылку календаря' };
+  } finally { clearTimeout(timer); }
+}
+// строки iCal с развёрнутыми переносами (RFC 5545, п. 3.1); значение — после первого двоеточия вне кавычек
+const icalJsonBytes = s => Buffer.byteLength(JSON.stringify(String(s)), 'utf8') - 2;
+const icalUnfold = text => String(text || '').replace(/\r\n[ \t]/g, '').replace(/\n[ \t]/g, '').split(/\r?\n/);
+function icalValue(line) { let q = false; for (let i = 0; i < line.length; i++) { const c = line[i]; if (c === '"') q = !q; else if (c === ':' && !q) return line.slice(i + 1); } return ''; }
+function icalDate(line) { const m = /^(\d{4})(\d{2})(\d{2})/.exec(icalValue(line)); return m ? m[1] + '-' + m[2] + '-' + m[3] : ''; }
+// события окна [from; to] и описания поясов; повторяющееся событие (RRULE) с началом не позже конца окна — с правилом.
+// Дата сверяется по записи DTSTART как есть, а Google пишет время в UTC (…Z): заседание 01:00 по Москве записано вчерашней датой. Поэтому
+// окно шире на день с каждой стороны — точную дату в поясе пользователя считает программа и лишнее отбрасывает сама
+const icalDayAdd = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+function icalWindow(text, from0, to0) {
+  const from = icalDayAdd(from0, -1), to = icalDayAdd(to0, 1);
+  const lines = icalUnfold(text), head = [], keep = []; let blk = null, depth = 0, total = 0, kept = 0, rec = 0, name = '';
+  for (const ln of lines) {
+    if (!blk) {
+      if (/^BEGIN:(VEVENT|VTIMEZONE)$/i.test(ln)) { blk = [ln]; depth = 1; continue; }
+      if (/^X-WR-CALNAME[:;]/i.test(ln)) name = icalValue(ln).slice(0, 200);
+      if (/^(BEGIN|END):VCALENDAR$/i.test(ln) || /^(VERSION|PRODID|CALSCALE|METHOD|X-WR-CALNAME|X-WR-TIMEZONE)[:;]/i.test(ln)) head.push(ln);
+      continue;
+    }
+    blk.push(ln);
+    if (/^BEGIN:/i.test(ln)) depth++;
+    else if (/^END:/i.test(ln) && --depth === 0) {
+      const b = blk; blk = null;
+      if (/^BEGIN:VTIMEZONE$/i.test(b[0])) { keep.push(b); continue; }
+      total++;
+      const ds = b.find(l => /^DTSTART[:;]/i.test(l)), d = ds ? icalDate(ds) : '', isRec = b.some(l => /^RRULE[:;]/i.test(l));
+      if (!d) continue;
+      if ((isRec && d <= to) || (d >= from && d <= to)) { keep.push(b); kept++; if (isRec) rec++; }
+    }
+  }
+  const out = [head.find(l => /^BEGIN:VCALENDAR$/i.test(l)) || 'BEGIN:VCALENDAR'].concat(head.filter(l => !/^(BEGIN|END):VCALENDAR$/i.test(l)));
+  // предел — в байтах ответа: строка уходит в JSON, где кириллица занимает 2 байта, а перевод строки — 4 (\r\n экранируются)
+  let ics = out.join('\r\n'), cut = 0, size = icalJsonBytes(ics + '\r\nEND:VCALENDAR');
+  for (const b of keep) { const piece = '\r\n' + b.join('\r\n'), sz = icalJsonBytes(piece); if (size + sz > ICAL_MAX_OUT) { cut++; continue; } ics += piece; size += sz; }
+  return { ics: ics + '\r\nEND:VCALENDAR', total, kept: kept - cut, recurring: rec, cut, name };
+}
+async function icalGet(body) {
+  const url = icalUrlOk(body.url);
+  if (!url) return { ok: false, error: 'host', note: 'сервер открывает только закрытые ссылки календарей Google (calendar.google.com/…/basic.ics) и Apple (…icloud.com/published/…)' };
+  const iso = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '';
+  const now = new Date(), from = iso(body.from) || new Date(now.getTime() - 30 * 864e5).toISOString().slice(0, 10), to = iso(body.to) || new Date(now.getTime() + 366 * 864e5).toISOString().slice(0, 10);
+  const g = await icalFetch(url);
+  if (!g.ok) return g;
+  if (!/BEGIN:VCALENDAR/i.test(g.text)) return { ok: false, error: 'not_ics', note: 'по ссылке не календарь — проверьте, что скопирована ссылка в формате iCal' };
+  const w = icalWindow(g.text, from, to);
+  return { ok: true, ics: w.ics, total: w.total, kept: w.kept, recurring: w.recurring, cut: w.cut, name: w.name, from, to, host: new URL(url).hostname, now: Date.now() };
+}
+
 // Экспорт внутренностей для автотестов (на работу функции не влияет)
-module.exports._test = { eventsSave, calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
+module.exports._test = { icalGet, icalUrlOk, icalFetch, icalWindow, icalUnfold, icalValue, ICAL_HOSTS, askPublish, askGet, askAck, askRequest, askPage, askNotify, askConsentOf, asksLoad, asksPrune, askTg, ASK_TG_RE, bookPublish, bookPage, bookNotify, bookConsentOf, bookConsentKey, consentVer, eventsSave, calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
