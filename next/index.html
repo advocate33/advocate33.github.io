@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 10:12 · 50e9f63">
+<meta name="build" content="13.10.2026 11:30 · e647ee6">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2553,7 +2553,10 @@ function putMany(list, opts) {
         const cur = g.result || null; let obj = obj0;
         if (typeof patch === 'function') { obj = patch(cur || obj0); if (!obj) { next(i + 1); return; } obj._upd = obj0._upd; obj._device = obj0._device; items[i][1] = obj; }
         const ex = exList.find(x => x && x.store === store && x.id === obj.id);
-        if (ex && cur) { const now = cur._upd || 0; if (now !== ex.upd && now !== ex.ack) { const msg = typeof formRecConflictText === 'function' && ex.snap ? formRecConflictText(ex, cur, obj) : 'Запись изменили, пока она была открыта — откройте заново'; ex.ack = now; finish(false, new Error(msg)); try { t.abort(); } catch (e) { /* штатно */ } return; } }
+        // аудит GPT 13.10.2026, A2: ожидание «записи нет» (absent) и «запись есть» (mustExist) — возврат к снимку; запись появилась или исчезла
+        // после сравнения — пакет не пишется целиком. Без этих отметок отсутствие записи по-прежнему не проверяется (формы, действия)
+        if (ex && ((ex.absent && cur) || (ex.mustExist && !cur))) { finish(false, new Error(ex.absent ? 'Запись появилась после сравнения (пришла с другого устройства или создана здесь) — сравните заново' : 'Запись удалена окончательно после сравнения — сравните заново')); try { t.abort(); } catch (e) { /* штатно */ } return; }
+        if (ex && cur && !ex.absent) { const now = cur._upd || 0; if (now !== ex.upd && now !== ex.ack) { const msg = typeof formRecConflictText === 'function' && ex.snap ? formRecConflictText(ex, cur, obj) : 'Запись изменили, пока она была открыта — откройте заново'; ex.ack = now; finish(false, new Error(msg)); try { t.abort(); } catch (e) { /* штатно */ } return; } }
         try { fieldStamps(obj, cur, obj._upd); } catch (e) { logErr('putMany:stamps', e); }
         os.put(obj); next(i + 1);
       };
@@ -3580,6 +3583,8 @@ async function nextSrvPost(action, payload, timeoutMs, slot) {
 }
 // v180: snapput (ссылка) → PUT шифротекста в хранилище → snapcommit с размером и суммой sha256; «busy» (замок занят другим
 // устройством) — один повтор через 1–3 секунды. Возвращает ответ сервера в том же виде, что dbput ({ok, ver} | {error}).
+// предел ожидания загрузки файла изменений (он не больше половины снимка; снимку — 10 минут)
+const SNAP_DELTA_MS = 120000;
 async function nextSnapSend(enc, baseVer, encDelta, slot) {
   const bytesArr = new TextEncoder().encode(enc), bytes = bytesArr.length, dArr = encDelta ? new TextEncoder().encode(encDelta) : null;
   pushStage('upload', mbText(bytes));
@@ -3595,7 +3600,8 @@ async function nextSnapSend(enc, baseVer, encDelta, slot) {
   // Д6 (сервер 186): изменения — рядом со снимком; не загрузились — фиксация без них (у других устройств цепочка прервётся, они возьмут
   // снимок целиком)
   let deltaToken = '';
-  if (dArr && p.deltaUrl && p.deltaToken) { try { const rd = await fetch(p.deltaUrl, { method: 'PUT', body: dArr, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (rd.ok) deltaToken = p.deltaToken; } catch (e) { logErr('snap:delta', e); } }
+  // аудит GPT 13.10.2026, B4: у загрузки изменений — свой предел (SNAP_DELTA_MS); не успела — фиксация без них, очередь обмена не висит
+  if (dArr && p.deltaUrl && p.deltaToken) { const dc = new AbortController(), dt = setTimeout(() => dc.abort(), SNAP_DELTA_MS); try { const rd = await fetch(p.deltaUrl, { method: 'PUT', body: dArr, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal: dc.signal }); if (rd.ok) deltaToken = p.deltaToken; } catch (e) { logErr('snap:delta', e, e && e.name === 'AbortError' ? 'изменения не загрузились за ' + Math.round(SNAP_DELTA_MS / 1000) + ' с — фиксация без них' : ''); } finally { clearTimeout(dt); } }
   const dPay = deltaToken ? { deltaToken, deltaBytes: dArr.length } : {};
   pushStage('confirm');
   let sha = ''; try { sha = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytesArr))).map(b => b.toString(16).padStart(2, '0')).join(''); } catch (e) { logErr('snap:sha', e); }
@@ -3997,6 +4003,18 @@ async function nextBlobsStranded(srv, key) {
   const local = new Set((await getAllRaw('docBlobs')).filter(b => b && b.data && !b._deleted).map(b => b.id));
   return (await getAll('docVersions')).filter(v => v && !v._deleted && v.cloudId && !local.has(v.id) && v.cloudSrv === srv && (!key || !v.cloudKey || v.cloudKey === key)).length;
 }
+// запрос к хранилищу за файлом документа — с пределом (файл до 50 МБ; как у снимка — 10 минут); не успел — ошибка словами
+const BLOB_NET_MS = 600000;
+// ответ: { ok, status, buf } — у скачивания тело читается внутри предела (fetch завершается по заголовкам, а не по телу)
+async function blobNetFetch(url, opts, verb) {
+  const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), BLOB_NET_MS);
+  try {
+    const r = await fetch(url, Object.assign({}, opts, { signal: ctl.signal }));
+    const buf = r.ok && !(opts && opts.method === 'PUT') ? await r.arrayBuffer() : null;
+    return { ok: r.ok, status: r.status, buf };
+  } catch (e) { if (e && e.name === 'AbortError') throw new Error('файл не ' + verb + ' за ' + Math.round(BLOB_NET_MS / 60000) + ' мин — медленная связь, повторите'); throw e; }
+  finally { clearTimeout(t); }
+}
 // положить недостающие файлы в хранилище (во время отправки — NEXT_PUSH.on); результат — числа для подтверждения
 async function nextBlobsPush() {
   if (typeof nextSnapKnown !== 'function' || nextSnapKnown() !== true) return { ok: true, uploaded: 0, failed: 0, total: 0, skipped: true };
@@ -4009,7 +4027,8 @@ async function nextBlobsPush() {
       const key = await nextBlobKey(SRVDB.pass), cloudId = await nextBlobCloudId(x.ver.id, key), enc = await nextBlobEncrypt(file, SRVDB.pass);
       const j = await nextSrvPost('blobput', { id: cloudId, size: enc.size });
       if (!j || !j.ok) { failed++; errors.push(nextSrvError(j)); continue; }
-      const r = await fetch(j.url, { method: 'PUT', body: enc, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' });
+      // аудит GPT 13.10.2026, B4 (тот же дефект, второй путь): загрузка файла — с пределом BLOB_NET_MS, иначе зависший запрос держит очередь обмена
+      const r = await blobNetFetch(j.url, { method: 'PUT', body: enc, cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }, 'загрузился');
       if (!r.ok) { failed++; errors.push('хранилище: HTTP ' + r.status); continue; }
       x.ver.cloudId = cloudId; x.ver.cloudAt = Date.now(); x.ver.cloudSize = enc.size; x.ver.cloudSrv = nextBlobSrv(); x.ver.cloudKey = key; await put('docVersions', x.ver); uploaded++;
     } catch (e) { logErr('blobs:push', e); failed++; errors.push(String(e && e.message || e).slice(0, 80)); }
@@ -4050,8 +4069,8 @@ async function nextBlobFetch(versionId) {
   if (v.cloudSrv && v.cloudSrv !== nextBlobSrv()) throw new Error('Файл лежит в хранилище прежнего сервера (' + v.cloudSrv + '), на этом устройстве его нет. Подключите прежний сервер в «Синхронизации» и откройте файл — он сохранится на устройстве и при следующей отправке уйдёт на новый сервер');
   if (v.cloudKey && v.cloudKey !== await nextBlobKey(SRVDB.pass)) throw new Error('Файл в хранилище зашифрован прежним паролем шифрования — верните прежний пароль в «Синхронизации» или откройте файл на устройстве, где он есть');
   const j = await srvCall('blobget', { id: v.cloudId }); if (!j || !j.ok) return '';
-  const r = await fetch(j.url, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }); if (!r.ok) return '';
-  const blob = await nextBlobDecrypt(await r.arrayBuffer(), SRVDB.pass), dataUrl = await nextBlobToDataUrl(blob);
+  const r = await blobNetFetch(j.url, { cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer' }, 'скачался'); if (!r.ok) return '';
+  const blob = await nextBlobDecrypt(r.buf, SRVDB.pass), dataUrl = await nextBlobToDataUrl(blob);
   await put('docBlobs', { id: versionId, data: dataUrl });
   return dataUrl;
 }
@@ -4109,16 +4128,34 @@ async function blobMoveRun() {
   const st = document.getElementById('bm-state');
   let res = null;
   try { res = await blobMoveFetchAll(r => { if (st) st.textContent = 'Скачиваю файлы прежним подключением: ' + (r.fetched + r.failed) + ' из ' + r.total + '…'; }); }
-  catch (e) { logErr('blobmove:run', e); res = { total: 0, fetched: 0, failed: 1, why: [String((e && e.message) || e)] }; }
+  catch (e) { logErr('blobmove:run', e); res = { total: 0, fetched: 0, failed: 1, error: true, why: [String((e && e.message) || e)] }; }
   finally { BLOB_MOVE.busy = false; }
   BLOB_MOVE.last = { at: Date.now(), ...res };
+  // аудит GPT 13.10.2026, A4: не всё скачалось (или проверка файлов упала) — подключение НЕ меняется: прежнее ещё действует, файлы можно
+  // докачать «Повторить перенос»; сменить, оставив их у прежнего подключения, — отдельное осознанное действие «Сменить без переноса»
+  if (res.failed) {
+    if (!res.error) next.stranded = res.failed;
+    blobMoveFailed(next, res);
+    return { ok: false, moved: res };
+  }
   BLOB_MOVE.pending = null; sheetBack(true);
   return syncApplyConnection(next, res);
+}
+function blobMoveFailed(next, res) {
+  const st = document.getElementById('bm-state'), log = document.getElementById('bm-log'), go = document.getElementById('bm-go'), skip = document.getElementById('bm-skip');
+  const head = res.error ? 'Перенос не выполнен: файлы не удалось проверить' : 'Не скачано файлов: ' + res.failed + ' из ' + res.total + (res.fetched ? ' (скачано ' + res.fetched + ')' : '');
+  if (st) { st.textContent = head + '. Подключение не сменено.'; st.classList.add('warn'); }
+  if (log) log.innerHTML = `<div id="bm-fail" style="flex-direction:column;gap:4px"><span>Причина: ${esc(blobMoveWhy(res.why) || 'не названа')}</span><span class="small muted" style="text-align:left">${res.error ? 'Сменить подключение без переноса — файлы, которых нет на устройстве, после смены не открыть.' : 'Эти файлы есть только у прежнего подключения. «Повторить перенос» — скачать их ещё раз; «Сменить без переноса» — сменить подключение, их можно будет открыть, только вернув прежнее.'}</span></div>`;
+  if (go) { go.disabled = false; go.lastChild.textContent = 'Повторить перенос'; }
+  if (skip) skip.disabled = false;
+  if (!st && typeof toast === 'function') toast(head + '. Подключение не сменено', true);
 }
 async function blobMoveSkip() { const next = BLOB_MOVE.pending; if (!next) return null; BLOB_MOVE.pending = null; sheetBack(true); return syncApplyConnection(next, null); }
 // отчёт словами для листа «Синхронизация» после смены подключения
 function blobMoveReport(res, stranded) {
   if (!res) return stranded ? ' Файлов документов, которые остались только в хранилище прежнего подключения, — ' + stranded + ': их можно открыть, только вернув прежнее подключение.' : '';
+  // аудит GPT 13.10.2026, A4: сбой проверки файлов (total 0, failed 1) не выдаётся за «файлов не было»
+  if (res.error) return ' Файлы документов прежнего подключения проверить не удалось (' + blobMoveWhy(res.why) + ') — часть из них может открываться только с прежним подключением.';
   if (!res.total) return ' Файлов только у прежнего подключения не было.';
   return ' Файлы документов: скачано на это устройство ' + res.fetched + ' из ' + res.total + (res.failed ? ', не удалось ' + res.failed + ' (' + blobMoveWhy(res.why) + ') — они остаются только в хранилище прежнего подключения' : '') + '. В новое хранилище они уйдут при ближайшей отправке на сервер.';
 }
@@ -5399,7 +5436,9 @@ function snapRbBuild(items, now) {
   for (const it of items || []) {
     const obj = snapRbTarget(it.store, it.cur, it.snap, now); if (!obj) continue;
     list.push([it.store, obj]);
-    if (it.cur) expect.push({ store: it.store, id: it.id, upd: it.cur._upd || 0, ack: null });
+    // аудит GPT 13.10.2026, A2: ожидание — и для записи, которой при сравнении не было (absent: появилась — возврат не пишется), и для
+    // бывшей (mustExist: удалена окончательно после сравнения — тоже); проверяет putMany в той же транзакции (next/fixes.js)
+    expect.push(it.cur ? { store: it.store, id: it.id, upd: it.cur._upd || 0, ack: null, mustExist: true } : { store: it.store, id: it.id, upd: 0, ack: null, absent: true });
     undo.push([it.store, it.id, it.cur ? snapRbClone(it.cur) : null]);
     if (it.store === 'cases' && it.snap && !it.snap._deleted) for (const e of snapRbCaseEvents(it.cur, it.snap, now)) list.push(['caseEvents', e]);
   }
@@ -5409,6 +5448,9 @@ function snapRbBuild(items, now) {
 // ── листы ──
 let SNAPRB = null;
 const snapRbWhen = ts => ts ? new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'без даты';
+// текст отмены — один для записи и для оценки в листе (аудит GPT 13.10.2026, A3): оценка по всем записям сравнения — верхняя граница для
+// любого выбора, поэтому обещание «можно будет отменить» не расходится с тем, что запишется
+function snapRbUndoText(undoItems, at) { return JSON.stringify({ at, snapAt: SNAPRB ? SNAPRB.at : 0, src: SNAPRB ? SNAPRB.src : '', items: undoItems }); }
 function snapRbUndoGet() { try { const o = JSON.parse(localStorage.getItem(SNAPRB_UNDO_KEY) || 'null'); return o && Array.isArray(o.items) ? o : null; } catch (e) { logErr('snaprb:undo:read', e); return null; } }
 // строка «последний возврат» с кнопкой отмены — в листах «Снимки базы на сервере» и «Копии базы»
 function snapRbUndoBox() {
@@ -5456,7 +5498,7 @@ function snapRbRender() {
     return `<label class="check rb-group"><input type="checkbox" id="rb-g-${g}"${on ? ' checked' : ''} onchange="snapRbGroup('${g}', this.checked)"><span><b>${esc(title)}</b> · ${list.length}</span></label>
       <details class="rb-list" id="rb-list-${g}"><summary>Показать записи</summary><div class="rb-rows">${rows}</div>${more}</details>`;
   };
-  const undoSize = JSON.stringify(p.back.concat(p.changed, p.extra).map(it => it.cur)).length, undoFits = undoSize <= SNAPRB_UNDO_MAX;
+  const undoSize = snapRbUndoText(p.back.concat(p.changed, p.extra).map(it => [it.store, it.id, it.cur ? snapRbClone(it.cur) : null]), Date.now()).length, undoFits = undoSize <= SNAPRB_UNDO_MAX;
   // снимок ui_check 13.10.2026: «Копия … от без даты сравнён» — род и дата без даты
   const srv = s.src === 'server', what = (srv ? 'Снимок базы на сервере' : 'Копия базы из файла') + (s.at ? ' от ' + snapRbWhen(s.at) : ' (дата создания не указана)');
   const body = total ? `<div class="info-box">${esc(what)} ${srv ? 'сравнён' : 'сравнена'} с базой на этом устройстве. Ничего ещё не записано.</div>
@@ -5493,13 +5535,18 @@ function snapRbCount() {
 async function snapRbWrite(items, undoOf) {
   const now = Date.now(), b = snapRbBuild(items, now);
   if (!b.list.length) return { ok: true, n: 0 };
+  // аудит GPT 13.10.2026, A1: очередь обмена — проверка и захват в одном такте (отмена возврата читает базу перед этим вызовом — за это
+  // время мог начаться обмен; раньше очередь ставилась без проверки, и finally снимал чужую)
+  if (NEXT_SYNC.busy) return { ok: false, error: 'идёт обмен — дождитесь его окончания и нажмите ещё раз' };
   NEXT_SYNC.busy = true; if (typeof syncStatusRender === 'function') syncStatusRender();
   try { await putMany(b.list, { expect: b.expect }); }
   catch (e) { logErr('snaprb:write', e); return { ok: false, error: String((e && e.message) || e).slice(0, 200) }; }
   finally { NEXT_SYNC.busy = false; if (typeof syncStatusRender === 'function') syncStatusRender(); }
+  // аудит GPT 13.10.2026, A3: после записанного возврата прежняя отмена больше не верна — удаляется ДО попытки запомнить новую; новая не
+  // поместилась или хранилище отказало — отмены нет, и это говорится (undoSaved: false)
+  localStorage.removeItem(SNAPRB_UNDO_KEY);
   let undoSaved = false;
-  if (!undoOf) { try { const txt = JSON.stringify({ at: now, snapAt: SNAPRB ? SNAPRB.at : 0, src: SNAPRB ? SNAPRB.src : '', items: b.undo }); if (txt.length <= SNAPRB_UNDO_MAX) { localStorage.setItem(SNAPRB_UNDO_KEY, txt); undoSaved = true; } } catch (e) { logErr('snaprb:undo:save', e); } }
-  else localStorage.removeItem(SNAPRB_UNDO_KEY);
+  if (!undoOf) { try { const txt = snapRbUndoText(b.undo, now); if (txt.length <= SNAPRB_UNDO_MAX) { localStorage.setItem(SNAPRB_UNDO_KEY, txt); undoSaved = true; } } catch (e) { logErr('snaprb:undo:save', e); } }
   try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('snaprb:refresh', e); }
   if (typeof devrAlarms === 'function' && typeof devrAlarmsSync === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e));
   return { ok: true, n: items.length, undoSaved };
@@ -5512,7 +5559,7 @@ async function snapRbApply() {
   const r = await snapRbWrite(items, false);
   if (!r.ok) { fErr('Возврат не записан: ' + r.error + '. Ничего не изменено — откройте возврат к снимку заново: сравнение покажет текущее состояние'); btnGo.disabled = false; return r; }
   SNAPRB = null;
-  toast('Возвращено записей: ' + r.n + (r.undoSaved ? '. Отменить — «Отменить возврат…» в «Копиях базы» и в «Снимках базы на сервере»' : '') + '. На другие устройства уйдёт при обмене');
+  toast('Возвращено записей: ' + r.n + (r.undoSaved ? '. Отменить — «Отменить возврат…» в «Копиях базы» и в «Снимках базы на сервере»' : r.n ? '. Отменить этот возврат нельзя: прежние версии не поместились в память устройства — вернуть их можно из копии базы' : '') + '. На другие устройства уйдёт при обмене', !!r.n && !r.undoSaved);
   closeSheet(); if (UI.ready) nav(UI.screen);
   return r;
 }
@@ -5707,14 +5754,17 @@ async function fsyncExchange(reason, opts) {
   if (!fsyncBound()) return { ok: false, error: 'файл или папка облака не выбраны' };
   if (!fsyncSupported()) return { ok: false, error: 'этот браузер не даёт доступа к ' + W.g + ' — обмен вручную' };
   if (FSYNC.busy || (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy)) { fsyncLater(); return { ok: false, error: 'идёт другой обмен — повторю через несколько секунд', busy: true }; }
-  const h = FSYNC.handle || (FSYNC.handle = await fsyncHandleGet());
-  if (!h) { const t = (W.a === 'файл' ? 'привязанный файл облака не найден' : 'папка облака не найдена') + ' на этом устройстве — выберите заново'; fsyncNote('err', t); return { ok: false, error: t }; }
-  FSYNC.perm = await fsyncPerm(h, !!o.ask);
-  if (FSYNC.perm !== 'granted') { try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); } return { ok: false, perm: true, error: 'нет доступа к ' + W.g + ' — нажмите «' + fsyncAllowLabel() + '»' }; }
-  if (!fsyncPass()) { fsyncNote('err', 'нужен пароль файла'); return { ok: false, error: 'нужен пароль файла' }; }
+  // аудит GPT 13.10.2026, A1: очередь занимается сразу после проверки, ДО первого ожидания (файл, разрешение). Раньше она ставилась после
+  // fsyncHandleGet и fsyncPerm — пока ждали разрешения, второй обмен (таймер, кнопка) или обмен с сервером проходил ту же проверку, два слияния
+  // шли одновременно, а finally одного снимал очередь другого. Ранние выходы ниже — внутри try, очередь освобождает общий finally.
   FSYNC.busy = true; if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = true; try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
   const res = { ok: true, added: 0, updated: 0, files: 0, wrote: false, reason: reason || '' };
   try {
+    const h = FSYNC.handle || (FSYNC.handle = await fsyncHandleGet());
+    if (!h) { const t = (W.a === 'файл' ? 'привязанный файл облака не найден' : 'папка облака не найдена') + ' на этом устройстве — выберите заново'; fsyncNote('err', t); return { ok: false, error: t }; }
+    FSYNC.perm = await fsyncPerm(h, !!o.ask);
+    if (FSYNC.perm !== 'granted') return { ok: false, perm: true, error: 'нет доступа к ' + W.g + ' — нажмите «' + fsyncAllowLabel() + '»' };
+    if (!fsyncPass()) { fsyncNote('err', 'нужен пароль файла'); return { ok: false, error: 'нужен пароль файла' }; }
     const hadLocal = fsyncHadLocal(), revBefore = syncRevision();
     const m = await fsyncReadMain(h, !!o.force);
     if (m.state === 'bad') { fsyncNote('err', 'файл ' + FSYNC_MAIN + ': ' + m.error); return { ok: false, error: m.error, badPass: m.badPass }; }
@@ -5888,12 +5938,13 @@ async function fsyncTake() {
   if (!file) { fErr('Выберите файл ' + FSYNC_MAIN + ' в папке облака'); return null; }
   { const bad = backupSizeCheck(Number(file.size || 0), backupIsMobile()); if (bad) { fErr(bad); return null; } }
   const pp = fsyncPassFromForm(false); if (pp.error) { fErr(pp.error); return null; }
-  if (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) { fErr('Идёт другой обмен — дождитесь его окончания и нажмите ещё раз'); return null; }
-  let text; try { text = await file.text(); } catch (e) { logErr('fsync:take', e, e && e.name); fErr('Файл не прочитан: ' + fsyncErrText(e)); return null; }
-  const d = await fsyncDecrypt(text, pp.pass); if (!d.ok) { fErr('Файл не открыт: ' + d.error); return null; }
-  if (pp.fresh) fsyncPassSet(pp.pass);
+  if ((typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) || FSYNC.busy) { fErr('Идёт другой обмен — дождитесь его окончания и нажмите ещё раз'); return null; }
+  // аудит GPT 13.10.2026, A1: очередь — сразу после проверки, до чтения и расшифровки файла (раньше между проверкой и захватом были два ожидания)
   if (typeof NEXT_SYNC === 'object') NEXT_SYNC.busy = true;
   try {
+    let text; try { text = await file.text(); } catch (e) { logErr('fsync:take', e, e && e.name); fErr('Файл не прочитан: ' + fsyncErrText(e)); return null; }
+    const d = await fsyncDecrypt(text, pp.pass); if (!d.ok) { fErr('Файл не открыт: ' + d.error); return null; }
+    if (pp.fresh) fsyncPassSet(pp.pass);
     const hadLocal = fsyncHadLocal(), revBefore = syncRevision();
     const r = await fsyncMergeDump(d.dump);
     if (r.failed) { fErr('Не записано записей: ' + r.failed + ' — возьмите файл ещё раз'); return r; }
@@ -5916,7 +5967,9 @@ async function fsyncPut() {
     const built = await fsyncBuild(), name = fsyncPutName();
     const how = await fileShare(name, built.text);
     if (how === 'shared' || how === 'saved') {
-      localStorage.setItem(FS_K.rev, revAt); if (fwdBefore) localStorage.removeItem(FS_K.fwd);
+      // аудит GPT 13.10.2026, A1: пока открыто меню «Поделиться», мог пройти обмен с сервером и пометить «есть что записать в файл» — данные
+      // после сборки файла в него не вошли, поэтому отметка снимается, только если база с начала сборки не менялась
+      localStorage.setItem(FS_K.rev, revAt); if (fwdBefore && syncRevision() === revAt) localStorage.removeItem(FS_K.fwd);
       localStorage.setItem(FS_K.mine, String(built.stamp)); localStorage.setItem(FS_K.putAt, String(Date.now())); fsyncNote('ok');
       openFsyncSheet('replace', { text: how === 'shared' ? 'Файл ' + name + ' передан в меню «Поделиться» — сохраните его в папку облака (туда же, где лежит ' + FSYNC_MAIN + '). Компьютер сам объединит его с базой.' : 'Файл ' + name + ' сохранён в загрузки. Переложите его в папку облака (туда же, где лежит ' + FSYNC_MAIN + ') — компьютер сам объединит его с базой.' });
     } else if (how === 'again') { const g = document.getElementById('bk-share-go'); if (g) g.hidden = false; fErr('Файл готов. Нажмите «Открыть меню «Поделиться»» — браузер открывает меню только сразу после нажатия'); }
@@ -13807,8 +13860,8 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
-<p><b>Вернуть базу к снимку.</b> «Синхронизация» → «Снимки базы на сервере» → «Вернуть…» у нужного снимка (или «Копии базы» → проверить файл → «Вернуть базу к копии…»). Программа сравнит снимок с базой на устройстве и покажет три группы: удалённое после снимка — вернётся; изменённое после снимка — вернётся к значениям снимка; созданное после снимка — по желанию уйдёт в корзину (по умолчанию не отмечено). Снимите отметки с того, что возвращать не нужно, и нажмите «Вернуть выбранное». Возврат записывается как новые правки и при обмене уходит на остальные устройства; перед возвратом получите изменения с сервера, чтобы учесть правки других устройств. Не меняются настройки, файлы документов, события судов и история изменений дел. Возврат можно отменить: «Отменить возврат…» в тех же листах — записи получат версии, которые были до возврата.</p>
-<p>Смена сервера или пароля шифрования: если часть файлов документов лежит только в хранилище прежнего подключения, программа предложит «Перенести» — скачает их на это устройство прежним подключением, затем сменит подключение; в новое хранилище файлы уйдут при ближайшей отправке на сервер. «Синхронизация» → «Файлы документов» показывает, где лежат файлы, и скачивает недостающие.</p>
+<p><b>Вернуть базу к снимку.</b> «Синхронизация» → «Снимки базы на сервере» → «Вернуть…» у нужного снимка (или «Копии базы» → проверить файл → «Вернуть базу к копии…»). Программа сравнит снимок с базой на устройстве и покажет три группы: удалённое после снимка — вернётся; изменённое после снимка — вернётся к значениям снимка; созданное после снимка — по желанию уйдёт в корзину (по умолчанию не отмечено). Снимите отметки с того, что возвращать не нужно, и нажмите «Вернуть выбранное». Возврат записывается как новые правки и при обмене уходит на остальные устройства; перед возвратом получите изменения с сервера, чтобы учесть правки других устройств. Не меняются настройки, файлы документов, события судов и история изменений дел. Возврат можно отменить: «Отменить возврат…» в тех же листах — записи получат версии, которые были до возврата. Отменить можно только последний возврат и только если прежние версии поместились в память устройства — программа скажет об этом сразу после возврата; иначе вернуть прежнее можно из копии базы.</p>
+<p>Смена сервера или пароля шифрования: если часть файлов документов лежит только в хранилище прежнего подключения, программа предложит «Перенести» — скачает их на это устройство прежним подключением, затем сменит подключение; в новое хранилище файлы уйдут при ближайшей отправке на сервер. Если скачать удалось не всё, подключение не меняется: «Повторить перенос» докачает остальное, «Сменить без переноса» сменит подключение, а нескачанные файлы откроются только с прежним подключением. «Синхронизация» → «Файлы документов» показывает, где лежат файлы, и скачивает недостающие.</p>
 <p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
 <p>Настройки → «Печать и выгрузка» (или «Отчёты» → «Печать и выгрузка»): выписка поступлений для кассовой книги, реестры дел, заседаний, ордеров и доверенностей — в окне печати можно «Сохранить как PDF»; таблицы CSV для Excel по разделам.</p>
 <p>Удалённое попадает в «Корзину» (Настройки) — оттуда его можно вернуть.</p>` },
