@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 11:30 · e647ee6">
+<meta name="build" content="13.10.2026 14:38 · 4560d23">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -137,6 +137,7 @@ h3{font-size:1rem;font-weight:600}
 .imp-done .button{min-height:36px}
 .task-when{color:var(--text-muted);font-weight:600}.task-when.overdue{color:var(--bad)}
 .t-license .lic-body{padding:12px 20px 16px}.t-license .lic-body p{margin:0}
+.t-backup .lic-body{padding:12px 20px 16px}.t-backup .lic-body p{margin:0}
 .panel-foot{font-size:.8125rem;color:var(--text-muted);padding:12px 20px 14px;border-top:1px solid var(--line);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .agenda-row{display:grid;grid-template-columns:55px minmax(0,1fr);gap:14px;padding:16px 20px;border-bottom:1px solid var(--line)}
 .agenda-row:last-child{border-bottom:0}.agenda-row+.day-mark{border-top:0}
@@ -214,12 +215,13 @@ dialog::backdrop{background:#0c183a70}
   .bottom-nav .icon{width:21px;height:21px}
   .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.stat{padding:14px}.stat-value{font-size:1.65rem}.stat-value.small-value{font-size:1.3rem}.stat-label{font-size:.75rem}
   .day-grid{gap:16px}.day-grid>.stack{display:contents}
-  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-book{order:1}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
+  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-backup{order:7}.t-book{order:1}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
   .panel.pad{padding:18px}.panel-title{padding:10px 8px 10px 16px}
   .imp-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main x" "done done";padding:12px 4px 12px 16px;gap:8px}
   .imp-done .button{min-height:var(--touch)}
   .panel-foot{padding:10px 16px 12px}
   .t-license .lic-body{padding:10px 16px 14px}
+  .t-backup .lic-body{padding:10px 16px 14px}
   .agenda-row{padding:15px 16px;gap:10px;grid-template-columns:48px minmax(0,1fr)}
   .day-mark{padding:9px 16px}
   .intro-strip{padding:18px;margin-bottom:18px}
@@ -320,6 +322,9 @@ button.imp-main:hover .task-title{color:var(--accent)}
 .list-rows>.list-btn>span:last-child{overflow-wrap:anywhere}
 /* 13.10.2026 (А3): строка «сайта суда» — название сверху, пояснение под ним: длинное пояснение с номером не рвётся по колонкам */
 .list-rows>.list-btn.site-row{flex-direction:column;align-items:flex-start;gap:2px;text-decoration:none}
+/* 13.10.2026 (п. 1.3): текст согласия на обработку ПД в листе онлайн-записи — абзацы как в тексте, длинные слова переносятся */
+.consent-prev>summary{display:flex;align-items:center;min-height:var(--touch);cursor:pointer;color:var(--accent);font-size:.875rem}
+.consent-text{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0 10px}
 /* А4: возврат к снимку — кнопки строки снимка переносятся, списки записей сворачиваются */
 .snap-row>span:first-child{flex:1;min-width:0}
 .snap-row>.row-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
@@ -4292,15 +4297,32 @@ if (typeof document !== 'undefined') {
 // (NEXT_REMIND в next/guard.js), как отправку базы — NEXT_PUSH. Признак «передавать» (crm_srv_remind) общий с прежней программой.
 const srvRemindOn = () => localStorage.getItem('crm_srv_remind') === '1';
 let SRV_REMIND_TIMER = null;
+// урок 136: задачи в утренней сводке, как в прежней программе (tgSendDigest — задачи на сегодня и число просроченных). Telegram —
+// зарубежный сервис, а названия задач пишут с фамилиями («Позвонить Иванову»): по умолчанию уходит «Задача по делу <номер>»; полные
+// названия задач и имя с телефоном в уведомлении о записи на приём — по отметке «Полные названия и имена в Telegram» (уходит с настройками).
+// Просроченные задачи передаются отдельной частью (не больше 200, самые поздние): сервер 189 сам считает их каждый день — задача, срок
+// которой прошёл, пока программа была закрыта, тоже попадёт в строку «Просрочено задач». Сервер 188 строки о просрочке не пишет.
+const SRV_REMIND_FULL_KEY = 'crm_srv_remind_full', SRV_REMIND_OVERDUE_MAX = 200;
+if (typeof SYNC_SETTINGS_KEYS !== 'undefined' && !SYNC_SETTINGS_KEYS.includes(SRV_REMIND_FULL_KEY)) SYNC_SETTINGS_KEYS.push(SRV_REMIND_FULL_KEY);
+const srvRemindFull = () => localStorage.getItem(SRV_REMIND_FULL_KEY) === '1';
+const srvRemindISO = ts => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+function srvRemindTaskItem(t, full) {
+  const num = String(t.caseNum || '').trim();
+  return { id: 't:' + t.id, date: t.due, time: t.time || '', title: full ? 'Задача: ' + String(t.title || 'без названия').slice(0, 140) : (num ? 'Задача по делу ' + num : 'Задача без дела'), text: full ? num : '' };
+}
 async function srvRemindBuild(nowTs) {
-  const now = nowTs || Date.now(), horizon = now + 14 * 864e5, out = [];
+  const now = nowTs || Date.now(), horizon = now + 14 * 864e5, out = [], today = srvRemindISO(now), full = srvRemindFull(), overdue = [];
   const isPlanned = h => h && h.status !== 'Проведено' && h.status !== 'Отменено' && h.status !== 'Дата прошла';
   const cases = await getAll('cases'); const active = cases.filter(c => c && !c._deleted && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено');
   active.forEach(c => (c.deadlines || []).forEach(dl => { if (!dl || dl.done || !dl.date) return; const t = parseLocalDate(dl.date); if (!t || t.getTime() < now - 864e5 || t.getTime() > horizon) return;
     out.push({ id: 'd:' + c.id + ':' + dl.date + ':' + String(dl.title || '').slice(0, 20), date: dl.date, title: `Срок: ${dl.title || 'срок'}`, text: [c.number, dl.confirmedAt ? '' : 'не подтверждён'].filter(Boolean).join(' · ') }); }));
   (await getAll('hearings')).forEach(h => { if (!h || h._deleted || !h.date || !isPlanned(h)) return; const t = parseLocalDate(h.date); if (!t || t.getTime() < now - 864e5 || t.getTime() > horizon) return;
     out.push({ id: 'h:' + h.id, date: h.date, time: h.time || '', title: `Заседание ${h.caseNum || ''}`.trim(), text: [h.court, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(', ') }); });
-  return out.sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || ''))).slice(0, 300);
+  (await getAll('tasks')).forEach(t => { if (!t || t._deleted || t.done || !/^\d{4}-\d{2}-\d{2}$/.test(t.due || '')) return; const d = parseLocalDate(t.due); if (!d || d.getTime() > horizon) return;
+    (t.due < today ? overdue : out).push(srvRemindTaskItem(t, full)); });
+  const byDate = (a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || ''));
+  // ближайшее — не больше 300; просроченные задачи — своей частью, чтобы не вытеснили ближайшее (на сервере предел — 500)
+  return out.sort(byDate).slice(0, 300).concat(overdue.sort((a, b) => byDate(b, a)).slice(0, SRV_REMIND_OVERDUE_MAX).sort(byDate));
 }
 // Передать список (или пустой — остановить напоминания). Возвращает ответ сервера; ошибки — словами.
 async function srvRemindSend(items) {
@@ -4334,12 +4356,20 @@ async function srvRemindToggle(on) {
   openRemindSheet('replace', j.ok ? { text: 'Список на сервере очищен — напоминания остановлены.' } : { text: 'Передача выключена, но список на сервере не очищен: ' + j.error + '. Повторите, когда будет связь.', bad: true });
 }
 async function srvRemindNow() { const b = document.getElementById('rm-now'); if (b) b.disabled = true; await srvRemindSync(true); openRemindSheet('replace'); }
+// отметка «Полные названия и имена в Telegram»: список напоминаний передаётся заново, страница записи публикуется заново (уведомление о
+// записи и текст согласия на сервере меняются вместе с ней)
+async function srvRemindFullToggle(on) {
+  localStorage.setItem(SRV_REMIND_FULL_KEY, on ? '1' : '0'); if (typeof bumpSettings === 'function') bumpSettings();
+  if (srvRemindOn() && SRV.url && SRV.secret) await srvRemindSync(true);
+  if (typeof bookPublish === 'function' && typeof bookCfg === 'function' && bookCfg().enabled) { try { await bookPublish(true, true); } catch (e) { logErr('remind:full-book', e); } }
+  openRemindSheet('replace');
+}
 function openRemindSheet(sub, msg) {
   const on = srvRemindOn(), srv = !!(SRV.url && SRV.secret), at = Number(localStorage.getItem('crm_srv_remind_at') || 0), err = lsJSON('crm_next_remind_err', null), tg = localStorage.getItem('crm_next_remind_tg');
   const state = !srv ? ['', 'Личный сервер не подключён — сначала «Синхронизация», шаг 1'] : !on ? ['', 'Передача на сервер выключена'] : err ? ['bad', 'Последняя передача не удалась: ' + err.msg] : at ? [tg === '0' ? 'warn' : 'good', `Включено · передано ${localStorage.getItem('crm_next_remind_n') || 0} ${new Date(at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}${tg === '0' ? ' · у сервера не заданы TG_TOKEN и TG_CHAT — сделайте шаги 1–3' : ' · Telegram у сервера настроен'}`] : ['', 'Включено, список ещё не передавался'];
   openSheet('Напоминания в Telegram', `<div class="status-line ${state[0]}" id="rm-state" role="status">${icon(state[0] === 'good' ? 'check' : state[0] ? 'circle-alert' : 'send')}<span>${esc(state[1])}</span></div>
     ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="rm-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
-    <p class="small muted">Раз в день, в 08:05 по Москве, ваш сервер присылает в Telegram сроки и заседания на сегодня и завтра — даже если программа закрыта. Бот — ваш собственный; автор программы к нему доступа не имеет.</p>
+    <p class="small muted">Раз в день, в 08:05 по Москве, ваш сервер присылает в Telegram сроки, заседания и задачи на сегодня и завтра — даже если программа закрыта; с сервера 189 — и число просроченных задач. Бот — ваш собственный; автор программы к нему доступа не имеет.</p>
     <div class="section-label step-label">Шаг 1. Создать бота</div>
     <ol class="steps-list"><li>В Telegram найдите @BotFather (с синей галочкой) → «Start» → команда <b>/newbot</b>.</li>
       <li>Придумайте имя бота (любое) и адрес, оканчивающийся на «bot», например «advokat_ivanov_bot».</li>
@@ -4353,8 +4383,10 @@ function openRemindSheet(sub, msg) {
       <li>Добавьте две переменные: <b>TG_TOKEN</b> — токен из шага 1, <b>TG_CHAT</b> — номер чата из шага 2 → «Создать версию».</li>
       <li>Таймер: Cloud Functions → crm-bridge → «Триггеры» → создать таймер, выражение cron <b>5 5 * * ? *</b> (это 08:05 по Москве), функция crm-bridge, сервисный аккаунт crm-server.</li></ol>
     <div class="section-label step-label">Шаг 4. Передавать список на сервер</div>
-    <p class="small muted">На сервер уходят даты, номера дел, названия сроков (как вы их записали — не пишите в них фамилии), суд и зал заседаний на 14 дней вперёд, до 300 записей. Имена доверителей не передаются. Список обновляется сам через несколько секунд после правки срока или заседания.</p>
+    <p class="small muted">На сервер уходят даты, номера дел, названия сроков (как вы их записали — не пишите в них фамилии), суд и зал заседаний и сроки задач на 14 дней вперёд, до 300 записей, и до 200 просроченных задач. Имена доверителей не передаются. Список обновляется сам через несколько секунд после правки срока, заседания или задачи.</p>
     <label class="check"><input type="checkbox" id="rm-on"${on ? ' checked' : ''}${srv ? '' : ' disabled'} onchange="srvRemindToggle(this.checked)"><span>Передавать список напоминаний на сервер</span></label>
+    <label class="check"><input type="checkbox" id="rm-full"${srvRemindFull() ? ' checked' : ''} onchange="srvRemindFullToggle(this.checked)"><span>Полные названия задач и имена в Telegram</span></label>
+    <p class="small muted" id="rm-full-note">Telegram — зарубежный сервис. Без этой отметки задача приходит как «Задача по делу А40-1234/2026», а уведомление о записи на приём — только с датой, временем и кодом заявки (имя и телефон — в программе). С отметкой — название задачи как вы его записали, а в уведомлении о записи — имя, телефон и вопрос; тогда об этом должно быть сказано в тексте согласия на странице записи (программа добавляет это сама).</p>
     <div class="form-actions"><button type="button" class="button primary" id="rm-now"${on && srv ? '' : ' disabled'} onclick="srvRemindNow()">${icon('send')}Передать сейчас</button>${srv ? '' : `<button type="button" class="button" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button>`}</div>
     <p class="small muted">Проверка: после «Передать сейчас» в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных — латиницей, заглавными). Первое сообщение придёт в 08:05, если на сегодня или завтра есть срок или заседание. Ничего не пришло — проверьте таймер (шаг 3) и что вы нажали «Start» у бота.</p>`, sub);
 }
@@ -5199,6 +5231,37 @@ let BACKUP_PENDING = null;
 // пришедшая потом с сервера, решалась бы «новее целиком» и терялась. Читается самая ранняя база серверов (sync/srv2.js) — более ранняя
 // база безопасна: запись, правленная с обеих сторон, объединяется по полям
 function backupMergeOpts(o) { return typeof syncMergeBaseForFile === 'function' ? Object.assign({ baseKey: null, base: syncMergeBaseForFile() }, o || {}) : (o || undefined); }
+// ── напоминание о копии базы (урок 136: backupReminderCheck прежней программы при переносе выпал) ──
+// Прежняя программа напоминала на обзоре, если копии нет 14 дней (и не напоминала при синхронизации через файл). Здесь копией считается любой
+// выход данных с устройства: копия в файл, удачная отправка на основной или запасной сервер (там история снимков), получение с сервера
+// при отсутствии неотправленных правок, запись в файл облака,
+// копия прежней программы (на основном адресе хранилище с ней общее). Нечего терять (нет дел) — не напоминает; «Скрыть» — на 7 дней.
+const BACKUP_NAG_KEY = 'crm_next_backup_nag', BACKUP_NAG_DAYS = 14, BACKUP_NAG_HIDE_DAYS = 7;
+function backupRemindModel(now, st) {
+  if (!st || !(st.cases > 0)) return null;
+  const outs = [['копия в файл', st.backupAt], ['отправка на сервер', st.pushAt], ['отправка на запасной сервер', st.pushAt2], ['обмен с сервером', st.syncAt], ['файл в облаке', st.fsAt], ['копия в прежней программе', st.legacyAt]]
+    .map(([how, at]) => [how, Number(at) || 0]).filter(x => x[1] > 0 && x[1] <= now + 60000);
+  const last = outs.reduce((a, x) => (!a || x[1] > a[1] ? x : a), null), days = last ? Math.floor((now - last[1]) / 864e5) : null;
+  if (last && days < BACKUP_NAG_DAYS) return null;
+  if (Number(st.hiddenAt) > 0 && now - Number(st.hiddenAt) < BACKUP_NAG_HIDE_DAYS * 864e5) return null;
+  return { never: !last, days, how: last ? last[0] : '', at: last ? last[1] : 0 };
+}
+function backupRemindState() {
+  const n = k => Number(localStorage.getItem(k) || 0);
+  // получение с сервера защищает данные, только если на устройстве нет неотправленных правок (тогда на сервере то же, что здесь)
+  let synced = false; try { synced = typeof nextLocalChanges === 'function' && !!(SRV && SRV.url) && !nextLocalChanges(); } catch (e) { logErr('backup:nag-sync', e); }
+  return { syncAt: synced ? n('crm_srvdb_lastpull') : 0, backupAt: n('crm_next_backup_at'), pushAt: n('crm_next_push_at'), pushAt2: n('crm_next_push_at_s2'), fsAt: Math.max(n('crm_fsync_write_at'), n('crm_fsync_put_at')), legacyAt: n('crm_last_backup'), hiddenAt: n(BACKUP_NAG_KEY) };
+}
+async function backupRemindBox() {
+  let cases = 0; try { cases = (await getAll('cases')).length; } catch (e) { logErr('backup:nag', e); return ''; }
+  const m = backupRemindModel(Date.now(), { ...backupRemindState(), cases }); if (!m) return '';
+  const title = m.never ? 'Копия базы ещё не сохранялась' : 'Копии базы нет ' + m.days + ' ' + plural(m.days, 'день', 'дня', 'дней');
+  const text = m.never ? 'База есть только на этом устройстве: копии в файл, отправки на сервер и обмена через облако ещё не было. Сохраните копию — на случай потери или поломки устройства.'
+    : `Последний раз данные уходили с устройства ${new Date(m.at).toLocaleDateString('ru-RU')} (${m.how}). Сохраните копию или отправьте изменения на сервер.`;
+  return `<section class="panel t-backup" id="backup-nag"><div class="panel-title"><h2>${esc(title)}</h2><div class="panel-tools"><button type="button" class="text-button" id="backup-nag-hide" onclick="backupRemindHide()">Скрыть</button></div></div>
+    <div class="lic-body"><p class="small">${esc(text)}</p><div class="form-actions" style="margin:8px 0 0"><button type="button" class="button small-btn" id="backup-nag-open" onclick="openBackupSheet()">${icon('hard-drive', 'icon-sm')}Сохранить копию</button></div></div></section>`;
+}
+function backupRemindHide() { localStorage.setItem(BACKUP_NAG_KEY, String(Date.now())); toast('Скрыто на 7 дней'); nav('today'); }
 function openBackupSheet(sub) {
   const last = Number(localStorage.getItem('crm_next_backup_at') || 0), checked = Number(localStorage.getItem('crm_next_backup_checked') || 0);
   openSheet('Копии базы', `<p class="small muted">Копия — один зашифрованный файл со всей базой. Его можно хранить отдельно, перенести на другое устройство или открыть в прежней программе («Восстановить из файла»). Без пароля копии файл не открыть — запишите пароль отдельно.</p>
@@ -7723,7 +7786,28 @@ const BOOK_KEY = 'crm_book', BOOK_HASH_KEY = 'crm_next_book_pubhash', BOOK_TICK 
 const BOOK = { timer: null, loop: null, busy: false };
 function bookCfg() {
   let c = {}; try { c = JSON.parse(localStorage.getItem(BOOK_KEY) || '{}') || {}; } catch (e) { /* штатно: настройки не разобраны — значения по умолчанию */ c = {}; }
-  return Object.assign({ enabled: false, publicId: '', title: 'Запись на консультацию', address: '', phone: '', note: '', durationMin: 60, horizonDays: 14, from: '10:00', to: '18:00', breakFrom: '13:00', breakTo: '14:00', days: [1, 2, 3, 4, 5], minLeadHours: 2, topics: '', hearingMin: 60, afterCourtMin: 0, beforeCourtMin: 0, gapMin: 0, lastPoll: 0, lastPub: 0 }, c);
+  return Object.assign({ enabled: false, publicId: '', title: 'Запись на консультацию', address: '', phone: '', note: '', durationMin: 60, horizonDays: 14, from: '10:00', to: '18:00', breakFrom: '13:00', breakTo: '14:00', days: [1, 2, 3, 4, 5], minLeadHours: 2, topics: '', hearingMin: 60, afterCourtMin: 0, beforeCourtMin: 0, gapMin: 0, lastPoll: 0, lastPub: 0,
+    opName: '', opAddress: '', opContact: '', consentMonths: 12, consentCustom: '' }, c);
+}
+// ── согласие на обработку персональных данных (13.10.2026, план по ЮрТопосу, п. 1.3) ──
+// Норма: ч. 1 ст. 9 Закона № 152-ФЗ в ред. ФЗ от 24.06.2025 № 156-ФЗ (с 01.09.2025) — согласие оформляется отдельно от иных информации и
+// документов. Строка «Нажимая «Записаться», вы соглашаетесь…» сервера 174–188 этому, по оценке, не отвечает. С сервера 189: отдельный
+// текст (страница ?book=…&consent=…), флажок без отметки, кнопка «Записаться» неактивна до отметки, в заявке — время согласия по часам
+// сервера и редакция текста; сервер хранит каждую редакцию. Текст собирается из полей листа (оператор, адрес, куда отзывать, срок) или
+// берётся свой. Шаблон — черновик для проверки адвокатом, не готовое юридическое заключение. Прежняя программа полей согласия не знает и
+// при своей публикации их не шлёт — сервер 189 оставляет на странице прежний текст согласия.
+const BOOK_CONSENT_MONTHS = [6, 12, 24, 36];
+function bookConsentText(cfg, full) {
+  const c = cfg || {}, custom = String(c.consentCustom || '').trim(); if (custom) return custom.slice(0, 8000);
+  const name = String(c.opName || '').trim(), addr = String(c.opAddress || '').trim(); if (!name || !addr) return '';
+  const months = BOOK_CONSENT_MONTHS.includes(Number(c.consentMonths)) ? Number(c.consentMonths) : 12, contact = String(c.opContact || '').trim();
+  return ['Согласие на обработку персональных данных',
+    `Заполняя форму записи на консультацию на этой странице и отмечая согласие, я свободно, своей волей и в своём интересе даю согласие оператору — ${name}, адрес: ${addr} — на обработку моих персональных данных: имени, номера телефона, а также сведений, которые я указал(а) в полях «Вопрос» и «Комментарий».`,
+    'Цель обработки: запись на консультацию и связь со мной по этой записи.',
+    'Действия с персональными данными: сбор, запись, систематизация, накопление, хранение, уточнение (обновление, изменение), извлечение, использование, удаление, уничтожение. Обработка ведётся с использованием средств автоматизации: заявка хранится на сервере оператора и в его программе учёта. Третьим лицам персональные данные не передаются, за исключением случаев, предусмотренных законом.',
+    full ? 'Уведомление оператору о заявке с моими именем, телефоном и вопросом направляется через мессенджер Telegram, серверы которого могут находиться за пределами Российской Федерации.' : '',
+    `Согласие действует со дня его дачи до достижения цели обработки, но не более ${months} ${plural(months, 'месяца', 'месяцев', 'месяцев')}, либо до его отзыва. Я могу отозвать согласие, направив оператору заявление${contact ? ' по адресу: ' + contact : ' по адресу оператора'}.`
+  ].filter(Boolean).join('\n\n');
 }
 function bookCfgSave(c) { localStorage.setItem(BOOK_KEY, JSON.stringify(c)); if (typeof bumpSettings === 'function') bumpSettings(); }
 const bookNewId = () => Array.from(crypto.getRandomValues(new Uint8Array(12))).map(b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
@@ -7771,6 +7855,9 @@ async function bookPublish(quiet, force) {
   if (!cfg.publicId) { cfg.publicId = bookNewId(); bookCfgSave(cfg); }
   const days = bookAvailability(cfg, await getAll('hearings'), await getAll('meetings'));
   const settings = { title: cfg.title, address: cfg.address, phone: cfg.phone, note: cfg.note, durationMin: Number(cfg.durationMin) || 60, topics: String(cfg.topics || '').split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 20) };
+  // сервер 189: текст согласия и вид уведомления в Telegram (сервер 188 эти поля не читает); пустой текст не шлётся — сервер оставит прежний
+  const full = typeof srvRemindFull === 'function' && srvRemindFull(), consent = bookConsentText(cfg, full);
+  settings.notifyFull = !!full; if (consent) settings.consentText = consent;
   const hash = JSON.stringify([cfg.publicId, settings, days]);
   if (!force && quiet && localStorage.getItem(BOOK_HASH_KEY) === hash) return { ok: true, same: true };
   const j = await bookSrv('bookpub', { publicId: cfg.publicId, settings, days }, true);
@@ -7798,7 +7885,14 @@ async function bookPoll(quiet) {
         const phone = String(b.phone || '').replace(/\D/g, '');
         let lead = leads.find(x => x.bookingId === b.id) || (phone ? leads.find(x => x.phone && String(x.phone).replace(/\D/g, '') === phone) : null);
         if (lead && lead._deleted) lead = { id: lead.id };
-        if (!lead) { lead = { id: 'О-book-' + b.id, name: String(b.name || 'Без имени'), phone: String(b.phone || ''), email: '', topic: b.topic || 'Консультация', summary: b.comment || '', kind: '', status: 'Новое', source: 'Онлайн-запись', bookingId: b.id, createdAt: Date.now() }; await put('leads', lead); leads.push(lead); }
+        // сервер 189: время согласия на обработку ПД (по часам сервера) и редакция текста — в обращение
+        const consent = Number(b.consentAt) > 0 ? { consentAt: Number(b.consentAt), consentVer: String(b.consentVer || '').slice(0, 24) } : null;
+        if (!lead) { lead = { id: 'О-book-' + b.id, name: String(b.name || 'Без имени'), phone: String(b.phone || ''), email: '', topic: b.topic || 'Консультация', summary: b.comment || '', kind: '', status: 'Новое', source: 'Онлайн-запись', bookingId: b.id, createdAt: Date.now(), ...(consent || {}) }; await put('leads', lead); leads.push(lead); }
+        else if (consent) {
+          // прежнее обращение того же человека: согласие дописывается, если новее; перечитать перед записью (урок 78), удалённое не трогать
+          const cur = await getOne('leads', lead.id);
+          if (cur && !cur._deleted && consent.consentAt > (Number(cur.consentAt) || 0)) { cur.consentAt = consent.consentAt; cur.consentVer = consent.consentVer; cur.updatedAt = Date.now(); await put('leads', cur); }
+        }
         m = { id: 'В-book-' + b.id, date: b.date, time: b.time, duration: Number(cfg.durationMin) || 60, with: String(b.name || ''), place: cfg.address || '', note: 'Онлайн-запись, код ' + (b.code || '') + (b.topic ? ' · ' + b.topic : '') + (b.comment ? '\n' + b.comment : '') + (b.phone ? '\nТел. ' + b.phone : ''), leadId: lead.id, bookingId: b.id, bookingCode: b.code || '', bookingStatus: b.status || 'new', createdAt: Date.now() };
         await put('meetings', m); meetings.push(m); n++;
       } else for (const x0 of same) {
@@ -7852,7 +7946,7 @@ async function bookPendingBox() {
       <div class="imp-done"><button type="button" class="button small-btn" id="bk-ok-${esc(m.id)}" onclick="bookSetStatus('${jsq(m.id)}', 'confirmed')">${icon('check', 'icon-sm')}Подтвердить</button><button type="button" class="button small-btn" id="bk-no-${esc(m.id)}" onclick="bookSetStatus('${jsq(m.id)}', 'declined')">Отклонить</button></div></div>`).join('')}</section>`;
 }
 function openBookSheet(mode) {
-  const c = bookCfg(), url = bookUrl(c), day = (n, l) => `<label class="check" style="display:inline-flex;margin-right:12px"><input type="checkbox" class="bk-day" value="${n}"${(c.days || []).includes(n) ? ' checked' : ''}><span>${l}</span></label>`;
+  const c = bookCfg(), url = bookUrl(c), consent = bookConsentText(c, typeof srvRemindFull === 'function' && srvRemindFull()), day = (n, l) => `<label class="check" style="display:inline-flex;margin-right:12px"><input type="checkbox" class="bk-day" value="${n}"${(c.days || []).includes(n) ? ' checked' : ''}><span>${l}</span></label>`;
   openSheet('Онлайн-запись на консультацию', `<p class="small muted">Доверитель открывает страницу записи на вашем личном сервере, видит свободные окна и оставляет заявку. Заявка становится обращением и встречей «ждёт подтверждения» — на «Сегодня» её можно подтвердить или отклонить. На сервер уходят только окна времени и подписи страницы — без имён доверителей и дел.</p>
     ${!SRV.url ? '<div class="info-box warning">Нужен личный сервер: «Синхронизация» → «Подключить сервер».</div>' : url ? `<div class="info-box" id="bk-url">Ссылка для доверителей: <span class="addr">${esc(url)}</span> <button type="button" class="text-button" onclick="bookCopyUrl()">Скопировать</button></div>` : '<p class="small muted">Ссылка появится после первого сохранения с включённой записью.</p>'}
     <label class="check"><input type="checkbox" id="bk-enabled"${c.enabled ? ' checked' : ''}><span>Включить онлайн-запись</span></label>
@@ -7866,6 +7960,13 @@ function openBookSheet(mode) {
       ${wide(fText('bk-topics', 'Темы для выбора (по одной в строке)', c.topics, 3))}</div>
     <div class="field"><span class="small muted">Дни приёма</span><div>${day(1, 'пн')}${day(2, 'вт')}${day(3, 'ср')}${day(4, 'чт')}${day(5, 'пт')}${day(6, 'сб')}${day(0, 'вс')}</div></div>
     <p class="small muted">Если у суда в справочнике указано время в пути и оно больше, берётся оно. Окна обновляются на сервере сами после правки заседаний и встреч.</p>
+    <div class="section-label step-label">Согласие на обработку персональных данных</div>
+    <p class="small muted">На странице записи — отдельный текст согласия и флажок без отметки; «Записаться» не нажимается, пока флажок не отмечен (ч. 1 ст. 9 Закона № 152-ФЗ в ред. от 24.06.2025: согласие оформляется отдельно от иных документов). В обращении сохраняются время согласия и редакция текста. Действует с сервера 189; текст ниже — черновик по полям, проверьте его.</p>
+    ${!consent ? '<div class="info-box warning" id="bk-consent-warn">Текст согласия не собран: укажите оператора и его адрес (или свой текст согласия).</div>' : ''}
+    <div class="form-grid">${wide(fInput('bk-opname', 'Оператор: ваши ФИО и адвокатское образование', c.opName, 'autocomplete="off" placeholder="адвокат Иванов Иван Иванович, коллегия адвокатов «…»"'))}${wide(fInput('bk-opaddr', 'Адрес оператора', c.opAddress, 'autocomplete="off"'))}
+      ${wide(fInput('bk-opcontact', 'Куда направлять отзыв согласия (почта или адрес)', c.opContact, 'autocomplete="off"'))}${fSelect('bk-cmonths', 'Срок действия согласия, месяцев', String(c.consentMonths), BOOK_CONSENT_MONTHS.map(String))}
+      ${fText('bk-ccustom', 'Свой текст согласия (необязательно — заменяет собранный по полям)', c.consentCustom, 3)}</div>
+    <details class="consent-prev" id="bk-consent-prev"><summary>Текст согласия, который увидит доверитель (по сохранённым полям)</summary><div class="small consent-text">${esc(consent || 'Текст не собран — заполните оператора и адрес и сохраните.')}</div></details>
     ${fSaveBar('bookSaveSettings()', 'Сохранить и опубликовать')}
     <div class="form-actions">${btn('Проверить заявки', 'bookPoll(false)', '', 'refresh-cw')}</div>`, mode === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
 }
@@ -7878,11 +7979,15 @@ function bookSettingsModel(v, prev) {
   c.hearingMin = num(v.hmin, 15, 480, 60); c.afterCourtMin = num(v.after, 0, 240, 0); c.beforeCourtMin = num(v.before, 0, 240, 0); c.gapMin = num(v.gap, 0, 120, 0);
   c.days = (v.days || []).map(Number).filter(n => n >= 0 && n <= 6); c.topics = String(v.topics || '');
   if (c.enabled && !c.days.length) return { error: 'Отметьте хотя бы один день приёма' };
+  // согласие на обработку ПД: оператор и адрес — или свой текст; без них страница записи остаётся с прежним текстом согласия
+  c.opName = String(v.opname || '').trim().slice(0, 300); c.opAddress = String(v.opaddr || '').trim().slice(0, 300); c.opContact = String(v.opcontact || '').trim().slice(0, 300);
+  c.consentMonths = BOOK_CONSENT_MONTHS.includes(Number(v.cmonths)) ? Number(v.cmonths) : 12; c.consentCustom = String(v.ccustom || '').trim().slice(0, 8000);
+  if (c.enabled && !c.consentCustom && (!c.opName || !c.opAddress)) return { error: 'Для текста согласия на обработку персональных данных укажите оператора (ваши ФИО и адвокатское образование) и его адрес — или вставьте свой текст согласия' };
   return { obj: c };
 }
 async function bookSaveSettings() {
   const v = { enabled: !!(document.getElementById('bk-enabled') || {}).checked, days: [...document.querySelectorAll('#sheetContent .bk-day:checked')].map(x => x.value) };
-  for (const k of ['title', 'address', 'phone', 'note', 'dur', 'from', 'to', 'b1', 'b2', 'horizon', 'lead', 'hmin', 'after', 'before', 'gap', 'topics']) v[k] = fv('bk-' + k);
+  for (const k of ['title', 'address', 'phone', 'note', 'dur', 'from', 'to', 'b1', 'b2', 'horizon', 'lead', 'hmin', 'after', 'before', 'gap', 'topics', 'opname', 'opaddr', 'opcontact', 'cmonths', 'ccustom']) v[k] = fv('bk-' + k);
   const r = bookSettingsModel(v, bookCfg()); if (r.error) { fErr(r.error); return; }
   if (r.obj.enabled && !r.obj.publicId) r.obj.publicId = bookNewId();
   bookCfgSave(r.obj);
@@ -10724,7 +10829,9 @@ SCREENS.today = async function () {
   const stageBox = typeof stageLagBox === 'function' ? await stageLagBox() : '';
   // план переноса, Б5: заявки онлайн-записи, ждущие подтверждения (sync/booking.js)
   const bookBox = typeof bookPendingBox === 'function' ? await bookPendingBox() : '';
-  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${bookBox}${licBox}${appBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
+  // урок 136: напоминание о копии базы — 14 дней данные не уходили с устройства (sync/files.js); «Скрыть» — на 7 дней
+  const backupBox = typeof backupRemindBox === 'function' ? await backupRemindBox() : '';
+  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${bookBox}${licBox}${appBox}${backupBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
   return out;
 };
 
@@ -11840,13 +11947,20 @@ async function saveLeadForm(id) {
   toast(id ? 'Обращение сохранено' : 'Обращение добавлено'); closeSheet(); await nav(UI.screen); openLeadSheet(r.obj.id);
 }
 // ── карточка ──
+// согласие на обработку ПД со страницы записи (сервер 189, ч. 1 ст. 9 152-ФЗ): время по часам сервера и редакция текста —
+// по ней сервер отдаёт тот самый текст (?book=<страница>&consent=<редакция>)
+function leadConsentText(l) {
+  if (!l || !Number(l.consentAt)) return '';
+  const d = new Date(Number(l.consentAt)), p = n => String(n).padStart(2, '0');
+  return `дано ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())} на странице записи${l.consentVer ? ' · редакция текста ' + l.consentVer : ''}`;
+}
 async function openLeadSheet(id, mode) {
   const l = await getOne('leads', id); if (!l) { toast('Обращение не найдено', true); return; }
   const c = l.convertedCaseId ? await getOne('cases', l.convertedCaseId) : null, mail = (await getAll('mail')).filter(m => m.leadId === id), due = leadClaimDue(l), k = due ? todayDayDiff(due, todayISO()) : null;
   const row = (a, b) => b ? `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>` : '';
   const body = `<div class="task-badges">${badge(l.status || 'Новое', LEAD_STATUS_CLS[l.status || 'Новое'] || '')}${l.kind ? badge(l.kind) : ''}${l.source ? badge(l.source) : ''}</div>
     <div class="actions" style="margin-bottom:12px">${btn('Изменить', `openLeadForm('${jsq(l.id)}')`, 'small-btn', 'pencil')}${c ? btn('Открыть дело', `openCaseSheet('${jsq(c.id)}')`, 'small-btn', 'briefcase-business') : btn('Создать дело', `leadToCaseAsk('${jsq(l.id)}')`, 'primary small-btn', 'plus')}${btn('В доверители', `leadToClient('${jsq(l.id)}')`, 'small-btn', 'user-plus')}${btn('Встреча', `openMeetingForm('', '')`, 'small-btn', 'handshake')}</div>
-    <div class="list-rows">${row('Суть', l.topic)}${row('Телефон', l.phone)}${contactRow(l.phone)}${row('Email', l.email)}${row('Адрес', l.addr)}${row('Противная сторона', [l.opponent, l.opponentInn ? 'ИНН ' + l.opponentInn : '', l.opponentInfo].filter(Boolean).join(' · '))}${due ? `<div><span class="muted">Ответ на претензию до</span><span class="${k !== null && k < 0 ? 'task-when overdue' : ''}">${esc(fmtDate(due))}${k !== null ? ' · ' + (k < 0 ? 'просрочен на ' + (-k) + ' ' + plural(-k, 'день', 'дня', 'дней') : k === 0 ? 'сегодня' : 'через ' + k + ' ' + plural(k, 'день', 'дня', 'дней')) : ''}</span></div>` : ''}${row('Подробности', l.summary)}${row('Создано', l.createdAt ? fmtDate(localISO(new Date(l.createdAt))) : '')}</div>
+    <div class="list-rows">${row('Суть', l.topic)}${row('Телефон', l.phone)}${contactRow(l.phone)}${row('Email', l.email)}${row('Адрес', l.addr)}${row('Противная сторона', [l.opponent, l.opponentInn ? 'ИНН ' + l.opponentInn : '', l.opponentInfo].filter(Boolean).join(' · '))}${due ? `<div><span class="muted">Ответ на претензию до</span><span class="${k !== null && k < 0 ? 'task-when overdue' : ''}">${esc(fmtDate(due))}${k !== null ? ' · ' + (k < 0 ? 'просрочен на ' + (-k) + ' ' + plural(-k, 'день', 'дня', 'дней') : k === 0 ? 'сегодня' : 'через ' + k + ' ' + plural(k, 'день', 'дня', 'дней')) : ''}</span></div>` : ''}${row('Подробности', l.summary)}${row('Согласие на обработку ПД', leadConsentText(l))}${row('Создано', l.createdAt ? fmtDate(localISO(new Date(l.createdAt))) : '')}</div>
     <div class="section-label">Статус</div><div class="chips" style="margin-bottom:12px">${LEAD_STATUSES.map(s => `<button type="button" class="chip" aria-pressed="${(l.status || 'Новое') === s}" onclick="leadSetStatus('${jsq(l.id)}','${jsq(s)}')">${esc(s)}</button>`).join('')}</div>
     ${mail.length ? `<div class="section-label">Письма · ${mail.length}</div><div class="list-rows">${mail.map(m => `<button type="button" class="list-btn" onclick="openMailSheet('${jsq(m.id)}')"><span>${esc(m.title || m.barcode || 'Письмо')}</span><span class="muted">${esc(m.status || m.channel || '')}</span></button>`).join('')}</div>` : ''}
     <div class="form-actions"><button type="button" class="button danger push-right" onclick="openDeleteSheet('leads', '${jsq(l.id)}')">${icon('trash-2')}Удалить</button></div>`;
@@ -13840,7 +13954,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
   { id: 'remind', title: 'Напоминания', html: `
 <p><b>На устройстве</b> — Настройки → «Напоминания на устройстве» → «Включить». Уведомления о заседаниях (за сутки и за 2 часа), сроках (за 7, 3, 1 день и в день срока), задачах и встречах приходят, пока программа открыта или свёрнута. В приложении для Android они ставятся будильниками телефона и приходят, даже когда программа закрыта. На iPhone уведомления работают у программы, добавленной на экран «Домой».</p>
 <h3>В Telegram — приходят, даже если программа не открывалась</h3>
-<p>Ваш сервер раз в день (08:05 по Москве) присылает в Telegram сроки и заседания на сегодня и завтра. На сервер уходит список без имён доверителей — только номера дел, суды, даты.</p>
+<p>Ваш сервер раз в день (08:05 по Москве) присылает в Telegram сроки, заседания и задачи на сегодня и завтра, с сервера 189 — и число просроченных задач. На сервер уходит список без имён доверителей — только номера дел, суды, даты; задача приходит как «Задача по делу …». Полные названия задач и имена в уведомлении о записи на приём — по отметке «Полные названия задач и имена в Telegram» в том же листе (Telegram — зарубежный сервис).</p>
 <ol><li>Создайте бота: в Telegram найдите <b>@BotFather</b> (с синей галочкой) → «Start» → команда <b>/newbot</b> → имя (любое) → имя пользователя (латиницей, заканчивается на bot). BotFather пришлёт <b>токен</b> вида 123456:ABC… — скопируйте его. Токен — секрет, никому не показывайте.</li>
 <li>Откройте своего бота по ссылке от BotFather и нажмите «Start» (или напишите ему любое слово) — иначе бот не сможет вам писать. Узнайте номер чата: в браузере откройте адрес <b>https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates</b> (подставив токен вместо &lt;ТОКЕН&gt;) — в ответе найдите «chat»:{«id»:<b>число</b>} — это номер чата.</li>
 <li>Запишите на сервер: консоль Облака → функция crm-bridge → «Редактор» → «Переменные окружения» → <b>TG_TOKEN</b> (токен) и <b>TG_CHAT</b> (номер чата) → «Создать версию». Таймер: «Триггеры» → «Создать» → «Таймер» → cron <b>5 5 * * ? *</b> (08:05 по Москве) → функция crm-bridge.</li>
