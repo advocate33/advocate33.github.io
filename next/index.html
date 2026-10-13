@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 19:29 · b0f743c">
+<meta name="build" content="13.10.2026 23:20 · d892353">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -8014,9 +8014,17 @@ async function bookPublish(quiet, force) {
 }
 // итоги для листа «Автоматизация»: время последнего удачного получения заявок и публикации окон, последняя ошибка {at, kind, msg}
 const BOOK_POLL_AT = 'crm_next_book_poll_at', BOOK_PUB_AT = 'crm_next_book_pub_at', BOOK_ERR = 'crm_next_book_err';
+// since — когда сбой этого вида начался (строка на «Сегодня» скрывается «×» до нового сбоя, урок 144)
 function bookNote(kind, err) {
-  if (err) { localStorage.setItem(BOOK_ERR, JSON.stringify({ at: Date.now(), kind, msg: String(err).slice(0, 160) })); return; }
-  const e = lsJSON(BOOK_ERR, null); if (!e || e.kind === kind) localStorage.removeItem(BOOK_ERR);
+  const e = lsJSON(BOOK_ERR, null);
+  if (err) { localStorage.setItem(BOOK_ERR, JSON.stringify({ at: Date.now(), kind, msg: String(err).slice(0, 300), since: e && e.kind === kind && e.since ? e.since : Date.now() })); return; }
+  if (!e || e.kind === kind) localStorage.removeItem(BOOK_ERR);
+}
+// «Сегодня»: заявка получена, но не сохранена — заметной строкой с «Повторить», пока сбой не прошёл (урок 144)
+function bookTodayItems() {
+  const e = lsJSON(BOOK_ERR, null); if (!e || e.kind !== 'save') return [];
+  return [{ key: 'bookerr:' + (e.since || e.at), kind: 'inbound', pr: 0, date: '', title: 'Запись на приём получена, но не сохранена', sub: e.msg, when: 'онлайн-запись', badges: [['Не сохранено', 'bad']],
+    open: 'openBookSheet()', act: { fn: 'bookPoll(false)', label: 'Повторить', icon: 'refresh-cw' } }];
 }
 function bookRepublishSoon() { if (!bookCfg().enabled) return; clearTimeout(BOOK.timer); BOOK.timer = setTimeout(() => bookPublish(true).catch(e => logErr('book:pub', e)), 5000); }
 // заявки → обращение и встреча (постоянные id по заявке: одна заявка — одна встреча)
@@ -8027,9 +8035,11 @@ async function bookPoll(quiet) {
     const j = await bookSrv('bookget', { since: cfg.lastPoll || 0 }, false);
     if (!j || !j.ok) { bookNote('poll', 'заявки не получены: ' + bookWhy(j)); if (!quiet) toast('Заявки не получены: ' + bookWhy(j), true); return 0; }
     // все записи, включая корзину: удалённая встреча или обращение по заявке не создаются заново
-    const meetings = await getAllRaw('meetings'), leads = await getAllRaw('leads'); let n = 0, maxTs = cfg.lastPoll || 0;
+    const meetings = await getAllRaw('meetings'), leads = await getAllRaw('leads'); let n = 0, maxTs = cfg.lastPoll || 0, failed = 0, why = '';
     for (const b of j.items || []) {
       if (!b || !b.id) continue; maxTs = Math.max(maxTs, Number(b.updatedAt || b.createdAt) || 0);
+      // урок 144 (аудит GPT 13.10.2026, A4): сбой записи одной заявки не обрывает приём остальных и не выдаётся за «новых записей нет»
+      try {
       const same = meetings.filter(x => x.bookingId === b.id);
       let m = same[0];
       if (!m) {
@@ -8055,13 +8065,22 @@ async function bookPoll(quiet) {
         if (Number(x.bookingSetAt) > (Number(b.updatedAt) || 0)) continue;
         x.bookingStatus = b.status; if (b.status === 'declined' || b.status === 'cancelled') x.status = 'Отменено'; await put('meetings', x);
       }
+      } catch (e) { failed++; why = why || (e && e.name === 'QuotaExceededError' ? 'на устройстве не хватает места' : String((e && e.message) || e || 'ошибка записи').slice(0, 120)); logErr('book:put', e); }
+    }
+    if (n) { toast('Новых записей на приём: ' + n); bookRepublishSoon(); if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }
+    // сбой записи: отметка «принято до» не сдвигается — несохранённые заявки придут снова (уже сохранённые узнаются по номеру заявки); ошибка
+    // остаётся в строке состояния и на «Сегодня»; сообщение — при ручной проверке и при первом сбое
+    if (failed) {
+      const prev = lsJSON(BOOK_ERR, null), first = !prev || prev.kind !== 'save';
+      bookNote('save', 'Получено заявок: ' + (j.items || []).length + ', не сохранено: ' + failed + ' (' + why + '). Заявки остались на сервере — программа попробует снова при следующей проверке; «Повторить» — сейчас.');
+      if (!quiet || first) toast('Запись на приём получена, но не сохранена: ' + why + ' — повторите («Сегодня» → «Повторить»)', true);
+      return n;
     }
     // урок 138: отметка «принято до» пишется в общие настройки только когда сдвинулась — иначе каждый опрос раз в 15 минут менял настройки,
     // и автообмен отправлял базу на сервер без единой правки пользователя
     if (maxTs !== (Number(cfg.lastPoll) || 0)) { const c2 = bookCfg(); c2.lastPoll = maxTs; bookCfgSave(c2); }
-    bookNote('poll', ''); localStorage.setItem(BOOK_POLL_AT, String(Date.now()));
-    if (n) { toast('Новых записей на приём: ' + n); bookRepublishSoon(); if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }
-    else if (!quiet) toast('Новых записей нет');
+    bookNote('save', ''); bookNote('poll', ''); localStorage.setItem(BOOK_POLL_AT, String(Date.now()));
+    if (!n && !quiet) toast('Новых записей нет');
     return n;
   } finally { BOOK.busy = false; }
 }
@@ -8258,9 +8277,19 @@ async function askSrv(action, payload, write) {
   NEXT_ASK.on = !!write;
   try { return await srvCall(action, payload); } finally { NEXT_ASK.on = false; }
 }
+// ошибка {at, kind, msg, since}: since — когда сбой этого вида начался (строка на «Сегодня» скрывается «×» до нового сбоя, урок 144)
 function askNote(kind, err) {
-  if (err) { localStorage.setItem(ASK_ERR, JSON.stringify({ at: Date.now(), kind, msg: String(err).slice(0, 160) })); return; }
-  const e = lsJSON(ASK_ERR, null); if (!e || e.kind === kind) localStorage.removeItem(ASK_ERR);
+  const e = lsJSON(ASK_ERR, null);
+  if (err) { localStorage.setItem(ASK_ERR, JSON.stringify({ at: Date.now(), kind, msg: String(err).slice(0, 300), since: e && e.kind === kind && e.since ? e.since : Date.now() })); return; }
+  if (!e || e.kind === kind) localStorage.removeItem(ASK_ERR);
+}
+// сбой записи словами: нет места на устройстве — так и сказано
+const askSaveWhy = e => (e && e.name === 'QuotaExceededError' ? 'на устройстве не хватает места' : String((e && e.message) || e || 'ошибка записи').slice(0, 120));
+// «Сегодня» (урок 144, аудит GPT 13.10.2026): вопрос получен, но не сохранён — заметной строкой с «Повторить», пока сбой не прошёл
+function askTodayItems() {
+  const e = lsJSON(ASK_ERR, null); if (!e || e.kind !== 'save') return [];
+  return [{ key: 'askerr:' + (e.since || e.at), kind: 'inbound', pr: 0, date: '', title: 'Вопрос с сайта получен, но не сохранён', sub: e.msg, when: 'вопросы с сайта', badges: [['Не сохранено', 'bad']],
+    open: 'openAskSheet()', act: { fn: 'askPoll(false)', label: 'Повторить', icon: 'refresh-cw' } }];
 }
 // публикация страницы: подписи, способы связи, текст согласия, «не принимать» при выключении
 function askPubSettings(c) {
@@ -8288,16 +8317,25 @@ async function askPoll(quiet) {
     if (!j || !j.ok) { askNote('poll', 'вопросы не получены: ' + askWhy(j)); if (!quiet) toast('Вопросы не получены: ' + askWhy(j), true); return 0; }
     const leads = await getAllRaw('leads'), clients = await getAll('clients'), purged = typeof purgedList === 'function' ? purgedList() : {};
     const plan = askPlan(j.items, leads, clients, purged, Number(j.now) || Date.now());
-    let n = 0;
+    let n = 0, failed = 0, why = '';
     for (const p of plan.create) {
       // обращение и задача — одной записью; появились за время запроса (обмен с другим устройством) — не пишутся, считаются принятыми
       try { await putMany([['leads', p.lead], ['tasks', p.task]], { expect: [{ store: 'leads', id: p.lead.id, absent: true }, { store: 'tasks', id: p.task.id, absent: true }] }); n++; plan.ack.push(p.q.id); }
-      catch (e) { if (/появилась после сравнения/.test((e && e.message) || '')) plan.ack.push(p.q.id); else logErr('ask:put', e); }
+      catch (e) { if (/появилась после сравнения/.test((e && e.message) || '')) plan.ack.push(p.q.id); else { failed++; why = why || askSaveWhy(e); logErr('ask:put', e); } }
     }
+    // «принято» сервер получает только о сохранённых: несохранённый вопрос остаётся на сервере и придёт при следующей проверке
     if (plan.ack.length) { const k = await askSrv('askack', { ids: plan.ack }, true); if (!k || !k.ok) logErr('ask:ack', new Error(askWhy(k))); }
-    askNote('poll', ''); localStorage.setItem(ASK_POLL_AT, String(Date.now()));
     if (n) { toast('Новых вопросов с сайта: ' + n + ' — в «Обращениях» и в «Сделать сегодня»'); if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }
-    else if (!quiet) toast(plan.wait ? 'Новых вопросов нет; принятые другим устройством придут с обменом: ' + plan.wait : 'Новых вопросов нет');
+    // урок 144: сбой записи — не «новых вопросов нет»; ошибка не стирается, время удачной проверки не сдвигается; сообщение — при ручной проверке
+    // и при первом сбое (дальше — строка на «Сегодня», не сообщение раз в 15 минут)
+    if (failed) {
+      const prev = lsJSON(ASK_ERR, null), first = !prev || prev.kind !== 'save';
+      askNote('save', 'Получено вопросов: ' + plan.create.length + ', не сохранено: ' + failed + ' (' + why + '). Вопросы остались на сервере — программа попробует снова при следующей проверке; «Повторить» — сейчас.');
+      if (!quiet || first) toast('Вопрос с сайта получен, но не сохранён: ' + why + ' — повторите («Сегодня» → «Повторить»)', true);
+      return n;
+    }
+    askNote('save', ''); askNote('poll', ''); localStorage.setItem(ASK_POLL_AT, String(Date.now()));
+    if (!n && !quiet) toast(plan.wait ? 'Новых вопросов нет; принятые другим устройством придут с обменом: ' + plan.wait : 'Новых вопросов нет');
     return n;
   } finally { ASK.busy = false; }
 }
@@ -8410,7 +8448,15 @@ if (typeof document === 'object' && document && typeof document.addEventListener
 //    Ссылка календаря — секрет (по ней календарь читается без входа): хранится в защищённом хранилище, на экран выводится сокращённой.
 //    Фоновая проверка — только для ссылки и календаря телефона, если включена: при открытии и раз в 6 часов, пока программа открыта; время
 //    запуска и итог — в ключах устройства (урок 138), в общие настройки — только когда изменились учёт или «Неразобранные».
-const CALIMP = { busy: false, last: null, loop: null, max: 50, staleMs: 6 * 3600000, keySrc: 'crm_calimp_src', keyUrl: 'crm_calimp_url', keySeen: 'crm_calimp_seen',
+// Аудит GPT 13.10.2026 (вечер), урок 144: 1) «уже есть в программе» — только запись того же вида, того же дела, дня и часа (у задачи — то же
+//    название); неполное совпадение — «возможно, уже есть» с записью программы, событие не отбрасывается; задача не поглощает заседание; событие,
+//    которое уже есть, связывается с записью (о его переносе скажет «Сегодня»); 2) у каждой ссылки и каждого выбранного календаря телефона —
+//    свой случайный номер источника (не из ссылки и не из номера календаря Android): «удалено» объявляет только тот источник, который событие
+//    видел; ключ события календаря телефона несёт номер источника устройства — номера событий разных телефонов не путаются; событие, уже
+//    разобранное через другой источник (то же название, день и час), не добавляется снова; 3) изменение названия или места — у неразобранной
+//    записи меняется текст, у разобранной — строка «В календаре изменено» на «Сегодня»; описание не сравнивается (в запись программы не
+//    попадает); 4) сбой записи — ошибкой в строке состояния, а не «прочитано».
+const CALIMP = { busy: false, last: null, loop: null, max: 50, staleMs: 6 * 3600000, keySrc: 'crm_calimp_src', keyUrl: 'crm_calimp_url', keyUsid: 'crm_calimp_usid', keySeen: 'crm_calimp_seen',
   keyNotes: 'crm_calimp_notes', keyAuto: 'crm_calimp_auto', keyOpt: 'crm_calimp_opt', keyAt: 'crm_next_calimp_at', keyOk: 'crm_next_calimp_ok', keyErr: 'crm_next_calimp_err', keyRes: 'crm_next_calimp_res' };
 if (typeof SYNC_SETTINGS_KEYS === 'object' && Array.isArray(SYNC_SETTINGS_KEYS)) for (const k of [CALIMP.keySeen, CALIMP.keyNotes]) if (!SYNC_SETTINGS_KEYS.includes(k)) SYNC_SETTINGS_KEYS.push(k);
 if (typeof SECRET_KEYS_PROTECTED !== 'undefined' && !SECRET_KEYS_PROTECTED.includes(CALIMP.keyUrl)) SECRET_KEYS_PROTECTED.push(CALIMP.keyUrl);
@@ -8585,12 +8631,13 @@ function calImpParseIcs(text, progTz) {
   }
   return { events, name };
 }
-// события календаря телефона (приложение 1.25, Instances): начало — мс UTC; весь день — полночь UTC дня события
-function calImpFromDevice(list, progTz, calId) {
+// события календаря телефона (приложение 1.25, Instances): начало — мс UTC; весь день — полночь UTC дня события. part — номер источника
+// на этом устройстве (src.sid); у источника, выбранного до урока 144, — номер календаря Android (ключи прежнего учёта не меняются)
+function calImpFromDevice(list, progTz, part) {
   const prog = calImpOffOf(progTz);
   return (list || []).filter(x => x && Number.isFinite(Number(x.begin))).map(x => {
     const b = Number(x.begin), allDay = !!x.allDay, z = new Date(allDay ? b : b + prog * 60000), desc = String(x.desc || '').slice(0, 2000), title = String(x.title || '').replace(/\s+/g, ' ').trim().slice(0, 300);
-    return { uid: 'dev:' + String(calId) + ':' + String(x.id), title: title || 'Без названия', place: String(x.loc || '').replace(/\s+/g, ' ').trim().slice(0, 300), desc,
+    return { uid: 'dev:' + String(part) + ':' + String(x.id), title: title || 'Без названия', place: String(x.loc || '').replace(/\s+/g, ' ').trim().slice(0, 300), desc,
       date: calImpIsoOf(z), time: allDay ? '' : calImpP2(z.getUTCHours()) + ':' + calImpP2(z.getUTCMinutes()), allDay, rec: !!x.rrule, cancelled: Number(x.status) === 2, own: CALIMP_OWN_MARK.test(desc), tzUnknown: false };
   });
 }
@@ -8602,33 +8649,72 @@ const CALIMP_MEETING_RE = /встреч|консультац|переговор|
 const CALIMP_CASENO_RE = /(^|[^0-9a-zа-яё])([АA]\d{2}-\d{1,7}\/\d{4}|\d{1,3}[а-яa-z]?-\d{1,7}\/\d{4})/i;
 function calImpType(e) { const t = e.title + ' ' + e.place; return CALIMP_HEARING_RE.test(t) ? 'hearing' : CALIMP_MEETING_RE.test(t) ? 'meeting' : 'task'; }
 function calImpText4(e) { return [e.title, e.place, e.desc].filter(Boolean).join(' · '); }
-// уже есть в программе: запись того же дела в тот же день (и час, если он у обоих), а без дела — заседание или встреча в тот же день и час,
-// задача — с тем же названием
-function calImpExists(e, d, c, type) {
-  const sameT = t => !e.time || !t || String(t) === e.time, ofCase = r => c && (r.caseId === c.id || (c.number && r.caseNum === c.number));
-  const hs = (d.hearings || []).filter(h => h && !h._deleted && h.status !== 'Отменено' && h.date === e.date);
-  const ms = (d.meetings || []).filter(m => m && !m._deleted && m.status !== 'Отменено' && m.date === e.date);
-  const ts = (d.tasks || []).filter(t => t && !t._deleted && t.due === e.date);
-  if (c) return hs.concat(ms, ts).some(r => ofCase(r) && sameT(r.time));
-  if (e.time && (type === 'hearing' ? hs : type === 'meeting' ? ms : []).some(r => String(r.time || '') === e.time)) return true;
-  const nt = calImpNorm(e.title); return !!nt && ts.some(t => calImpNorm(t.title) === nt);
+// есть ли событие в программе (урок 144): «same» — запись того же вида, того же дела, в тот же день и час (у задачи — то же название, час не
+// противоречит); «maybe» — совпадение неполное: у одной из записей нет часа, дело в событии не узнано, а в этот день и час уже есть заседание или
+// встреча, запись другого вида того же дела в тот же час. «maybe» не отбрасывается — событие идёт в «Неразобранные» с пометкой и ссылкой на
+// найденную запись, решает пользователь. Задача не поглощает заседание и встречу: подготовка в день заседания — обычное дело.
+function calImpMatch(e, d, c, type) {
+  const tm = t => (!e.time || !t ? 'none' : String(t) === e.time ? 'eq' : 'diff');
+  const ofCase = r => !!c && (r.caseId === c.id || (!!c.number && r.caseNum === c.number));
+  const day = (list, store) => (list || []).filter(r => r && !r._deleted && r.status !== 'Отменено' && r.date === e.date).map(r => [store, r]);
+  const hs = day(d.hearings, 'hearings'), ms = day(d.meetings, 'meetings'), ts = (d.tasks || []).filter(t => t && !t._deleted && t.due === e.date).map(r => ['tasks', r]);
+  const res = (st, x) => (x ? { st, store: x[0], id: x[1].id, r: x[1] } : null);
+  if (type === 'task') {
+    const nt = calImpNorm(e.title);
+    const same = nt ? ts.find(([, t]) => calImpNorm(t.title) === nt && tm(t.time) !== 'diff' && (!c || !(t.caseId || t.caseNum) || ofCase(t))) : null;
+    return same ? res('same', same) : res('maybe', c ? hs.concat(ms).find(([, r]) => ofCase(r) && tm(r.time) === 'eq') : null);
+  }
+  const own = type === 'hearing' ? hs : ms, other = type === 'hearing' ? ms : hs;
+  if (c) return res('same', own.find(([, r]) => ofCase(r) && tm(r.time) === 'eq')) || res('maybe', own.find(([, r]) => ofCase(r) && tm(r.time) === 'none') || other.find(([, r]) => ofCase(r) && tm(r.time) === 'eq'));
+  return e.time ? res('maybe', own.concat(other).find(([, r]) => tm(r.time) === 'eq')) : null;
 }
 const calImpWhen = (d, t) => (d ? fmtDate(d) : '') + (t ? ' ' + t : '');
+// найденная запись программы словами: «заседание 20.10.2026 10:00 · Д-1/2026»
+function calImpRecText(m) {
+  if (!m || !m.r) return '';
+  const r = m.r, kind = { hearings: 'заседание', meetings: 'встреча', tasks: 'задача' }[m.store] || 'запись';
+  return [kind + ' ' + calImpWhen(r.date || r.due, r.time), m.store === 'tasks' ? r.title : m.store === 'meetings' ? r.with : '', r.caseNum].filter(Boolean).join(' · ').slice(0, 160);
+}
+// действие «открыть запись программы» по ссылке учёта «хранилище:id»
+function calImpOpenFn(store, id) {
+  return store === 'hearings' ? `openHearingForm('${jsq(id)}')` : store === 'meetings' ? `openMeetingForm('${jsq(id)}')` : store === 'tasks' ? `openTaskForm('${jsq(id)}')` : store === 'cases' || store === 'deadline' ? `openCaseSheet('${jsq(id)}')` : 'openCalImportSheet()';
+}
+// источники, которые видели событие (урок 144): прежний учёт — одно поле src
+const calImpSrcsOf = s => (Array.isArray(s.srcs) ? s.srcs : s.src ? [s.src] : []);
+// изменения полей разобранного события: из прежних и новых — «как было в начале» → «как стало»; вернули на прежнее — поле снимается
+function calImpChMerge(a, b) {
+  const out = Object.assign({}, a || {});
+  for (const f of Object.keys(b || {})) { const from = out[f] ? out[f][0] : b[f][0], to = b[f][1]; if (calImpNorm(from) === calImpNorm(to)) delete out[f]; else out[f] = [from, to]; }
+  return out;
+}
 function calImpItemText(e) { return [e.title, calImpWhen(e.date, e.time) || '', e.place].filter(Boolean).join(' · ').slice(0, 2000); }
 // ── план: чистая функция. ctx = { seen, inbox, data, today, from, to, src, only, max, now, complete }
-// Ключ события — UID календаря (одинаков в ссылке и в файле того же календаря), у календаря телефона — номер события; учёт seen[ключ] =
-// { d, t, s, st: inbox | done | skip | gone, src, at, rec, prev, cx, od, ot }; od/ot — дата и время разобранного события до первого переноса:
-// строка «перенесено» сравнивает с ними (с тем, что записано в программе), а не с предыдущим чтением; вернули на прежнее — строка снимается.
-// n.cancelled — отмена уже взятого события (это новость); n.cxSkip — отменённые события, которые не брались (их не добавляют, сообщать не о чем)
+// Ключ события — UID календаря (одинаков в ссылке и в файле того же календаря), у календаря телефона — «dev:<номер источника>:<номер события>»;
+// учёт seen[ключ] = { d, t, s, p, st: inbox | done | skip | gone | alias, src, srcs, at, rec, prev, cx, od, ot, of }; s, p — название и место при
+// последнем чтении (урок 144: изменение — новость); srcs — источники, которые видели событие (удаление объявляет только такой источник); od/ot —
+// дата и время разобранного события до первого переноса: строка «перенесено» сравнивает с ними (с тем, что записано в программе), а не с
+// предыдущим чтением; вернули на прежнее — строка снимается. alias — событие, уже учтённое под ключом другого источника (of): не добавляется
+// и ни о чём не сообщает. n.cancelled — отмена уже взятого события (это новость); n.cxSkip — отменённые события, которые не брались. Перенос,
+// изменение, отмена считаются, только когда пользователь их увидит (строка на «Сегодня» или пометка у записи): иначе фоновая проверка
+// сообщала бы о том, чего на экране нет (урок 143).
 function calImpPlan(events, ctx) {
-  const seen = JSON.parse(JSON.stringify(ctx.seen || {})), inbox = ctx.inbox || [], d = ctx.data || {}, cases = d.cases || [];
-  const n = { found: 0, own: 0, rec: 0, past: 0, exists: 0, dup: 0, filtered: 0, known: 0, more: 0, added: 0, moved: 0, gone: 0, cancelled: 0, cxSkip: 0, back: 0, tzUnknown: 0 };
+  const seen = JSON.parse(JSON.stringify(ctx.seen || {})), inbox = ctx.inbox || [], d = ctx.data || {}, cases = d.cases || [], src = ctx.src || '', at = ctx.now || Date.now();
+  const n = { found: 0, own: 0, rec: 0, past: 0, exists: 0, maybe: 0, dup: 0, filtered: 0, known: 0, more: 0, added: 0, moved: 0, changed: 0, gone: 0, cancelled: 0, cxSkip: 0, back: 0, tzUnknown: 0 };
   const add = [], upd = {}, notes = [], drop = [], rows = [], present = new Set(), room = Math.max(0, Math.min(ctx.max == null ? CALIMP.max : ctx.max, 200 - inbox.length));
   const byKey = {}; inbox.forEach(x => { if (x && x.cal && x.cal.key) byKey[x.cal.key] = x; });
   const keyOf = e => (/^dev:/.test(e.uid) ? e.uid : 'i:' + e.uid);
-  const note = (key, s, kind, now2) => notes.push({ key, kind, title: s.s || '', was: { d: s.od || s.d, t: s.od ? (s.ot || '') : s.t }, now: now2 || null, rec: s.rec || '', at: ctx.now || Date.now() });
+  // одна строка на событие: перенос, отмена, удаление важнее изменения названия или места; изменения копятся в ch
+  const note = (key, s, kind, now2, ch) => {
+    let x = notes.find(y => y.key === key);
+    if (!x) { x = { key, kind, title: s.s || '', was: { d: s.od || s.d, t: s.od ? (s.ot || '') : s.t }, now: now2 || null, rec: s.rec || '', at }; notes.push(x); } else if (kind !== 'changed') x.kind = kind;
+    if (now2) x.now = now2; if (ch) x.ch = calImpChMerge(x.ch, ch); x.title = s.s || x.title;
+  };
   // правка неразобранной записи: upd[id] = { cal: поля учёта записи, text: новый текст }
-  const patch = (key, p, text) => { const x = byKey[key]; if (!x) return; const u = upd[x.id] || (upd[x.id] = { cal: {} }); Object.assign(u.cal, p); if (text) u.text = text; };
+  const patch = (key, p, text) => { const x = byKey[key]; if (!x) return false; const u = upd[x.id] || (upd[x.id] = { cal: {} }); Object.assign(u.cal, p); if (text) u.text = text; return true; };
+  // уже разобранное или пропущенное через другой источник (ссылка на компьютере и календарь телефона, прежний ключ календаря телефона): тот же
+  // день, час и название
+  const fp = (dd, tt, ss) => dd + '|' + (tt || '') + '|' + calImpNorm(ss), byFp = {};
+  Object.keys(seen).forEach(k => { const s = seen[k]; if (s && (s.st === 'done' || s.st === 'skip') && s.d && !calImpSrcsOf(s).includes(src)) byFp[fp(s.d, s.t, s.s)] = k; });
   for (const e of events || []) {
     n.found++;
     if (e.date > ctx.to) continue;
@@ -8637,48 +8723,70 @@ function calImpPlan(events, ctx) {
     if (e.rec) { n.rec++; continue; }
     const s = seen[key];
     if (s) {
+      // источник, который видит событие, запоминается (смена ссылки на тот же календарь, урок 144); файл — разовый снимок, не запоминается
+      if (src && src !== 'f' && !calImpSrcsOf(s).includes(src)) s.srcs = calImpSrcsOf(s).concat(src).slice(-4);
+      const t1 = e.title.slice(0, 120), p1 = e.place.slice(0, 120);
+      if (s.st === 'alias') { s.d = e.date; s.t = e.time; s.s = t1; s.p = p1; n.known++; continue; }
       // вернулось в календарь: учёт восстанавливается, строка «удалено» у разобранного снимается, пометка у неразобранного — тоже
       if (s.st === 'gone') { s.st = s.prev || 'skip'; delete s.prev; if (s.st === 'done') drop.push(key); else if (s.st === 'inbox') patch(key, { gone: 0 }); }
       if (e.cancelled) {
-        if (!s.cx && (s.st === 'done' || s.st === 'inbox')) { s.cx = 1; n.cancelled++; if (s.st === 'done') note(key, s, 'cancelled'); else patch(key, { cancelled: 1 }); }
+        if (!s.cx && (s.st === 'done' || s.st === 'inbox')) { s.cx = 1; if (s.st === 'done') { note(key, s, 'cancelled'); n.cancelled++; } else if (patch(key, { cancelled: 1 })) n.cancelled++; }
         continue;
       }
       if (s.cx) { delete s.cx; if (s.st === 'inbox') patch(key, { cancelled: 0 }); else if (s.st === 'done') drop.push(key); }
+      let news = false;
       if (s.d !== e.date || s.t !== e.time) {
-        n.moved++;
         if (s.st === 'done') {
           if (!s.od) { s.od = s.d; s.ot = s.t || ''; }
           // перенесли обратно на время, записанное в программе, — сообщать не о чем
-          if (s.od === e.date && (s.ot || '') === e.time) { delete s.od; delete s.ot; drop.push(key); n.moved--; n.back++; }
-          else note(key, s, 'moved', { d: e.date, t: e.time });
-        } else if (s.st === 'inbox' && byKey[key]) { const was = byKey[key].cal.moved || calImpWhen(s.d, s.t); patch(key, { due: e.date, time: e.time, moved: was }, calImpItemText(e)); }
+          if (s.od === e.date && (s.ot || '') === e.time) { delete s.od; delete s.ot; drop.push(key); n.back++; }
+          else { note(key, s, 'moved', { d: e.date, t: e.time }); n.moved++; }
+          news = true;
+        } else if (s.st === 'inbox' && byKey[key]) { const was = byKey[key].cal.moved || calImpWhen(s.d, s.t); patch(key, { due: e.date, time: e.time, moved: was }, calImpItemText(e)); n.moved++; news = true; }
         s.d = e.date; s.t = e.time;
-      } else n.known++;
+      }
+      // название или место изменились (урок 144); учёт прежней версии без места — место записывается молча
+      const chT = calImpNorm(s.s) !== calImpNorm(t1), chP = 'p' in s && calImpNorm(s.p) !== calImpNorm(p1), ch = {};
+      if (chT) ch.s = [s.s || '', t1]; if (chP) ch.p = [s.p || '', p1];
+      s.s = t1; s.p = p1;
+      if (chT || chP) {
+        if (s.st === 'done') { note(key, s, 'changed', null, ch); n.changed++; news = true; }
+        else if (s.st === 'inbox' && patch(key, { title: e.title, place: e.place, type: calImpType(e), changed: 1 }, calImpItemText(e))) { n.changed++; news = true; }
+      }
+      if (!news) n.known++;
       continue;
     }
     if (e.cancelled) { n.cxSkip++; continue; }
     if (e.date < ctx.today) { n.past++; continue; }
+    const t1 = e.title.slice(0, 120), p1 = e.place.slice(0, 120), ak = byFp[fp(e.date, e.time, t1)];
+    if (ak && ak !== key) { seen[key] = { d: e.date, t: e.time, s: t1, p: p1, st: 'alias', of: ak, src, at }; n.known++; continue; }
     const m = typeof inboxCaseMatch === 'function' ? inboxCaseMatch(calImpText4(e), cases) : { case: null }, c = m.case, type = calImpType(e);
     if (e.tzUnknown) n.tzUnknown++;
     const row = { title: e.title, date: e.date, time: e.time, place: e.place, type, caseNum: c ? c.number : '', state: '' };
     if (ctx.only && type !== 'hearing' && !c && !CALIMP_CASENO_RE.test(calImpText4(e))) { n.filtered++; row.state = 'filtered'; rows.push(row); continue; }
-    if (calImpExists(e, d, c, type)) { n.exists++; row.state = 'exists'; rows.push(row); continue; }
+    const mt = calImpMatch(e, d, c, type);
+    // уже есть в программе: учёт связывает событие с записью — о переносе, отмене или удалении в календаре скажет «Сегодня»
+    if (mt && mt.st === 'same') { seen[key] = { d: e.date, t: e.time, s: t1, p: p1, st: 'done', rec: mt.store + ':' + mt.id, src, at }; n.exists++; row.state = 'exists'; row.rec = calImpRecText(mt); rows.push(row); continue; }
     const nt = calImpNorm(e.title);
     if (inbox.concat(add).some(x => x && x.cal && x.cal.due === e.date && (x.cal.time || '') === e.time && calImpNorm(x.cal.title) === nt)) { n.dup++; row.state = 'dup'; rows.push(row); continue; }
     if (add.length >= room) { n.more++; row.state = 'more'; rows.push(row); continue; }
-    add.push({ text: calImpItemText(e), at: ctx.now || Date.now(), cal: { key, due: e.date, time: e.time, title: e.title, type, place: e.place, src: ctx.src || '', tzUnknown: e.tzUnknown ? 1 : 0 } });
-    seen[key] = { d: e.date, t: e.time, s: e.title.slice(0, 120), st: 'inbox', src: ctx.src || '', at: ctx.now || Date.now() };
-    n.added++; row.state = 'new'; rows.push(row);
+    const cal = { key, due: e.date, time: e.time, title: e.title, type, place: e.place, src, tzUnknown: e.tzUnknown ? 1 : 0 };
+    if (mt) { cal.maybe = { store: mt.store, id: mt.id, text: calImpRecText(mt) }; n.maybe++; row.rec = cal.maybe.text; }
+    add.push({ text: calImpItemText(e), at, cal });
+    seen[key] = { d: e.date, t: e.time, s: t1, p: p1, st: 'inbox', src, at };
+    n.added++; row.state = mt ? 'maybe' : 'new'; rows.push(row);
   }
-  // удалено из календаря: только когда прочитано всё окно (complete) — иначе отсутствие ничего не значит
+  // удалено из календаря: только когда прочитано всё окно (complete) и только источником, который событие видел (урок 144)
   if (ctx.complete) Object.keys(seen).forEach(key => {
     const s = seen[key];
-    if (present.has(key) || s.src !== ctx.src || !(s.st === 'inbox' || s.st === 'done') || !s.d || s.d < ctx.today || s.d < ctx.from || s.d > ctx.to) return;
-    n.gone++; if (s.st === 'done') note(key, s, 'gone'); else patch(key, { gone: 1 });
+    if (present.has(key) || !calImpSrcsOf(s).includes(src) || !(s.st === 'inbox' || s.st === 'done') || !s.d || s.d < ctx.today || s.d < ctx.from || s.d > ctx.to) return;
+    if (s.st === 'done') { note(key, s, 'gone'); n.gone++; } else if (patch(key, { gone: 1 })) n.gone++;
     s.prev = s.st; s.st = 'gone';
   });
   // учёт старше 60 дней не нужен
   const old = calImpAddDays(ctx.today, -60); Object.keys(seen).forEach(k => { if (seen[k] && seen[k].d && seen[k].d < old) delete seen[k]; });
+  // строка с отменённым в этом чтении состоянием (перенос вернули, отмену сняли, событие вернулось) и изменением: остаётся только изменение
+  notes.forEach(x => { if (drop.includes(x.key)) x.clear = 1; });
   return { add, upd, notes, drop: drop.filter(k => !notes.some(x => x.key === k)), seen, n, rows };
 }
 // ── запись плана: «Неразобранные», учёт, строки на «Сегодня»; в общие настройки — только изменившееся (урок 138) ──
@@ -8695,8 +8803,18 @@ function calImpApplyPlan(plan) {
   if (seen1 !== seen0 && !(seen0 === '{}' && seen1 === '{}')) { localStorage.setItem(CALIMP.keySeen, seen1); changed = true; }
   const dropKeys = new Set(plan.drop || []), had = calImpNotesLoad();
   if (plan.notes.length || had.some(x => dropKeys.has(x.key))) {
+    const hasCh = x => !!(x && x.ch && Object.keys(x.ch).length);
+    // новая строка о событии сливается с прежней (урок 144): изменение названия или места не стирает перенос, и наоборот
+    const fresh = plan.notes.map(nw => {
+      const old = had.find(x => x.key === nw.key); if (!old) return nw;
+      const keep = nw.kind === 'changed' && !nw.clear && old.kind !== 'changed';
+      const out = Object.assign({}, old, nw, { kind: keep ? old.kind : nw.kind, now: keep ? old.now : nw.now, was: keep ? old.was : nw.was, ch: calImpChMerge(old.ch, nw.ch) });
+      delete out.clear; if (!hasCh(out)) delete out.ch; return out;
+    }).filter(x => x.kind !== 'changed' || hasCh(x)).map(x => { const y = Object.assign({}, x); delete y.clear; return y; });
     const keys = new Set(plan.notes.map(x => x.key).concat([...dropKeys]));
-    localStorage.setItem(CALIMP.keyNotes, JSON.stringify(plan.notes.concat(had.filter(x => !keys.has(x.key))).slice(0, 50))); changed = true;
+    // перенос вернули, отмену сняли, событие вернулось: строка уходит, а если в ней есть изменение названия или места — остаётся оно
+    const kept = had.filter(x => dropKeys.has(x.key) && !plan.notes.some(y => y.key === x.key) && hasCh(x)).map(x => Object.assign({}, x, { kind: 'changed', now: null }));
+    localStorage.setItem(CALIMP.keyNotes, JSON.stringify(fresh.concat(kept, had.filter(x => !keys.has(x.key))).slice(0, 50))); changed = true;
   }
   if (changed && typeof bumpSettings === 'function') bumpSettings();
   return changed;
@@ -8758,9 +8876,15 @@ async function calImpRead(src, from, to, fileText) {
   const fromMs = tzEpoch(from, '', tz), toMs = tzEpoch(to, '', tz) + 864e5;
   const r = await devcalCall(id => AndroidApp.calRead(id, String(src.id), String(fromMs), String(toMs)), 60000);
   if (!r || !r.ok) return { ok: false, error: devcalWhy(r) };
-  return { ok: true, events: calImpFromDevice(r.events, tz, src.id), complete: !r.cut, name: src.name || '' };
+  return { ok: true, events: calImpFromDevice(r.events, tz, src.sid || src.id), complete: !r.cut, name: src.name || '' };
 }
-function calImpSrcId(src) { return src.kind === 'dev' ? 'd' + String(src.id) : src.kind === 'url' ? 'u' : 'f'; }
+// номер источника (урок 144): у ссылки — случайный, заводится при сохранении новой ссылки (crm_calimp_usid, на устройстве; не из самой ссылки —
+// она секрет), у календаря телефона — случайный при выборе календаря (src.sid); источник, выбранный до урока 144, — прежний номер
+function calImpSrcId(src) { return src.kind === 'dev' ? (src.sid || 'd' + String(src.id)) : src.kind === 'url' ? (localStorage.getItem(CALIMP.keyUsid) || 'u') : 'f'; }
+function calImpRand() {
+  // случайный номер источника; без криптографии (старый браузер) — Math.random: номер не секрет, нужен только разный у разных источников
+  try { return Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => (b % 36).toString(36)).join(''); } catch (e) { /* штатно: нет crypto */ return Math.random().toString(36).slice(2, 10); }
+}
 async function calImpData() { const d = {}; for (const st of ['cases', 'hearings', 'tasks', 'meetings']) d[st] = await getAll(st); return d; }
 // прочитать и (apply) записать. Проверка и захват — в одном такте (урок 134); план считается заново прямо перед записью — по свежим
 // «Неразобранным» и учёту (урок 78)
@@ -8783,12 +8907,18 @@ async function calImpRun(opt) {
     if (o.apply && src.kind !== 'file') localStorage.setItem(CALIMP.keyRes, JSON.stringify(res));
     CALIMP.last = { src, read: { events: r.events, complete: r.complete, name: r.name, from, to }, plan, at: Date.now() };
     return Object.assign({ ok: true }, res, { plan });
-  } catch (e) { logErr('calimp:run', e); return { ok: false, error: 'сбой: ' + String((e && e.message) || e).slice(0, 120) }; }
+  } catch (e) {
+    // сбой записи (нет места на устройстве и т. п.) — ошибкой в строке состояния и в «Автоматизации», а не «прочитано» (урок 144)
+    logErr('calimp:run', e); const msg = (e && e.name === 'QuotaExceededError' ? 'на устройстве не хватает места — ' : 'сбой: ') + String((e && e.message) || e).slice(0, 120);
+    if (src.kind !== 'file') { try { localStorage.setItem(CALIMP.keyErr, JSON.stringify({ at: Date.now(), msg })); } catch (e2) { logErr('calimp:err', e2); } }
+    return { ok: false, error: msg };
+  }
   finally { CALIMP.busy = false; }
 }
 function calImpResText(n, applied) {
   const parts = [applied ? 'в «Неразобранные» добавлено: ' + n.added : 'новых: ' + n.added];
-  if (n.moved) parts.push('перенесено в календаре: ' + n.moved); if (n.back) parts.push('в календаре вернули на прежнее время: ' + n.back); if (n.cancelled) parts.push('отменено: ' + n.cancelled); if (n.gone) parts.push('удалено из календаря: ' + n.gone);
+  if (n.maybe) parts.push('из них, возможно, уже есть в программе (проверьте): ' + n.maybe);
+  if (n.moved) parts.push('перенесено в календаре: ' + n.moved); if (n.changed) parts.push('изменено название или место: ' + n.changed); if (n.back) parts.push('в календаре вернули на прежнее время: ' + n.back); if (n.cancelled) parts.push('отменено: ' + n.cancelled); if (n.gone) parts.push('удалено из календаря: ' + n.gone);
   if (n.exists) parts.push('уже есть в программе: ' + n.exists); if (n.dup) parts.push('уже в «Неразобранных»: ' + n.dup); if (n.known) parts.push('переносились раньше: ' + n.known);
   if (n.filtered) parts.push('не похожи на дела: ' + n.filtered); if (n.rec) parts.push('повторяющихся (не переносятся): ' + n.rec); if (n.cxSkip) parts.push('отменённых в календаре (не переносятся): ' + n.cxSkip); if (n.own) parts.push('события самой программы: ' + n.own);
   if (n.more) parts.push('не поместилось (в «Неразобранных» не больше 200, за раз — не больше ' + CALIMP.max + '): ' + n.more);
@@ -8797,11 +8927,16 @@ function calImpResText(n, applied) {
 }
 // ── строки на «Сегодня»: перенос, отмена, удаление уже разобранного события ──
 function calImpTodayItems(today) {
-  const label = { moved: 'В календаре перенесено: ', cancelled: 'В календаре отменено: ', gone: 'Удалено из календаря: ' };
+  const label = { moved: 'В календаре перенесено: ', cancelled: 'В календаре отменено: ', gone: 'Удалено из календаря: ', changed: 'В календаре изменено: ' };
+  const q = v => '«' + (String(v || '').length > 60 ? String(v).slice(0, 59) + '…' : String(v || '')) + '»';
   return calImpNotesLoad().map(x => {
-    const [store, id] = String(x.rec || '').split(':'), open = store === 'hearings' ? `openHearingForm('${jsq(id)}')` : store === 'meetings' ? `openMeetingForm('${jsq(id)}')` : store === 'tasks' ? `openTaskForm('${jsq(id)}')` : store === 'cases' || store === 'deadline' ? `openCaseSheet('${jsq(id)}')` : 'openCalImportSheet()';
-    const sub = x.kind === 'moved' && x.now ? 'было ' + calImpWhen(x.was.d, x.was.t) + ' → в календаре ' + calImpWhen(x.now.d, x.now.t) + ' · в программе не изменено' : 'было ' + calImpWhen(x.was.d, x.was.t) + ' · в программе не изменено';
-    return { key: 'ci:' + x.key, kind: 'calimp', pr: 1, date: (x.now && x.now.d) || x.was.d || today, title: (label[x.kind] || '') + (x.title || 'событие'), sub, when: 'из календаря', badges: [['Проверьте', 'warn']],
+    const [store, id] = String(x.rec || '').split(':'), open = calImpOpenFn(store, id), ch = x.ch || {}, hasCh = !!(ch.s || ch.p);
+    // изменения названия и места (урок 144): что было → что стало в календаре
+    const chText = [ch.s ? 'название ' + q(ch.s[0]) + ' → ' + q(ch.s[1]) : '', ch.p ? 'место ' + (ch.p[0] ? q(ch.p[0]) : 'не указано') + ' → ' + (ch.p[1] ? q(ch.p[1]) : 'не указано') : ''].filter(Boolean).join(' · ');
+    const when = x.kind === 'moved' && x.now ? 'было ' + calImpWhen(x.was.d, x.was.t) + ' → в календаре ' + calImpWhen(x.now.d, x.now.t) : x.kind === 'changed' ? '' : 'было ' + calImpWhen(x.was.d, x.was.t);
+    const sub = [when, chText, 'в программе не изменено'].filter(Boolean).join(' · ');
+    const title = (x.kind === 'moved' && hasCh ? 'В календаре перенесено и изменено: ' : label[x.kind] || '') + (x.title || 'событие');
+    return { key: 'ci:' + x.key, kind: 'calimp', pr: 1, date: (x.now && x.now.d) || x.was.d || today, title, sub, when: 'из календаря', badges: [['Проверьте', 'warn']],
       open, act: { fn: `calImpNoteDone('${jsq(x.key)}')`, label: 'Разобрано', icon: 'check' }, dismiss: `calImpNoteDone('${jsq(x.key)}')`, dismissLabel: 'Разобрано' };
   });
 }
@@ -8819,7 +8954,7 @@ async function calImpAutoTick() {
   if (typeof document === 'object' && document.visibilityState && document.visibilityState !== 'visible') return;
   if (Date.now() - Number(localStorage.getItem(CALIMP.keyAt) || 0) < CALIMP.staleMs) return;
   const r = await calImpRun({ apply: true });
-  if (r.ok && r.n && (r.n.added || r.n.moved || r.n.back || r.n.cancelled || r.n.gone)) { toast('Из календаря: ' + calImpResText(r.n, true)); if (typeof UI === 'object' && UI.ready && (UI.screen === 'today' || UI.screen === 'inbox') && !sheetIsOpen()) nav(UI.screen); }
+  if (r.ok && r.n && (r.n.added || r.n.moved || r.n.changed || r.n.back || r.n.cancelled || r.n.gone)) { toast('Из календаря: ' + calImpResText(r.n, true)); if (typeof UI === 'object' && UI.ready && (UI.screen === 'today' || UI.screen === 'inbox') && !sheetIsOpen()) nav(UI.screen); }
 }
 function calImpStart() {
   if (typeof window !== 'object' || typeof setInterval !== 'function' || CALIMP.loop) return;
@@ -8868,12 +9003,12 @@ async function openCalImportSheet(mode, msg) {
   } else if (pick === 'file') detail = `<div class="section-label step-label">Файл .ics</div><div class="field"><input type="file" id="ci-file" accept=".ics,text/calendar"></div>
     <div class="form-actions">${btn('Прочитать файл', 'calImpFile()', 'primary', 'calendar-days')}</div><p class="small muted">Файл выгрузки любого календаря: Google — «Настройки» → «Импорт и экспорт» → «Экспорт» (архив; распакуйте и выберите файл календаря), Outlook — «Сохранить календарь», iPhone — через компьютер. Сервер и приложение не нужны.</p>`;
   const P = CALIMP.last && CALIMP.last.plan && msg && msg.preview ? CALIMP.last.plan : null;
-  const stLabel = { new: 'добавится', exists: 'уже есть в программе', dup: 'уже в «Неразобранных»', filtered: 'не похоже на дело', more: 'не поместилось' };
+  const stLabel = { new: 'добавится', maybe: 'добавится — возможно, уже есть', exists: 'уже есть в программе', dup: 'уже в «Неразобранных»', filtered: 'не похоже на дело', more: 'не поместилось' };
   const typeLabel = { hearing: 'заседание', meeting: 'встреча', task: 'задача' };
   // название календаря — из самого файла (X-WR-CALNAME) или из списка календарей телефона; в подписи раздела не ставится (она прописными)
   const calName = CALIMP.last && CALIMP.last.read ? CALIMP.last.read.name : '';
   const preview = P ? `<div class="section-label">Что найдено</div><div class="info-box" id="ci-sum">${calName ? 'Календарь «' + esc(calName) + '»: ' : ''}${esc(calImpResText(P.n, false))}</div>
-    ${P.rows.length ? `<div class="list-rows" id="ci-rows">${P.rows.slice(0, 40).map(r => `<div class="ci-row${r.state === 'new' ? '' : ' muted'}"><span>${esc(calImpWhen(r.date, r.time))} · ${esc(r.title)}</span><span class="muted">${esc([typeLabel[r.type], r.caseNum, stLabel[r.state]].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>${P.rows.length > 40 ? `<p class="small muted">Ещё ${P.rows.length - 40}</p>` : ''}` : ''}
+    ${P.rows.length ? `<div class="list-rows" id="ci-rows">${P.rows.slice(0, 40).map(r => `<div class="ci-row${r.state === 'new' ? '' : ' muted'}"><span>${esc(calImpWhen(r.date, r.time))} · ${esc(r.title)}</span><span class="muted">${esc([typeLabel[r.type], r.caseNum, stLabel[r.state] + (r.rec ? ': ' + r.rec : '')].filter(Boolean).join(' · '))}</span></div>`).join('')}</div>${P.rows.length > 40 ? `<p class="small muted">Ещё ${P.rows.length - 40}</p>` : ''}` : ''}
     <div class="form-actions">${btn('Добавить в «Быстрые записи» (' + P.n.added + ')', 'calImpApplyNow()', 'primary', 'plus')}</div>` : '';
   openSheet('События из календаря', `<div class="status-line ${state[0]}" id="ci-state" role="status">${icon(state[0] === 'good' ? 'check' : state[0] ? 'circle-alert' : 'calendar-days')}<span>${esc(state[1])}</span></div>
     ${msg && msg.text ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="ci-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
@@ -8905,11 +9040,14 @@ async function calImpSaveUrl() {
   const raw = fv('ci-url'), url = calImpUrlNorm(raw);
   if (!raw) { openCalImportSheet('replace', { text: 'Вставьте ссылку в поле', bad: true }); return; }
   if (!url) { openCalImportSheet('replace', { text: 'Это не ссылка календаря Google (…calendar.google.com/calendar/ical/…/basic.ics) или iCloud (…icloud.com/published/…). Для Google нужна «Закрытая ссылка в формате iCal», а не адрес страницы календаря.', bad: true }); return; }
+  // другая ссылка — новый номер источника (урок 144): события прежнего календаря не объявляются «удалёнными»; та же ссылка — номер прежний.
+  // Тот же календарь с новой ссылкой (в Google «Сбросить») узнаётся по событиям: каждое увиденное запоминает новый источник
+  if (url !== (localStorage.getItem(CALIMP.keyUrl) || '') || !localStorage.getItem(CALIMP.keyUsid)) localStorage.setItem(CALIMP.keyUsid, 'u-' + calImpRand());
   localStorage.setItem(CALIMP.keyUrl, url); localStorage.setItem(CALIMP.keySrc, JSON.stringify({ kind: 'url' })); localStorage.removeItem(CALIMP.keyErr); CALIMP_UI.pick = 'url';
   openCalImportSheet('replace', { text: 'Ссылка сохранена. Нажмите «Посмотреть события».' });
 }
 function calImpDropUrl() {
-  localStorage.removeItem(CALIMP.keyUrl); const s = calImpSrc(); if (s && s.kind === 'url') { localStorage.removeItem(CALIMP.keySrc); localStorage.setItem(CALIMP.keyAuto, '0'); }
+  localStorage.removeItem(CALIMP.keyUrl); localStorage.removeItem(CALIMP.keyUsid); const s = calImpSrc(); if (s && s.kind === 'url') { localStorage.removeItem(CALIMP.keySrc); localStorage.setItem(CALIMP.keyAuto, '0'); }
   openCalImportSheet('replace', { text: 'Ссылка удалена с этого устройства. Учёт перенесённых событий остался — после новой ссылки они не повторятся.' });
 }
 async function calImpPerm() {
@@ -8919,7 +9057,10 @@ async function calImpPerm() {
 }
 function calImpPickCal(id) {
   const c = (Array.isArray(CALIMP_UI.list) ? CALIMP_UI.list : []).find(x => String(x.id) === String(id)); if (!c) return;
-  localStorage.setItem(CALIMP.keySrc, JSON.stringify({ kind: 'dev', id: c.id, name: c.name || '' })); localStorage.removeItem(CALIMP.keyErr);
+  // номер источника — случайный на этом устройстве (урок 144): номера календаря и событий Android на разных телефонах совпадают у разных
+  // календарей, а учёт общий; тот же календарь выбран снова — номер прежний
+  const s0 = calImpSrc(), sid = s0 && s0.kind === 'dev' && String(s0.id) === String(c.id) && s0.sid ? s0.sid : 'd-' + calImpRand();
+  localStorage.setItem(CALIMP.keySrc, JSON.stringify({ kind: 'dev', id: c.id, name: c.name || '', sid })); localStorage.removeItem(CALIMP.keyErr);
   openCalImportSheet('replace', { text: 'Выбран календарь «' + (c.name || '') + '». Нажмите «Посмотреть события».' });
 }
 function calImpAutoToggle(on) { localStorage.setItem(CALIMP.keyAuto, on ? '1' : '0'); openCalImportSheet('replace', { text: on ? 'Программа будет проверять календарь сама при открытии и раз в 6 часов.' : 'Проверка календаря — по кнопке.' }); }
@@ -11619,6 +11760,9 @@ function todayModel(d, now, hidden) {
   if (typeof mailTodayItems === 'function') mailTodayItems(d.mail || [], today, caseOf).forEach(x => imp.push(x));
   // 13.10.2026 (этап 6): событие календаря, уже разобранное в программе, в календаре перенесли, отменили или удалили (sync/calimp.js)
   if (typeof calImpTodayItems === 'function') calImpTodayItems(today).forEach(x => imp.push(x));
+  // урок 144 (аудит GPT 13.10.2026): вопрос с сайта или запись на приём получены, но не сохранены на устройстве (sync/ask.js, sync/booking.js)
+  if (typeof askTodayItems === 'function') askTodayItems().forEach(x => imp.push(x));
+  if (typeof bookTodayItems === 'function') bookTodayItems().forEach(x => imp.push(x));
   imp.sort((a, b) => a.pr - b.pr || String(a.date).localeCompare(String(b.date)) || String(a.title).localeCompare(String(b.title), 'ru'));
   // разбор GPT 04.10.2026, п. 6: процессуальный срок, скрытый до дня срока, возвращается в этот день (скрытие — не дольше срока)
   const hiddenDl = lsJSON(TODAY_HIDE_DL_KEY, {}) || {};
@@ -14007,11 +14151,15 @@ function inboxUndoHtml() { const u = INBOX_UNDO; return u ? `<div class="info-bo
 function inboxRowHtml(x, i, cases, now) {
   const r = inboxParseX(x, now, cases), [label, ico] = INBOX_TYPES[r.type];
   // из календаря: пометка источника, перенос и отмена в календаре — словами (sync/calimp.js)
-  const k = x.cal, calNote = k ? ' <span class="muted">из календаря' + (k.cancelled ? ' · отменено в календаре' : k.gone ? ' · удалено из календаря' : k.moved ? ' · перенесено (было ' + esc(k.moved) + ')' : '') + '</span>' : '';
+  const k = x.cal, calNote = k ? ' <span class="muted">из календаря' + (k.cancelled ? ' · отменено в календаре' : k.gone ? ' · удалено из календаря' : k.moved ? ' · перенесено (было ' + esc(k.moved) + ')' : '') + (k.changed && !k.cancelled && !k.gone ? ' · изменено в календаре' : '') + '</span>' : '';
+  // урок 144 (аудит GPT 13.10.2026): неполное совпадение с записью программы — событие не отброшено, а показано с найденной записью; решает
+  // пользователь: «Открыть запись» — посмотреть, «×» — не нужно (о событии больше не спрашивать), «Так и есть» — это другое событие
+  const maybe = k && k.maybe && k.maybe.id ? `<div class="info-box warning ib-maybe">Возможно, уже есть в программе: ${esc(k.maybe.text || '')}</div>` : '';
   const chip = `<span class="chip-s">${icon(ico, 'icon-sm')}${esc(label)}${r.due ? ' · ' + esc(fmtDate(r.due)) + (k && r.time ? ' ' + esc(r.time) : '') : ''}${r.caseNum ? ' · ' + esc(r.caseNum) : ''}</span>${calNote}`;
   const ok = r.needsCase && !r.caseId ? `<button type="button" class="button small-btn" onclick="inboxOther(${i})">Выбрать дело</button>` : `<button type="button" class="button small-btn primary ib-ok" onclick="inboxApply(${i})">Так и есть</button>`;
-  return `<div class="ib-row" data-id="${esc(x.id)}"><div class="task-title ib-text">${esc(x.text)}</div><div class="task-sub">${chip} <span class="muted">${esc(new Date(x.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span></div>
-    <div class="actions">${ok}<button type="button" class="button small-btn" onclick="inboxOther(${i})">Другое</button>${iconBtn('Удалить запись', `inboxDelete('${jsq(x.id)}')`, 'x')}</div></div>`;
+  const openRec = maybe && typeof calImpOpenFn === 'function' ? `<button type="button" class="button small-btn ib-open-rec" onclick="${calImpOpenFn(k.maybe.store, k.maybe.id)}">Открыть запись</button>` : '';
+  return `<div class="ib-row" data-id="${esc(x.id)}"><div class="task-title ib-text">${esc(x.text)}</div><div class="task-sub">${chip} <span class="muted">${esc(new Date(x.at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</span></div>${maybe}
+    <div class="actions">${ok}${openRec}<button type="button" class="button small-btn" onclick="inboxOther(${i})">Другое</button>${iconBtn('Удалить запись', `inboxDelete('${jsq(x.id)}')`, 'x')}</div></div>`;
 }
 async function inboxBody(sheet) {
   const cases = await getAll('cases'), now = new Date(); INBOX_VIEW = inboxItems().sort((a, b) => (b.at || 0) - (a.at || 0));
@@ -16576,7 +16724,8 @@ const HELP_SECTIONS = [
 <ol><li>Настройки → «Вопросы с сайта» → «Принимать вопросы через страницу»; проверьте заголовок, способы связи и текст согласия (оператор и адрес подставляются из онлайн-записи, если они там заполнены).</li>
 <li>«Сохранить и опубликовать» — появятся ссылка для доверителей и код кнопки: «Скопировать код кнопки» и вставьте код на страницу своего сайта.</li>
 <li>Проверка: откройте страницу по ссылке, отправьте пробный вопрос и нажмите «Проверить вопросы» — появится обращение с источником «Сайт».</li></ol>
-<p>Вопрос становится обращением, на «Сегодня» — задача «Связаться» в «Сделать сегодня». Если за рабочий день ответа нет (вопрос пришёл в рабочий день — то же время следующего рабочего дня; в выходной — до конца ближайшего рабочего дня), задача поднимается в «Требует внимания» с пометкой «Нет ответа больше рабочего дня». В карточке обращения — «Связались», ссылка на Telegram и пометка «Повторное обращение», если этот телефон или Telegram уже был у прежнего обращения или доверителя. Уведомление о вопросе приходит в Telegram, если у сервера заданы TG_TOKEN и TG_CHAT; без отметки «Полные названия задач и имена в Telegram» — только номер вопроса, без имени и текста. Выключение приёма закрывает саму страницу: она отвечает, что вопросы не принимаются. При сбое Яндекс Облака страница не открывается.</p>` },
+<p>Вопрос становится обращением, на «Сегодня» — задача «Связаться» в «Сделать сегодня». Если за рабочий день ответа нет (вопрос пришёл в рабочий день — то же время следующего рабочего дня; в выходной — до конца ближайшего рабочего дня), задача поднимается в «Требует внимания» с пометкой «Нет ответа больше рабочего дня». В карточке обращения — «Связались», ссылка на Telegram и пометка «Повторное обращение», если этот телефон или Telegram уже был у прежнего обращения или доверителя. Уведомление о вопросе приходит в Telegram, если у сервера заданы TG_TOKEN и TG_CHAT; без отметки «Полные названия задач и имена в Telegram» — только номер вопроса, без имени и текста. Выключение приёма закрывает саму страницу: она отвечает, что вопросы не принимаются. При сбое Яндекс Облака страница не открывается.</p>
+<p>Если вопрос (или заявку онлайн-записи) программа получила, а записать на устройство не смогла — например, не хватило места, — на «Сегодня» появится строка «Вопрос с сайта получен, но не сохранён» с кнопкой «Повторить». Такой вопрос остаётся на сервере и придёт снова при следующей проверке; освободите место на устройстве и нажмите «Повторить».</p>` },
   { id: 'money', title: 'Финансы, отчёты, калькуляторы', html: `
 <p>«Финансы»: счета (фиксированная сумма, почасовой, гонорар успеха, абонентская плата), оплата из строки счёта, рассрочка, расходы, «Платежи» за период с итогом и «Выписка для печати».</p>
 <p>Депозит (авансы по делу): в карточке дела «Ещё: добавить в дело» → «Аванс», или группа «Деньги» → «Внести аванс» / «Списать». Остаток по делу виден там же; списание больше остатка программа записывает только после второго нажатия «Сохранить». Все остатки по делам и общий итог — «Финансы» → «Депозиты». Операции, внесённые в прежней программе, видны и здесь.</p>
@@ -16676,7 +16825,8 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <ol><li>Выберите, откуда брать события: закрытая ссылка календаря Google или iCloud (её читает личный сервер версии 191 или новее — браузер такую ссылку сам не прочитает), календарь на телефоне (приложение для Android 1.25) или файл .ics (один раз, без сервера).</li>
 <li>Для Google: в браузере на компьютере — календарь в «Мои календари» → «⋮» → «Настройки и общий доступ» → «Интеграция календаря» → «Закрытый адрес в формате iCal» (в английском интерфейсе — Settings and sharing → Integrate calendar → Secret address in iCal format) → вставьте в программу → «Сохранить ссылку». Ссылка — секрет: по ней календарь читается без входа.</li>
 <li>«Посмотреть события» — программа покажет, что добавится, а что уже есть; «Добавить в «Быстрые записи»». Можно включить проверку самой программой — при открытии и раз в 6 часов.</li></ol>
-<p>Не переносятся события самой программы (лента и «Google Календарь»), повторяющиеся (планёрки, дни рождения), прошедшие и уже имеющиеся в программе. Если разобранное событие в календаре перенесли, отменили или удалили, на «Сегодня» появится строка «В календаре перенесено …» — программа сама заседание не меняет: проверьте и нажмите «Разобрано».</p>` },
+<p>Не переносятся события самой программы (лента и «Google Календарь»), повторяющиеся (планёрки, дни рождения), прошедшие и уже имеющиеся в программе. «Уже есть» — это запись того же вида, того же дела, в тот же день и час (у задачи — то же название): такое событие программа связывает с записью. Если совпадение неполное (дело в событии не узнано, а в это время уже стоит заседание; у заседания в программе не указано время), событие всё равно попадает в «Неразобранные» с пометкой «Возможно, уже есть в программе» и кнопкой «Открыть запись» — решаете вы: «Так и есть», если это другое событие, или «×», если то же.</p>
+<p>Если разобранное событие в календаре перенесли, отменили, удалили или изменили его название или место, на «Сегодня» появится строка «В календаре перенесено …» («изменено …») с тем, что было и что стало, — программа сама заседание не меняет: проверьте и нажмите «Разобрано». У неразобранной записи новые дата, время, название и место подставляются сами. Сменили ссылку на календарь — программа не сочтёт события прежнего календаря удалёнными.</p>` },
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
