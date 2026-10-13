@@ -1,0 +1,188 @@
+name: FamilyVPN - follow donor and publish signed APK
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: family-release
+  cancel-in-progress: false
+
+jobs:
+  family-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout OUR family patch repository
+        uses: actions/checkout@v4
+        with:
+          path: family
+          persist-credentials: false
+
+      - name: Discover donor's latest stable release
+        id: discover
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          donor_tag="$(gh api repos/Ivan4537/WDTT-Plus/releases/latest --jq '.tag_name')"
+          if [[ ! "$donor_tag" =~ ^v[0-9]+$ ]]; then
+            echo "Unsupported donor tag: $donor_tag" >&2; exit 1
+          fi
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-10)"
+          family_tag="family-${donor_tag}-${short_sha}"
+          echo "donor_tag=$donor_tag" >> "$GITHUB_OUTPUT"
+          echo "family_tag=$family_tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$family_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "needs_build=false" >> "$GITHUB_OUTPUT"
+            echo "Family release already exists: $family_tag"
+          else
+            echo "needs_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch exact donor release source
+        if: steps.discover.outputs.needs_build == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan4537/WDTT-Plus
+          ref: ${{ steps.discover.outputs.donor_tag }}
+          path: donor
+          persist-credentials: false
+
+      - name: Check server compatibility and preserve provenance
+        if: steps.discover.outputs.needs_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Donor Git commit: $(git -C donor rev-parse HEAD)"
+          approved="$(tr -d '[:space:]' < family/familyvpn/config/approved-server-version.txt)"
+          actual="$(sed -n 's/^WDTT_SERVER_VERSION="\([^"]*\)"/\1/p' donor/server-installer/compatibility-contract.env)"
+          if [[ -z "$approved" || "$actual" != "$approved" ]]; then
+            echo "STOP: donor wdtt-server=$actual, approved installed server=$approved" >&2
+            echo "Update the VPS WITH backup and a tested rollback BEFORE approving a new server version." >&2
+            exit 1
+          fi
+          mkdir -p donor/tools donor/config
+          cp family/familyvpn/tools/*.py family/familyvpn/tools/*.kt donor/tools/
+          cp family/familyvpn/config/approved-server-version.txt donor/config/
+
+      - name: Java 21
+        if: steps.discover.outputs.needs_build == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Go for donor compilation
+        if: steps.discover.outputs.needs_build == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+
+      - name: Android SDK and NDK
+        if: steps.discover.outputs.needs_build == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android toolchain
+        if: steps.discover.outputs.needs_build == 'true'
+        run: sdkmanager --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+
+      - name: Restore release keystore from GitHub Secrets
+        if: steps.discover.outputs.needs_build == 'true'
+        shell: bash
+        working-directory: donor
+        env:
+          FAMILY_KEYSTORE_B64: ${{ secrets.FAMILY_KEYSTORE_B64 }}
+          FAMILY_STORE_PASSWORD: ${{ secrets.FAMILY_STORE_PASSWORD }}
+          FAMILY_KEY_ALIAS: ${{ secrets.FAMILY_KEY_ALIAS }}
+          FAMILY_KEY_PASSWORD: ${{ secrets.FAMILY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ -n "$FAMILY_KEYSTORE_B64" && -n "$FAMILY_STORE_PASSWORD" && -n "$FAMILY_KEY_ALIAS" && -n "$FAMILY_KEY_PASSWORD" ]] || { echo 'Missing signing secrets' >&2; exit 1; }
+          printf '%s' "$FAMILY_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/family-release.jks"
+          printf 'KEYSTORE_FILE=%s\nKEYSTORE_PASSWORD=%s\nKEY_ALIAS=%s\nKEY_PASSWORD=%s\nWDTT_PLUS_DOMAIN=wdttplus.ru\n' \
+            "$RUNNER_TEMP/family-release.jks" "$FAMILY_STORE_PASSWORD" "$FAMILY_KEY_ALIAS" "$FAMILY_KEY_PASSWORD" > local.properties
+          echo "sdk.dir=$ANDROID_HOME" >> local.properties
+          chmod 600 local.properties "$RUNNER_TEMP/family-release.jks"
+
+      - name: Verify lock / apply our family patch
+        if: steps.discover.outputs.needs_build == 'true'
+        working-directory: donor
+        env:
+          FAMILY_UPDATE_REPO: ${{ github.repository }}
+          FAMILY_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          python3 tools/verify_device_binding.py
+          python3 tools/apply_family_mode.py
+
+      - name: Run unit tests and produce signed RELEASE APK
+        if: steps.discover.outputs.needs_build == 'true'
+        working-directory: donor
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Check APK signature, determine versionCode and hash
+        if: steps.discover.outputs.needs_build == 'true'
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk='donor/app/build/outputs/apk/release/app-universal-release.apk'
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk"
+          basecode="$(sed -n 's/^val appVersionCode = \([0-9]*\)$/\1/p' donor/app/build.gradle.kts)"
+          [[ "$basecode" =~ ^[0-9]+$ ]] || exit 1
+          versioncode=$((basecode * 100000 + GITHUB_RUN_NUMBER))
+          cp "$apk" "FamilyVPN-${versioncode}.apk"
+          sha256sum "FamilyVPN-${versioncode}.apk"
+          # Ship complete corresponding source under GPLv3, never signing secrets.
+          tar -czf "FamilyVPN-${versioncode}-source.tar.gz" -C donor \
+            --exclude='.git' --exclude='.gradle' --exclude='build' --exclude='app/build' \
+            --exclude='local.properties' --exclude='*.jks' --exclude='*.keystore' \
+            --exclude='app/src/main/jniLibs' --exclude='app/src/main/assets/server' .
+          echo "source=FamilyVPN-${versioncode}-source.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "file=FamilyVPN-${versioncode}.apk" >> "$GITHUB_OUTPUT"
+          echo "version=$versioncode" >> "$GITHUB_OUTPUT"
+
+      - name: Create DRAFT release (not yet visible to family)
+        if: steps.discover.outputs.needs_build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.discover.outputs.family_tag }}
+          DONOR_TAG: ${{ steps.discover.outputs.donor_tag }}
+          APK_FILE: ${{ steps.apk.outputs.file }}
+          SOURCE_FILE: ${{ steps.apk.outputs.source }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" "$APK_FILE" "$SOURCE_FILE" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft \
+            --title "FamilyVPN $DONOR_TAG / build $GITHUB_RUN_NUMBER" \
+            --notes "Source: Ivan4537/WDTT-Plus $DONOR_TAG; donor commit: $(git -C donor rev-parse HEAD). Family patch commit: $GITHUB_SHA. Signed with our existing keystore. New server version requires explicit approval."
+
+      - name: Confirm published asset SHA-256 and publish release
+        if: steps.discover.outputs.needs_build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.discover.outputs.family_tag }}
+          APK_FILE: ${{ steps.apk.outputs.file }}
+        run: |
+          set -euo pipefail
+          expected="sha256:$(sha256sum "$APK_FILE" | awk '{print $1}')"
+          actual="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" --jq ".assets[] | select(.name == \"$APK_FILE\") | .digest")"
+          if [[ "$expected" != "$actual" ]]; then
+            echo 'FAIL: GitHub asset digest mismatch/missing. Draft retained; not exposed to families.' >&2
+            exit 1
+          fi
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          echo "Published $RELEASE_TAG with SHA-256 $expected"
