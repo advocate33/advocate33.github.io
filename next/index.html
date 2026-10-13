@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 08:30 · 1642753">
+<meta name="build" content="13.10.2026 10:12 · 50e9f63">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -6311,7 +6311,7 @@ async function monEvDedupe() {
 }
 // 09.10.2026: то же заседание (ключ без текста, monEvKey), но описание другое — обновляется текст записи, дубль не создаётся; применённое
 // событие снова становится новым: сайт мог дописать результат («Заседание отложено») — автоприменение перенесёт его в заседание (пропуск пользователя autoSkip держится)
-async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.externalId,x])),hearByKey=new Map(live.filter(x=>x.eventType==='hearing'&&x.externalId).map(x=>[monEvKey(x),x])),added=[];let updated=0;for(const x of rows){if(!hashes.has(x.hash)&&x.eventType==='hearing'&&x.externalId&&hearByKey.has(monEvKey(x))){const prevH=hearByKey.get(monEvKey(x));if(prevH.title!==x.title&&!(monHearRes(prevH)&&!monHearRes(x))){prevH.title=x.title;prevH.raw=x.raw;prevH.hash=x.hash;prevH.receivedAt=Date.now();if(prevH.status==='applied'&&!prevH.autoSkip)prevH.status='new';await put('monitorEvents',prevH);hashes.add(x.hash);updated++;}continue;}if(hashes.has(x.hash)||keys.has(monEvKey(x)))continue;const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if(x.eventType==='caseflow'&&x.externalId)flowByExt.set(x.externalId,x);if(x.eventType==='hearing'&&x.externalId)hearByKey.set(monEvKey(x),x);added.push(x);}
+async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>x.eventType==='caseflow'&&x.externalId).map(x=>[x.externalId,x])),hearByKey=new Map(live.filter(x=>x.eventType==='hearing'&&x.externalId).map(x=>[monEvKey(x),x])),added=[],again=[];let updated=0;for(const x of rows){if(!hashes.has(x.hash)&&x.eventType==='hearing'&&x.externalId&&hearByKey.has(monEvKey(x))){const prevH=hearByKey.get(monEvKey(x));if(prevH.title!==x.title&&!(monHearRes(prevH)&&!monHearRes(x))){prevH.title=x.title;prevH.raw=x.raw;prevH.hash=x.hash;prevH.receivedAt=Date.now();if(prevH.status==='applied'&&!prevH.autoSkip)prevH.status='new';await put('monitorEvents',prevH);hashes.add(x.hash);updated++;}continue;}if(hashes.has(x.hash)||keys.has(monEvKey(x))){if(x.eventType==='casecard'&&x.caseId)again.push(x);continue;}const prev=x.eventType==='caseflow'&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new')prev.status='flow';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if(x.eventType==='caseflow'&&x.externalId)flowByExt.set(x.externalId,x);if(x.eventType==='hearing'&&x.externalId)hearByKey.set(monEvKey(x),x);added.push(x);}
   // 04.10.2026: дубли, записанные до исправления или пришедшие обменом, удаляются
   await monEvDedupe();
   { /* v238: УИД с сайта суда запоминается в деле при первой привязке по номеру — дальше привязка идёт по УИД */
@@ -6320,6 +6320,12 @@ async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw(
   }
   { /* v239: карточки дел с сайта суда при плановом сборе — заполняем пустые поля дела */
     const cards=added.filter(x=>x.eventType==='casecard'&&x.caseId);
+    // 13.10.2026 (снимок дела, где доверитель — ответчик: после v135 нет противной стороны и участников): карточка писалась в дело только при
+    // ПЕРВОМ чтении — повторное (тот же ключ события) пропускалось как дубль, и стороны с ролями (приложение 1.15+) не доходили до дела, если
+    // первое чтение было приложением 1.13. Повторное чтение — та же запись события (описание обновляется), карточка снова прикладывается к делу:
+    // crmCaseApplyCard заполняет только пустые поля и не возвращает удалённых участников. Без явного чтения (opts.cardAgain — окно КАД) — только
+    // если карточка изменилась; событие, отмеченное «не применять», не трогается.
+    if(again.length){const liveNow=(await getAllRaw('monitorEvents')).filter(e=>!e._deleted&&e.eventType==='casecard');for(const x of again){const ev=liveNow.find(e=>monEvKey(e)===monEvKey(x));if(!ev||ev.status==='ignored')continue;const changed=String(ev.raw||'')!==String(x.raw||'');if(!changed&&!opts.cardAgain)continue;ev.raw=x.raw;ev.receivedAt=Date.now();ev.caseId=x.caseId;ev.caseNum=x.caseNum;if(changed)updated++;cards.push(ev);}}
     if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null,cardSt='';{const j=crmMonRawObj(x);card=j.card||null;cardSt=String(j.st||'');}if(!card)continue;
     // 10.10.2026: инстанция карточки (raw.st от коллектора и окна КАД) — поля апелляции и кассации, а не всегда первой инстанции
     const res=crmCaseApplyCard(c,card,cardSt==='Апелляция'?'App':(cardSt==='Кассация'||cardSt==='Надзор')?'Cass':'');if(res.done.length){addCaseHistoryEvent(c,'courtCard','',res.done.join('; '),'monitor');await put('cases',c);await crmCaseLogByNum(c.number,'flow','С сайта суда: '+res.done.join('; '));}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
@@ -7093,7 +7099,8 @@ async function kadCardApply(caseId, summary, link) {
   const rows = kadCardRows(parsed, c, link, todayISO()).concat(calRows); if (!rows.length) return { done: [], diff: [], hearing: null, sideNames: parsed.sideNames, nothing: true };
   const before = JSON.parse(JSON.stringify(c)), evBefore = new Set((await getAllRaw('monitorEvents')).filter(x => !x._deleted).map(x => x.externalId));
   const norm = await crmMonNormalizeRows(rows, 'Карточка КАД');
-  await crmMonPersist(norm, { quiet: true });
+  // 13.10.2026: чтение окна КАД — карточка прикладывается к делу и при повторном чтении (пустые поля, участники, противная сторона)
+  await crmMonPersist(norm, { quiet: true, cardAgain: true });
   const after = await getOne('cases', caseId), evAfter = (await getAllRaw('monitorEvents')).filter(x => !x._deleted);
   const FIELDS = [['courtNo', 'номер дела в суде'], ['courtNoApp', 'номер дела в суде (апелляция)'], ['courtNoCass', 'номер дела в суде (кассация)'], ['judge', 'судья'], ['judgeApp', 'судья (апелляция)'], ['judgeCass', 'судья (кассация)'],
     ['court', 'суд'], ['courtApp', 'суд (апелляция)'], ['courtCass', 'суд (кассация)'], ['i1FilingDate', 'дата поступления'], ['courtCategory', 'категория'],
@@ -8501,7 +8508,7 @@ applyTheme(); applyFontSettings(); // до первой отрисовки — �
 
 // ▼▼▼ ui/guard.js
 // ═══ ui/guard.js — защита незавершённой формы и черновик (план основных функций, п. 1.1, 03.10.2026) ═══
-// Форма — лист, собранный через fSaveBar (есть .form-actions). При открытии снимаются значения полей; закрытие любым путём —
+// Форма — лист, собранный через fSaveBar (есть .form-actions.save-bar). При открытии снимаются значения полей; закрытие любым путём —
 // «×» (closeSheet), «←» (sheetBack), Esc (cancel у <dialog>), «Назад» телефона (popstate) — при изменённых полях не закрывает,
 // а показывает выбор: «Сохранить» (жмёт кнопку сохранения формы), «Продолжить», «Закрыть без сохранения». Нажатие любой кнопки
 // в .form-actions (сохранить, удалить) снимает защиту — после них форма закрывается как раньше.
@@ -8561,7 +8568,14 @@ function formRecConflictText(r, cur, obj) {
 // устойчивый id новой записи на время жизни формы: повтор «Сохранить» после сбоя не создаёт вторую запись (разбор GPT 04.10.2026 (вечер), п. 1)
 function formNewId(prefix, fallback) { if (!UI.cur) return fallback; UI.cur.newIds = UI.cur.newIds || {}; if (!UI.cur.newIds[prefix]) UI.cur.newIds[prefix] = fallback; return UI.cur.newIds[prefix]; }
 function guardSaveFailed() { SHEET_GUARD.saving = 0; SHEET_GUARD.failed = true; }
-function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions'); }
+// 13.10.2026 (снимок «Сегодня»: «Незавершённая форма» листов «Google Календарь», «Лента календаря», «Файл в облаке»): формой считался любой
+// лист с рядом кнопок .form-actions — и листы настроек, которые действуют сразу, без «Сохранить»; их флажки и поля давали вопрос о
+// несохранённых изменениях и черновики, а поля ключей и паролей (код сервера, ключ лицензии, пароль файла) — черновик с секретом в открытом
+// хранилище. Форма — как задумано в шапке модуля: лист с панелью «Сохранить» (fSaveBar, .save-bar).
+function guardIsForm() { return !!document.querySelector('#sheetContent .form-actions.save-bar'); }
+// лист с полем пароля (PIN, пароль файла) в черновик не пишется: черновик лежит в открытом хранилище устройства
+function guardHasSecret() { return !!document.querySelector('#sheetContent .modal-content input[type="password"]'); }
+function guardDraftSafe(d) { const b = String((d && d.body) || ''); return /class="form-actions save-bar"/.test(b) && !/type="password"/.test(b); }
 // значения всех полей формы одной строкой — для сравнения
 function guardFormState() {
   const box = document.querySelector('#sheetContent .modal-content'); if (!box) return '';
@@ -8576,10 +8590,7 @@ function guardArm() {
   // идёт запись через guardRun — черновик снимет её завершение (по итогу и по своему ключу), а не показ листа
   if (guardSaving() && !SHEET_GUARD.busy) guardDraftDrop();
   SHEET_GUARD.saving = 0;
-  if (!guardIsForm()) { SHEET_GUARD.armed = false; SHEET_GUARD.snap = ''; return; }
-  SHEET_GUARD.armed = true;
-  if (UI.cur && UI.cur.guardSnap === undefined) UI.cur.guardSnap = guardFormState();
-  SHEET_GUARD.snap = UI.cur ? UI.cur.guardSnap : guardFormState();
+  // обработчики вешаются при первом показе любого листа (раньше — первой формы с .form-actions): «Удалить» в листе подтверждения — тоже отметка записи
   const box = document.getElementById('sheetContent');
   if (box && !box.__guardBound) { box.__guardBound = true;
     box.addEventListener('input', guardOnInput, true); box.addEventListener('change', guardOnInput, true);
@@ -8594,6 +8605,10 @@ function guardArm() {
       if (isSave || (b.classList.contains('danger') && !opener)) SHEET_GUARD.saving = Date.now();
     }, true);
   }
+  if (!guardIsForm()) { SHEET_GUARD.armed = false; SHEET_GUARD.snap = ''; return; }
+  SHEET_GUARD.armed = true;
+  if (UI.cur && UI.cur.guardSnap === undefined) UI.cur.guardSnap = guardFormState();
+  SHEET_GUARD.snap = UI.cur ? UI.cur.guardSnap : guardFormState();
 }
 function guardDirty() { return SHEET_GUARD.armed && guardIsForm() && guardFormState() !== SHEET_GUARD.snap; }
 function guardDisarm(dropDraft) { SHEET_GUARD.armed = false; clearTimeout(SHEET_GUARD.timer); if (dropDraft) guardDraftDrop(); }
@@ -8615,7 +8630,7 @@ function guardFormFields() {
   return out;
 }
 function guardDraftSave() {
-  if (!guardDirty() || !UI.cur) return false;
+  if (!guardDirty() || !UI.cur || guardHasSecret()) return false;
   try { sheetFreeze(); const tab = document.querySelector('#cx-tabs [aria-pressed="true"]');
     // разбор GPT 05.10.2026, п. 1: версия записи на момент открытия — при восстановлении сверяется с текущей (чужая правка не затирается молча)
     const rec = UI.cur.rec ? { store: UI.cur.rec.store, id: UI.cur.rec.id, upd: UI.cur.rec.upd, snap: UI.cur.rec.snap } : null;
@@ -8630,6 +8645,16 @@ function guardDraftDrop(key) {
   try { const k = key || guardCurKey(); if (!k) return;
     guardDraftsWrite(guardDraftsAll().filter(x => guardDraftKeyOf(x) !== k)); if (UI.cur && UI.cur.draftKey === k) UI.cur.draftKey = ''; } catch (e) { logErr('guard:draft', e); }
 }
+// черновики, записанные до 13.10.2026 листами настроек (без панели «Сохранить») или листами с полем пароля, удаляются при запуске
+function guardDraftsPurgeUnsafe() {
+  let a = []; try { a = JSON.parse(localStorage.getItem(GUARD_DRAFTS_KEY) || '[]'); } catch (e) { a = []; }
+  if (!Array.isArray(a)) a = [];
+  let one = null; try { one = JSON.parse(localStorage.getItem(GUARD_DRAFT_KEY) || 'null'); } catch (e) { one = null; }
+  const keep = a.filter(guardDraftSafe), n = a.length - keep.length + (one && !guardDraftSafe(one) && !a.some(d => d && d.at === one.at && d.title === one.title) ? 1 : 0);
+  if (n) guardDraftsWrite(keep);
+  return n;
+}
+try { guardDraftsPurgeUnsafe(); } catch (e) { if (typeof logErr === 'function') logErr('guard:purge', e); }
 function guardDraftGet(key) { const all = guardDraftsAll(); return key ? (all.find(x => guardDraftKeyOf(x) === key) || null) : (all[0] || null); }
 // попытка закрыть: true — можно закрывать; false — показан выбор, лист остаётся
 function guardBeforeClose(how, byUser) {
@@ -13139,7 +13164,7 @@ function openChecklistEditor(kind) {
     <div id="chk-rows">${(lists[k] || []).map(x => row(x.t, x.days)).join('')}</div>
     <div class="actions" style="margin:8px 0">${btn('Добавить задачу', 'checklistAddRow()', 'small-btn', 'plus')}</div>
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
-    <div class="form-actions"><button type="button" class="button primary" id="chk-save" onclick="checklistEditorSave()">${icon('check')}Сохранить набор</button>${btn('Вернуть набор по умолчанию', 'checklistEditorReset()', '', 'rotate-ccw')}</div>`, sheetIsOpen() ? true : undefined);
+    <div class="form-actions save-bar"><button type="button" class="button primary" id="chk-save" onclick="checklistEditorSave()">${icon('check')}Сохранить набор</button>${btn('Вернуть набор по умолчанию', 'checklistEditorReset()', '', 'rotate-ccw')}</div>`, sheetIsOpen() ? true : undefined);
   CHK_ROW_HTML = row;
   const sel = document.getElementById('chk-kind'); if (sel) sel.onchange = () => openChecklistEditor(sel.value);
 }
@@ -13157,6 +13182,9 @@ function checklistEditorSave() {
   if (m.error) { fErr(m.error); return; }
   const lists = checklistsGet(); lists[kind] = m.list; checklistsSave(lists);
   toast('Набор «' + kind + '» сохранён: задач ' + m.list.length); fErr('');
+  // 13.10.2026: редактор — форма с панелью «Сохранить» (ui/guard.js) и после записи остаётся открытым: записанное — новое исходное
+  // состояние, иначе закрытие спросило бы о несохранённых изменениях
+  if (typeof guardFormState === 'function' && UI.cur) { UI.cur.guardSnap = guardFormState(); SHEET_GUARD.snap = UI.cur.guardSnap; SHEET_GUARD.saving = 0; guardDraftDrop(); }
 }
 function checklistEditorReset() {
   const kind = fv('chk-kind'); if (!kind) return;
@@ -13745,7 +13773,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <h3>Карточки всех дел разом</h3>
 <p>«Суды и мониторинг» → «Карточки всех дел»: программа по очереди читает карточку каждого дела в работе со ссылкой на сайт суда — суды общей юрисдикции через коллектор, КАД в приложении для Android или для компьютера — и пишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». В листе — итог по каждому делу; «Остановить» прерывает обход после текущего дела.</p>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
-<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) и в приложении для компьютера (1.3 и новее) карточку можно прочитать: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения для Android 1.15 (в приложении для компьютера — с 1.3, всё перечисленное ниже — тоже). Доверителя программа узнаёт среди сторон и в другом написании (фамилия с инициалами, «ООО» вместо полного названия) и записывает в пустые поля его роль и противную сторону — сторону противоположной роли; если доверителя среди сторон нет и роль доверителя в деле не указана, противная сторона не угадывается — лист говорит, как её указать. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Данные с сайта — справочные: проверьте их в карточке дела.</p>
+<p>Сайт kad.arbitr.ru не отдаёт карточку дела скриптам — коллектор такие ссылки пропускает. В приложении для Android (1.6 и новее) и в приложении для компьютера (1.3 и новее) карточку можно прочитать: в деле со ссылкой на kad.arbitr.ru — кнопка «Карточка КАД». Откроется окно сайта; если он попросит проверку браузера, пройдите её там, чтение продолжится само. Прочитанная карточка записывается в дело так же, как ответ коллектора: номер дела в суде, судья, суд, дата поступления и категория — в пустые поля (если в деле уже другое значение, оно не меняется, расхождение названо в листе); ближайшее заседание — в события судов, откуда автоприменение создаёт заседание дела. Стороны с ролями записываются начиная с приложения для Android 1.15 (в приложении для компьютера — с 1.3, всё перечисленное ниже — тоже). Доверителя программа узнаёт среди сторон и в другом написании (фамилия с инициалами, «ООО» вместо полного названия) и записывает в пустые поля его роль и противную сторону — сторону противоположной роли; если доверителя среди сторон нет и роль доверителя в деле не указана, противная сторона не угадывается — лист говорит, как её указать. С приложения 1.19 окно после карточки открывает вкладку «Календарь» и нажимает отмеченные дни: документы по дням (заявления, определения, ходатайства, протоколы) записываются в ленту дела строками движения, отметки заседаний — заседаниями без времени. С приложения 1.20 дни нажимаются от последних к ранним (не больше 40), поэтому в длинном деле читаются свежие события; если дней больше 40, лист прямо говорит, что прочитано не всё. С приложения 1.21 окно читает и другие годы календаря, а заседания всех лет берёт из выгрузки календаря сайта — с временем и залом (прошедшему заседанию без времени время дописывается). Даты однозначных актов — принятие к производству, оставление без движения, решение и мотивированное решение, апелляционное и кассационное постановление — записываются в пустые поля дела; заполненное поле не меняется, а расхождение предлагается в «Суды и мониторинг». Сроки от этих дат — как всегда, требуют вашего подтверждения. Чтение занимает до двух минут. Если по ссылке открылась карточка другого дела (другой номер или окно перешло на другую карточку), в дело ничего не записывается — лист называет причину. Повторное чтение той же карточки тоже дополняет пустые поля: если дело впервые читалось приложением без ролей сторон, стороны, роль доверителя и противная сторона запишутся при следующем чтении; заполненное и убранные вами участники не меняются. Данные с сайта — справочные: проверьте их в карточке дела.</p>
 <p>Автопроверка карточек КАД (приложение для Android 1.22 и новее или для компьютера 1.3 и новее): пока программа открыта, карточки дел в работе со ссылкой на КАД перечитываются сами раз в 6 часов — незаметно, по одной, и записываются в дело так же, как по кнопке «Карточка КАД». Выключатель и время последней проверки — Настройки → «Мониторинг судов». Если сайт попросит проверку браузера, автопроверка ждёт 6 часов: откройте «Карточка КАД» в любом деле и пройдите проверку — автопроверка продолжится.</p>
 <p>Данные с сайтов судов — не истина: сверяйте с определениями суда.</p>` },
   { id: 'post', title: 'Переписка и Почта России', html: `
@@ -13801,7 +13829,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <li><b>Появилась полоса «Доступна новая версия»</b> — нажмите «Обновить»: программа дождётся записи, незавершённую форму сохранит в черновик.</li>
 <li><b>Как проверить, нет ли новой версии</b> — Настройки → «Проверить обновления»: проверяются и программа, и приложение для Android или компьютера, ответ называет обе части. Программа ищет новую версию и сама — при открытии, при возврате в приложение (не чаще раза в 15 минут) и раз в час, пока открыта; номер сборки — внизу Настроек, «О программе».</li>
 <li><b>Запись не сохраняется: «Деморежим…»</b> — исчерпан месячный предел без пропуска; Настройки → «Лицензия».</li>
-<li><b>Незавершённая форма</b> — на «Сегодня» полоска «Незавершённая форма» → «Открыть»; если запись изменили на другом устройстве, программа предупредит.</li></ul>
+<li><b>Незавершённая форма</b> — на «Сегодня» полоска «Незавершённая форма» → «Открыть»; если запись изменили на другом устройстве, программа предупредит. Черновик оставляют только формы с кнопкой «Сохранить»; листы настроек, которые действуют сразу, черновиков не оставляют, а формы с полем пароля или PIN-кода в черновик не пишутся — пароль не попадает в хранилище устройства открытым текстом.</li></ul>
 ` },
 ];
 function openHelpSheet(sub) {
