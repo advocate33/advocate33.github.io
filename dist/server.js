@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v188: события — одна запись под замком для доставки и очистки (eventsclear), файл событий пишется условно по ETag (аудит 13.10.2026)
 //  v187: лента календаря по ссылке самой функции — GET ?cal=<метка>; метка — HMAC от SECRET, кода сервера в ссылке нет (А1)
 //  v186: изменения базы между версиями — устройство берёт только их (deltaget), а не весь снимок; разрыв цепочки — снимок целиком
 //  (план переноса 11.10.2026, Д6, этап 1)
@@ -122,7 +123,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 187,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 188,
       ready: readiness()
     });
   }
@@ -141,7 +142,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 187, cal: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 188, cal: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -157,7 +158,8 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'dbver')  { const v = await dbVer(); return reply(v.ok ? { ok: true, ver: v.ver } : v); } // v185: ETag — внутреннее
     if (body.action === 'eventsput')   return reply(await eventsPut(body.events, body.mode));   // v171
     if (body.action === 'eventsget')   { const st = await eventsLoad(); return reply(st.corrupt ? { ok: false, error: 'events_corrupt', note: 'файл событий на сервере повреждён — следующая доставка коллектора сохранит его копию и начнёт новый' } : { ok: true, events: st.events }); }
-    if (body.action === 'eventsclear') return reply(await eventsSave({ events: [] }));
+    // v188: очистка — тем же путём, что доставка: под замком событий, с условной записью
+    if (body.action === 'eventsclear') return reply(await eventsPut([], 'replace'));
     if (body.action === 'dict_upload')  return reply(await dictUpload(body));   // v172
     if (body.action === 'dict_start')   return reply(await dictStart(body, event));
     if (body.action === 'dict_status')  return reply(await dictStatus(body, event));
@@ -571,16 +573,23 @@ async function eventsLoad() {
     throw new Error('Хранилище не настроено: BUCKET / S3_KEY_ID / S3_SECRET');
   }
   const r = await s3Get(eventsKey());
-  if (r.status === 404) return { events: [], updatedAt: 0 };
+  if (r.status === 404) return { events: [], updatedAt: 0, exists: false, etag: '' };
   if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error('s3 ' + r.status + ' ' + t.slice(0, 120)); }
   // v184: повреждённый файл — не пустой список (иначе следующая запись затёрла бы его); вызывающий решает, что делать
-  const text = await r.text();
-  try { const j = JSON.parse(text); return { events: Array.isArray(j.events) ? j.events : [], updatedAt: j.updatedAt || 0 }; }
-  catch (e) { return { events: [], updatedAt: 0, corrupt: true, text }; }
+  // v188: ETag прочитанного файла — условие записи (eventsSave)
+  const text = await r.text(), etag = (r.headers && r.headers.get && r.headers.get('etag')) || '';
+  try { const j = JSON.parse(text); return { events: Array.isArray(j.events) ? j.events : [], updatedAt: j.updatedAt || 0, exists: true, etag }; }
+  catch (e) { return { events: [], updatedAt: 0, corrupt: true, text, exists: true, etag }; }
 }
-async function eventsSave(st) {
+// v188: cur — прочитанный файл (eventsLoad): запись только если файл с тех пор не менялся (If-Match) или его не было (If-None-Match: *);
+// файл изменился — { ok:false, error:'changed' }, вызывающий перечитывает. Без cur — запись без условия (как до 188).
+async function eventsSave(st, cur) {
   st.updatedAt = Date.now();
-  const r = await s3Put(eventsKey(), JSON.stringify(st), 'application/json; charset=utf-8');
+  const body = JSON.stringify(st), CT = 'application/json; charset=utf-8';
+  const cond = cur ? (cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' }) : null;
+  let r = cond ? await s3PutIf(eventsKey(), body, CT, cond) : await s3Put(eventsKey(), body, CT);
+  if (cond && condFailed(r)) return { ok: false, error: 'changed' };
+  if (cond && condUnsupported(r)) { console.log('events: условная запись не поддерживается (501) — запись без условия'); r = await s3Put(eventsKey(), body, CT); }
   if (!r.ok) { const t = await r.text().catch(() => ''); return { ok: false, error: 's3 ' + r.status + ' ' + t.slice(0, 120) }; }
   return { ok: true, total: st.events.length };
 }
@@ -613,18 +622,25 @@ async function eventsPut(events, mode) {
     await new Promise(res => setTimeout(res, 200 + Math.floor(Math.random() * 500)));
   }
   try {
-    const st = await eventsLoad(); let saved = '';
-    if (st.corrupt) {
-      // повреждённый файл сохраняется копией до записи нового списка; не сохранилась копия — запись не идёт
-      saved = eventsKey().replace(/\.json$/, '') + '.corrupt-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
-      const c = await s3Put(saved, st.text, 'application/json; charset=utf-8');
-      if (!c.ok) return { ok: false, error: 'events_corrupt', note: 'файл событий повреждён, а копию сохранить не удалось (s3 ' + c.status + ') — запись не выполнена' };
+    let saved = '';
+    // v188: файл изменился между чтением и записью (замок пережил срок, список хранилища отстал) — перечитать, объединить, записать снова
+    for (let i = 0; i < 4; i++) {
+      const st = await eventsLoad();
+      if (st.corrupt) {
+        // повреждённый файл сохраняется копией до записи нового списка; не сохранилась копия — запись не идёт
+        saved = eventsKey().replace(/\.json$/, '') + '.corrupt-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+        const c = await s3Put(saved, st.text, 'application/json; charset=utf-8');
+        if (!c.ok) return { ok: false, error: 'events_corrupt', note: 'файл событий повреждён, а копию сохранить не удалось (s3 ' + c.status + ') — запись не выполнена' };
+      }
+      const m = eventsMerge(st.events, events, mode === 'replace' ? 'replace' : 'merge');
+      if (!(await lockHeld(lock, evLockPrefix()))) return { ok: false, error: 'lock_lost' };
+      const r = await eventsSave({ events: m.events }, st);
+      if (r.ok) return { ok: true, added: m.added, updated: m.updated, skipped: m.skipped, total: m.events.length, ...(saved ? { corruptSaved: saved } : {}) };
+      if (r.error !== 'changed') return r;
+      console.log('events: файл изменился после чтения — перечитываю (попытка ' + (i + 2) + ')');
+      await new Promise(res => setTimeout(res, 60 + Math.floor(Math.random() * 180)));
     }
-    const m = eventsMerge(st.events, events, mode === 'replace' ? 'replace' : 'merge');
-    if (!(await lockHeld(lock, evLockPrefix()))) return { ok: false, error: 'lock_lost' };
-    const r = await eventsSave({ events: m.events });
-    if (!r.ok) return r;
-    return { ok: true, added: m.added, updated: m.updated, skipped: m.skipped, total: m.events.length, ...(saved ? { corruptSaved: saved } : {}) };
+    return { ok: false, error: 'busy', note: 'файл событий одновременно меняет другой запрос — повторите позже' };
   } finally { await lockRelease(lock); }
 }
 
@@ -1248,4 +1264,4 @@ form{background:#fff;border:1px solid #e3e5ee;border-radius:12px;padding:12px;ma
 }
 
 // Экспорт внутренностей для автотестов (на работу функции не влияет)
-module.exports._test = { calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
+module.exports._test = { eventsSave, calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
