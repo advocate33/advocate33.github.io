@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 14:38 · 4560d23">
+<meta name="build" content="13.10.2026 16:28 · f2c64ee">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -390,6 +390,13 @@ button.agenda-row:hover{background:var(--surface2)}
 .status-line.good{background:var(--good-bg);color:var(--good)}
 .status-line.warn{background:var(--warn-bg);color:var(--warn)}
 .status-line.bad{background:var(--bad-bg);color:var(--bad)}
+/* 13.10.2026 (план по ЮрТопосу, этап 2): лист «Автоматизация» — строка действия: заголовок с отметкой, где выполняется, когда, итог, кнопки */
+.auto-list{display:flex;flex-direction:column;gap:10px;margin-bottom:14px}
+.auto-row{border:1px solid var(--line);border-radius:var(--r-md);padding:10px 12px;background:var(--surface)}
+.auto-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.auto-row .small{margin-top:3px;overflow-wrap:anywhere}
+.auto-row .auto-err{color:var(--bad)}
+.auto-row .auto-actions{margin:8px 0 0;flex-wrap:wrap}
 .step-label{display:flex;align-items:center;gap:6px;margin-top:24px}
 .step-label .icon{color:var(--good)}
 .conflict{padding:12px 0;border-bottom:1px solid var(--line)}
@@ -552,6 +559,20 @@ button.agenda-row:hover{background:var(--surface2)}
 .lic-dev{display:flex;align-items:center;justify-content:space-between;gap:12px}.lic-dev .button{flex:none}
 /* 12.10.2026: инструкция по облакам (файл в облаке) — раскрываемые блоки по облакам */
 .fgroup.guide{margin:0 0 8px}.fgroup.guide ol,.fgroup.guide ul{padding-left:20px;margin:6px 0}.fgroup.guide li{margin:4px 0}
+/* 13.10.2026 (этап 3 плана): «Суды и судьи» — строка суда (название и пояснение столбцом), телефоны с «Позвонить», поиск на экране мониторинга */
+.list-rows>.list-btn.court-row{align-items:center;gap:10px}
+.court-row>span:first-child{display:flex;flex-direction:column;min-width:0;flex:1;text-align:left}
+.court-row>span:first-child>.task-sub{overflow-wrap:anywhere}
+.court-phone{display:flex;justify-content:space-between;align-items:center;gap:10px;min-height:var(--touch);padding:6px 0;border-bottom:1px solid var(--line)}
+.court-phone:last-child{border-bottom:0}
+.court-phone>span{min-width:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.court-phone>.button{flex:none;text-decoration:none}
+.courts-panel>.inn-row{padding:12px 12px 14px 20px}
+.courts-panel>.inn-row input{min-height:42px;padding:9px 11px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface2);color:var(--text);font-size:.9375rem}
+.courts-region>summary{display:flex;align-items:center;min-height:var(--touch);cursor:pointer;color:var(--accent);font-size:.875rem;font-weight:600}
+.court-src a{color:var(--accent)}
+/* запрос с пробелом после @media: next_11_today_b.js берёт последний телефонный блок без пробела как блок «Сегодня» */
+@media (max-width:640px){.courts-panel>.inn-row{padding:10px 8px 12px 16px}.courts-panel>.inn-row input{min-height:var(--touch);font-size:1rem}}
 
 </style>
 </head>
@@ -5237,11 +5258,15 @@ function backupMergeOpts(o) { return typeof syncMergeBaseForFile === 'function' 
 // при отсутствии неотправленных правок, запись в файл облака,
 // копия прежней программы (на основном адресе хранилище с ней общее). Нечего терять (нет дел) — не напоминает; «Скрыть» — на 7 дней.
 const BACKUP_NAG_KEY = 'crm_next_backup_nag', BACKUP_NAG_DAYS = 14, BACKUP_NAG_HIDE_DAYS = 7;
-function backupRemindModel(now, st) {
-  if (!st || !(st.cases > 0)) return null;
+// последний выход данных с устройства: [как, когда] или null (метка из будущего — сбитые часы — не считается)
+function backupLastOut(now, st) {
   const outs = [['копия в файл', st.backupAt], ['отправка на сервер', st.pushAt], ['отправка на запасной сервер', st.pushAt2], ['обмен с сервером', st.syncAt], ['файл в облаке', st.fsAt], ['копия в прежней программе', st.legacyAt]]
     .map(([how, at]) => [how, Number(at) || 0]).filter(x => x[1] > 0 && x[1] <= now + 60000);
-  const last = outs.reduce((a, x) => (!a || x[1] > a[1] ? x : a), null), days = last ? Math.floor((now - last[1]) / 864e5) : null;
+  return outs.reduce((a, x) => (!a || x[1] > a[1] ? x : a), null);
+}
+function backupRemindModel(now, st) {
+  if (!st || !(st.cases > 0)) return null;
+  const last = backupLastOut(now, st), days = last ? Math.floor((now - last[1]) / 864e5) : null;
   if (last && days < BACKUP_NAG_DAYS) return null;
   if (Number(st.hiddenAt) > 0 && now - Number(st.hiddenAt) < BACKUP_NAG_HIDE_DAYS * 864e5) return null;
   return { never: !last, days, how: last ? last[0] : '', at: last ? last[1] : 0 };
@@ -7861,9 +7886,17 @@ async function bookPublish(quiet, force) {
   const hash = JSON.stringify([cfg.publicId, settings, days]);
   if (!force && quiet && localStorage.getItem(BOOK_HASH_KEY) === hash) return { ok: true, same: true };
   const j = await bookSrv('bookpub', { publicId: cfg.publicId, settings, days }, true);
-  if (j && j.ok) { const c2 = bookCfg(); c2.lastPub = Date.now(); bookCfgSave(c2); localStorage.setItem(BOOK_HASH_KEY, hash); if (!quiet) toast('Опубликовано окон: ' + j.slots + ' на ' + j.days + ' ' + plural(j.days, 'день', 'дня', 'дней')); }
-  else if (!quiet) toast('Окна не опубликованы: ' + bookWhy(j), true);
+  // время публикации — на устройстве (BOOK_PUB_AT), а не в общих настройках crm_book: запись в них уходит на другие устройства и
+  // запускала бы обмен базой после каждой публикации (урок 138)
+  if (j && j.ok) { bookNote('pub', ''); localStorage.setItem(BOOK_PUB_AT, String(Date.now())); localStorage.setItem(BOOK_HASH_KEY, hash); if (!quiet) toast('Опубликовано окон: ' + j.slots + ' на ' + j.days + ' ' + plural(j.days, 'день', 'дня', 'дней')); }
+  else { bookNote('pub', 'окна не опубликованы: ' + bookWhy(j)); if (!quiet) toast('Окна не опубликованы: ' + bookWhy(j), true); }
   return j;
+}
+// итоги для листа «Автоматизация»: время последнего удачного получения заявок и публикации окон, последняя ошибка {at, kind, msg}
+const BOOK_POLL_AT = 'crm_next_book_poll_at', BOOK_PUB_AT = 'crm_next_book_pub_at', BOOK_ERR = 'crm_next_book_err';
+function bookNote(kind, err) {
+  if (err) { localStorage.setItem(BOOK_ERR, JSON.stringify({ at: Date.now(), kind, msg: String(err).slice(0, 160) })); return; }
+  const e = lsJSON(BOOK_ERR, null); if (!e || e.kind === kind) localStorage.removeItem(BOOK_ERR);
 }
 function bookRepublishSoon() { if (!bookCfg().enabled) return; clearTimeout(BOOK.timer); BOOK.timer = setTimeout(() => bookPublish(true).catch(e => logErr('book:pub', e)), 5000); }
 // заявки → обращение и встреча (постоянные id по заявке: одна заявка — одна встреча)
@@ -7872,7 +7905,7 @@ async function bookPoll(quiet) {
   BOOK.busy = true;
   try {
     const j = await bookSrv('bookget', { since: cfg.lastPoll || 0 }, false);
-    if (!j || !j.ok) { if (!quiet) toast('Заявки не получены: ' + bookWhy(j), true); return 0; }
+    if (!j || !j.ok) { bookNote('poll', 'заявки не получены: ' + bookWhy(j)); if (!quiet) toast('Заявки не получены: ' + bookWhy(j), true); return 0; }
     // все записи, включая корзину: удалённая встреча или обращение по заявке не создаются заново
     const meetings = await getAllRaw('meetings'), leads = await getAllRaw('leads'); let n = 0, maxTs = cfg.lastPoll || 0;
     for (const b of j.items || []) {
@@ -7903,7 +7936,10 @@ async function bookPoll(quiet) {
         x.bookingStatus = b.status; if (b.status === 'declined' || b.status === 'cancelled') x.status = 'Отменено'; await put('meetings', x);
       }
     }
-    const c2 = bookCfg(); c2.lastPoll = maxTs; bookCfgSave(c2);
+    // урок 138: отметка «принято до» пишется в общие настройки только когда сдвинулась — иначе каждый опрос раз в 15 минут менял настройки,
+    // и автообмен отправлял базу на сервер без единой правки пользователя
+    if (maxTs !== (Number(cfg.lastPoll) || 0)) { const c2 = bookCfg(); c2.lastPoll = maxTs; bookCfgSave(c2); }
+    bookNote('poll', ''); localStorage.setItem(BOOK_POLL_AT, String(Date.now()));
     if (n) { toast('Новых записей на приём: ' + n); bookRepublishSoon(); if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }
     else if (!quiet) toast('Новых записей нет');
     return n;
@@ -8454,7 +8490,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')","openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')","openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС3')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -8950,7 +8986,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     </div>
     <div class="section-label">Данные</div>
-    <div class="list-rows set-list"><button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button>${typeof openChecklistEditor === 'function' ? '<button type="button" class="list-btn" id="set-checklists" onclick="openChecklistEditor()"><span>Типовые задачи</span><span class="muted">наборы задач по виду дела — создаются из карточки дела</span></button>' : ''}<button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-calfeed" onclick="openCalFeedSheet()"><span>Лента календаря</span><span class="muted">${typeof calFeedStateText === 'function' ? esc(calFeedStateText()) : 'подписка в календаре телефона'}</span></button><button type="button" class="list-btn" id="set-devcal" onclick="openDevCalSheet()"><span>Google Календарь</span><span class="muted">${typeof devcalStateText === 'function' ? esc(devcalStateText()) : 'в приложении для Android'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows set-list">${typeof openAutomationSheet === 'function' ? `<button type="button" class="list-btn" id="set-auto" onclick="openAutomationSheet()"><span>Автоматизация</span><span class="muted">${esc(autoSettingsLine())}</span></button>` : ''}<button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button>${typeof openChecklistEditor === 'function' ? '<button type="button" class="list-btn" id="set-checklists" onclick="openChecklistEditor()"><span>Типовые задачи</span><span class="muted">наборы задач по виду дела — создаются из карточки дела</span></button>' : ''}<button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-calfeed" onclick="openCalFeedSheet()"><span>Лента календаря</span><span class="muted">${typeof calFeedStateText === 'function' ? esc(calFeedStateText()) : 'подписка в календаре телефона'}</span></button><button type="button" class="list-btn" id="set-devcal" onclick="openDevCalSheet()"><span>Google Календарь</span><span class="muted">${typeof devcalStateText === 'function' ? esc(devcalStateText()) : 'в приложении для Android'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" id="set-orders" onclick="openOrdersSheet()"><span>Журнал ордеров</span><span class="muted">выписать, найти, распечатать реестр</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
@@ -9091,14 +9127,20 @@ function createPick(i) { const it = CREATE_ITEMS[i]; if (!it || typeof window[it
 async function openSearchSheet(q) {
   q = String(q || '').trim(); if (!q) { toast('Введите, что искать'); return; }
   const n = s => String(s || '').toLowerCase().replace(/ё/g, 'е'), qq = n(q);
-  let cases = [], clients = [];
-  try { cases = (await getAll('cases')).filter(c => [c.number, c.client, c.courtNo, c.court, c.subject, caseOpponentName(c)].some(v => n(v).includes(qq))); clients = (await getAll('clients')).filter(c => [c.name, c.phone, c.inn].some(v => n(v).includes(qq))); }
+  // 13.10.2026 (этап 3, «кто звонил»): номер телефона — в любом написании (+7, 8, скобки, дефисы), по последним цифрам
+  const pd = typeof courtPhoneQuery === 'function' ? courtPhoneQuery(q) : '';
+  const telHit = v => { if (!pd) return false; let d = String(v || '').replace(/\D/g, ''); if (d.length === 11 && (d[0] === '7' || d[0] === '8')) d = d.slice(1); return !!d && (d.endsWith(pd) || (pd.length >= 6 && d.includes(pd))); };
+  let cases = [], clients = [], courts = { courts: [], judges: [] };
+  try { cases = (await getAll('cases')).filter(c => [c.number, c.client, c.courtNo, c.court, c.subject, caseOpponentName(c)].some(v => n(v).includes(qq))); clients = (await getAll('clients')).filter(c => [c.name, c.phone, c.inn].some(v => n(v).includes(qq)) || telHit(c.phone)); }
   catch (e) { logErr('search', e); }
+  try { if (typeof courtsModelLoad === 'function') courts = courtsFind(COURTS_VIEW = await courtsModelLoad(), q); } catch (e) { logErr('search:courts', e); }
   // строки — кнопки: дело и доверитель открываются (замечание пользователя 30.09.2026)
   const row = (a, b, fn) => `<button type="button" class="search-result list-btn" onclick="${fn}"><span class="task-title">${esc(a)}</span><span class="task-sub">${esc(b)}</span></button>`;
   const body = (cases.length ? `<div class="section-label">Дела · ${cases.length}</div><div class="list-rows">` + cases.slice(0, 30).map(c => row([c.number, c.client].filter(Boolean).join(' · '), [c.court, c.courtNo, c.stage].filter(Boolean).join(' · '), `openCaseSheet('${jsq(c.id)}')`)).join('') + '</div>' : '')
-    + (clients.length ? `<div class="section-label">Доверители · ${clients.length}</div><div class="list-rows">` + clients.slice(0, 30).map(c => row(c.name || 'Без имени', [c.phone, c.inn ? 'ИНН ' + c.inn : ''].filter(Boolean).join(' · '), `openClientSheet('${jsq(c.id)}')`)).join('') + '</div>' : '');
-  openSheet('Поиск: ' + q, body || emptyState('search', 'Ничего не найдено', 'Поиск идёт по номеру дела, доверителю, суду и номеру в суде.'));
+    + (clients.length ? `<div class="section-label">Доверители · ${clients.length}</div><div class="list-rows">` + clients.slice(0, 30).map(c => row(c.name || 'Без имени', [c.phone, c.inn ? 'ИНН ' + c.inn : ''].filter(Boolean).join(' · '), `openClientSheet('${jsq(c.id)}')`)).join('') + '</div>' : '')
+    + (courts.courts.length ? `<div class="section-label">Суды · ${courts.courts.length}</div><div class="list-rows">` + courts.courts.slice(0, 20).map(x => courtRowHtml(x.c, x.hit)).join('') + '</div>' : '')
+    + (courts.judges.length ? `<div class="section-label">Судьи · ${courts.judges.length}</div><div class="list-rows">` + courts.judges.slice(0, 20).map(x => judgeRowHtml(x.j, x.hit, x.who)).join('') + '</div>' : '');
+  openSheet('Поиск: ' + q, body || emptyState('search', 'Ничего не найдено', 'Поиск идёт по номеру дела, доверителю, суду и номеру в суде, судьям; номер телефона — в любом написании.'));
   // поручение пользователя 04.10.2026: после показа результатов строка поиска очищается, клавиатура убирается (запрос — в заголовке листа)
   const inp = document.getElementById('top-search'); if (inp) { inp.value = ''; inp.blur(); }
 }
@@ -9117,6 +9159,7 @@ const SETTINGS_WORDS = {
   openRemindSheet: 'telegram телеграм бот уведомления напоминания', openCalFeedSheet: 'календарь лента подписка ics icloud google гугл яндекс айфон iphone заседания расписание',
   openDevCalSheet: 'google гугл календарь android андроид телефон планшет заседания события запись часовой пояс',
 openDevRemindSheet: 'уведомления напоминания будильник устройство телефон',
+  openAutomationSheet: 'автоматизация автоматически сама само расписание планировщик фоновые действия обмен сводка лента события судов обновление',
   openYcSetupSheet: 'сервер облако яндекс функция мастер развернуть', openTrashSheet: 'корзина удалённые удаленные восстановить вернуть',
   openOrdersSheet: 'ордер ордера журнал книжка бланк', openDadataSheet: 'dadata дадата инн реквизиты адрес егрюл огрн',
   openErrlogSheet: 'ошибки журнал сбой лог', openMonitorSettingsSheet: 'суд суды коллектор мониторинг кад сайт заседания события',
@@ -9124,6 +9167,7 @@ openDevRemindSheet: 'уведомления напоминания будиль�
   openBookSheet: 'запись приём прием консультация окна расписание заявка доверитель страница ссылка',
   openSyncSheet: 'синхронизация сервер обмен отправить загрузить база пароль код', openRefsSheet: 'справочники суды судьи списки праздники нерабочие дни',
   openIntegritySheet: 'проверка данных дубли ошибки номера доверители', openHelpSheet: 'инструкция помощь справка как',
+  openCourtsSheet: 'суды судьи телефон номер кто звонил контакты секретарь помощник адрес маршрут',
 };
 const setsNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е');
 function settingsWordsOf(q) { return setsNorm(q).split(/[\s,.;:«»"']+/).filter(w => w.length >= 2); }
@@ -9131,7 +9175,7 @@ function settingsHit(text, words) { const t = setsNorm(text); return words.every
 function settingsRowText(r) { const fn = String(r.getAttribute('onclick') || '').split('(')[0].trim(); return (r.textContent || '') + ' ' + (SETTINGS_WORDS[fn] || '') + ' ' + (r.dataset.words || ''); }
 // поле поиска и пункты из других мест — в начало листа «Настройки» (ui/sheets.js)
 function settingsSearchHtml() {
-  const extra = [['openSyncSheet()', 'Синхронизация', 'личный сервер, обмен базой'], ['openRefsSheet()', 'Справочники', 'суды, судьи, списки, нерабочие дни'], ['openIntegritySheet()', 'Проверка данных', 'дубли, записи без связей'], ['openHelpSheet()', 'Инструкция', 'как пользоваться программой']]
+  const extra = [['openSyncSheet()', 'Синхронизация', 'личный сервер, обмен базой'], ['openRefsSheet()', 'Справочники', 'суды, судьи, списки, нерабочие дни'], ['openCourtsSheet()', 'Суды и судьи', 'контакты, поиск «кто звонил»'], ['openIntegritySheet()', 'Проверка данных', 'дубли, записи без связей'], ['openHelpSheet()', 'Инструкция', 'как пользоваться программой']]
     .filter(([fn]) => typeof window !== 'object' || typeof window[fn.slice(0, -2)] === 'function');
   return `<label class="field wide set-search"><span>Найти настройку</span><input id="set-search" type="search" autocomplete="off" placeholder="например: PIN, Telegram, ордер" oninput="settingsFilter(this.value)"></label>
     <div class="section-label" id="set-extra-label" hidden>Другие разделы</div><div class="list-rows set-list" id="set-extra" hidden>${extra.map(([fn, t, sub]) => `<button type="button" class="list-btn" onclick="${fn}"><span>${esc(t)}</span><span class="muted">${esc(sub)}</span></button>`).join('')}</div>
@@ -11337,9 +11381,13 @@ async function caseDocsOpen(caseId) {
 }
 // ── контакты суда: из данных дела (справочник судов конкурента не берём) ──
 // 04.10.2026 (справочники): пустые поля дела дополняются карточкой суда (адрес, телефон, сайт, почта) и карточкой судьи (кабинет, секретарь, телефоны)
-function courtContactsModel(c, courtInfo, judgeInfo) {
+// 13.10.2026 (этап 3, ui/courts.js): пустое в карточке суда дополняется встроенным перечнем судов (официальные сайты) — с пометкой fromSite
+function courtContactsModel(c, courtInfo, judgeInfo, builtin) {
   c = c || {}; const ci = n => (courtInfo || (typeof courtInfoGet === 'function' ? courtInfoGet : () => null))(n) || {}, ji = n => (judgeInfo || (typeof judgeInfoGet === 'function' ? judgeInfoGet : () => null))(n) || {};
-  const fill = x => { const k = ci(x.court), j = ji(x.judge); return { ...x, address: x.address || k.addr || '', courtPhone: k.phone || '', site: k.site || '', email: k.email || '', cabinet: x.cabinet || j.cabinet || '', assistant: x.assistant || j.secretary || '', phone: x.phone || j.assistantPhone || j.secretaryPhone || '' }; };
+  const bi = n => (builtin || (!courtInfo && typeof courtBuiltin === 'function' ? courtBuiltin : () => null))(n) || {};
+  const fill = x => { const k0 = ci(x.court), b = bi(x.court), j = ji(x.judge), fromSite = ['addr', 'phone', 'site', 'email'].filter(f => !k0[f] && b[f]);
+    const k = { ...k0 }; fromSite.forEach(f => { k[f] = b[f]; });
+    return { ...x, address: x.address || k.addr || '', courtPhone: k.phone || '', site: k.site || '', email: k.email || '', cabinet: x.cabinet || j.cabinet || '', assistant: x.assistant || j.secretary || j.assistant || '', phone: x.phone || j.assistantPhone || j.secretaryPhone || '', fromSite: fromSite.length ? b.src || '' : '' }; };
   return [
     { title: 'Первая инстанция', court: c.court, judge: c.judge, assistant: c.secretary, phone: c.secretaryPhone, cabinet: c.cabinet, address: c.courtAddress, link: c.link, no: c.courtNo },
     { title: 'Апелляция', court: c.apCourt || c.courtApp, judge: c.judgeApp, address: c.courtAddressApp, link: c.linkApp, no: c.apCourtNo || c.courtNoApp },
@@ -11353,7 +11401,8 @@ async function openCourtContacts(caseId) {
   const tel = p => String(p || '').replace(/[^\d+]/g, '');
   const body = list.length ? list.map(x => { const url = x.link ? safeExternalUrl(x.link) : '';
     return `<div class="section-label">${esc(x.title)}</div><div class="list-rows">${row('Суд', x.court)}${row('№ дела в суде', x.no)}${row('Судья', x.judge)}${row('Помощник / секретарь', x.assistant)}${row('Телефон', x.phone)}${row('Телефон суда', x.courtPhone)}${row('Сайт суда', x.site)}${row('Почта суда', x.email)}${row('Кабинет', x.cabinet)}${row('Адрес', x.address)}</div>
-      <div class="actions" style="margin:8px 0 4px">${x.phone && tel(x.phone) ? `<a class="button small-btn primary" href="tel:${esc(tel(x.phone))}">${icon('phone', 'icon-sm')}Позвонить</a>` : ''}${url ? `<a class="button small-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${icon('landmark', 'icon-sm')}Сайт суда</a>` : ''}</div>`; }).join('')
+      ${x.fromSite ? `<p class="small muted">Телефон, адрес и сайт суда — с официального сайта суда (встроенный перечень); перед звонком сверьте.</p>` : ''}
+      <div class="actions" style="margin:8px 0 4px">${x.phone && tel(x.phone) ? `<a class="button small-btn primary" href="tel:${esc(tel(x.phone))}">${icon('phone', 'icon-sm')}Позвонить</a>` : ''}${url ? `<a class="button small-btn" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${icon('landmark', 'icon-sm')}Сайт суда</a>` : ''}${x.court && typeof openCourtCard === 'function' ? `<button type="button" class="button small-btn court-card-open" onclick="openCourtCard('${jsq(x.court)}')">${icon('landmark', 'icon-sm')}Карточка суда</button>` : ''}</div>`; }).join('')
     : `<p class="small">В деле пока нет суда и контактов.</p>`;
   if (typeof sheetFreeze === 'function') sheetFreeze();
   openSheet('Контакты суда', body + `<div class="form-actions" style="margin-top:8px"><button type="button" class="button small-btn" onclick="openCourtSites('${jsq(c.id)}')">${icon('arrow-right', 'icon-sm')}Дело на сайтах судов</button></div>` + `<p class="small muted" style="margin-top:10px">Телефон помощника, кабинет и ссылка на сайт суда заполняются в форме дела («Все поля» → «Первая инстанция»); ссылку на дело может подставить мониторинг.</p><div class="actions">${btn('Изменить данные суда', `openCaseForm('${jsq(c.id)}', true)`, 'small-btn', 'pencil')}</div>`, true);
@@ -13466,6 +13515,7 @@ function openRefsSheet(sub) {
   const rows = Object.keys(REF_META).filter(k => REF_META[k].editable).map(k => `<button type="button" class="list-btn" id="ref-${esc(k)}" onclick="openRefEditSheet('${jsq(k)}')"><span>${esc(REF_META[k].title)}</span><span class="muted num">${refItemsOf(k).length}</span></button>`).join('');
   const off = typeof CAL_OFF === 'object' && CAL_OFF ? CAL_OFF.size : 0;
   openSheet('Справочники', `<p class="small muted">Списки подставляются в формы; новое значение можно добавить и прямо из формы («Добавить … в справочник»). Здесь — правка: добавить, переименовать (с объединением дублей), удалить; у судов и судей — карточки.</p>
+    ${typeof openCourtsSheet === 'function' ? `<div class="list-rows" style="margin-bottom:8px"><button type="button" class="list-btn" id="ref-courts-all" onclick="openCourtsSheet()"><span>Суды и судьи — контакты, поиск «кто звонил»</span><span class="muted">${icon('landmark', 'icon-sm')}</span></button></div>` : ''}
     <div class="section-label">Списки</div><div class="list-rows">${rows}</div>
     <div class="section-label">Для расчёта сроков</div><div class="list-rows"><button type="button" class="list-btn" id="ref-holidays" onclick="openHolidaysSheet()"><span>Нерабочие дни</span><span class="muted">${off ? off + ' ' + plural(off, 'дата', 'даты', 'дат') : 'не заполнены — переносятся только суббота и воскресенье'}</span></button></div>
     <div class="section-label">Порядок в данных</div><div class="list-rows"><button type="button" class="list-btn" id="ref-integrity" onclick="openIntegritySheet()"><span>Проверка данных</span><span class="muted">дубли, записи без связей, переплаты, сроки без даты</span></button></div>`, sub);
@@ -13525,32 +13575,51 @@ async function refRemoveGo(key, i) {
   sheetBack(true); openRefEditSheet(key, 'replace', { text: 'Удалено: ' + v });
 }
 // ── карточка суда ──
-function openCourtInfoForm(name) {
-  const i = courtInfoGet(name) || {};
-  openSheet('Суд: ' + name, `<p class="small muted">Адрес подставляется в дела с этим судом; телефон, сайт и почта показываются в «Контактах суда».</p><div class="form-grid">
-    ${wide(fInput('ci-addr', 'Адрес', i.addr, 'autocomplete="off" placeholder="индекс, город, улица, дом"'))}${fInput('ci-phone', 'Телефон', i.phone, 'autocomplete="off" inputmode="tel" placeholder="+7 …"')}${fInput('ci-travel', 'Время в пути, минут', i.travel, 'inputmode="numeric" autocomplete="off"')}
+// 13.10.2026 (этап 3 плана по ЮрТопосу, ui/courts.js): часы работы, заметка (добавочный, как пройти), источник и дата проверки; запись —
+// courtCardSave (те же refs/courtInfo, поля, которых форма не знает, сохраняются); from = 'card' — после сохранения назад в карточку суда
+function openCourtInfoForm(name, from) {
+  const i = courtInfoGet(name) || {}, b = typeof courtBuiltin === 'function' ? courtBuiltin(name) : null;
+  openSheet('Суд: ' + name, `<p class="small muted">Адрес подставляется в дела с этим судом; телефон, сайт и почта показываются в «Контактах суда» и в «Суды и судьи», по телефону суд находится поиском «кто звонил».</p>
+    ${b ? `<div class="form-actions" style="margin:0 0 8px"><button type="button" class="button small-btn" id="ci-from-site" onclick="courtFormFromSite('${jsq(name)}')">${icon('check', 'icon-sm')}Подставить с сайта суда в пустые поля</button></div>` : ''}<div class="form-grid">
+    ${wide(fInput('ci-addr', 'Адрес', i.addr, 'autocomplete="off" placeholder="индекс, город, улица, дом"'))}${fInput('ci-phone', 'Телефон', i.phone, 'autocomplete="off" inputmode="tel" placeholder="+7 …; несколько — через запятую"')}${fInput('ci-travel', 'Время в пути, минут', i.travel, 'inputmode="numeric" autocomplete="off"')}
     ${fInput('ci-site', 'Сайт', i.site, 'autocomplete="off" inputmode="url" placeholder="https://…"')}${fInput('ci-email', 'Электронная почта', i.email, 'autocomplete="off" inputmode="email" placeholder="для подачи документов"')}
-  </div>${fSaveBar(`saveCourtInfoForm('${jsq(name)}')`)}`, true);
+    ${wide(fInput('ci-hours', 'Часы работы, приём', i.hours, 'autocomplete="off" placeholder="пн–чт 9:00–18:00, пт 9:00–16:45"'))}${fText('ci-note', 'Заметка: добавочный, как пройти, канцелярия', i.note, 2)}
+    ${fInput('ci-src', 'Откуда контакты', i.src, 'autocomplete="off" placeholder="сайт суда, звонок в канцелярию…"')}${fInput('ci-checked', 'Проверено', i.checked, 'type="date"')}
+  </div>${fSaveBar(`saveCourtInfoForm('${jsq(name)}', '${jsq(from || '')}')`)}`, true);
 }
-async function saveCourtInfoForm(name) {
-  const v = { addr: fv('ci-addr'), phone: fv('ci-phone'), site: fv('ci-site'), email: fv('ci-email'), travel: fv('ci-travel') };
+function courtFormFromSite(name) {
+  const b = typeof courtBuiltin === 'function' ? courtBuiltin(name) : null; if (!b) return;
+  let n = 0; [['ci-addr', 'addr'], ['ci-phone', 'phone'], ['ci-site', 'site'], ['ci-email', 'email'], ['ci-hours', 'hours']].forEach(([id, k]) => { const el = document.getElementById(id); if (el && !String(el.value || '').trim() && b[k]) { el.value = b[k]; n++; } });
+  if (n) { const s = document.getElementById('ci-src'), c = document.getElementById('ci-checked'); if (s && !s.value) s.value = b.src; if (c && !c.value) c.value = COURTS_CHECKED; }
+  toast(n ? 'Подставлено полей: ' + n + ' — проверьте и сохраните' : 'Пустых полей, которые есть на сайте суда, нет');
+}
+async function saveCourtInfoForm(name, from) {
+  const v = { addr: fv('ci-addr'), phone: fv('ci-phone'), site: fv('ci-site'), email: fv('ci-email'), travel: fv('ci-travel'), hours: fv('ci-hours'), note: fv('ci-note'), src: fv('ci-src'), checked: fv('ci-checked') };
   if (v.travel && !/^\d{1,4}$/.test(v.travel.trim())) { fErr('Время в пути — число минут'); return; }
   if (v.site && !/^https?:\/\//i.test(v.site.trim())) v.site = 'https://' + v.site.trim();
-  try { await courtInfoSave(name, v); } catch (e) { logErr('refs:court', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'ошибка')); return; }
-  sheetBack(true); openRefEditSheet('courts', 'replace', { text: 'Карточка суда сохранена: ' + name });
+  // форма открыта до загрузки ui/courts.js (сборка без модуля) — прежняя запись
+  try { if (typeof courtCardSave === 'function') await courtCardSave(name, v); else await courtInfoSave(name, v); } catch (e) { logErr('refs:court', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'ошибка')); return; }
+  sheetBack(true);
+  if (from === 'card' && typeof openCourtCard === 'function') { toast('Карточка суда сохранена'); openCourtCard(name, 'replace'); return; }
+  openRefEditSheet('courts', 'replace', { text: 'Карточка суда сохранена: ' + name });
 }
 // ── карточка судьи ──
-function openJudgeInfoForm(name) {
+// 13.10.2026: ФИО помощника и заметка; запись — judgeCardSave (поля прежней программы JUDGE_FIELDS и новые, неизвестные поля сохраняются)
+function openJudgeInfoForm(name, from) {
   const i = judgeInfoGet(name) || {};
-  openSheet('Судья: ' + name, `<p class="small muted">Кабинет, секретарь и телефоны показываются в «Контактах суда» по делам с этим судьёй.</p><div class="form-grid">
-    ${wide(fCombo('ji-court', 'Суд', i.court, 'courts'))}${fInput('ji-cabinet', 'Кабинет', i.cabinet, 'autocomplete="off" placeholder="№ кабинета, этаж"')}${fInput('ji-assistantPhone', 'Телефон помощника', i.assistantPhone, 'autocomplete="off" inputmode="tel" placeholder="+7 …"')}
+  openSheet('Судья: ' + name, `<p class="small muted">Кабинет, секретарь, помощник и их телефоны показываются в «Контактах суда» по делам с этим судьёй; по телефону судья находится поиском «кто звонил».</p><div class="form-grid">
+    ${wide(fCombo('ji-court', 'Суд', i.court, 'courts'))}${fInput('ji-cabinet', 'Кабинет', i.cabinet, 'autocomplete="off" placeholder="№ кабинета, этаж"')}
     ${fInput('ji-secretary', 'Секретарь', i.secretary, 'autocomplete="off" placeholder="ФИО"')}${fInput('ji-secretaryPhone', 'Телефон секретаря', i.secretaryPhone, 'autocomplete="off" inputmode="tel" placeholder="+7 …"')}
-  </div>${fSaveBar(`saveJudgeInfoForm('${jsq(name)}')`)}`, true);
+    ${fInput('ji-assistant', 'Помощник', i.assistant, 'autocomplete="off" placeholder="ФИО"')}${fInput('ji-assistantPhone', 'Телефон помощника', i.assistantPhone, 'autocomplete="off" inputmode="tel" placeholder="+7 …"')}
+    ${fText('ji-note', 'Заметка', i.note, 2)}
+  </div>${fSaveBar(`saveJudgeInfoForm('${jsq(name)}', '${jsq(from || '')}')`)}`, true);
 }
-async function saveJudgeInfoForm(name) {
-  const v = {}; JUDGE_FIELDS.forEach(k => { v[k] = fv('ji-' + k); });
-  try { await comboRememberAll(document.getElementById('sheetContent')); await judgeInfoSave(name, v); } catch (e) { logErr('refs:judge', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'ошибка')); return; }
-  sheetBack(true); openRefEditSheet('judges', 'replace', { text: 'Карточка судьи сохранена: ' + name });
+async function saveJudgeInfoForm(name, from) {
+  const v = {}; JUDGE_FIELDS.forEach(k => { v[k] = fv('ji-' + k); }); v.assistant = fv('ji-assistant'); v.note = fv('ji-note');
+  try { await comboRememberAll(document.getElementById('sheetContent')); if (typeof judgeCardSave === 'function') await judgeCardSave(name, v); else await judgeInfoSave(name, v); } catch (e) { logErr('refs:judge', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'ошибка')); return; }
+  sheetBack(true);
+  if (from === 'card' && typeof openJudgeCard === 'function') { toast('Карточка судьи сохранена'); openJudgeCard(name, 'replace'); return; }
+  openRefEditSheet('judges', 'replace', { text: 'Карточка судьи сохранена: ' + name });
 }
 // ── нерабочие дни (производственный календарь) ──
 const holDatesParse = text => { const out = [], bad = []; String(text || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean).forEach(x => { let iso = ''; const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(x); if (m) iso = m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'); else if (/^\d{4}-\d{2}-\d{2}$/.test(x)) iso = x; const d = iso ? parseLocalDate(iso) : null; if (d && !isNaN(d) && localISO(d) === iso) out.push(iso); else bad.push(x); }); return { dates: [...new Set(out)].sort(), bad }; };
@@ -13564,6 +13633,506 @@ async function saveHolidaysForm() {
   if (off.bad.length || work.bad.length) { fErr('Не похоже на дату (ДД.ММ.ГГГГ): ' + off.bad.concat(work.bad).slice(0, 5).join(', ')); return; }
   try { await holidaysSave(off.dates, work.dates); } catch (e) { logErr('refs:holidays', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'ошибка')); return; }
   toast('Нерабочие дни сохранены: ' + off.dates.length + ' · рабочих выходных: ' + work.dates.length); closeSheet(); openRefsSheet();
+}
+
+// ▼▼▼ ui/courts.js
+// ═══ ui/courts.js — суды и судьи: контакты и поиск «кто звонил» (план по ЮрТопосу 13.10.2026, этап 3) ═══
+// Источники контактов: 1) карточки судов и судей пользователя — те же записи, что у прежней программы (refs/courtInfo, refs/judgeInfo);
+// 2) встроенный перечень судов Владимирской области — переписан с официальных сайтов судов 13.10.2026 (адрес страницы — в каждой записи).
+// Встроенный перечень в базу сам не пишется: при показе он дополняет пустые поля карточки, «Записать в карточку» — только по нажатию.
+// Чужую базу контактов не берём (решение 13.10.2026). Поиск по номеру: цифры в любом написании (+7, 8, скобки, дефисы, «доб.»),
+// с 4 цифр; совпадение — конец номера или его часть (с 6 цифр). Номер без кода (« , 52-81-63 (ф.)») получает код предыдущего номера строки.
+// Прежняя программа (v314) при правке карточки суда сохраняет только свои поля (адрес, телефон, сайт, почта, время в пути) — часы работы,
+// заметка, источник и дата проверки, сделанные здесь, она при такой правке теряет; эта программа пишет карточку с сохранением всех полей.
+
+const COURTS_CHECKED = '2026-10-13';
+const COURTS_SRC_WLD = 'https://oblsud.wld.sudrf.ru/modules.php?name=sud';
+// Районные и городские суды — со страницы «Суды субъекта РФ» сайта Владимирского областного суда (две выборки 13.10.2026 совпали);
+// адреса сайтов — как на этой странице (http). Арбитражные суды, областной, апелляционный и кассационный суды общей юрисдикции — с их сайтов.
+// Подсудность вышестоящих судов общей юрисдикции для Владимирской области — п. 2 ч. 2 ст. 23.1 и п. 1 ч. 2 ст. 23.9 ФКЗ «О судах общей
+// юрисдикции в Российской Федерации» (в ред. ФКЗ от 31.07.2023 № 7-ФКЗ; consultant.ru, сверено 13.10.2026 — действующую редакцию сверить).
+const COURTS_WLD_DISTRICT = [
+  ['Александровский городской суд Владимирской области', 'aleksandrovsky', '601650, Владимирская обл., г. Александров, пл. Советская, д. 2', '(49244) 3-03-56, 2-24-20 (ф.)'],
+  ['Вязниковский городской суд Владимирской области', 'viaznikovsky', '601445, Владимирская обл., г. Вязники, ул. Мельничная, д. 2', '(49233) 2-32-66'],
+  ['Гороховецкий районный суд Владимирской области', 'gorohovecky', '601480, Владимирская обл., г. Гороховец, ул. Гоголя, д. 17', '(49238) 2-12-38, 2-29-24 (ф)'],
+  ['Гусь-Хрустальный городской суд Владимирской области', 'gus-hrustalsky', '601501, Владимирская обл., г. Гусь-Хрустальный, ул. Калинина, д. 36', '(49241) 2-14-85'],
+  ['Камешковский районный суд Владимирской области', 'kameshkovsky', '601300, Владимирская обл., г. Камешково, ул. Карла Либкнехта, д. 3', '(49248) 2-14-51'],
+  ['Киржачский районный суд Владимирской области', 'kirzhachsky', '601010, Владимирская обл., г. Киржач, ул. Серегина, д. 12', '(49237) 2-21-69, 2-34-58 (ф.)'],
+  ['Ковровский городской суд Владимирской области', 'kovrovsky', '601900, Владимирская обл., г. Ковров, ул. Щорса, д. 21', '(49232) 2-19-47'],
+  ['Кольчугинский городской суд Владимирской области', 'kolchuginsky', '601785, Владимирская обл., г. Кольчугино, ул. 50 лет Октября, д. 1', '(49245) 4-51-66, 4-36-58 (ф.)'],
+  ['Ленинский районный суд г. Владимира', 'leninsky', '600021, Владимирская обл., г. Владимир, ул. Стрелецкая, д. 55', '(4922) 45-09-35, 45-09-36 (ф.)'],
+  ['Меленковский районный суд Владимирской области', 'melenkovsky', '602102, Владимирская обл., г. Меленки, ул. Советская, д. 23 А', '(49247) 2-27-69'],
+  ['Муромский городской суд Владимирской области', 'muromsky', '602267, Владимирская обл., г. Муром, ул. Московская, д. 15', '(49234) 3-66-76, 3-37-24 (ф.)'],
+  ['Октябрьский районный суд г. Владимира', 'oktiabrsky', '600005, Владимирская обл., г. Владимир, пр. Октябрьский, д. 40', '(4922) 53-28-05, 43-03-66 (ф.)'],
+  ['Петушинский районный суд Владимирской области', 'petushinsky', '601144, Владимирская обл., г. Петушки, ул. Ленина, д. 17', '(49243) 2-10-04, 2-21-06'],
+  ['Селивановский районный суд Владимирской области', 'selivanovsky', '602332, Владимирская обл., п. Красная Горбатка, ул. Красноармейская, д. 10', '(49236) 2-18-65'],
+  ['Собинский городской суд Владимирской области', 'sobinsky', '601204, Владимирская обл., г. Собинка, Рабочий пр., д. 6', '(49242) 2-51-10'],
+  ['Судогодский районный суд Владимирской области', 'sudogodsky', '601352, Владимирская обл., г. Судогда, ул. Ленина, д. 72', '(49235) 2-35-24 (т, ф)'],
+  ['Суздальский районный суд Владимирской области', 'suzdalsky', '601293, Владимирская обл., г. Суздаль, ул. Энгельса, д. 7', '(49231) 2-05-48'],
+  ['Фрунзенский районный суд г. Владимира', 'frunzensky', '600020, Владимирская обл., г. Владимир, ул. Б. Нижегородская, д. 67 А; ул. Б. Нижегородская, д. 65 Е', '(4922) 32-36-94, 32-42-61 (ф.)'],
+  ['Юрьев-Польский районный суд Владимирской области', 'iuriev-polsky', '601800, Владимирская обл., г. Юрьев-Польский, Советская пл., д. 14', '(49246) 2-10-68'],
+];
+const COURTS_REGION = [
+  { id: 'as-wld', name: 'Арбитражный суд Владимирской области', alias: ['АС Владимирской области'], addr: '600005, г. Владимир, Октябрьский просп., д. 19',
+    phone: '(4922) 47-23-65 (справочная), 47-23-67, 47-23-03 (телефон доверия)', email: 'vladimir.info@arbitr.ru', site: 'https://vladimir.arbitr.ru/',
+    hours: 'На сайте два графика без подписи: пн–чт 8:30–17:15, пт 8:30–16:00 и пн–чт 9:00–15:30, пт 9:00–14:00; перерыв 12:30–13:00', src: 'https://vladimir.arbitr.ru/' },
+  { id: '1aas', name: 'Первый арбитражный апелляционный суд', alias: ['1 арбитражный апелляционный суд', '1-й арбитражный апелляционный суд', '1 ААС', 'Первый ААС'],
+    addr: '600017, г. Владимир, ул. Березина, д. 4', phone: '+7 (4922) 44-76-65 (справочно-информационная служба), 44-74-38 (приёмная председателя), 44-73-10 (ф.), 45-03-23 (телефон доверия)',
+    email: 'info@1aas.arbitr.ru', site: 'https://1aas.arbitr.ru/', hours: 'пн–пт 8:30–17:00, перерыв 12:30–13:00', src: 'https://1aas.arbitr.ru/' },
+  { id: 'fasvvo', name: 'Арбитражный суд Волго-Вятского округа', alias: ['АС Волго-Вятского округа'], addr: '603000, Нижний Новгород, Б. Покровская, д. 1',
+    phone: '(831) 435-20-16 (справочная), 435-20-87 (приём документов), 435-20-88 (телефон доверия)', email: 'fasvvo.info@arbitr.ru', site: 'https://fasvvo.arbitr.ru/',
+    hours: 'пн–чт 8:00–17:00, пт 8:00–16:00, перерыв 12:00–12:48; приём документов нарочно 10:00–11:30 и 14:00–15:00', src: 'https://fasvvo.arbitr.ru/' },
+  { id: 'oblsud-wld', name: 'Владимирский областной суд', alias: [], addr: '600015, Владимирская обл., г. Владимир, ул. Разина, д. 22 Б',
+    phone: '(4922) 40-83-04 (приёмная граждан), 52-81-63 (ф.)', email: 'oblsud.wld@sudrf.ru', site: 'https://oblsud.wld.sudrf.ru/',
+    hours: 'пн–чт 8:30–17:30, пт 8:30–16:15, перерыв 13:00–13:45', note: 'На сайте суда: обращения в электронном виде на почту суда отклоняются — для них раздел «Обращения граждан» (ej.sudrf.ru).', src: 'https://oblsud.wld.sudrf.ru/' },
+  { id: '1ap', name: 'Первый апелляционный суд общей юрисдикции', alias: ['1 апелляционный суд общей юрисдикции', '1-й апелляционный суд общей юрисдикции'],
+    addr: '121471, г. Москва, пр. Генерала Дорохова, д. 80', phone: '+7 (495) 870-51-10, 870-52-30 (ф.)', email: '1ap@sudrf.ru', site: 'https://1ap.sudrf.ru/',
+    role: 'апелляция на акты Владимирского областного суда (п. 1 ч. 2 ст. 23.9 ФКЗ «О судах общей юрисдикции в РФ»)', src: 'https://1ap.sudrf.ru/modules.php?name=info_court' },
+  { id: '2kas', name: 'Второй кассационный суд общей юрисдикции', alias: ['2 кассационный суд общей юрисдикции', '2-й кассационный суд общей юрисдикции'],
+    addr: '121357, г. Москва, ул. Верейская, д. 29, стр. 34', phone: '8 (495) 870-51-55 (справочная), 870-52-79 (ф.)', email: '2kas@sudrf.ru', site: 'https://2kas.sudrf.ru/',
+    role: 'кассация для судов Владимирской области (п. 2 ч. 2 ст. 23.1 ФКЗ «О судах общей юрисдикции в РФ»)', src: 'https://2kas.sudrf.ru/' },
+].concat(COURTS_WLD_DISTRICT.map(([name, sub, addr, phone]) => ({ id: sub, name, alias: name.endsWith(' Владимирской области') ? [name.slice(0, -' Владимирской области'.length)] : [],
+  addr, phone, email: sub + '.wld@sudrf.ru', site: 'http://' + sub + '.wld.sudrf.ru', src: COURTS_SRC_WLD })));
+
+// ── сравнение названий: регистр, «ё», кавычки, точки и «г.» не важны («Ленинский районный суд г.Владимира» = «… г. Владимира») ──
+function courtKey(s) {
+  return ' ' + String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[«»"'.,()]/g, ' ').replace(/\s+/g, ' ') + ' ';
+}
+function courtKeyN(s) { return courtKey(s).replace(/ г /g, ' ').replace(/\s+/g, ' ').trim(); }
+const COURTS_BY_KEY = (() => { const m = new Map(); COURTS_REGION.forEach(c => [c.name].concat(c.alias || []).forEach(n => m.set(courtKeyN(n), c))); return m; })();
+// суд встроенного перечня по названию из дела; «Ленинский районный суд» без города — не совпадает (таких судов много)
+function courtBuiltin(name) { return name ? COURTS_BY_KEY.get(courtKeyN(name)) || null : null; }
+
+// ── телефоны: «(4922) 45-09-35, 45-09-36 (ф.)» → [{raw, nat:'4922450935', fax:false, label:''}, {…, nat:'4922450936', fax:true}] ──
+// номера разделяются запятой или точкой с запятой вне скобок: «(т, ф)» — пояснение одного номера, а не два номера
+function courtPhoneParts(raw) {
+  const parts = []; let cur = '', dep = 0;
+  for (const ch of String(raw || '')) {
+    if (ch === '(') dep++; else if (ch === ')') dep = Math.max(0, dep - 1);
+    if ((ch === ',' || ch === ';') && !dep) { parts.push(cur); cur = ''; } else cur += ch;
+  }
+  parts.push(cur); return parts;
+}
+function courtPhones(raw) {
+  const out = []; let code = '';
+  courtPhoneParts(raw).forEach(part => {
+    const p = part.trim(); if (!p) return;
+    const pieces = p.split(/доб\.?|доп\.?/i), main = pieces[0], ext = (pieces[1] || '').replace(/\D/g, '');
+    const labels = []; const re = /\(([^)]*)\)/g; let m;
+    while ((m = re.exec(main))) { if (!/\d/.test(m[1])) labels.push(m[1].trim()); }
+    const cm = /\((\d{3,5})\)/.exec(main);
+    let d = main.replace(/\D/g, '');
+    if (!d) return;
+    if (d.length === 11 && (d[0] === '7' || d[0] === '8')) d = d.slice(1);
+    else if (!cm && d.length < 10 && code && code.length + d.length === 10) d = code + d;
+    if (cm) code = cm[1];
+    const fax = labels.some(l => /^ф\.?$|факс/i.test(l)), telfax = labels.some(l => /т\.?,\s*ф/i.test(l));
+    const label = labels.filter(l => !/^ф\.?$|факс|^т\.?,\s*ф\.?$/i.test(l)).join(', ') || (telfax ? 'телефон и факс' : '');
+    out.push({ raw: p, nat: d.length === 10 ? d : '', digits: d, ext, fax: fax && !telfax, label });
+  });
+  return out;
+}
+function courtTelHref(ph) { return ph.nat ? 'tel:+7' + ph.nat + (ph.ext ? ',' + ph.ext : '') : (ph.digits.length >= 5 ? 'tel:' + ph.digits : ''); }
+// запрос «кто звонил»: 4 и больше цифр без букв; 11 цифр с 7 или 8 впереди — без них
+function courtPhoneQuery(q) {
+  const s = String(q || ''); if (/[a-zа-яё]/i.test(s) || /\//.test(s)) return '';
+  let d = s.replace(/\D/g, ''); if (d.length < 4) return '';
+  if (d.length === 11 && (d[0] === '7' || d[0] === '8')) d = d.slice(1);
+  return d;
+}
+function courtPhoneHit(phones, d) {
+  if (!d) return null;
+  return phones.find(p => { const n = p.nat || p.digits; return n.endsWith(d) || (d.length >= 6 && n.includes(d)); }) || null;
+}
+
+// ── модель: суды и судьи из дел, заседаний, справочника, карточек и встроенного перечня ──
+// Записи, которые совпадают со встроенным судом (в том числе разными написаниями), сводятся в одну строку.
+function courtsModel(o) {
+  o = o || {}; const today = o.today || '', info = o.info || {}, jinfo = o.jinfo || {};
+  const by = new Map();
+  const ent = (name, how) => {
+    name = String(name || '').trim(); if (!name) return null;
+    const b = courtBuiltin(name), k = b ? 'b:' + b.id : 'n:' + courtKeyN(name);
+    let e = by.get(k); if (!e) { e = { key: k, name: '', names: [], builtin: b, cases: [], hearings: [], judges: new Set(), from: new Set() }; by.set(k, e); }
+    // написания — только пользователя (дела, заседания, справочник, карточки); название из встроенного перечня сюда не входит
+    if (how !== 'region' && !e.names.includes(name)) e.names.push(name);
+    e.from.add(how); return e;
+  };
+  const active = c => !c.archived && c.status !== 'Завершено';
+  (o.cases || []).forEach(c => {
+    if (!c) return;
+    [[c.court, c.judge], [c.apCourt || c.courtApp, c.judgeApp], [c.courtCass, c.judgeCass], [c.koapAppealTo, '']].forEach(([court, judge]) => {
+      const e = ent(court, 'case'); if (!e) return; if (!e.cases.some(x => x.id === c.id)) e.cases.push({ id: c.id, number: c.number || '', client: c.client || '', stage: c.stage || '', active: active(c) });
+      if (judge) e.judges.add(String(judge).trim());
+    });
+  });
+  (o.hearings || []).forEach(h => {
+    if (!h) return; const e = ent(h.court, 'hearing'); if (!e) return;
+    if (h.judge) e.judges.add(String(h.judge).trim());
+    if (h.date && h.date >= today && (!h.status || h.status === 'Назначено')) e.hearings.push({ id: h.id, date: h.date, time: h.time || '', caseNum: h.caseNum || '', room: h.room || '' });
+  });
+  (o.refCourts || []).forEach(n => ent(n, 'ref'));
+  Object.keys(info).forEach(n => ent(n, 'card'));
+  Object.keys(jinfo).forEach(j => { const ji = jinfo[j] || {}; if (ji.court) { const e = ent(ji.court, 'judge'); if (e) e.judges.add(j); } });
+  COURTS_REGION.forEach(b => ent(b.name, 'region'));
+  const courts = [...by.values()].map(e => {
+    // основное написание — то, под которым есть карточка, иначе самое частое в делах, иначе первое
+    const withCard = e.names.find(n => info[n]);
+    const freq = n => (o.cases || []).filter(c => c && [c.court, c.apCourt, c.courtApp, c.courtCass, c.koapAppealTo].includes(n)).length;
+    e.name = withCard || e.names.slice().sort((a, b) => freq(b) - freq(a))[0] || (e.builtin && e.builtin.name) || '';
+    const own = {}; e.names.forEach(n => Object.entries(info[n] || {}).forEach(([k, v]) => { if (v && own[k] == null) own[k] = v; }));
+    const b = e.builtin || {}, fromSite = [];
+    const eff = { ...own };
+    ['addr', 'phone', 'site', 'email', 'hours'].forEach(k => { if (!eff[k] && b[k]) { eff[k] = b[k]; fromSite.push(k); } });
+    e.own = own; e.eff = eff; e.fromSite = fromSite; e.phones = courtPhones(eff.phone);
+    e.hearings.sort((x, y) => (x.date + x.time).localeCompare(y.date + y.time));
+    e.activeCases = e.cases.filter(c => c.active).length;
+    e.used = e.cases.length > 0 || e.hearings.length > 0;
+    e.judges = [...e.judges].filter(Boolean).sort((a, b) => a.localeCompare(b, 'ru'));
+    return e;
+  });
+  courts.sort((a, b) => (b.activeCases - a.activeCases) || (b.cases.length - a.cases.length) || (b.hearings.length - a.hearings.length) || a.name.localeCompare(b.name, 'ru'));
+  // судьи: справочник, карточки, дела, заседания
+  const jm = new Map();
+  const jent = name => { name = String(name || '').trim(); if (!name) return null; const k = courtKeyN(name); let j = jm.get(k); if (!j) { j = { name, key: k, info: jinfo[name] || {}, courts: new Set(), cases: [] }; jm.set(k, j); } if (!Object.keys(j.info).length && jinfo[name]) j.info = jinfo[name]; return j; };
+  (o.refJudges || []).forEach(jent); Object.keys(jinfo).forEach(jent);
+  courts.forEach(c => c.judges.forEach(n => { const j = jent(n); if (j) j.courts.add(c.name); }));
+  (o.cases || []).forEach(c => { if (!c) return; [c.judge, c.judgeApp, c.judgeCass].forEach(n => { const j = jent(n); if (j && !j.cases.some(x => x.id === c.id)) j.cases.push({ id: c.id, number: c.number || '', client: c.client || '', active: active(c) }); }); });
+  const judges = [...jm.values()].map(j => { if (j.info.court) j.courts.add(j.info.court); j.courts = [...j.courts]; j.phones = courtPhones([j.info.secretaryPhone, j.info.assistantPhone].filter(Boolean).join(', '));
+    j.secPhones = courtPhones(j.info.secretaryPhone); j.asPhones = courtPhones(j.info.assistantPhone); return j; })
+    .sort((a, b) => (b.cases.length - a.cases.length) || a.name.localeCompare(b.name, 'ru'));
+  return { courts, judges };
+}
+// поиск: номер — по телефонам судов, секретарей и помощников; текст — по названию, адресу (город), заметке, судье, секретарю, помощнику
+function courtsFind(model, q) {
+  const d = courtPhoneQuery(q), out = { phone: !!d, courts: [], judges: [] };
+  if (d) {
+    model.courts.forEach(c => { const h = courtPhoneHit(c.phones, d); if (h) out.courts.push({ c, hit: h }); });
+    model.judges.forEach(j => { const s = courtPhoneHit(j.secPhones, d), a = courtPhoneHit(j.asPhones, d); if (s || a) out.judges.push({ j, hit: s || a, who: s ? 'секретарь' : 'помощник' }); });
+    return out;
+  }
+  const words = courtKeyN(q).split(' ').filter(Boolean); if (!words.length) return out;
+  const has = hay => { const h = courtKeyN(hay); return words.every(w => h.includes(w)); };
+  model.courts.forEach(c => { if (has([c.name, ...c.names, ...(c.builtin ? [c.builtin.name, ...(c.builtin.alias || [])] : []), c.eff.addr, c.eff.note, c.judges.join(' ')].join(' '))) out.courts.push({ c }); });
+  model.judges.forEach(j => { if (has([j.name, j.courts.join(' '), j.info.secretary, j.info.assistant, j.info.cabinet].join(' '))) out.judges.push({ j }); });
+  return out;
+}
+async function courtsModelLoad() {
+  let cases = [], hearings = [];
+  try { cases = await getAll('cases'); hearings = await getAll('hearings'); } catch (e) { logErr('courts:load', e); }
+  try { if (typeof loadCourtInfo === 'function') { await loadCourtInfo(); await loadJudgeInfo(); } } catch (e) { logErr('courts:refs', e); }
+  return courtsModel({ cases, hearings, today: todayISO(), info: typeof COURT_INFO === 'object' ? COURT_INFO : {}, jinfo: typeof JUDGE_INFO === 'object' ? JUDGE_INFO : {},
+    refCourts: typeof refItemsOf === 'function' ? refItemsOf('courts') : [], refJudges: typeof refItemsOf === 'function' ? refItemsOf('judges') : [] });
+}
+
+// ── запись карточек с сохранением всех полей (в том числе тех, которых не знает прежняя программа) ──
+const COURT_CARD_FIELDS = ['addr', 'phone', 'site', 'email', 'travel', 'hours', 'note', 'src', 'checked'];
+const JUDGE_CARD_FIELDS = (typeof JUDGE_FIELDS !== 'undefined' ? JUDGE_FIELDS : ['court', 'cabinet', 'secretary', 'secretaryPhone', 'assistantPhone']).concat(['assistant', 'note']);
+function cardMerge(cur, data, fields) {
+  const out = { ...(cur || {}) };
+  fields.forEach(k => { if (!data || !(k in data)) return; const v = String(data[k] == null ? '' : data[k]).trim(); if (v) out[k] = v; else delete out[k]; });
+  return out;
+}
+async function courtCardSave(name, data) {
+  if (!name) return;
+  // перечитать перед записью: карточку могли изменить обмен или другая вкладка
+  await loadCourtInfo();
+  const next = cardMerge(COURT_INFO[name], data, COURT_CARD_FIELDS);
+  if (Object.keys(next).length) COURT_INFO[name] = next; else delete COURT_INFO[name];
+  await put('refs', { id: 'courtInfo', items: [], info: COURT_INFO });
+}
+async function judgeCardSave(name, data) {
+  if (!name) return;
+  await loadJudgeInfo();
+  const next = cardMerge(JUDGE_INFO[name], data, JUDGE_CARD_FIELDS);
+  if (Object.keys(next).length) JUDGE_INFO[name] = next; else delete JUDGE_INFO[name];
+  await put('refs', { id: 'judgeInfo', items: [], info: JUDGE_INFO });
+}
+// данные встроенного перечня — в пустые поля карточки пользователя (по нажатию), с источником и датой проверки
+function courtFromBuiltinData(own, b) {
+  const d = {}; let n = 0;
+  ['addr', 'phone', 'site', 'email', 'hours'].forEach(k => { if (!(own || {})[k] && b[k]) { d[k] = b[k]; n++; } });
+  if (n) { d.src = b.src; d.checked = COURTS_CHECKED; }
+  return { data: d, n };
+}
+async function courtCardFromBuiltin(name) {
+  const b = courtBuiltin(name); if (!b) { toast('Этого суда нет во встроенном перечне', true); return; }
+  try { await loadCourtInfo(); const r = courtFromBuiltinData(COURT_INFO[name], b); if (!r.n) { toast('Карточка уже заполнена — с сайта суда добавить нечего'); return; } await courtCardSave(name, r.data); toast('В карточку записано полей: ' + r.n + ' — с сайта суда'); }
+  catch (e) { logErr('courts:fromSite', e); toast('Не удалось записать: ' + ((e && e.message) || 'ошибка'), true); return; }
+  openCourtCard(name, 'replace');
+}
+
+// ── лист «Суды и судьи» ──
+let COURTS_VIEW = null;
+function courtRowSub(c) {
+  const city = (/(?:^|,\s*)((?:г|п|пгт|с)\.\s*[^,;]+)/.exec(c.eff.addr || '') || [])[1] || '';
+  const next = c.hearings[0];
+  return [city, c.activeCases ? 'дел в работе: ' + c.activeCases : (c.cases.length ? 'дел: ' + c.cases.length : ''), next ? 'заседание ' + fmtDate(next.date) + (next.time ? ' ' + next.time : '') : '', c.phones[0] ? c.phones[0].raw : ''].filter(Boolean).join(' · ');
+}
+function courtRowHtml(c, hit) {
+  return `<button type="button" class="list-btn court-row" onclick="openCourtCard('${jsq(c.name)}')"><span><span class="task-title">${esc(c.name)}</span><span class="task-sub">${esc(hit ? 'совпал номер ' + hit.raw + (hit.fax ? ' — факс' : '') : courtRowSub(c))}</span></span>${icon('chevron-right', 'icon-sm')}</button>`;
+}
+function judgeRowHtml(j, hit, who) {
+  const who2 = hit ? (who === 'секретарь' ? j.info.secretary : j.info.assistant) || '' : '';
+  const sub = hit ? [who + (who2 ? ': ' + who2 : ''), 'совпал номер ' + hit.raw].join(' · ') : [j.courts[0], j.info.cabinet ? 'каб. ' + j.info.cabinet : '', j.cases.length ? 'дел: ' + j.cases.length : ''].filter(Boolean).join(' · ');
+  return `<button type="button" class="list-btn court-row" onclick="openJudgeCard('${jsq(j.name)}')"><span><span class="task-title">${esc(j.name)}</span><span class="task-sub">${esc(sub)}</span></span>${icon('chevron-right', 'icon-sm')}</button>`;
+}
+function courtsResultsHtml(model, q) {
+  q = String(q || '').trim();
+  if (q) {
+    const r = courtsFind(model, q);
+    if (!r.courts.length && !r.judges.length) return emptyState('search', r.phone ? 'Номер не найден' : 'Ничего не найдено', r.phone ? 'Среди телефонов судов, секретарей и помощников такого номера нет. Если звонили из суда — запишите номер в карточку суда или судьи.' : 'Поиск идёт по названию суда, городу и адресу, судьям, секретарям и помощникам.');
+    return (r.courts.length ? `<div class="section-label">Суды · ${r.courts.length}</div><div class="list-rows">${r.courts.slice(0, 40).map(x => courtRowHtml(x.c, x.hit)).join('')}</div>` : '')
+      + (r.judges.length ? `<div class="section-label">Судьи · ${r.judges.length}</div><div class="list-rows">${r.judges.slice(0, 40).map(x => judgeRowHtml(x.j, x.hit, x.who)).join('')}</div>` : '');
+  }
+  const used = model.courts.filter(c => c.used), cards = model.courts.filter(c => !c.used && Object.keys(c.own).length), region = model.courts.filter(c => c.builtin && !c.used);
+  const judges = model.judges.filter(j => j.cases.length || Object.keys(j.info).length);
+  return (used.length ? `<div class="section-label">Суды ваших дел · ${used.length}</div><div class="list-rows">${used.map(c => courtRowHtml(c)).join('')}</div>` : '')
+    + (cards.filter(c => !c.builtin).length ? `<div class="section-label">Суды с карточкой</div><div class="list-rows">${cards.filter(c => !c.builtin).map(c => courtRowHtml(c)).join('')}</div>` : '')
+    + (judges.length ? `<div class="section-label">Судьи · ${judges.length}</div><div class="list-rows">${judges.slice(0, 60).map(j => judgeRowHtml(j)).join('')}</div>` : '')
+    + (region.length ? `<details class="courts-region"><summary>Суды Владимирской области · ${region.length}</summary><p class="small muted">Адреса, телефоны и сайты — с официальных сайтов судов (${esc(fmtDate(COURTS_CHECKED))}). Перед звонком или поездкой сверьте на сайте суда.</p><div class="list-rows">${region.map(c => courtRowHtml(c)).join('')}</div></details>` : '')
+    + (!used.length && !judges.length ? `<p class="small muted">Суды ваших дел появятся здесь сами, когда в делах будут указаны суды.</p>` : '');
+}
+async function openCourtsSheet(q, mode) {
+  COURTS_VIEW = await courtsModelLoad();
+  const m = COURTS_VIEW, used = m.courts.filter(c => c.used).length;
+  openSheet('Суды и судьи', `<div class="status-line" id="courts-state" role="status">${icon('landmark')}<span>${esc('Судов ваших дел: ' + used + ' · судей: ' + m.judges.filter(j => j.cases.length || Object.keys(j.info).length).length)}</span></div>
+    <div class="form-grid"><label class="field wide"><span>Кто звонил? Номер, суд, город или судья</span><input id="courts-q" type="search" autocomplete="off" inputmode="search" value="${esc(q || '')}" placeholder="например 8 4922 45-09-35 или Ковров" oninput="courtsFilter()"></label></div>
+    <div id="courts-res">${courtsResultsHtml(m, q)}</div>
+    <p class="small muted" style="margin-top:10px">Номер ищется в любом написании — с +7, 8, скобками и дефисами, достаточно последних цифр. Карточку суда или судьи можно дополнить: часы работы, добавочный, кабинет, секретарь и помощник.</p>`, mode || (sheetIsOpen() ? true : undefined));
+}
+function courtsFilter() {
+  const box = document.getElementById('courts-res'), inp = document.getElementById('courts-q'); if (!box || !inp || !COURTS_VIEW) return;
+  box.innerHTML = courtsResultsHtml(COURTS_VIEW, inp.value);
+}
+
+// ── карточка суда ──
+function courtEntryOf(model, name) {
+  const b = courtBuiltin(name), k = b ? 'b:' + b.id : 'n:' + courtKeyN(name);
+  return model.courts.find(c => c.key === k) || null;
+}
+function courtPhonesHtml(phones) {
+  return phones.map(p => { const href = courtTelHref(p);
+    return `<div class="court-phone"><span>${esc(p.raw)}</span>${href && !p.fax ? `<a class="button small-btn" href="${esc(href)}">${icon('phone', 'icon-sm')}Позвонить</a>` : ''}</div>`; }).join('');
+}
+async function openCourtCard(name, mode) {
+  const m = COURTS_VIEW = await courtsModelLoad();
+  const c = courtEntryOf(m, name); if (!c) { toast('Суд не найден', true); return; }
+  const e = c.eff, b = c.builtin, row = (k, v) => v ? `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>` : '';
+  const site = e.site ? safeExternalUrl(/^https?:\/\//i.test(e.site) ? e.site : 'https://' + e.site) : '';
+  const map = e.addr ? 'https://yandex.ru/maps/?text=' + encodeURIComponent(String(e.addr).split(';')[0]) : '';
+  const fromSite = c.fromSite.length ? `<p class="small muted court-src">${esc(c.fromSite.length === 5 || !Object.keys(c.own).length ? 'Контакты' : 'Не заполненное в карточке')} — с официального сайта суда, переписано ${esc(fmtDate(COURTS_CHECKED))}. Перед звонком или поездкой сверьте.</p>` : '';
+  const ownSrc = c.own.src || c.own.checked ? `<p class="small muted">Источник карточки: ${esc([c.own.src, c.own.checked ? 'проверено ' + fmtDate(c.own.checked) : ''].filter(Boolean).join(' · '))}</p>` : '';
+  const cases = c.cases.slice().sort((x, y) => (y.active - x.active) || String(y.number).localeCompare(String(x.number), 'ru', { numeric: true }));
+  const casesHtml = cases.length ? `<div class="section-label">Ваши дела в этом суде · ${cases.length}${c.activeCases ? ', в работе ' + c.activeCases : ''}</div><div class="list-rows">${cases.slice(0, 30).map(x => `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(x.id)}')"><span class="task-title">${esc([x.number, x.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc([x.stage, x.active ? '' : 'завершено'].filter(Boolean).join(' · '))}</span></button>`).join('')}</div>` : '';
+  const hearHtml = c.hearings.length ? `<div class="section-label">Ближайшие заседания · ${c.hearings.length}</div><div class="list-rows">${c.hearings.slice(0, 10).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span class="task-title">${esc(fmtDate(h.date) + (h.time ? ' ' + h.time : ''))}</span><span class="task-sub">${esc([h.caseNum, h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · '))}</span></button>`).join('')}</div>` : '';
+  const judgesHtml = c.judges.length ? `<div class="section-label">Судьи · ${c.judges.length}</div><div class="list-rows">${c.judges.map(n => { const j = m.judges.find(x => x.key === courtKeyN(n)) || { name: n, info: {}, courts: [], cases: [] }; return judgeRowHtml(j); }).join('')}</div>` : '';
+  const canFill = b && courtFromBuiltinData(c.own, b).n;
+  const actions = `<div class="actions" style="margin:8px 0 4px">${site ? `<a class="button small-btn" href="${esc(site)}" target="_blank" rel="noopener noreferrer">${icon('landmark', 'icon-sm')}Сайт суда</a>` : ''}${map ? `<a class="button small-btn" id="court-route" href="${esc(map)}" target="_blank" rel="noopener noreferrer">${icon('map-pin', 'icon-sm')}Маршрут</a>` : ''}${e.email ? `<a class="button small-btn" href="mailto:${esc(e.email)}">${icon('mail', 'icon-sm')}Написать</a>` : ''}${c.fromSite.length && b && b.src ? `<a class="button small-btn" id="court-src" href="${esc(b.src)}" target="_blank" rel="noopener noreferrer">${icon('arrow-right', 'icon-sm')}Источник контактов</a>` : ''}</div>`;
+  openSheet(c.name, `${b && b.role ? `<p class="small muted">${esc(b.role)}</p>` : ''}<div class="list-rows">${row('Адрес', e.addr)}${row('Почта', e.email)}${row('Сайт', e.site)}${row('Часы работы', e.hours)}${row('Время в пути', e.travel ? e.travel + ' мин' : '')}${row('Заметка', e.note)}${c.names.length > 1 ? row('Написания в делах', c.names.join('; ')) : ''}</div>
+    ${c.phones.length ? `<div class="section-label">Телефоны</div><div class="court-phones">${courtPhonesHtml(c.phones)}</div>` : '<p class="small muted">Телефона в карточке нет.</p>'}
+    ${actions}${fromSite}${ownSrc}${casesHtml}${hearHtml}${judgesHtml}
+    <div class="form-actions" style="margin-top:10px"><button type="button" class="button small-btn" id="court-edit" onclick="openCourtInfoForm('${jsq(c.name)}', 'card')">${icon('pencil', 'icon-sm')}Изменить карточку</button>${canFill ? `<button type="button" class="button small-btn" id="court-fill" onclick="courtCardFromBuiltin('${jsq(c.name)}')">${icon('check', 'icon-sm')}Записать данные с сайта суда в карточку</button>` : ''}</div>`, mode || (sheetIsOpen() ? true : undefined));
+}
+
+// ── карточка судьи ──
+async function openJudgeCard(name, mode) {
+  const m = COURTS_VIEW = await courtsModelLoad();
+  const j = m.judges.find(x => x.key === courtKeyN(name)); if (!j) { toast('Судья не найден', true); return; }
+  const i = j.info || {}, row = (k, v) => v ? `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>` : '';
+  const ph = (label, who, phones) => phones.length ? `<div class="section-label">${esc(label)}${who ? ' · ' + esc(who) : ''}</div><div class="court-phones">${courtPhonesHtml(phones)}</div>` : '';
+  const cases = j.cases.slice().sort((x, y) => (y.active - x.active) || String(y.number).localeCompare(String(x.number), 'ru', { numeric: true }));
+  openSheet('Судья: ' + j.name, `<div class="list-rows">${j.courts.map(n => `<button type="button" class="list-btn" onclick="openCourtCard('${jsq(n)}')"><span class="muted">Суд</span><span>${esc(n)}</span></button>`).join('')}${row('Кабинет', i.cabinet)}${row('Секретарь', i.secretary)}${row('Помощник', i.assistant)}${row('Заметка', i.note)}</div>
+    ${ph('Телефон секретаря', i.secretary, j.secPhones)}${ph('Телефон помощника', i.assistant, j.asPhones)}${!j.secPhones.length && !j.asPhones.length ? '<p class="small muted">Телефонов секретаря и помощника в карточке нет.</p>' : ''}
+    ${cases.length ? `<div class="section-label">Ваши дела у судьи · ${cases.length}</div><div class="list-rows">${cases.slice(0, 30).map(x => `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(x.id)}')"><span class="task-title">${esc([x.number, x.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(x.active ? 'в работе' : 'завершено')}</span></button>`).join('')}</div>` : ''}
+    <div class="form-actions" style="margin-top:10px"><button type="button" class="button small-btn" id="judge-edit" onclick="openJudgeInfoForm('${jsq(j.name)}', 'card')">${icon('pencil', 'icon-sm')}Изменить карточку</button></div>`, mode || (sheetIsOpen() ? true : undefined));
+}
+// строка поиска на экране «Суды и мониторинг»: Enter или кнопка — лист с результатами
+function courtsSearchGo() { const v = String((document.getElementById('mon-courts-q') || {}).value || '').trim(); openCourtsSheet(v); }
+function courtsSearchPanel() {
+  return `<section class="panel courts-panel"><div class="panel-title"><h2>Суды и судьи</h2><div class="panel-tools"><button type="button" class="text-button" id="mon-courts-all" onclick="openCourtsSheet()">Все суды</button></div></div>
+    <div class="inn-row"><input id="mon-courts-q" type="search" autocomplete="off" placeholder="Кто звонил? Номер, суд или судья" aria-label="Кто звонил? Номер, суд или судья" onkeydown="if(event.key==='Enter'){event.preventDefault();courtsSearchGo()}"><button type="button" class="button small-btn primary" id="mon-courts-go" onclick="courtsSearchGo()">${icon('search', 'icon-sm')}Найти</button></div></section>`;
+}
+
+// ▼▼▼ ui/automation.js
+// ═══ ui/automation.js — лист «Автоматизация»: что программа и сервер делают сами (план по ЮрТопосу 13.10.2026, этап 2; предложение GPT) ═══
+// Каждое автоматическое действие одной строкой: где выполняется (на сервере — и при закрытой программе / будильником приложения / только
+// при открытой программе), когда последний раз удалось, когда следующий запуск, итог или ошибка словами, «Выполнить сейчас» и «Настроить».
+// Сведения — отметки, которые модули уже пишут (crm_srvdb_lastpull, crm_mon_pull_at, crm_next_cal_at …), и их функции состояния; здесь
+// ничего не считается заново. autoModel(now, env) — чистая функция (тест подаёт свои сведения), autoEnv() собирает сведения на устройстве.
+// Действие «давно не удавалось» при включённой автоматике — «требует внимания»: выключенное само не работает, о нём сказано прямо.
+const AUTO_WHERE = { server: 'на сервере — и при закрытой программе', app: 'будильником приложения — и при закрытой программе', open: 'только при открытой программе', manual: 'по кнопке' };
+const AUTO_STATE = { ok: ['работает', 'good'], warn: ['требует внимания', 'warn'], bad: ['ошибка', 'bad'], off: ['выключено', ''] };
+const AUTO_STALE = 864e5;
+const AUTO = { busy: '', last: {} };
+function autoWhen(ts, now) {
+  if (!(Number(ts) > 0)) return '';
+  const d = new Date(Number(ts)), n = new Date(now || Date.now()), p = x => String(x).padStart(2, '0');
+  const hm = p(d.getHours()) + ':' + p(d.getMinutes());
+  if (d.toDateString() === n.toDateString()) return 'сегодня ' + hm;
+  const y = new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1); if (d.toDateString() === y.toDateString()) return 'вчера ' + hm;
+  return p(d.getDate()) + '.' + p(d.getMonth() + 1) + (d.getFullYear() !== n.getFullYear() ? '.' + d.getFullYear() : '') + ' ' + hm;
+}
+const autoErr = e => (e && (e.msg || e.error) ? { at: Number(e.at) || 0, msg: String(e.msg || e.error) } : null);
+// состояние строки: не настроено / выключено — off; последняя попытка с ошибкой — bad; давно не удавалось — warn (stale задают только строки
+// с включённой автоматикой: действие по кнопке давностью «внимания» не требует)
+function autoState(o, now) {
+  if (!o.on) return 'off';
+  if (o.err && (!o.last || o.err.at >= o.last)) return 'bad';
+  if (o.warn) return 'warn';
+  if (o.stale && (!o.last || now - o.last > o.stale)) return 'warn';
+  return 'ok';
+}
+function autoModel(now, env) {
+  const e = env || {}, rows = [];
+  const add = r => { r.err = autoErr(r.err); r.state = autoState(r, now); rows.push(r); };
+  // обмен с серверами
+  const S = e.srv || {};
+  add({ id: 'srv', title: 'Обмен базой с сервером', where: S.auto ? 'open' : 'manual', on: !!S.configured, auto: !!S.auto, last: Math.max(S.lastPull || 0, S.lastPush || 0), err: S.err,
+    stale: S.auto ? AUTO_STALE : 0, next: !S.configured ? 'сервер не подключён' : S.auto ? 'раз в 5 минут, при возврате на экран и через 4 секунды после правки' : 'автообмен выключен — обмен по кнопке «Синхронизация»',
+    note: S.text || '', run: S.configured ? 'srv' : '', setup: 'openSyncSheet()' });
+  if (e.srv2 && e.srv2.configured) add({ id: 'srv2', title: 'Обмен базой с запасным сервером', where: S.auto ? 'open' : 'manual', on: !!e.srv2.checked, auto: !!S.auto, last: Math.max(e.srv2.lastPull || 0, e.srv2.lastPush || 0), err: e.srv2.err,
+    stale: S.auto ? AUTO_STALE : 0, next: !e.srv2.checked ? 'связь с запасным сервером не проверена' : S.auto ? 'вместе с основным' : 'по кнопке', note: e.srv2.text || '', run: e.srv2.checked ? 'srv2' : '', setup: 'openSyncSheet()' });
+  const F = e.fs || {};
+  add({ id: 'fs', title: 'Файл в облаке', where: 'open', on: !!F.used, last: F.last, err: F.err, warn: F.state === 'perm', stale: 0,
+    next: F.used ? 'раз в 2 минуты, при возврате на экран и через 5 секунд после правки' : 'не подключён — «Настройки» → «Файл в облаке»', note: F.text || '', run: F.used ? 'fs' : '', setup: 'openFsyncSheet()' });
+  // суды
+  const C = e.col || {}, M = e.mon || {}, L = e.links || {};
+  add({ id: 'col', title: 'Сбор с сайтов судов (коллектор)', where: 'server', on: !!C.configured, last: 0, lastKnown: false, err: null, stale: 0,
+    next: C.configured ? 'по таймеру функции коллектора в Облаке (утром и днём); итог последнего сбора — «Суды и мониторинг» → «Проверить»' : 'коллектор не настроен — «Настройки» → «Мониторинг судов»',
+    note: '', run: C.configured && M.ready ? 'col' : '', runLabel: 'Собрать сейчас', setup: 'openMonitorSettingsSheet()' });
+  add({ id: 'links', title: 'Список дел для коллектора', where: 'open', on: !!L.configured, last: L.last, err: L.err, warn: !!L.bad && !L.err, stale: 0,
+    next: L.configured ? 'при запуске программы и через 8 секунд после сохранения дела, если список изменился' : 'коллектор не настроен', note: L.text || '', run: L.configured ? 'links' : '', setup: 'openMonitorSettingsSheet()' });
+  add({ id: 'mon', title: 'События судов с сервера', where: 'open', on: !!M.ready, auto: M.auto !== false, last: M.last, err: M.err, stale: M.auto !== false ? AUTO_STALE : 0,
+    next: !M.ready ? 'сервер не подключён' : M.auto !== false ? 'при открытии, при возврате на экран (не чаще раза в 10 минут) и раз в 30 минут' : 'получение выключено — по кнопке «Обновить» в «Суды и мониторинг»',
+    note: M.text || '', run: M.ready ? 'mon' : '', setup: 'openMonitorSettingsSheet()' });
+  const K = e.kad || {};
+  if (K.supported) add({ id: 'kad', title: 'Автопроверка карточек КАД', where: 'open', on: !!K.on, last: K.last, err: null, stale: 0,
+    next: K.on ? 'раз в 10 минут проверяет, какие дела не читались 6 часов; читает по одному в фоне' : 'выключена — «Карточки всех дел»', note: K.text || '', run: 'kad', setup: 'openCardsAllSheet()' });
+  // напоминания и календари
+  const R = e.remind || {};
+  add({ id: 'remind', title: 'Напоминания в Telegram', where: 'server', on: !!(R.on && R.srv), last: R.last, err: R.err, warn: R.tg === '0', stale: 0,
+    next: !R.srv ? 'сервер не подключён' : R.on ? 'сервер присылает в 08:05 по Москве; список уходит на сервер через 8 секунд после правки' : 'передача списка выключена',
+    note: R.tg === '0' ? 'у сервера не заданы TG_TOKEN и TG_CHAT — сообщения не уходят' : R.on && R.n != null ? 'на сервере записей: ' + R.n : '', run: R.on && R.srv ? 'remind' : '', setup: 'openRemindSheet()' });
+  const CF = e.cal || {};
+  add({ id: 'cal', title: 'Лента календаря', where: 'open', on: !!(CF.on && CF.srv), last: CF.last, err: CF.err, stale: 0,
+    next: !CF.srv ? 'сервер не подключён' : CF.on ? 'через 8 секунд после правки и при открытии; календари забирают ленту с сервера сами' : 'публикация выключена на этом устройстве',
+    note: CF.text || '', run: CF.on && CF.srv ? 'cal' : '', setup: 'openCalFeedSheet()' });
+  const DC = e.devcal || {};
+  if (DC.app) add({ id: 'devcal', title: 'Google Календарь', where: 'open', on: !!DC.on, last: DC.last, err: DC.err, stale: 0,
+    next: DC.on ? 'через 8 секунд после правки и при открытии' : 'выключено', note: DC.text || '', run: DC.on ? 'devcal' : '', setup: 'openDevCalSheet()' });
+  const DR = e.devr || {};
+  add({ id: 'devr', title: 'Напоминания на устройстве', where: DR.app ? 'app' : 'open', on: !!DR.on, last: DR.app ? DR.last : 0, lastKnown: !!DR.app, err: null, stale: 0,
+    next: !DR.on ? 'выключены' : DR.app ? 'будильники ставятся через 6 секунд после правки; уведомления — по времени' : 'проверка раз в 5 минут, пока программа открыта', note: '', run: DR.on ? 'devr' : '', setup: 'openDevRemindSheet()' });
+  const B = e.book || {};
+  add({ id: 'book', title: 'Заявки онлайн-записи', where: 'open', on: !!(B.on && B.srv), last: B.lastPoll, err: B.err, stale: B.on ? AUTO_STALE : 0,
+    next: !B.srv ? 'сервер не подключён' : B.on ? 'раз в 15 минут, пока программа открыта; страница записи на сервере работает всегда' : 'онлайн-запись выключена',
+    note: B.on && B.lastPub ? 'окна опубликованы ' + autoWhen(B.lastPub, now) : '', run: B.on && B.srv ? 'book' : '', setup: 'openBookSheet()' });
+  const U = e.upd || {};
+  add({ id: 'upd', title: 'Проверка обновлений программы', where: 'open', on: true, last: U.last, err: U.err, stale: 0,
+    next: 'при возврате на экран (не чаще раза в 15 минут) и раз в час', note: '', run: 'upd', setup: '' });
+  const BK = e.backup || {};
+  add({ id: 'backup', title: 'Копия базы', where: 'manual', on: true, last: BK.at || 0, lastKnown: false, err: null, warn: !!BK.remind, stale: 0,
+    next: 'копию сохраняете вы; программа напоминает, если 14 дней данные не уходили с устройства',
+    note: BK.at ? 'последний раз данные уходили с устройства: ' + (BK.how || '') : 'данные ещё не уходили с устройства', run: '', runOpen: 'openBackupSheet()', setup: '' });
+  return rows;
+}
+// сведения на этом устройстве: каждая функция модуля — по наличию (лист открывается и без модуля)
+function autoEnv(now, cases) {
+  const n = k => Number(localStorage.getItem(k) || 0), j = k => lsJSON(k, null), tryv = (f, d) => { if (typeof f !== 'function') return d; try { return f(); } catch (e) { logErr('auto:env', e); return d; } };
+  // функции модулей — через typeof: часть объявлена через const (devcalOn, calFeedOn …), модуля может не быть в сборке или песочнице теста
+  const F = {
+    nextAutoOn: typeof nextAutoOn === 'function' ? nextAutoOn : null, srvSlotText: typeof srvSlotText === 'function' ? srvSlotText : null,
+    srv2Configured: typeof srv2Configured === 'function' ? srv2Configured : null, srvChecked: typeof srvChecked === 'function' ? srvChecked : null,
+    fsyncUsed: typeof fsyncUsed === 'function' ? fsyncUsed : null, fsyncState: typeof fsyncState === 'function' ? fsyncState : null, fsyncLast: typeof fsyncLast === 'function' ? fsyncLast : null, fsyncStateText: typeof fsyncStateText === 'function' ? fsyncStateText : null,
+    crmCollectorSrvCfg: typeof crmCollectorSrvCfg === 'function' ? crmCollectorSrvCfg : null, monPullReady: typeof monPullReady === 'function' ? monPullReady : null,
+    monPullAutoOn: typeof monPullAutoOn === 'function' ? monPullAutoOn : null, monPullStatusText: typeof monPullStatusText === 'function' ? monPullStatusText : null, monLinksStatus: typeof monLinksStatus === 'function' ? monLinksStatus : null,
+    kadQuietSupported: typeof kadQuietSupported === 'function' ? kadQuietSupported : null, kadAutoState: typeof kadAutoState === 'function' ? kadAutoState : null, kadAutoStatusText: typeof kadAutoStatusText === 'function' ? kadAutoStatusText : null,
+    srvRemindOn: typeof srvRemindOn === 'function' ? srvRemindOn : null, calFeedOn: typeof calFeedOn === 'function' ? calFeedOn : null, calFeedStateText: typeof calFeedStateText === 'function' ? calFeedStateText : null,
+    devcalApp: typeof devcalApp === 'function' ? devcalApp : null, devcalOn: typeof devcalOn === 'function' ? devcalOn : null, devcalCal: typeof devcalCal === 'function' ? devcalCal : null, devcalStateText: typeof devcalStateText === 'function' ? devcalStateText : null,
+    devrOn: typeof devrOn === 'function' ? devrOn : null, bookCfg: typeof bookCfg === 'function' ? bookCfg : null,
+    backupRemindState: typeof backupRemindState === 'function' ? backupRemindState : null, backupRemindModel: typeof backupRemindModel === 'function' ? backupRemindModel : null,
+  };
+  const srvOk = !!(SRV.url && SRV.secret);
+  const env = { now };
+  env.srv = { configured: !!(srvOk && SRVDB.pass), auto: !!tryv(F.nextAutoOn, false), lastPull: n('crm_srvdb_lastpull'), lastPush: n('crm_srvdb_lastpush'), err: j('crm_srvdb_lasterr'), text: tryv(F.srvSlotText && (() => F.srvSlotText(0, now)), '') };
+  if (tryv(F.srv2Configured, false)) env.srv2 = { configured: true, checked: !!tryv(F.srvChecked && (() => F.srvChecked(1)), false), lastPull: n('crm_srvdb_lastpull_s2'), lastPush: n('crm_srvdb_lastpush_s2'), err: j('crm_srvdb_lasterr_s2'), text: tryv(F.srvSlotText && (() => F.srvSlotText(1, now)), '') };
+  env.fs = F.fsyncUsed ? { used: !!tryv(F.fsyncUsed, false), state: tryv(F.fsyncState, ''), last: tryv(F.fsyncLast, 0), err: j('crm_fsync_err'), text: tryv(F.fsyncStateText && (() => F.fsyncStateText(now)), '') } : {};
+  const col = tryv(F.crmCollectorSrvCfg, {}) || {};
+  env.col = { configured: !!(col.url && col.secret) };
+  env.mon = { ready: F.monPullReady ? !!tryv(F.monPullReady, false) : srvOk, auto: F.monPullAutoOn ? tryv(F.monPullAutoOn, true) !== false : true, last: n('crm_mon_pull_at'), err: j('crm_mon_pull_err'), text: tryv(F.monPullStatusText, '') };
+  const ls = tryv(F.monLinksStatus, null);
+  env.links = { configured: env.col.configured, last: n('crm_mon_links_at'), err: j('crm_mon_links_err'), bad: !!(ls && ls.bad), text: ls ? ls.text || '' : '' };
+  if (tryv(F.kadQuietSupported, false)) { const st = tryv(F.kadAutoState, {}) || {}; env.kad = { supported: true, on: st.on !== false, last: (st.run && st.run.at) || 0, text: tryv(F.kadAutoStatusText, '') }; }
+  env.remind = { srv: srvOk, on: !!tryv(F.srvRemindOn, false), last: n('crm_srv_remind_at'), err: j('crm_next_remind_err'), tg: localStorage.getItem('crm_next_remind_tg'), n: localStorage.getItem('crm_next_remind_n') };
+  env.cal = { srv: srvOk, on: !!tryv(F.calFeedOn, false), last: n('crm_next_cal_at'), err: j('crm_next_cal_err'), text: tryv(F.calFeedStateText, '') };
+  if (tryv(F.devcalApp, false)) env.devcal = { app: true, on: !!tryv(() => F.devcalOn && F.devcalOn() && F.devcalCal && !!F.devcalCal(), false), last: n('crm_devcal_at'), err: j('crm_devcal_err'), text: tryv(F.devcalStateText, '') };
+  env.devr = { on: !!tryv(F.devrOn, false), app: typeof AndroidApp !== 'undefined' && !!AndroidApp && typeof AndroidApp.scheduleReminders === 'function', last: n('crm_alarms_at') };
+  env.book = { srv: srvOk, on: !!(tryv(F.bookCfg, {}) || {}).enabled, lastPoll: n('crm_next_book_poll_at'), lastPub: n('crm_next_book_pub_at'), err: j('crm_next_book_err') };
+  env.upd = { last: n('crm_next_upd_at'), err: j('crm_next_upd_err') };
+  if (F.backupRemindState && F.backupRemindModel && typeof backupLastOut === 'function') {
+    // «требует внимания» — по тому же правилу, что напоминание на «Сегодня» (14 дней), без учёта «Скрыть»
+    const st = tryv(F.backupRemindState, {}) || {}, last = backupLastOut(now, st), m = F.backupRemindModel(now, Object.assign({}, st, { cases: cases == null ? 1 : cases, hiddenAt: 0 }));
+    env.backup = { at: last ? last[1] : 0, how: last ? last[0] : '', remind: !!m };
+  }
+  return env;
+}
+// «Выполнить сейчас»: функции модулей; итог — одной фразой. Ни одно действие не занимает общую очередь обмена в обход её правил:
+// обмен с сервером и с файлом сами проверяют очередь и отвечают «занято».
+async function autoRun(id) {
+  const why = j => (j && (j.error || j.why || j.note)) || 'нет ответа';
+  switch (id) {
+    case 'srv': case 'srv2': { const r = await nextServerExchange(id === 'srv2' ? 1 : 0); return r.ok ? { ok: true, text: 'Обмен прошёл: с сервера новых — ' + (r.added || 0) + ', обновлено — ' + (r.updated || 0) + (r.pushed ? '; база устройства отправлена' : '; отправлять было нечего') } : { ok: false, text: 'Обмен не удался (' + (r.step || 'обмен') + '): ' + r.error }; }
+    case 'fs': { const r = await fsyncExchange('вручную', { ask: true, force: true }); return r && r.ok ? { ok: true, text: 'Обмен с файлом прошёл: из файла новых — ' + (r.added || 0) + ', обновлено — ' + (r.updated || 0) + (r.wrote ? '; файл записан' : '') } : { ok: false, text: 'Обмен с файлом не удался: ' + why(r) }; }
+    case 'col': { const r = await monRefreshAll(); return r ? { ok: !(r.collected && r.collected.ok === false), text: r.collected && r.collected.ok === false ? 'Сбор не выполнен: ' + r.collected.error : 'Сбор и получение событий выполнены — подробности в «Суды и мониторинг»' } : { ok: false, text: 'Сбор не запущен — подробности в сообщении выше' }; }
+    case 'links': { const r = await monLinksSync(true); return r && r.sent ? { ok: true, text: r.cleared ? 'Коллектору отправлен пустой список — дел для наблюдения нет' : 'Коллектору отправлено дел: ' + r.count } : { ok: !(r && r.failed), text: r && r.failed ? 'Список не отправлен: ' + r.why : 'Отправлять нечего: ' + ((r && r.why) || 'список не изменился') }; }
+    case 'mon': { const r = await monPullCore(); if (!r.ok && !r.busy) localStorage.setItem('crm_mon_pull_err', JSON.stringify({ at: Date.now(), msg: r.error })); return r.ok ? { ok: true, text: 'События получены: новых — ' + (r.added || 0) + (r.applied ? ', применено к делам — ' + r.applied : '') } : { ok: false, text: r.busy ? 'Идёт обмен — повторите через минуту' : 'События не получены: ' + r.error }; }
+    case 'kad': { const r = await cardsAllRun({ auto: true }); return r && r.total ? { ok: true, text: 'Прочитано карточек: ' + (r.ok || 0) + ' из ' + r.total + (r.blocked ? '; сайт не пустил: ' + r.blocked : '') } : { ok: true, text: 'Читать нечего: все дела со ссылкой на КАД прочитаны за последние 6 часов' }; }
+    case 'remind': { const r = await srvRemindSync(true); return r && r.ok ? { ok: true, text: 'На сервер передано напоминаний: ' + (r.n || 0) + (r.telegram ? '' : ' — у сервера не заданы TG_TOKEN и TG_CHAT') } : { ok: false, text: 'Напоминания не переданы: ' + why(r) }; }
+    case 'cal': { const r = await calFeedPublish(true); return r && r.ok ? { ok: true, text: 'Лента опубликована: событий — ' + (r.n || 0) } : { ok: false, text: 'Лента не опубликована: ' + why(r) }; }
+    case 'devcal': { const r = await devcalSync(true); return r && r.ok ? { ok: true, text: typeof devcalResText === 'function' ? devcalResText(r) : 'Календарь обновлён' } : { ok: false, text: r && r.skip ? 'Календарь не выбран или нет разрешения' : 'Календарь не обновлён: ' + why(r) }; }
+    case 'devr': { const shown = await devrCheck(true); let set = null; if (typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.scheduleReminders === 'function') set = await devrAlarmsSync(true); return { ok: true, text: 'Проверено: уведомлений показано — ' + (shown || 0) + (set != null ? '; будильников поставлено — ' + set : '') }; }
+    case 'book': { const nNew = await bookPoll(true); const p = await bookPublish(true, true); const e = lsJSON('crm_next_book_err', null); return e && Date.now() - e.at < 60000 ? { ok: false, text: 'Онлайн-запись: ' + e.msg } : { ok: true, text: 'Новых заявок: ' + (nNew || 0) + (p && p.ok ? '; окон опубликовано: ' + (p.slots || 0) : '') }; }
+    case 'upd': { const r = await nextUpdateCheck(true); return { ok: r.state !== 'error', text: typeof appUpdProgText === 'function' ? appUpdProgText(r) : r.state }; }
+  }
+  return { ok: false, text: 'неизвестное действие' };
+}
+async function autoRunNow(id) {
+  if (AUTO.busy) { toast('Уже выполняется: дождитесь окончания'); return null; }
+  AUTO.busy = id;
+  const b = document.getElementById('auto-run-' + id); if (b) { b.disabled = true; b.textContent = 'Выполняется…'; }
+  let res;
+  try { res = await autoRun(id); } catch (e) { logErr('auto:run:' + id, e); res = { ok: false, text: 'Сбой: ' + String((e && e.message) || e).slice(0, 160) }; }
+  finally { AUTO.busy = ''; }
+  AUTO.last[id] = Object.assign({ at: Date.now() }, res);
+  if (sheetIsOpen() && document.getElementById('auto-sheet')) await openAutomationSheet('replace');
+  return res;
+}
+function autoSummary(rows) {
+  const c = s => rows.filter(r => r.state === s).length;
+  return { ok: c('ok'), warn: c('warn'), bad: c('bad'), off: c('off'), text: [c('ok') ? 'работает ' + c('ok') : '', c('bad') ? 'с ошибкой ' + c('bad') : '', c('warn') ? 'требует внимания ' + c('warn') : '', c('off') ? 'выключено ' + c('off') : ''].filter(Boolean).join(' · ') };
+}
+async function openAutomationSheet(mode) {
+  const now = Date.now(); let rows = [], cases = null;
+  try { cases = (await getAll('cases')).length; } catch (e) { logErr('auto:cases', e); }
+  try { rows = autoModel(now, autoEnv(now, cases)); } catch (e) { logErr('auto:model', e); }
+  const sum = autoSummary(rows), groups = [['server', 'На сервере'], ['app', 'Будильник приложения'], ['open', 'При открытой программе'], ['manual', 'По кнопке']];
+  const row = r => {
+    const [st, cls] = AUTO_STATE[r.state], done = AUTO.last[r.id];
+    const lines = [r.last ? 'Последний раз удалось: ' + autoWhen(r.last, now) : r.on && r.lastKnown !== false ? 'Удачных запусков на этом устройстве ещё не было' : '', 'Когда: ' + r.next, r.note, r.err && r.state === 'bad' ? 'Ошибка ' + autoWhen(r.err.at, now) + ': ' + r.err.msg : ''].filter(Boolean);
+    return `<div class="auto-row" id="auto-${esc(r.id)}"><div class="auto-head"><span class="task-title">${esc(r.title)}</span>${badge(st, cls)}</div>
+      <div class="small muted auto-where">${esc(AUTO_WHERE[r.where] || '')}</div>${lines.map(t => `<div class="small${/^Ошибка /.test(t) ? ' auto-err' : ''}">${esc(t)}</div>`).join('')}
+      ${done ? `<div class="small auto-done${done.ok ? '' : ' auto-err'}" role="status">${esc(autoWhen(done.at, now) + ': ' + done.text)}</div>` : ''}
+      <div class="form-actions auto-actions">${r.run ? `<button type="button" class="button small-btn" id="auto-run-${esc(r.id)}" onclick="autoRunNow('${jsq(r.id)}')"${AUTO.busy ? ' disabled' : ''}>${icon('refresh-cw', 'icon-sm')}${esc(r.runLabel || 'Выполнить сейчас')}</button>` : ''}${r.runOpen ? `<button type="button" class="button small-btn" id="auto-open-${esc(r.id)}" onclick="${r.runOpen}">${icon('hard-drive', 'icon-sm')}Сохранить копию</button>` : ''}${r.setup ? `<button type="button" class="button small-btn" id="auto-setup-${esc(r.id)}" onclick="${r.setup}">${icon('settings', 'icon-sm')}Настроить</button>` : ''}</div></div>`;
+  };
+  openSheet('Автоматизация', `<div id="auto-sheet"><div class="status-line ${sum.bad ? 'bad' : sum.warn ? 'warn' : 'good'}" role="status">${icon(sum.bad || sum.warn ? 'circle-alert' : 'check')}<span>${esc(sum.text || 'нет действий')}</span></div>
+    <p class="small muted">Что программа и ваш сервер делают сами, без нажатий. «На сервере» работает и при закрытой программе; «при открытой программе» — только пока программа открыта на этом устройстве (в браузере или приложении). Время — по последней удаче на этом устройстве.</p>
+    ${groups.map(([w, label]) => { const rs = rows.filter(r => r.where === w); return rs.length ? `<div class="section-label">${esc(label)}</div><div class="auto-list">${rs.map(row).join('')}</div>` : ''; }).join('')}</div>`, mode === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
+}
+// строка в Настройках: число действий с ошибкой и требующих внимания
+function autoSettingsLine() {
+  try { const s = autoSummary(autoModel(Date.now(), autoEnv(Date.now()))); return s.bad || s.warn ? [s.bad ? 'с ошибкой ' + s.bad : '', s.warn ? 'требует внимания ' + s.warn : ''].filter(Boolean).join(' · ') : 'что программа и сервер делают сами'; }
+  catch (e) { logErr('auto:line', e); return 'что программа и сервер делают сами'; }
 }
 
 // ▼▼▼ ui/integrity.js
@@ -13847,9 +14416,11 @@ const HELP_SECTIONS = [
 <li><b>Данные с другого устройства</b> — «Синхронизация»: адрес и код своего сервера, пароль шифрования → «Сохранить и проверить связь» → «Загрузить базу с сервера». Если сервера ещё нет — Настройки → «Свой сервер в Яндекс Облаке».</li>
 <li><b>Первое дело</b> — кнопка «Создать» (или «+» на телефоне) → «Дело».</li></ol>
 <h3>Где что</h3>
-<p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам и доверителям и переключатель темы.</p>
+<p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам, доверителям, судам и судьям (и по номеру телефона) и переключатель темы.</p>
 <h3>Справочники</h3>
-<p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта; у судьи — суд, кабинет, секретарь, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — праздники и перенесённые выходные для расчёта сроков. «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, записи, привязанные сразу к двум делам, переплаты, сроки без даты — и ничего не меняет сама: у записи, привязанной к двум делам, вы выбираете верное дело. Если номер дела изменить в форме дела, его задачи, заседания, счета и доверенности переходят на новый номер сами.</p>` },
+<p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта, часы работы, заметка (добавочный, как пройти), откуда контакты и когда проверены; у судьи — суд, кабинет, секретарь, помощник, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — праздники и перенесённые выходные для расчёта сроков. «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, записи, привязанные сразу к двум делам, переплаты, сроки без даты — и ничего не меняет сама: у записи, привязанной к двум делам, вы выбираете верное дело. Если номер дела изменить в форме дела, его задачи, заседания, счета и доверенности переходят на новый номер сами.</p>
+<h3>Суды и судьи, «кто звонил»</h3>
+<p>«Суды и мониторинг» → строка «Кто звонил?» (или «Справочники» → «Суды и судьи»): введите номер, с которого звонили, — в любом написании, с +7, 8, скобками или только последние цифры (от четырёх), — программа найдёт суд, секретаря или помощника судьи с этим номером. Там же поиск по названию суда, городу, судье, секретарю и помощнику. В карточке суда — телефоны с кнопкой «Позвонить», «Сайт суда», «Маршрут» (карта по адресу), ваши дела в этом суде, ближайшие заседания и судьи. Суды Владимирской области (районные и городские, областной, арбитражные суды области, апелляционный и кассационный) уже есть в программе: адреса, телефоны и сайты переписаны с официальных сайтов судов 13.10.2026 — перед звонком или поездкой сверьте; «Записать данные с сайта суда в карточку» переносит их в вашу карточку, дальше её можно править. Если в вашей карточке суда что-то заполнено, показывается ваше. Верхняя строка поиска программы тоже находит доверителя, суд и судью по номеру телефона.</p>` },
   { id: 'today', title: '«Сегодня» и быстрые записи', html: `
 <p>«Сегодня» показывает, что требует внимания: просроченные и ближайшие сроки, задачи, заседания без результата, подготовку к заседаниям, истекающие доверенности, события с сайтов судов. У каждой строки — действие («Выполнено», «Итог заседания») и «×»: строка скрывается на неделю. Процессуальный срок, скрытый заранее, возвращается в день срока.</p>
 <p>«План дня» — заседания, встречи и задачи со временем. «Сделать сегодня» — задачи на сегодня без времени.</p>
@@ -13984,6 +14555,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p>Устройства пропуска: при вводе пропуска программа регистрирует это устройство на сервере лицензий автора (уходят только пропуск, отпечаток и название устройства, версия программы) и раз в сутки проверяет, действует ли пропуск. «Лицензия» → «Устройства» — список устройств с датами и «Отвязать»: место освобождается для нового устройства. Прежняя программа на этом же устройстве считается тем же устройством. Без связи ничего не меняется; деморежим включается только по ответу сервера — пропуск отозван или для устройства нет места.</p>
 <p>Без действующего пропуска — деморежим: до 5 новых записей в месяц в каждом разделе (дела, доверители, заседания, задачи, счета, обращения, письма); данные сохраняются полностью. Тарифы и как получить пропуск — Настройки → «Лицензия» → «Как получить ключ».</p>` },
   { id: 'trouble', title: 'Если что-то не работает', html: `
+<p><b>Что программа делает сама</b> — «Настройки» → «Автоматизация»: обмен с сервером и файлом в облаке, сбор с сайтов судов и получение событий, напоминания, лента и Google Календарь, заявки онлайн-записи, проверка обновлений, копия базы. По каждому действию — где оно выполняется (на сервере — и при закрытой программе; будильником приложения; только при открытой программе), когда последний раз удалось, когда следующий раз, ошибка словами и кнопки «Выполнить сейчас» и «Настроить».</p>
 <ul><li><b>«Нет связи с сервером»</b> — «Синхронизация» → «Сохранить и проверить связь»: программа назовёт причину. «403 / не публичная» — на странице функции в консоли включите «Публичная функция». «auth» — секретный код не совпадает с переменной SECRET функции (или в поле коллектора стоит код сервера). «Нет ответа» — адрес с опечаткой, нет интернета или мешает VPN.</li>
 <li><b>«Запрос слишком большой»</b> при отправке — база больше предела Облака: «Синхронизация» → «Размер базы» → включите сжатие; файлы документов уходят в хранилище отдельно от снимка.</li>
 <li><b>«Список дел коллектору не отправлен»</b> — программа не получила ответа функции collector-sud. Откройте адрес этой функции в браузере без секрета: живая функция отвечает {"ok":false,"error":"forbidden"}. Ответ другой или его нет — журнал функции: Яндекс Облако → collector-sud → «Логи». Затем «Отправить список дел».</li>
@@ -14445,7 +15017,7 @@ SCREENS.monitoring = async function () {
   const refreshBtn = `<button type="button" class="button primary" id="mon-refresh" onclick="monRefreshAll()"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? ' disabled' : ''}>${icon('refresh-cw')}Обновить с сайтов судов</button>`;
   return pageHead('Суды и мониторинг', sub, refreshBtn + btn('Получить события', 'monitorPull()', '', 'cloud-download') + (typeof openCardsAllSheet === 'function' ? btn('Карточки всех дел', 'openCardsAllSheet()', '', 'files') : '') + btn('Настройка', 'openMonitorSettingsSheet()', '', 'settings')) +
     `<div class="status-line" id="mon-refresh-state"${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? '' : ' hidden'}>${typeof MON_AUTO === 'object' && MON_AUTO.refreshing ? 'Обхожу сайты судов — до 8 минут, не закрывайте страницу…' : ''}</div>` +
-    hint + linksBad + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел по расписанию и кладёт события на ваш сервер; программа забирает их сама при открытии и раз в 30 минут. «Обновить с сайтов судов» — обойти сайты прямо сейчас. Как настроить — Настройки → «Мониторинг судов».', m.counts.all ? '' : btn('Обновить с сайтов судов', 'monRefreshAll()', 'primary', 'refresh-cw'))}</section>`;
+    hint + linksBad + (typeof courtsSearchPanel === 'function' ? courtsSearchPanel() : '') + offers + `<div class="chips" style="margin-bottom:12px">${chips}</div><section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('landmark', m.counts.all ? 'По этому фильтру событий нет' : 'Событий пока нет', m.counts.all ? 'Выберите другой фильтр' : 'Коллектор в облаке обходит сайты судов по ссылкам из дел по расписанию и кладёт события на ваш сервер; программа забирает их сама при открытии и раз в 30 минут. «Обновить с сайтов судов» — обойти сайты прямо сейчас. Как настроить — Настройки → «Мониторинг судов».', m.counts.all ? '' : btn('Обновить с сайтов судов', 'monRefreshAll()', 'primary', 'refresh-cw'))}</section>`;
 };
 // ── карточка события ──
 async function openMonitorEventSheet(id, mode) {
@@ -14625,7 +15197,9 @@ async function nextUpdateCheck(force) {
   if (!reg || typeof reg.update !== 'function') return { state: 'nosw' };
   if (!force && Date.now() - NEXT_UPDATE.last < 15 * 60 * 1000) return { state: 'skip' };
   NEXT_UPDATE.last = Date.now();
-  try { await reg.update(); } catch (e) { logErr('next:update', e); return { state: 'error', error: (e && e.message) || String(e) }; }
+  // итог проверки — для листа «Автоматизация» (ui/automation.js): время удачной проверки или ошибка
+  try { await reg.update(); } catch (e) { logErr('next:update', e); const msg = (e && e.message) || String(e); localStorage.setItem('crm_next_upd_err', JSON.stringify({ at: Date.now(), msg: msg.slice(0, 160) })); return { state: 'error', error: msg }; }
+  localStorage.setItem('crm_next_upd_at', String(Date.now())); localStorage.removeItem('crm_next_upd_err');
   // по кнопке — дождаться загрузки новой версии (до 10 с): ответ «есть новая версия» приходит вместе с полосой «Обновить»
   if (force && reg.installing) {
     const w = reg.installing;
