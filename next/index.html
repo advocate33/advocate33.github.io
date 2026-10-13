@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="13.10.2026 17:38 · 5d51495">
+<meta name="build" content="13.10.2026 19:27 · a7c7386+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2960,10 +2960,13 @@ const NEXT_REMIND = { on: false };
 const NEXT_BOOK = { on: false };
 // план переноса, А1: лента календаря (ics) — только пока идёт публикация (sync/calfeed.js ставит и снимает отметку)
 const NEXT_CAL = { on: false };
+// этап 4 плана по ЮрТопосу (13.10.2026): «Задать вопрос» — вопросы (askget) — чтение; страница (askpub) и отметка «принято» (askack) —
+// только пока идёт действие sync/ask.js
+const NEXT_ASK = { on: false };
 {
   const srvCallV310 = srvCall;
   srvCall = async function (action, payload) {
-    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on) && !(['bookpub', 'bookset'].includes(action) && NEXT_BOOK.on) && !(action === 'ics' && NEXT_CAL.on)) {
+    if (!NEXT_SERVER_READ.includes(action) && !NEXT_SERVER_HIST.includes(action) && !(['dbput', 'snapput', 'snapcommit', 'blobput'].includes(action) && NEXT_PUSH.on) && !(action === 'remindput' && NEXT_REMIND.on) && !(['bookpub', 'bookset'].includes(action) && NEXT_BOOK.on) && !(action === 'ics' && NEXT_CAL.on) && action !== 'askget' && !(['askpub', 'askack'].includes(action) && NEXT_ASK.on)) {
       logErr('next:guard', new Error('запись на сервер из новой версии отключена: ' + action));
       return { ok: false, blocked: true, error: 'Новая версия пока только читает данные с сервера' };
     }
@@ -4437,7 +4440,7 @@ function openRemindSheet(sub, msg) {
     <p class="small muted">На сервер уходят даты, номера дел, названия сроков (как вы их записали — не пишите в них фамилии), суд и зал заседаний и сроки задач на 14 дней вперёд, до 300 записей, и до 200 просроченных задач. Имена доверителей не передаются. Список обновляется сам через несколько секунд после правки срока, заседания или задачи.</p>
     <label class="check"><input type="checkbox" id="rm-on"${on ? ' checked' : ''}${srv ? '' : ' disabled'} onchange="srvRemindToggle(this.checked)"><span>Передавать список напоминаний на сервер</span></label>
     <label class="check"><input type="checkbox" id="rm-full"${srvRemindFull() ? ' checked' : ''} onchange="srvRemindFullToggle(this.checked)"><span>Полные названия задач и имена в Telegram</span></label>
-    <p class="small muted" id="rm-full-note">Telegram — зарубежный сервис. Без этой отметки задача приходит как «Задача по делу А40-1234/2026», а уведомление о записи на приём — только с датой, временем и кодом заявки (имя и телефон — в программе). С отметкой — название задачи как вы его записали, а в уведомлении о записи — имя, телефон и вопрос; тогда об этом должно быть сказано в тексте согласия на странице записи (программа добавляет это сама).</p>
+    <p class="small muted" id="rm-full-note">Telegram — зарубежный сервис. Без этой отметки задача приходит как «Задача по делу А40-1234/2026», а уведомление о записи на приём — только с датой, временем и кодом заявки, о вопросе с сайта — только с номером вопроса (имя, контакты и вопрос — в программе). С отметкой — название задачи как вы его записали, а в уведомлениях — имя, контакты и вопрос; тогда об этом должно быть сказано в тексте согласия на странице записи и на странице «Задать вопрос» (программа добавляет это сама).</p>
     <div class="form-actions"><button type="button" class="button primary" id="rm-now"${on && srv ? '' : ' disabled'} onclick="srvRemindNow()">${icon('send')}Передать сейчас</button>${srv ? '' : `<button type="button" class="button" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button>`}</div>
     <p class="small muted">Проверка: после «Передать сейчас» в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Если пишет «не заданы TG_TOKEN и TG_CHAT» — проверьте шаг 3 (имена переменных — латиницей, заглавными). Первое сообщение придёт в 08:05, если на сегодня или завтра есть срок или заседание. Ничего не пришло — проверьте таймер (шаг 3) и что вы нажали «Start» у бота.</p>`, sub);
 }
@@ -8157,6 +8160,233 @@ function bookStart() {
 }
 if (typeof document === 'object' && document && typeof document.addEventListener === 'function') bookStart();
 
+// ▼▼▼ sync/ask.js
+// ═══ sync/ask.js — «Задать вопрос» (план по ЮрТопосу 13.10.2026, этап 4; нужен личный сервер 190) ═══
+// Страница на вашем личном сервере (GET ?ask=<publicId>): доверитель пишет имя, телефон и (или) Telegram, как с ним связаться и вопрос,
+// отмечает согласие на обработку ПД (отдельный текст, как у онлайн-записи с сервера 189). Программа забирает вопросы (askget) при открытии и
+// раз в 15 минут, пока открыта: вопрос → обращение (источник «Сайт», постоянный id О-ask-<id>) и задача «Связаться» на сегодня (З-ask-<id>);
+// прошёл рабочий день без ответа — задача поднимается в «Требует внимания» с пометкой «Нет ответа больше рабочего дня». Тот же телефон или
+// Telegram, что у прежнего обращения или доверителя, — пометка «повторное обращение» со ссылками. Принятые вопросы программа отмечает на
+// сервере (askack) — сервер удаляет их через 30 дней. Выключение публикует «не принимать» (off): страница перестаёт принимать вопросы, а не
+// только программа перестаёт их забирать — иначе вопросы копились бы без ответа.
+// Курсора «вопросы до» нет: сервер отдаёт все вопросы, программа узнаёт свои по id обращения (включая корзину и окончательно удалённые).
+// Вопрос, который уже принял другой ваш компьютер или телефон (отметка «принято» моложе суток), здесь не создаётся — обращение придёт с
+// обменом; через сутки без обращения — создаётся (устройство, принявшее вопрос, могло так и не обменяться).
+// Настройки — crm_ask (синхронизируются); время опроса, публикации и ошибка — на устройстве (урок 138: фоновые действия не пишут в общие настройки).
+const ASK_KEY = 'crm_ask', ASK_HASH_KEY = 'crm_next_ask_pubhash', ASK_POLL_AT = 'crm_next_ask_poll_at', ASK_PUB_AT = 'crm_next_ask_pub_at', ASK_ERR = 'crm_next_ask_err', ASK_TICK = 15 * 60000;
+const ASK = { loop: null, busy: false };
+const ASK_METHOD_LABELS = { call: 'Позвонить', tg: 'Написать в Telegram', wa: 'Написать в WhatsApp', sms: 'Написать SMS' };
+if (typeof SYNC_SETTINGS_KEYS === 'object' && Array.isArray(SYNC_SETTINGS_KEYS) && !SYNC_SETTINGS_KEYS.includes(ASK_KEY)) SYNC_SETTINGS_KEYS.push(ASK_KEY);
+function askCfg() {
+  let c = {}; try { c = JSON.parse(localStorage.getItem(ASK_KEY) || '{}') || {}; } catch (e) { /* штатно: настройки не разобраны — значения по умолчанию */ c = {}; }
+  return Object.assign({ enabled: false, publicId: '', title: 'Задать вопрос адвокату', intro: '', phone: '', methods: ['call', 'tg'], opName: '', opAddress: '', opContact: '', consentMonths: 12, consentCustom: '' }, c);
+}
+function askCfgSave(c) { localStorage.setItem(ASK_KEY, JSON.stringify(c)); if (typeof bumpSettings === 'function') bumpSettings(); }
+function askUrl(c) { c = c || askCfg(); return SRV.url && c.publicId ? String(SRV.url).replace(/\/+$/, '') + '?ask=' + c.publicId : ''; }
+// код кнопки для своего сайта: обычная ссылка, без сценариев и внешних файлов
+function askButtonCode(url) {
+  return url ? `<a href="${esc(url)}" target="_blank" rel="noopener" style="display:inline-block;padding:12px 20px;border-radius:8px;background:#4f46e5;color:#ffffff;font:16px/1.2 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;text-decoration:none">Задать вопрос адвокату</a>` : '';
+}
+const askDigits10 = s => String(s || '').replace(/\D/g, '').slice(-10);
+const askPad = n => String(n).padStart(2, '0');
+// ── согласие на обработку ПД: тот же порядок, что у онлайн-записи (ч. 1 ст. 9 Закона № 152-ФЗ в ред. ФЗ от 24.06.2025 № 156-ФЗ — согласие
+// отдельно от иных документов; текст — черновик для проверки адвокатом, не готовое юридическое заключение) ──
+const ASK_CONSENT_MONTHS = [6, 12, 24, 36];
+function askConsentText(cfg, full) {
+  const c = cfg || {}, custom = String(c.consentCustom || '').trim(); if (custom) return custom.slice(0, 8000);
+  const name = String(c.opName || '').trim(), addr = String(c.opAddress || '').trim(); if (!name || !addr) return '';
+  const months = ASK_CONSENT_MONTHS.includes(Number(c.consentMonths)) ? Number(c.consentMonths) : 12, contact = String(c.opContact || '').trim();
+  return ['Согласие на обработку персональных данных',
+    `Заполняя форму «Задать вопрос» на этой странице и отмечая согласие, я свободно, своей волей и в своём интересе даю согласие оператору — ${name}, адрес: ${addr} — на обработку моих персональных данных: имени, номера телефона, имени пользователя Telegram, а также сведений, которые я указал(а) в поле «Вопрос».`,
+    'Цель обработки: ответ на мой вопрос и связь со мной по нему.',
+    'Действия с персональными данными: сбор, запись, систематизация, накопление, хранение, уточнение (обновление, изменение), извлечение, использование, удаление, уничтожение. Обработка ведётся с использованием средств автоматизации: вопрос хранится на сервере оператора и в его программе учёта. Третьим лицам персональные данные не передаются, за исключением случаев, предусмотренных законом.',
+    full ? 'Уведомление оператору о вопросе с моими именем, контактами и текстом вопроса направляется через мессенджер Telegram, серверы которого могут находиться за пределами Российской Федерации.' : '',
+    `Согласие действует со дня его дачи до достижения цели обработки, но не более ${months} ${plural(months, 'месяца', 'месяцев', 'месяцев')}, либо до его отзыва. Я могу отозвать согласие, направив оператору заявление${contact ? ' по адресу: ' + contact : ' по адресу оператора'}.`
+  ].filter(Boolean).join('\n\n');
+}
+// ── срок ответа: «рабочий день». Вопрос пришёл в рабочий день — то же время следующего рабочего дня; в выходной или праздник — до конца
+// ближайшего рабочего дня. Строка «ГГГГ-ММ-ДД ЧЧ:ММ» по часам пояса программы (next/tz.js); рабочие дни — по производственному календарю
+// из «Справочников» (rules/calendar.js). Это внутренний срок ответа, а не процессуальный.
+function askDueOf(ts) {
+  const z = typeof tzNow === 'function' ? tzNow(ts) : new Date(ts), d0 = localISO(z);
+  return addBusinessDaysISO(d0, 1) + ' ' + (isWorkdayISO(d0) ? askPad(z.getHours()) + ':' + askPad(z.getMinutes()) : '23:59');
+}
+function askNowMark(ts) { const z = typeof tzNow === 'function' ? tzNow(ts) : new Date(ts == null ? Date.now() : ts); return localISO(z) + ' ' + askPad(z.getHours()) + ':' + askPad(z.getMinutes()); }
+function askDueText(due) { const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(due || ''); return m ? fmtDate(m[1]) + ' ' + (m[2] === '23:59' ? 'до конца дня' : m[2]) : ''; }
+// ── вопрос → обращение и задача (чистые функции для тестов) ──
+function askLeadOf(q, leads, clients) {
+  const ph = askDigits10(q.phone), tg = String(q.tg || '').toLowerCase(), text = String(q.question || '').replace(/\s+/g, ' ').trim();
+  // повторное обращение: прежние обращения с тем же телефоном или Telegram и доверитель с тем же телефоном — только пометка со ссылками
+  const prev = (leads || []).filter(l => l && !l._deleted && l.id !== 'О-ask-' + q.id && ((ph.length === 10 && askDigits10(l.phone) === ph) || (tg && String(l.telegram || '').toLowerCase() === tg)))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+  const client = ph.length === 10 ? (clients || []).find(c => c && !c._deleted && askDigits10(c.phone) === ph) : null;
+  return { id: 'О-ask-' + q.id, name: String(q.name || 'Без имени').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Без имени', phone: String(q.phone || ''), email: '', telegram: String(q.tg || ''),
+    topic: text.length > 80 ? text.slice(0, 79) + '…' : text, summary: String(q.question || ''), kind: '', status: 'Новое', source: 'Сайт',
+    askId: String(q.id), askCode: String(q.code || ''), askMethod: ASK_METHOD_LABELS[q.method] ? q.method : '', askAt: Number(q.createdAt) || 0,
+    consentAt: Number(q.consentAt) || 0, consentVer: String(q.consentVer || '').slice(0, 24), consentKind: 'ask',
+    repeatOf: prev.slice(0, 5).map(l => l.id), repeatClientId: client ? client.id : '', createdAt: Date.now() };
+}
+function askTaskOf(q, lead) {
+  const how = ASK_METHOD_LABELS[lead.askMethod] || 'Связаться';
+  return { id: 'З-ask-' + q.id, title: 'Связаться: ' + lead.name + ' — вопрос с сайта', due: localISO(typeof tzNow === 'function' ? tzNow() : new Date()), time: '', priority: 'Высокий', caseNum: '',
+    note: [how, lead.phone ? 'телефон ' + lead.phone : '', lead.telegram ? 'Telegram @' + lead.telegram : ''].filter(Boolean).join(' · '), done: false, doneAt: '',
+    leadId: lead.id, askDue: askDueOf(Number(q.createdAt) || Date.now()), createdAt: Date.now() };
+}
+// что делать с ответом сервера: create — новые обращения с задачами, ack — отметить на сервере «принято», wait — приняло другое устройство
+function askPlan(items, leads, clients, purged, srvNow) {
+  const ids = new Set((leads || []).map(l => l && l.id)), live = (leads || []).filter(l => l && !l._deleted), out = { create: [], ack: [], wait: 0 };
+  for (const q of items || []) {
+    if (!q || !/^[A-Za-z0-9]{3,40}$/.test(String(q.id || ''))) continue;
+    const lid = 'О-ask-' + q.id;
+    if (ids.has(lid) || (purged && purged[lid])) { if (!q.takenAt) out.ack.push(q.id); continue; }
+    if (q.takenAt && Number(srvNow) - Number(q.takenAt) < 864e5) { out.wait++; continue; }
+    const lead = askLeadOf(q, live, clients), task = askTaskOf(q, lead);
+    out.create.push({ q, lead, task }); live.push(lead); ids.add(lid);
+  }
+  return out;
+}
+// ответ сервера словами: старый сервер — «нужен сервер 190»; известные коды — по-русски; иначе как есть
+function askWhy(j) {
+  if (!j) return 'сервер не ответил';
+  if (j.error === 'unknown_action') return 'личный сервер старше версии 190 — форма «Задать вопрос» заработает после обновления сервера';
+  if (j.note) return j.note;
+  return { blocked: 'запись на сервер закрыта', asks_corrupt: 'файл вопросов на сервере повреждён', auth: 'сервер не принял секретный код — проверьте «Синхронизацию»' }[j.error] || j.error || 'сервер не ответил';
+}
+async function askSrv(action, payload, write) {
+  NEXT_ASK.on = !!write;
+  try { return await srvCall(action, payload); } finally { NEXT_ASK.on = false; }
+}
+function askNote(kind, err) {
+  if (err) { localStorage.setItem(ASK_ERR, JSON.stringify({ at: Date.now(), kind, msg: String(err).slice(0, 160) })); return; }
+  const e = lsJSON(ASK_ERR, null); if (!e || e.kind === kind) localStorage.removeItem(ASK_ERR);
+}
+// публикация страницы: подписи, способы связи, текст согласия, «не принимать» при выключении
+function askPubSettings(c) {
+  const full = typeof srvRemindFull === 'function' && srvRemindFull(), consent = askConsentText(c, full);
+  const s = { title: c.title || 'Задать вопрос адвокату', intro: c.intro || '', phone: c.phone || '', methods: (c.methods || []).filter(m => ASK_METHOD_LABELS[m]), notifyFull: !!full, off: !c.enabled };
+  if (consent) s.consentText = consent;
+  return s;
+}
+async function askPublish(quiet, force) {
+  const c = askCfg(); if (!c.publicId) return null;
+  if (!SRV.url || !SRV.secret) { if (!quiet) toast('Подключите личный сервер: «Синхронизация» → «Подключить сервер»', true); return null; }
+  const settings = askPubSettings(c), hash = JSON.stringify([c.publicId, settings]);
+  if (!force && localStorage.getItem(ASK_HASH_KEY) === hash) return { ok: true, same: true };
+  const j = await askSrv('askpub', { publicId: c.publicId, settings }, true);
+  if (j && j.ok) { askNote('pub', ''); localStorage.setItem(ASK_PUB_AT, String(Date.now())); localStorage.setItem(ASK_HASH_KEY, hash); }
+  else askNote('pub', 'страница не опубликована: ' + askWhy(j));
+  return j;
+}
+async function askPoll(quiet) {
+  const c = askCfg(); if (!c.enabled || !SRV.url || !SRV.secret) return 0;
+  // проверка и захват — в одном такте, до первого ожидания (урок 134)
+  if (ASK.busy) return 0; ASK.busy = true;
+  try {
+    const j = await askSrv('askget', {}, false);
+    if (!j || !j.ok) { askNote('poll', 'вопросы не получены: ' + askWhy(j)); if (!quiet) toast('Вопросы не получены: ' + askWhy(j), true); return 0; }
+    const leads = await getAllRaw('leads'), clients = await getAll('clients'), purged = typeof purgedList === 'function' ? purgedList() : {};
+    const plan = askPlan(j.items, leads, clients, purged, Number(j.now) || Date.now());
+    let n = 0;
+    for (const p of plan.create) {
+      // обращение и задача — одной записью; появились за время запроса (обмен с другим устройством) — не пишутся, считаются принятыми
+      try { await putMany([['leads', p.lead], ['tasks', p.task]], { expect: [{ store: 'leads', id: p.lead.id, absent: true }, { store: 'tasks', id: p.task.id, absent: true }] }); n++; plan.ack.push(p.q.id); }
+      catch (e) { if (/появилась после сравнения/.test((e && e.message) || '')) plan.ack.push(p.q.id); else logErr('ask:put', e); }
+    }
+    if (plan.ack.length) { const k = await askSrv('askack', { ids: plan.ack }, true); if (!k || !k.ok) logErr('ask:ack', new Error(askWhy(k))); }
+    askNote('poll', ''); localStorage.setItem(ASK_POLL_AT, String(Date.now()));
+    if (n) { toast('Новых вопросов с сайта: ' + n + ' — в «Обращениях» и в «Сделать сегодня»'); if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !sheetIsOpen()) nav('today'); }
+    else if (!quiet) toast(plan.wait ? 'Новых вопросов нет; принятые другим устройством придут с обменом: ' + plan.wait : 'Новых вопросов нет');
+    return n;
+  } finally { ASK.busy = false; }
+}
+// «Связались» из карточки обращения: задача «Связаться» выполнена — строка уходит с «Сегодня»
+async function askContacted(leadId) {
+  const l = await getOne('leads', leadId); if (!l || !l.askId) { toast('Обращение не найдено', true); return; }
+  const t = await getOne('tasks', 'З-ask-' + l.askId);
+  if (!t) { toast('Задача «Связаться» не найдена — отметьте статус обращения', true); return; }
+  if (!t.done) { t.done = true; t.doneAt = todayISO(); try { await put('tasks', t); } catch (e) { logErr('ask:done', e); toast('Не удалось сохранить отметку — подробности в журнале ошибок', true); return; } }
+  toast('Отмечено: связались'); if (typeof UI === 'object' && UI.ready) await nav(UI.screen); openLeadSheet(leadId);
+}
+// блок в карточке обращения
+async function askLeadBlock(l) {
+  if (!l || !l.askId) return '';
+  let t = null; try { t = await getOne('tasks', 'З-ask-' + l.askId); } catch (e) { logErr('ask:lead', e); }
+  const row = (a, b) => b ? `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>` : '';
+  const at = Number(l.askAt) ? new Date(Number(l.askAt)) : null, late = !!(t && !t.done && t.askDue && askNowMark() >= t.askDue);
+  const tg = l.telegram ? `<div class="contact-row"><span class="muted">Telegram</span><span class="contact-actions"><a class="button small-btn" href="tg://resolve?domain=${esc(l.telegram)}" data-web="https://t.me/${esc(l.telegram)}" onclick="tgOpen(event, this)">${icon('send', 'icon-sm')}Написать @${esc(l.telegram)}</a></span></div>` : '';
+  const prev = []; for (const id of (l.repeatOf || []).slice(0, 5)) { try { const p = await getOne('leads', id); if (p && !p._deleted) prev.push(p); } catch (e) { logErr('ask:prev', e); } }
+  let client = null; if (l.repeatClientId) { try { client = await getOne('clients', l.repeatClientId); } catch (e) { logErr('ask:client', e); } }
+  const rep = prev.length || (client && !client._deleted) ? `<div class="section-label">Повторное обращение</div><div class="list-rows">${client && !client._deleted ? `<button type="button" class="list-btn" onclick="openClientSheet('${jsq(client.id)}')"><span>Доверитель: ${esc(client.name || '')}</span><span class="muted">тот же телефон</span></button>` : ''}${prev.map(p => `<button type="button" class="list-btn" onclick="openLeadSheet('${jsq(p.id)}')"><span>${esc(p.name || 'Обращение')}${p.topic ? ' · ' + esc(p.topic) : ''}</span><span class="muted">${esc([p.createdAt ? fmtDate(localISO(new Date(p.createdAt))) : '', p.status || ''].filter(Boolean).join(' · '))}</span></button>`).join('')}</div>` : '';
+  return `<div class="section-label">Вопрос с сайта</div><div class="list-rows">${row('Получен', at ? fmtDate(localISO(at)) + ' ' + askPad(at.getHours()) + ':' + askPad(at.getMinutes()) + (l.askCode ? ' · номер ' + l.askCode : '') : '')}${row('Как связаться', ASK_METHOD_LABELS[l.askMethod] || '')}${row('Ответить до', t && t.askDue ? askDueText(t.askDue) + (t.done ? ' · связались ' + fmtDate(t.doneAt) : late ? ' · срок прошёл' : '') : '')}</div>${tg}
+    ${t && !t.done ? `<div class="actions" style="margin:8px 0 12px">${btn('Связались', `askContacted('${jsq(l.id)}')`, late ? 'primary small-btn' : 'small-btn', 'check')}</div>` : ''}${rep}`;
+}
+// ── лист настройки ──
+function openAskSheet(mode) {
+  const c0 = askCfg(), b = typeof bookCfg === 'function' ? bookCfg() : {};
+  // оператор и адрес — те же, что у онлайн-записи, если здесь ещё не заданы
+  const c = Object.assign({}, c0, { opName: c0.opName || b.opName || '', opAddress: c0.opAddress || b.opAddress || '', opContact: c0.opContact || b.opContact || '', phone: c0.phone || b.phone || '' });
+  const url = askUrl(c0), consent = askConsentText(c, typeof srvRemindFull === 'function' && srvRemindFull()), err = lsJSON(ASK_ERR, null);
+  const m = (k, l) => `<label class="check" style="display:inline-flex;margin-right:12px"><input type="checkbox" class="ak-m" value="${k}"${(c.methods || []).includes(k) ? ' checked' : ''}><span>${l}</span></label>`;
+  openSheet('Вопросы с сайта', `<p class="small muted">Страница «Задать вопрос» на вашем личном сервере: доверитель пишет имя, телефон или Telegram, как с ним связаться и вопрос. Программа забирает вопросы при открытии и раз в 15 минут, пока открыта: вопрос становится обращением, а на «Сегодня» появляется задача «Связаться». Если за рабочий день ответа нет, задача поднимается в «Требует внимания». Нужен личный сервер версии 190 или новее; уведомление в Telegram — если у сервера заданы TG_TOKEN и TG_CHAT (как для напоминаний). Вложения на странице не принимаются.</p>
+    ${!SRV.url ? '<div class="info-box warning">Нужен личный сервер: «Синхронизация» → «Подключить сервер».</div>' : url ? `<div class="info-box" id="ak-url">Ссылка для доверителей: <span class="addr">${esc(url)}</span> <button type="button" class="text-button" onclick="askCopy('url')">Скопировать</button></div>
+      <div class="field"><span class="small muted">Кнопка для вашего сайта — вставьте этот код на страницу сайта:</span><textarea id="ak-code" readonly rows="3" class="addr">${esc(askButtonCode(url))}</textarea><div class="actions"><button type="button" class="button small-btn" id="ak-copy-code" onclick="askCopy('code')">${icon('files', 'icon-sm')}Скопировать код кнопки</button><a class="button small-btn" href="${esc(url)}" target="_blank" rel="noopener">${icon('arrow-right', 'icon-sm')}Открыть страницу</a></div></div>` : '<p class="small muted">Ссылка и код кнопки появятся после первого сохранения с включённым приёмом вопросов.</p>'}
+    ${err ? `<div class="info-box warning" id="ak-err">${esc(err.msg)}</div>` : ''}
+    <label class="check"><input type="checkbox" id="ak-enabled"${c.enabled ? ' checked' : ''}><span>Принимать вопросы через страницу</span></label>
+    <div class="form-grid">${wide(fInput('ak-title', 'Заголовок страницы', c.title, 'autocomplete="off"'))}${wide(fText('ak-intro', 'Пояснение на странице (необязательно)', c.intro, 2))}
+      ${fInput('ak-phone', 'Ваш телефон на странице (необязательно)', c.phone, 'type="tel" autocomplete="off"')}</div>
+    <div class="field"><span class="small muted">Как доверитель может попросить связаться</span><div>${m('call', 'позвонить')}${m('tg', 'Telegram')}${m('wa', 'WhatsApp')}${m('sms', 'SMS')}</div></div>
+    <div class="section-label step-label">Согласие на обработку персональных данных</div>
+    <p class="small muted">На странице — отдельный текст согласия и флажок без отметки; «Отправить вопрос» не нажимается, пока флажок не отмечен (ч. 1 ст. 9 Закона № 152-ФЗ в ред. от 24.06.2025). В обращении сохраняются время согласия и редакция текста. Текст ниже — черновик по полям, проверьте его.</p>
+    ${!consent ? '<div class="info-box warning" id="ak-consent-warn">Текст согласия не собран: укажите оператора и его адрес (или свой текст согласия).</div>' : ''}
+    <div class="form-grid">${wide(fInput('ak-opname', 'Оператор: ваши ФИО и адвокатское образование', c.opName, 'autocomplete="off" placeholder="адвокат Иванов Иван Иванович, коллегия адвокатов «…»"'))}${wide(fInput('ak-opaddr', 'Адрес оператора', c.opAddress, 'autocomplete="off"'))}
+      ${wide(fInput('ak-opcontact', 'Куда направлять отзыв согласия (почта или адрес)', c.opContact, 'autocomplete="off"'))}${fSelect('ak-cmonths', 'Срок действия согласия, месяцев', String(c.consentMonths), ASK_CONSENT_MONTHS.map(String))}
+      ${fText('ak-ccustom', 'Свой текст согласия (необязательно — заменяет собранный по полям)', c.consentCustom, 3)}</div>
+    <details class="consent-prev" id="ak-consent-prev"><summary>Текст согласия, который увидит доверитель (по сохранённым полям)</summary><div class="small consent-text">${esc(consent || 'Текст не собран — заполните оператора и адрес и сохраните.')}</div></details>
+    ${fSaveBar('askSaveSettings()', 'Сохранить и опубликовать')}
+    <div class="form-actions">${btn('Проверить вопросы', 'askPoll(false)', '', 'refresh-cw')}</div>`, mode === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
+}
+function askSettingsModel(v, prev) {
+  const c = { ...prev };
+  c.enabled = !!v.enabled; c.title = String(v.title || '').trim().slice(0, 120) || 'Задать вопрос адвокату'; c.intro = String(v.intro || '').trim().slice(0, 1000); c.phone = String(v.phone || '').trim().slice(0, 40);
+  c.methods = [...new Set((v.methods || []).filter(k => ASK_METHOD_LABELS[k]))];
+  if (c.enabled && !c.methods.length) return { error: 'Отметьте хотя бы один способ связи' };
+  c.opName = String(v.opname || '').trim().slice(0, 300); c.opAddress = String(v.opaddr || '').trim().slice(0, 300); c.opContact = String(v.opcontact || '').trim().slice(0, 300);
+  c.consentMonths = ASK_CONSENT_MONTHS.includes(Number(v.cmonths)) ? Number(v.cmonths) : 12; c.consentCustom = String(v.ccustom || '').trim().slice(0, 8000);
+  if (c.enabled && !c.consentCustom && (!c.opName || !c.opAddress)) return { error: 'Для текста согласия на обработку персональных данных укажите оператора (ваши ФИО и адвокатское образование) и его адрес — или вставьте свой текст согласия' };
+  return { obj: c };
+}
+async function askSaveSettings() {
+  const v = { enabled: !!(document.getElementById('ak-enabled') || {}).checked, methods: [...document.querySelectorAll('#sheetContent .ak-m:checked')].map(x => x.value) };
+  for (const k of ['title', 'intro', 'phone', 'opname', 'opaddr', 'opcontact', 'cmonths', 'ccustom']) v[k] = fv('ak-' + k);
+  const prev = askCfg(), r = askSettingsModel(v, prev); if (r.error) { fErr(r.error); return; }
+  if (r.obj.enabled && !r.obj.publicId) r.obj.publicId = typeof bookNewId === 'function' ? bookNewId() : Array.from(crypto.getRandomValues(new Uint8Array(12))).map(b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+  if (!r.obj.publicId) { askCfgSave(r.obj); toast('Сохранено: приём вопросов выключен'); closeSheet(); return; }
+  if (!SRV.url || !SRV.secret) { askCfgSave(r.obj); fErr('Настройки сохранены, но страница не опубликована: подключите личный сервер («Синхронизация»)'); return; }
+  // выключение — сначала сервер: страница перестаёт принимать вопросы; не удалось — настройки не меняются, программа продолжает забирать вопросы
+  if (!r.obj.enabled && prev.enabled) {
+    const save0 = localStorage.getItem(ASK_KEY); askCfgSave(r.obj);
+    const j = await askPublish(true, true);
+    if (!j || !j.ok) { if (save0 === null) localStorage.removeItem(ASK_KEY); else localStorage.setItem(ASK_KEY, save0); fErr('Приём не выключен: сервер не ответил (' + askWhy(j) + '). Страница пока принимает вопросы — повторите, когда сервер будет доступен'); return; }
+    toast('Приём вопросов выключен: страница отвечает «не принимаются»'); closeSheet(); return;
+  }
+  askCfgSave(r.obj);
+  const j = await askPublish(true, true);
+  if (j && j.ok) { toast(r.obj.enabled ? 'Страница опубликована' : 'Сохранено'); if (r.obj.enabled) askPoll(true).catch(e => logErr('ask:poll', e)); openAskSheet('replace'); }
+  else fErr('Настройки сохранены, но страница не опубликована: ' + askWhy(j));
+}
+async function askCopy(what) {
+  const u = askUrl(), text = what === 'code' ? askButtonCode(u) : u; if (!text) return;
+  try { await navigator.clipboard.writeText(text); toast(what === 'code' ? 'Код кнопки скопирован — вставьте его на страницу сайта' : 'Ссылка скопирована'); }
+  catch (e) { logErr('ask:copy', e); toast('Не удалось скопировать — выделите текст вручную', true); }
+}
+// ── фон: при открытии и раз в 15 минут, пока программа на экране; страница переопубликуется, если изменились подписи или согласие ──
+function askStart() {
+  if (typeof window !== 'object' || typeof setInterval !== 'function' || ASK.loop) return;
+  const tick = () => { if (!askCfg().enabled || (typeof document === 'object' && document.visibilityState && document.visibilityState !== 'visible')) return; askPublish(true).then(() => askPoll(true)).catch(e => logErr('ask:tick', e)); };
+  ASK.loop = setInterval(tick, ASK_TICK); setTimeout(tick, 7000);
+}
+if (typeof document === 'object' && document && typeof document.addEventListener === 'function') askStart();
+
 // ▼▼▼ sync/ycdeploy.js
 // ═══ sync/ycdeploy.js — «Свой сервер в Яндекс Облаке одной кнопкой» (план основных функций, п. 3.2; обещано 30.09.2026) ═══
 // Мастер прежней программы (v273/v275, ycDeploy) перенесён дословно: каталог → сервисный аккаунт и роли → ключ хранилища → закрытый бакет →
@@ -8605,7 +8835,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -9101,7 +9331,7 @@ async function openSettingsSheet(sub) {
     <p class="small muted">Начертание</p>${choice(UI_FONT_FAMILIES.map(f => [f[0], f[2]]), fam, 'setFontFam')}
     </div>
     <div class="section-label">Данные</div>
-    <div class="list-rows set-list">${typeof openAutomationSheet === 'function' ? `<button type="button" class="list-btn" id="set-auto" onclick="openAutomationSheet()"><span>Автоматизация</span><span class="muted">${esc(autoSettingsLine())}</span></button>` : ''}<button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button>${typeof openChecklistEditor === 'function' ? '<button type="button" class="list-btn" id="set-checklists" onclick="openChecklistEditor()"><span>Типовые задачи</span><span class="muted">наборы задач по виду дела — создаются из карточки дела</span></button>' : ''}${typeof openTplListSheet === 'function' ? '<button type="button" class="list-btn" id="set-doctpl" onclick="openTplListSheet()"><span>Шаблоны документов</span><span class="muted">претензия, ходатайство, жалоба, соглашение, доверенность — и свои</span></button><button type="button" class="list-btn" id="set-lawyer" onclick="openLawyerProfileSheet()"><span>Реквизиты адвоката</span><span class="muted">ФИО, регистрационный номер, адвокатское образование — для документов</span></button>' : ''}<button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-calfeed" onclick="openCalFeedSheet()"><span>Лента календаря</span><span class="muted">${typeof calFeedStateText === 'function' ? esc(calFeedStateText()) : 'подписка в календаре телефона'}</span></button><button type="button" class="list-btn" id="set-devcal" onclick="openDevCalSheet()"><span>Google Календарь</span><span class="muted">${typeof devcalStateText === 'function' ? esc(devcalStateText()) : 'в приложении для Android'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
+    <div class="list-rows set-list">${typeof openAutomationSheet === 'function' ? `<button type="button" class="list-btn" id="set-auto" onclick="openAutomationSheet()"><span>Автоматизация</span><span class="muted">${esc(autoSettingsLine())}</span></button>` : ''}<button type="button" class="list-btn" id="set-backup" onclick="openBackupSheet()"><span>Копии базы</span><span class="muted">сохранить в файл, загрузить из файла</span></button><button type="button" class="list-btn" id="set-fsync" onclick="openFsyncSheet()"><span>Файл в облаке</span><span class="muted">${typeof fsyncStateText === 'function' && fsyncUsed() ? esc(fsyncStateText()) : 'синхронизация без своего сервера: Google Диск, Яндекс Диск, Dropbox, OneDrive'}</span></button><button type="button" class="list-btn" id="set-print" onclick="openPrintSheet()"><span>Печать и выгрузка</span><span class="muted">реестры, выписка поступлений, таблицы для Excel</span></button>${typeof openChecklistEditor === 'function' ? '<button type="button" class="list-btn" id="set-checklists" onclick="openChecklistEditor()"><span>Типовые задачи</span><span class="muted">наборы задач по виду дела — создаются из карточки дела</span></button>' : ''}${typeof openTplListSheet === 'function' ? '<button type="button" class="list-btn" id="set-doctpl" onclick="openTplListSheet()"><span>Шаблоны документов</span><span class="muted">претензия, ходатайство, жалоба, соглашение, доверенность — и свои</span></button><button type="button" class="list-btn" id="set-lawyer" onclick="openLawyerProfileSheet()"><span>Реквизиты адвоката</span><span class="muted">ФИО, регистрационный номер, адвокатское образование — для документов</span></button>' : ''}<button type="button" class="list-btn" id="set-lock" onclick="openSecuritySheet()"><span>Защита входа</span><span class="muted">${typeof LOCK === 'object' && LOCK.enabled ? 'PIN-код установлен' : 'выключена'}</span></button><button type="button" class="list-btn" id="set-appupd" onclick="appUpdCheckManual()"><span>Проверить обновления</span><span class="muted">${typeof appVersionLine === 'function' ? appVersionLine() : ''}</span></button><button type="button" class="list-btn" id="set-license" onclick="openLicenseSheet()"><span>Лицензия</span><span class="muted">${localStorage.getItem('crm_license') ? 'пропуск введён' : 'пропуск не введён · деморежим'}</span></button><button type="button" class="list-btn" id="set-remind" onclick="openRemindSheet()"><span>Напоминания в Telegram</span><span class="muted">${srvRemindOn() ? 'передаются на сервер' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-calfeed" onclick="openCalFeedSheet()"><span>Лента календаря</span><span class="muted">${typeof calFeedStateText === 'function' ? esc(calFeedStateText()) : 'подписка в календаре телефона'}</span></button><button type="button" class="list-btn" id="set-devcal" onclick="openDevCalSheet()"><span>Google Календарь</span><span class="muted">${typeof devcalStateText === 'function' ? esc(devcalStateText()) : 'в приложении для Android'}</span></button><button type="button" class="list-btn" id="set-book" onclick="openBookSheet()"><span>Онлайн-запись на консультацию</span><span class="muted">${typeof bookCfg === 'function' && bookCfg().enabled ? 'включена' : 'выключена'}</span></button>${typeof openAskSheet === 'function' ? `<button type="button" class="list-btn" id="set-ask" onclick="openAskSheet()"><span>Вопросы с сайта</span><span class="muted">${askCfg().enabled ? 'страница «Задать вопрос» принимает вопросы' : 'страница «Задать вопрос» и кнопка для сайта'}</span></button>` : ''}<button type="button" class="list-btn" id="set-devremind" onclick="openDevRemindSheet()"><span>Напоминания на устройстве</span><span class="muted">${typeof devrOn === 'function' && devrOn() ? 'включены' : 'выключены'}</span></button><button type="button" class="list-btn" id="set-cloud" onclick="openYcSetupSheet()"><span>Свой сервер в Яндекс Облаке</span><span class="muted">${SRV.url && SRV.secret ? 'подключён' : 'создать или подключить — по шагам'}</span></button><button type="button" class="list-btn" onclick="openTrashSheet(true)"><span>Корзина</span><span class="muted">${nTrash ? 'записей: ' + nTrash : 'пусто'}</span></button>
       <button type="button" class="list-btn" id="set-orders" onclick="openOrdersSheet()"><span>Журнал ордеров</span><span class="muted">выписать, найти, распечатать реестр</span></button>
       <button type="button" class="list-btn" onclick="openDadataSheet()"><span>Реквизиты по ИНН и адреса</span><span class="muted">${DADATA.token ? 'ключ DaData сохранён' : 'ключ не задан'}</span></button>
       <button type="button" class="list-btn" onclick="openErrlogSheet()"><span>Журнал ошибок</span><span class="muted">${(() => { const n = errLogGet().length; return n ? 'записей: ' + n : 'пусто'; })()}</span></button>
@@ -9280,6 +9510,7 @@ openDevRemindSheet: 'уведомления напоминания будиль�
   openErrlogSheet: 'ошибки журнал сбой лог', openMonitorSettingsSheet: 'суд суды коллектор мониторинг кад сайт заседания события',
   openPochtaSheet: 'почта трек трек-номер отслеживание письмо отправление',
   openBookSheet: 'запись приём прием консультация окна расписание заявка доверитель страница ссылка',
+  openAskSheet: 'вопрос задать вопрос сайт форма кнопка заявка обращение обратная связь страница ссылка telegram телеграм',
   openSyncSheet: 'синхронизация сервер обмен отправить загрузить база пароль код', openRefsSheet: 'справочники суды судьи списки праздники нерабочие дни',
   openIntegritySheet: 'проверка данных дубли ошибки номера доверители', openHelpSheet: 'инструкция помощь справка как',
   openCourtsSheet: 'суды судьи телефон номер кто звонил контакты секретарь помощник адрес маршрут',
@@ -10794,15 +11025,20 @@ function todayModel(d, now, hidden) {
     else if (k <= 2 && unconfirmed) imp.push({ ...base, pr: 1, when: todayDayLabel(dl.date, today), badges: [['Срок требует проверки', 'warn']] });
     else if (k <= 1) imp.push({ ...base, pr: 2, when: todayDayLabel(dl.date, today), badges: [['Процессуальный срок', 'accent']] });
   }));
+  // этап 4 плана по ЮрТопосу (13.10.2026, sync/ask.js): задача «Связаться» по вопросу с сайта — строка открывает обращение; прошёл рабочий
+  // день без ответа (askDue — «ГГГГ-ММ-ДД ЧЧ:ММ» по часам пояса программы) — строка в «Требует внимания» с пометкой
+  const nowMark = today + ' ' + String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
   tasks.forEach(t => {
-    if (!t || t.done || !t.due) return; const k = todayDayDiff(t.due, today); if (k === null || k > 0) return;
+    if (!t || t.done || !t.due) return;
+    if (t.askDue && nowMark >= t.askDue) { imp.push({ key: 't:' + t.id, kind: 'task', pr: 0, date: t.due, title: t.title || 'Связаться', sub: 'Вопрос с сайта · ответить нужно было до ' + (typeof askDueText === 'function' ? askDueText(t.askDue) : t.askDue), when: 'Нет ответа больше рабочего дня', overdue: true, done: true, taskId: t.id, leadId: t.leadId || '', badges: [['Вопрос с сайта', 'bad']] }); return; }
+    const k = todayDayDiff(t.due, today); if (k === null || k > 0) return;
     // задача на сегодня с указанным временем стоит в плане дня, а не здесь (вариант Б, 03.10.2026)
     if (k === 0 && t.time) return;
     const c = caseOf(t);
     // п. 1.5 (03.10.2026): задача на сегодня без времени — в блоке «Сделать сегодня»; просроченная — по-прежнему в «Требует внимания»
-    if (k === 0) { todo.push({ key: 't:' + t.id, kind: 'task', title: t.title || 'Задача', sub: caseTitle(c, t.caseNum) || 'Без дела', taskId: t.id, done: true, priority: t.priority || '' }); return; }
+    if (k === 0) { todo.push({ key: 't:' + t.id, kind: 'task', title: t.title || 'Задача', sub: t.askDue ? 'Вопрос с сайта · ответить до ' + (typeof askDueText === 'function' ? askDueText(t.askDue) : t.askDue) : caseTitle(c, t.caseNum) || 'Без дела', taskId: t.id, leadId: t.leadId || '', done: true, priority: t.priority || '' }); return; }
     imp.push({ key: 't:' + t.id, kind: 'task', pr: k < 0 ? 0 : 2, date: t.due, title: t.title || 'Задача', sub: caseTitle(c, t.caseNum) || 'Без дела',
-      when: k < 0 ? 'Просрочена ' + ago(k) : 'Сегодня', overdue: k < 0, done: true, taskId: t.id, badges: [] });
+      when: k < 0 ? 'Просрочена ' + ago(k) : 'Сегодня', overdue: k < 0, done: true, taskId: t.id, leadId: t.leadId || '', badges: [] });
   });
   // подготовка к заседанию (поручение 01.10.2026): за prepDays дней до заседания — заметная строка; с текстом «что подготовить» или без него
   hearings.forEach(h => {
@@ -10932,7 +11168,7 @@ SCREENS.today = async function () {
 
   // строка: текст (срок/дело/значки) · «Выполнено» · «×»; на телефоне «Выполнено» уходит под текст (tokens.css, .imp-row)
   // сама строка — кнопка: заседание открывает «После заседания», задача — форму задачи, срок — карточку дела
-  const impOpen = x => x.kind === 'mail' ? `openMailSheet('${jsq(x.mailId)}')` : x.kind === 'clash' ? (x.hearingId ? `openHearingForm('${jsq(x.hearingId)}')` : `openMeetingForm('${jsq(x.meetingId)}')`) : x.kind === 'poa' ? `openPoaForm('${jsq(x.poaId)}')` : x.kind === 'hearing' ? `openAfterHearing('${jsq(x.hearingId)}')` : x.kind === 'prep' ? `openHearingForm('${jsq(x.hearingId)}')` : x.kind === 'task' ? `openTaskForm('${jsq(x.taskId)}')` : x.dlId ? `openDeadlineSheet('${jsq(x.caseId)}', '${jsq(x.dlId)}')` : `openCaseSheet('${jsq(x.caseId)}')`;
+  const impOpen = x => x.kind === 'mail' ? `openMailSheet('${jsq(x.mailId)}')` : x.kind === 'clash' ? (x.hearingId ? `openHearingForm('${jsq(x.hearingId)}')` : `openMeetingForm('${jsq(x.meetingId)}')`) : x.kind === 'poa' ? `openPoaForm('${jsq(x.poaId)}')` : x.kind === 'hearing' ? `openAfterHearing('${jsq(x.hearingId)}')` : x.kind === 'prep' ? `openHearingForm('${jsq(x.hearingId)}')` : x.kind === 'task' ? (x.leadId ? `openLeadSheet('${jsq(x.leadId)}')` : `openTaskForm('${jsq(x.taskId)}')`) : x.dlId ? `openDeadlineSheet('${jsq(x.caseId)}', '${jsq(x.dlId)}')` : `openCaseSheet('${jsq(x.caseId)}')`;
   // v299/v301: правила сроков обновлены — у дел есть неподтверждённые автосроки по прежней версии или недостающие сроки
   let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== RULES_VER) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
   const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>Правила сроков обновлены ${badge(RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
@@ -10953,7 +11189,7 @@ SCREENS.today = async function () {
   const impBody = m.important.length ? impRows + moreBtn + more + hiddenNote : m.hiddenCount ? `<p class="panel-foot" id="imp-all-hidden">Все предупреждения скрыты: ${m.hiddenCount}${hiddenOverdue ? ', из них просроченных — ' + hiddenOverdue : ''}. <button type="button" class="text-button" onclick="todayUnhideAll()">Показать снова</button></p>` : `<p class="panel-foot">Срочного нет: просроченных сроков и задач нет, заседания с неуказанным результатом разобраны.</p>`;
   // v312: «Считать все проведёнными» — прошедшим заседаниям без результата ставится «Проведено»
   // п. 1.5: «Сделать сегодня» — задачи на сегодня без времени; у строки «Выполнено»; блок сворачивается до завтра
-  const todoBox = m.todo.length ? panel('t-todo', 'todo', 'Сделать сегодня', m.todo.length, '', m.todo.map(x => `<div class="imp-row"${swp('todayDone', [x.key], 'Выполнено')}><button type="button" class="imp-main" onclick="openTaskForm('${jsq(x.taskId)}')"><span class="task-title">${esc(x.title)}</span><span class="task-sub">${esc(x.sub)}${x.priority === 'Высокий' ? ' · ' + badge('Высокий', 'warn') : ''}</span></button><div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button></div></div>`).join('')) : '';
+  const todoBox = m.todo.length ? panel('t-todo', 'todo', 'Сделать сегодня', m.todo.length, '', m.todo.map(x => `<div class="imp-row"${swp('todayDone', [x.key], 'Выполнено')}><button type="button" class="imp-main" onclick="${x.leadId ? `openLeadSheet('${jsq(x.leadId)}')` : `openTaskForm('${jsq(x.taskId)}')`}"><span class="task-title">${esc(x.title)}</span><span class="task-sub">${esc(x.sub)}${x.priority === 'Высокий' ? ' · ' + badge('Высокий', 'warn') : ''}</span></button><div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button></div></div>`).join('')) : '';
   const important = panel('t-important', 'important', 'Требует внимания', m.important.length, (m.pastCount ? `<button type="button" class="text-button" onclick="todayHearingsAllDone()">Считать все проведёнными</button>` : '') + (m.important.length ? `<button type="button" class="text-button" onclick="todayHideAll()">Скрыть все</button>` : ''), impBody);
 
   // без времени — короткая пометка вида записи вместо «весь день» (не переносится в узкой колонке)
@@ -12080,7 +12316,7 @@ function leadsModel(leads, cases, p, today) {
   const q = casesNorm(p.q), list = (leads || []).filter(l => l && !l._deleted);
   const counts = { all: list.length, active: list.filter(leadIsActive).length }; LEAD_STATUSES.forEach(s => { counts[s] = list.filter(l => l.status === s).length; });
   const rows = list.filter(l => p.f === 'all' || (p.f === 'active' ? leadIsActive(l) : l.status === p.f))
-    .filter(l => !q || [l.name, l.phone, l.email, l.topic, l.opponent, l.summary].some(v => casesNorm(v).includes(q)))
+    .filter(l => !q || [l.name, l.phone, l.email, l.telegram, l.topic, l.opponent, l.summary].some(v => casesNorm(v).includes(q)))
     .map(l => { const due = leadClaimDue(l), k = due && today ? todayDayDiff(due, today) : null, c = l.convertedCaseId ? (cases || []).find(x => x.id === l.convertedCaseId) : null;
       return { l, due, k, overdue: k !== null && k < 0 && leadIsActive(l), caseNumber: c ? c.number : '', status: l.status || 'Новое', cls: LEAD_STATUS_CLS[l.status || 'Новое'] || '' }; })
     .sort((a, b) => (b.l.createdAt || 0) - (a.l.createdAt || 0));
@@ -12089,7 +12325,7 @@ function leadsModel(leads, cases, p, today) {
 SCREENS.leads = async function () {
   const p = leadsPrefs(), m = leadsModel(await getAll('leads'), await getAll('cases'), p, todayISO());
   const chips = LEAD_FILTERS.map(([k, t]) => `<button type="button" class="chip" aria-pressed="${p.f === k}" onclick="leadsSet('f','${jsq(k)}')">${esc(t)} <span class="chip-n">${m.counts[k] || 0}</span></button>`).join('');
-  const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openLeadSheet('${jsq(r.l.id)}')"><span><span class="task-title">${esc(r.l.name)}</span><span class="task-sub">${esc([r.l.topic, r.l.phone, r.l.source, r.caseNumber ? 'дело ' + r.caseNumber : ''].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status, r.cls)}${r.due ? badge('ответ до ' + fmtDate(r.due), r.overdue ? 'bad' : '') : ''}${r.l.createdAt ? `<span class="muted small">${esc(fmtDate(localISO(new Date(r.l.createdAt))))}</span>` : ''}</span></button>`).join('');
+  const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openLeadSheet('${jsq(r.l.id)}')"><span><span class="task-title">${esc(r.l.name)}</span><span class="task-sub">${esc([r.l.topic, r.l.phone, r.l.source, r.caseNumber ? 'дело ' + r.caseNumber : ''].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status, r.cls)}${(r.l.repeatOf && r.l.repeatOf.length) || r.l.repeatClientId ? badge('повторное', 'warn') : ''}${r.due ? badge('ответ до ' + fmtDate(r.due), r.overdue ? 'bad' : '') : ''}${r.l.createdAt ? `<span class="muted small">${esc(fmtDate(localISO(new Date(r.l.createdAt))))}</span>` : ''}</span></button>`).join('');
   return pageHead('Обращения', `${m.counts.active} ${plural(m.counts.active, 'активное', 'активных', 'активных')} из ${m.counts.all}`, btn('Обращение', 'openLeadForm()', 'primary', 'user-plus')) +
     `<div class="toolbar"><div class="chips">${chips}</div><div class="toolbar-right"><label class="search-wrap"><span class="sr">Поиск по обращениям</span>${icon('search')}<input type="search" value="${esc(p.q)}" placeholder="Имя, телефон, тема, оппонент" onkeydown="if(event.key==='Enter'){event.preventDefault();leadsSet('q',this.value)}" onsearch="leadsSet('q',this.value)"></label></div></div>
     <section class="panel">${m.rows.length ? `<div class="list-rows">${rows}</div>` : emptyState('user-plus', m.counts.all ? 'По этому фильтру обращений нет' : 'Обращений пока нет', m.counts.all ? 'Измените фильтр или запрос' : 'Обращение — это звонок или встреча до заключения соглашения. Когда соглашение заключено, из обращения одной кнопкой создаётся дело.', btn('Обращение', 'openLeadForm()', 'primary', 'user-plus'))}</section>`;
@@ -12142,15 +12378,18 @@ async function saveLeadForm(id) {
 function leadConsentText(l) {
   if (!l || !Number(l.consentAt)) return '';
   const d = new Date(Number(l.consentAt)), p = n => String(n).padStart(2, '0');
-  return `дано ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())} на странице записи${l.consentVer ? ' · редакция текста ' + l.consentVer : ''}`;
+  // этап 4 (сервер 190): согласие со страницы «Задать вопрос» — consentKind 'ask', текст редакции — ?ask=<страница>&consent=<редакция>
+  return `дано ${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())} ${l.consentKind === 'ask' ? 'на странице «Задать вопрос»' : 'на странице записи'}${l.consentVer ? ' · редакция текста ' + l.consentVer : ''}`;
 }
 async function openLeadSheet(id, mode) {
   const l = await getOne('leads', id); if (!l) { toast('Обращение не найдено', true); return; }
   const c = l.convertedCaseId ? await getOne('cases', l.convertedCaseId) : null, mail = (await getAll('mail')).filter(m => m.leadId === id), due = leadClaimDue(l), k = due ? todayDayDiff(due, todayISO()) : null;
   const row = (a, b) => b ? `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>` : '';
-  const body = `<div class="task-badges">${badge(l.status || 'Новое', LEAD_STATUS_CLS[l.status || 'Новое'] || '')}${l.kind ? badge(l.kind) : ''}${l.source ? badge(l.source) : ''}</div>
+  // этап 4 плана по ЮрТопосу: вопрос с сайта — когда пришёл, как связаться, до какого времени ответить, «Связались», повторное обращение (sync/ask.js)
+  const askBox = typeof askLeadBlock === 'function' ? await askLeadBlock(l) : '';
+  const body = `<div class="task-badges">${badge(l.status || 'Новое', LEAD_STATUS_CLS[l.status || 'Новое'] || '')}${l.kind ? badge(l.kind) : ''}${l.source ? badge(l.source) : ''}${(l.repeatOf && l.repeatOf.length) || l.repeatClientId ? badge('Повторное обращение', 'warn') : ''}</div>
     <div class="actions" style="margin-bottom:12px">${btn('Изменить', `openLeadForm('${jsq(l.id)}')`, 'small-btn', 'pencil')}${c ? btn('Открыть дело', `openCaseSheet('${jsq(c.id)}')`, 'small-btn', 'briefcase-business') : btn('Создать дело', `leadToCaseAsk('${jsq(l.id)}')`, 'primary small-btn', 'plus')}${btn('В доверители', `leadToClient('${jsq(l.id)}')`, 'small-btn', 'user-plus')}${btn('Встреча', `openMeetingForm('', '')`, 'small-btn', 'handshake')}${typeof openDocTplPicker === 'function' ? btn('Документ по шаблону', `openDocTplPicker('lead', '${jsq(l.id)}')`, 'small-btn', 'notebook-pen') : ''}</div>
-    <div class="list-rows">${row('Суть', l.topic)}${row('Телефон', l.phone)}${contactRow(l.phone)}${row('Email', l.email)}${row('Адрес', l.addr)}${row('Противная сторона', [l.opponent, l.opponentInn ? 'ИНН ' + l.opponentInn : '', l.opponentInfo].filter(Boolean).join(' · '))}${due ? `<div><span class="muted">Ответ на претензию до</span><span class="${k !== null && k < 0 ? 'task-when overdue' : ''}">${esc(fmtDate(due))}${k !== null ? ' · ' + (k < 0 ? 'просрочен на ' + (-k) + ' ' + plural(-k, 'день', 'дня', 'дней') : k === 0 ? 'сегодня' : 'через ' + k + ' ' + plural(k, 'день', 'дня', 'дней')) : ''}</span></div>` : ''}${row('Подробности', l.summary)}${row('Согласие на обработку ПД', leadConsentText(l))}${row('Создано', l.createdAt ? fmtDate(localISO(new Date(l.createdAt))) : '')}</div>
+    <div class="list-rows">${row('Суть', l.topic)}${row('Телефон', l.phone)}${contactRow(l.phone)}${row('Email', l.email)}${row('Адрес', l.addr)}${row('Противная сторона', [l.opponent, l.opponentInn ? 'ИНН ' + l.opponentInn : '', l.opponentInfo].filter(Boolean).join(' · '))}${due ? `<div><span class="muted">Ответ на претензию до</span><span class="${k !== null && k < 0 ? 'task-when overdue' : ''}">${esc(fmtDate(due))}${k !== null ? ' · ' + (k < 0 ? 'просрочен на ' + (-k) + ' ' + plural(-k, 'день', 'дня', 'дней') : k === 0 ? 'сегодня' : 'через ' + k + ' ' + plural(k, 'день', 'дня', 'дней')) : ''}</span></div>` : ''}${row('Подробности', l.summary)}${row('Согласие на обработку ПД', leadConsentText(l))}${row('Создано', l.createdAt ? fmtDate(localISO(new Date(l.createdAt))) : '')}</div>${askBox}
     <div class="section-label">Статус</div><div class="chips" style="margin-bottom:12px">${LEAD_STATUSES.map(s => `<button type="button" class="chip" aria-pressed="${(l.status || 'Новое') === s}" onclick="leadSetStatus('${jsq(l.id)}','${jsq(s)}')">${esc(s)}</button>`).join('')}</div>
     ${mail.length ? `<div class="section-label">Письма · ${mail.length}</div><div class="list-rows">${mail.map(m => `<button type="button" class="list-btn" onclick="openMailSheet('${jsq(m.id)}')"><span>${esc(m.title || m.barcode || 'Письмо')}</span><span class="muted">${esc(m.status || m.channel || '')}</span></button>`).join('')}</div>` : ''}
     <div class="form-actions"><button type="button" class="button danger push-right" onclick="openDeleteSheet('leads', '${jsq(l.id)}')">${icon('trash-2')}Удалить</button></div>`;
@@ -14174,6 +14413,11 @@ function autoModel(now, env) {
   add({ id: 'book', title: 'Заявки онлайн-записи', where: 'open', on: !!(B.on && B.srv), last: B.lastPoll, err: B.err, stale: B.on ? AUTO_STALE : 0,
     next: !B.srv ? 'сервер не подключён' : B.on ? 'раз в 15 минут, пока программа открыта; страница записи на сервере работает всегда' : 'онлайн-запись выключена',
     note: B.on && B.lastPub ? 'окна опубликованы ' + autoWhen(B.lastPub, now) : '', run: B.on && B.srv ? 'book' : '', setup: 'openBookSheet()' });
+  // 13.10.2026 (этап 4 плана по ЮрТопосу): вопросы с сайта (sync/ask.js) — страница на сервере, забирает программа
+  const AQ = e.ask || {};
+  if (AQ.mod) add({ id: 'ask', title: 'Вопросы с сайта', where: 'open', on: !!(AQ.on && AQ.srv), last: AQ.last, err: AQ.err, stale: AQ.on ? AUTO_STALE : 0,
+    next: !AQ.srv ? 'сервер не подключён' : AQ.on ? 'при открытии и раз в 15 минут, пока программа открыта; страница «Задать вопрос» на сервере принимает вопросы всегда' : 'приём вопросов выключен',
+    note: AQ.on && AQ.lastPub ? 'страница опубликована ' + autoWhen(AQ.lastPub, now) : '', run: AQ.on && AQ.srv ? 'ask' : '', setup: 'openAskSheet()' });
   // 13.10.2026 (этап 5 плана по ЮрТопосу): статусы Почты России сами при открытой программе (sync/pochta.js)
   const P = e.mail || {};
   add({ id: 'mail', title: 'Статусы Почты России', where: 'open', on: !!(P.srv && P.ready === '1' && P.auto), last: P.last, err: P.err, stale: 0,
@@ -14220,6 +14464,7 @@ function autoEnv(now, cases) {
   if (tryv(F.devcalApp, false)) env.devcal = { app: true, on: !!tryv(() => F.devcalOn && F.devcalOn() && F.devcalCal && !!F.devcalCal(), false), last: n('crm_devcal_at'), err: j('crm_devcal_err'), text: tryv(F.devcalStateText, '') };
   env.devr = { on: !!tryv(F.devrOn, false), app: typeof AndroidApp !== 'undefined' && !!AndroidApp && typeof AndroidApp.scheduleReminders === 'function', last: n('crm_alarms_at') };
   env.book = { srv: srvOk, on: !!(tryv(F.bookCfg, {}) || {}).enabled, lastPoll: n('crm_next_book_poll_at'), lastPub: n('crm_next_book_pub_at'), err: j('crm_next_book_err') };
+  env.ask = { mod: typeof askCfg === 'function', srv: srvOk, on: typeof askCfg === 'function' && !!(tryv(askCfg, {}) || {}).enabled, last: n('crm_next_ask_poll_at'), lastPub: n('crm_next_ask_pub_at'), err: j('crm_next_ask_err') };
   env.upd = { last: n('crm_next_upd_at'), err: j('crm_next_upd_err') };
   env.mail = { srv: srvOk, ready: localStorage.getItem('crm_next_pochta_ready'), auto: localStorage.getItem('crm_next_mail_auto') !== '0', last: n('crm_next_mail_track_at'), err: j('crm_next_mail_track_err'),
     used: typeof mailQuotaUsed === 'function' ? tryv(() => mailQuotaUsed(localISO(new Date(now))), 0) : 0 };
@@ -14246,6 +14491,7 @@ async function autoRun(id) {
     case 'devcal': { const r = await devcalSync(true); return r && r.ok ? { ok: true, text: typeof devcalResText === 'function' ? devcalResText(r) : 'Календарь обновлён' } : { ok: false, text: r && r.skip ? 'Календарь не выбран или нет разрешения' : 'Календарь не обновлён: ' + why(r) }; }
     case 'devr': { const shown = await devrCheck(true); let set = null; if (typeof AndroidApp !== 'undefined' && AndroidApp && typeof AndroidApp.scheduleReminders === 'function') set = await devrAlarmsSync(true); return { ok: true, text: 'Проверено: уведомлений показано — ' + (shown || 0) + (set != null ? '; будильников поставлено — ' + set : '') }; }
     case 'book': { const nNew = await bookPoll(true); const p = await bookPublish(true, true); const e = lsJSON('crm_next_book_err', null); return e && Date.now() - e.at < 60000 ? { ok: false, text: 'Онлайн-запись: ' + e.msg } : { ok: true, text: 'Новых заявок: ' + (nNew || 0) + (p && p.ok ? '; окон опубликовано: ' + (p.slots || 0) : '') }; }
+    case 'ask': { const p = await askPublish(true); const nNew = await askPoll(true); const e = lsJSON('crm_next_ask_err', null); return e && Date.now() - e.at < 60000 ? { ok: false, text: 'Вопросы с сайта: ' + e.msg } : { ok: true, text: 'Новых вопросов: ' + (nNew || 0) + (p && p.ok && !p.same ? '; страница опубликована' : '') }; }
     case 'mail': { const plan = mailTrackPlan(await getAll('mail')); if (!plan.toTrack.length) return { ok: true, text: plan.total ? 'Запрашивать нечего: все отправления вручены' : 'Отправлений с трек-номером нет' }; const r = await mailTrackRun(plan); return r.busy ? { ok: false, text: 'Статусы уже обновляются — повторите через минуту' } : r.ok ? { ok: true, text: mailTrackSummary(r.updated, r.errors, plan.skipped, r.same).text } : { ok: false, text: 'Статусы не обновлены: ' + mailTrackErrText(r) }; }
     case 'upd': { const r = await nextUpdateCheck(true); return { ok: r.state !== 'error', text: typeof appUpdProgText === 'function' ? appUpdProgText(r) : r.state }; }
   }
@@ -15737,7 +15983,13 @@ const HELP_SECTIONS = [
 <ol><li>Настройки → «Онлайн-запись на консультацию» → «Включить онлайн-запись»; укажите дни и часы приёма, перерыв, длительность, адрес и телефон, которые увидит доверитель.</li>
 <li>«Сохранить и опубликовать» — на сервер уходят только свободные окна и подписи страницы, без имён и дел. Ниже появится ссылка для доверителей — «Скопировать» и разместите её на сайте или в подписи.</li>
 <li>Проверка: откройте ссылку в браузере — должны быть видны дни и время. Заседания (с дорогой до суда и обратно) и встречи время занимают сами; окна обновляются после правок.</li></ol>
-<p>Заявки программа забирает раз в 15 минут, пока открыта (или кнопкой «Проверить заявки»): заявка становится обращением и встречей, на «Сегодня» — блок «Записи на приём» с кнопками «Подтвердить» (можно написать заметку: что взять с собой) и «Отклонить». Доверитель видит ответ на странице записи по коду заявки. Пока работают обе программы, заявку может забрать любая из них; если её успели забрать обе, на «Сегодня» она всё равно одна, а ответ меняет обе встречи.</p>` },
+<p>Заявки программа забирает раз в 15 минут, пока открыта (или кнопкой «Проверить заявки»): заявка становится обращением и встречей, на «Сегодня» — блок «Записи на приём» с кнопками «Подтвердить» (можно написать заметку: что взять с собой) и «Отклонить». Доверитель видит ответ на странице записи по коду заявки. Пока работают обе программы, заявку может забрать любая из них; если её успели забрать обе, на «Сегодня» она всё равно одна, а ответ меняет обе встречи.</p>
+<h3>Вопросы с сайта</h3>
+<p>Страница «Задать вопрос» на вашем личном сервере: доверитель пишет имя, телефон или Telegram, как с ним связаться и вопрос и отмечает согласие на обработку персональных данных (отдельный текст). Нужен личный сервер версии 190 или новее.</p>
+<ol><li>Настройки → «Вопросы с сайта» → «Принимать вопросы через страницу»; проверьте заголовок, способы связи и текст согласия (оператор и адрес подставляются из онлайн-записи, если они там заполнены).</li>
+<li>«Сохранить и опубликовать» — появятся ссылка для доверителей и код кнопки: «Скопировать код кнопки» и вставьте код на страницу своего сайта.</li>
+<li>Проверка: откройте страницу по ссылке, отправьте пробный вопрос и нажмите «Проверить вопросы» — появится обращение с источником «Сайт».</li></ol>
+<p>Вопрос становится обращением, на «Сегодня» — задача «Связаться» в «Сделать сегодня». Если за рабочий день ответа нет (вопрос пришёл в рабочий день — то же время следующего рабочего дня; в выходной — до конца ближайшего рабочего дня), задача поднимается в «Требует внимания» с пометкой «Нет ответа больше рабочего дня». В карточке обращения — «Связались», ссылка на Telegram и пометка «Повторное обращение», если этот телефон или Telegram уже был у прежнего обращения или доверителя. Уведомление о вопросе приходит в Telegram, если у сервера заданы TG_TOKEN и TG_CHAT; без отметки «Полные названия задач и имена в Telegram» — только номер вопроса, без имени и текста. Выключение приёма закрывает саму страницу: она отвечает, что вопросы не принимаются. При сбое Яндекс Облака страница не открывается.</p>` },
   { id: 'money', title: 'Финансы, отчёты, калькуляторы', html: `
 <p>«Финансы»: счета (фиксированная сумма, почасовой, гонорар успеха, абонентская плата), оплата из строки счёта, рассрочка, расходы, «Платежи» за период с итогом и «Выписка для печати».</p>
 <p>Депозит (авансы по делу): в карточке дела «Ещё: добавить в дело» → «Аванс», или группа «Деньги» → «Внести аванс» / «Списать». Остаток по делу виден там же; списание больше остатка программа записывает только после второго нажатия «Сохранить». Все остатки по делам и общий итог — «Финансы» → «Депозиты». Операции, внесённые в прежней программе, видны и здесь.</p>
