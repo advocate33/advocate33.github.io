@@ -1,0 +1,77 @@
+name: FamilyVPN - publish existing test APK manually
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - familyvpn-development
+    paths:
+      - '.github/workflows/family-publish-test.yml'
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-test-apk:
+    if: github.repository == 'advocate33/advocate33.github.io'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout only FamilyVPN source branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout audited WDTT Plus v20
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan4537/WDTT-Plus
+          ref: v20
+          path: donor
+          persist-credentials: false
+      - name: Download successfully built APK from prior verified run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download 38512121142 --repo "$GITHUB_REPOSITORY" \
+            --name FamilyVPN-debug-test-apks --dir downloads
+          mapfile -d '' apks < <(find downloads -type f -name '*.apk' -print0)
+          printf 'Number of APKs: %s\n' "${#apks[@]}"
+          find downloads -type f -printf '%P (%s bytes)\n'
+          if [ "${#apks[@]}" -ne 1 ]; then
+            echo "Expected exactly one test APK; refusing ambiguous publication" >&2
+            exit 1
+          fi
+          cp "${apks[0]}" FamilyVPN-test-v20.apk
+          test -s FamilyVPN-test-v20.apk
+          sha256sum FamilyVPN-test-v20.apk > FamilyVPN-test-v20.apk.sha256
+      - name: Add complete donor and family patch source
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf FamilyVPN-test-v20-source.tar.gz \
+            --exclude='.git' --exclude='*.jks' --exclude='*.keystore' \
+            --exclude='local.properties' -C "$GITHUB_WORKSPACE" donor familyvpn
+          test -s FamilyVPN-test-v20-source.tar.gz
+      - name: Create manually requested TEST prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag='family-test-v20-20261014'
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Existing test release found: $tag. Not overwriting."
+            exit 0
+          fi
+          gh release create "$tag" \
+            FamilyVPN-test-v20.apk \
+            FamilyVPN-test-v20.apk.sha256 \
+            FamilyVPN-test-v20-source.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --target familyvpn-development \
+            --prerelease \
+            --title "FamilyVPN v20 - first TEST APK" \
+            --notes "TEST BUILD ONLY. Compiled from Ivan4537/WDTT-Plus tag v20 with familyvpn patch. Built in GitHub Actions run 38512121142. Not yet tested on Samsung, mobile networks, Wi-Fi switching, or VK calls. Signed with temporary Android debug signing key: do not distribute to family. Real releases require one stable protected signing keystore and fresh security review. Individual passwords, SSH keys and VPN links are NOT bundled. GPLv3 corresponding source attached."
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url --jq '.url'
