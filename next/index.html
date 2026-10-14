@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="14.10.2026 08:40 · a2190f1">
+<meta name="build" content="14.10.2026 10:37 · a4909aa">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -138,6 +138,7 @@ h3{font-size:1rem;font-weight:600}
 .task-when{color:var(--text-muted);font-weight:600}.task-when.overdue{color:var(--bad)}
 .t-license .lic-body{padding:12px 20px 16px}.t-license .lic-body p{margin:0}
 .t-backup .lic-body{padding:12px 20px 16px}.t-backup .lic-body p{margin:0}
+.t-prodcal .lic-body{padding:12px 20px 16px}.t-prodcal .lic-body p{margin:0}.t-prodcal .form-actions{flex-wrap:wrap}
 .panel-foot{font-size:.8125rem;color:var(--text-muted);padding:12px 20px 14px;border-top:1px solid var(--line);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .agenda-row{display:grid;grid-template-columns:55px minmax(0,1fr);gap:14px;padding:16px 20px;border-bottom:1px solid var(--line)}
 .agenda-row:last-child{border-bottom:0}.agenda-row+.day-mark{border-top:0}
@@ -215,13 +216,14 @@ dialog::backdrop{background:#0c183a70}
   .bottom-nav .icon{width:21px;height:21px}
   .stats{grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.stat{padding:14px}.stat-value{font-size:1.65rem}.stat-value.small-value{font-size:1.3rem}.stat-label{font-size:.75rem}
   .day-grid{gap:16px}.day-grid>.stack{display:contents}
-  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-backup{order:7}.t-book{order:1}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
+  .t-important{order:1}.t-hero{order:2}.t-schedule{order:3}.t-tomorrow{order:4}.t-todo{order:5}.t-mon{order:6}.t-review{order:7}.t-license{order:7}.t-backup{order:7}.t-prodcal{order:7}.t-book{order:1}.t-stage{order:7}.t-next{order:8}.t-work{order:9}
   .panel.pad{padding:18px}.panel-title{padding:10px 8px 10px 16px}
   .imp-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main x" "done done";padding:12px 4px 12px 16px;gap:8px}
   .imp-done .button{min-height:var(--touch)}
   .panel-foot{padding:10px 16px 12px}
   .t-license .lic-body{padding:10px 16px 14px}
   .t-backup .lic-body{padding:10px 16px 14px}
+  .t-prodcal .lic-body{padding:10px 16px 14px}
   .agenda-row{padding:15px 16px;gap:10px;grid-template-columns:48px minmax(0,1fr)}
   .day-mark{padding:9px 16px}
   .intro-strip{padding:18px;margin-bottom:18px}
@@ -2765,6 +2767,8 @@ const NEXT_CAL_YEARS = '2026–2027';
 function isWorkdayISO(iso) {
   if (CAL_OFF.has(iso)) return false;
   if (CAL_WORK.has(iso)) return true;
+  // 14.10.2026: производственный календарь (next/prodcal.js) — загруженный с сайта программы, встроенный, для лет без данных — ст. 112 ТК РФ
+  if (typeof prodcalDayKind === 'function') return prodcalDayKind(iso) === 'work';
   if (NEXT_CAL_OFF.has(iso)) return false;
   if (NEXT_CAL_WORK.has(iso)) return true;
   const d = parseLocalDate(iso); if (!d || isNaN(d)) return true;
@@ -2974,6 +2978,220 @@ function nextPresetRules(c) {
   for (const act of ['decision', 'appeal', 'cass']) nextActRules(nextPresetCase(c, act, t), act).forEach(n => { if (n.kind !== 'control') out.push([act, { key: n.autoKey.split(':')[2], t: n.title, term: n.term }]); });
   return out;
 }
+
+// ▼▼▼ next/prodcal.js
+// ═══ next/prodcal.js — производственный календарь: рабочие и нерабочие дни загружаются сами (14.10.2026) ═══
+// Решение пользователя 14.10.2026 («делай как предлагаешь»): вместо ручного ввода — файл dist/calendar.json на сайте программы (тот же адрес,
+// что программа: CSP и сторонних адресатов не прибавляется). Файл раз в неделю собирает GitHub Actions в crm-src (prodcal/build_prodcal.mjs)
+// из двух неофициальных источников — xmlcalendar и isdayoff.ru — и публикует год, только если источники совпали между собой и со ст. 112
+// ТК РФ; официального машиночитаемого источника нет (постановление Правительства о переносе выходных публикуется текстом).
+// День считается так: свой список пользователя (Справочники → «Нерабочие дни», rules/calendar.js) → праздники ч. 1 ст. 112 ТК РФ → год из
+// загруженного файла → встроенный календарь (next/acts.js: 2026–2027) → для лет без данных — ст. 112 ТК РФ: праздники в будни и перенос
+// выходного, совпавшего с праздником, на следующий рабочий день (ч. 2), без переносов Правительства (ч. 5) — «предварительно»; это сказано
+// в паспорте срока, в калькуляторах, в листе «Нерабочие дни» и на «Сегодня» (с 1 декабря — о следующем годе).
+// Год из файла проверяется и здесь (даты, будни и выходные, баланс по ст. 112 ТК РФ) — непринятый год не используется. Файл хранится на
+// устройстве (crm_next_prodcal — не синхронизируется: он одинаков для всех и берётся с сайта); запрос — через 7 с после запуска и при возврате
+// на экран, не чаще раза в 6 часов, и по кнопке «Проверить сейчас». Сети нет или файла нет — молча действует прежний (раздел 1, п. 3), итог —
+// в листе «Нерабочие дни» и в «Автоматизации». Сроки дел сами не переписываются: «Сегодня» предлагает пересчитать неподтверждённые автосроки,
+// дата которых по календарю стала другой, и называет подтверждённые (ui/deadlines.js, nextRulesReviewFind).
+// Состояние — свойство функции prodcalState: модуль не держит const-состояния, к которому могли бы обратиться до его выполнения.
+const PRODCAL_VER = '2026-10-14';
+const PRODCAL_KEY = 'crm_next_prodcal', PRODCAL_AT = 'crm_next_prodcal_at', PRODCAL_TRY = 'crm_next_prodcal_try', PRODCAL_ERR = 'crm_next_prodcal_err', PRODCAL_HIDE = 'crm_next_prodcal_hide';
+const PRODCAL_EVERY = 6 * 3600e3, PRODCAL_TIMEOUT = 20000, PRODCAL_MAX = 300000;
+// ч. 1 ст. 112 ТК РФ (ред. 25.05.2026): нерабочие праздничные дни
+const PRODCAL_HOL = ['01-01', '01-02', '01-03', '01-04', '01-05', '01-06', '01-07', '01-08', '02-23', '03-08', '05-01', '05-09', '06-12', '11-04'];
+// встроенный календарь (NEXT_CAL_OFF/NEXT_CAL_WORK в next/acts.js) — основание по годам
+const PRODCAL_BUILTIN = { 2026: 'постановление Правительства РФ от 24.09.2025 № 1466', 2027: 'постановление Правительства РФ от 17.09.2026 № 1187' };
+
+function prodcalState() { const f = prodcalState; if (!f.s) f.s = { loaded: false, file: null, busy: false, years: new Map() }; return f.s; }
+const pcDow = iso => new Date(iso + 'T00:00:00Z').getUTCDay();
+const pcWe = iso => { const w = pcDow(iso); return w === 0 || w === 6; };
+const pcNext = iso => { const t = new Date(iso + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + 1); return t.toISOString().slice(0, 10); };
+const pcValid = iso => typeof iso === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(iso) && !isNaN(Date.parse(iso + 'T00:00:00Z')) && new Date(iso + 'T00:00:00Z').toISOString().slice(0, 10) === iso;
+const pcFmt = iso => iso.slice(8, 10) + '.' + iso.slice(5, 7) + '.' + iso.slice(0, 4);
+
+// ── что определяет сам закон (ст. 112 ТК РФ): праздники в будни и перенос выходного, совпавшего с праздником (кроме январских) ──
+function prodcalLaw(y) {
+  const hol = PRODCAL_HOL.map(md => y + '-' + md), hs = new Set(hol), off = new Set(), moved = [];
+  hol.forEach(h => { if (!pcWe(h)) off.add(h); });
+  hol.filter(h => h.slice(5, 7) !== '01' && pcWe(h)).forEach(h => {
+    let d = pcNext(h); while (pcWe(d) || hs.has(d) || off.has(d)) d = pcNext(d);
+    off.add(d); moved.push([h, d]);
+  });
+  return { hol, off: [...off].sort(), moved };
+}
+// проверка года из файла — те же правила, что у сборщика (prodcal/build_prodcal.mjs, checkLaw): пустой список — год принят
+function prodcalYearProbs(y, rec) {
+  const p = [];
+  if (!rec || typeof rec !== 'object' || !Array.isArray(rec.off) || !Array.isArray(rec.work)) return ['нет списков дней'];
+  if (rec.off.length > 60 || rec.work.length > 30) return ['слишком длинные списки дней'];
+  rec.off.forEach(d => { if (!pcValid(d) || !d.startsWith(y + '-') || pcWe(d)) p.push('неверная запись нерабочего будня: ' + String(d).slice(0, 12)); });
+  rec.work.forEach(d => { if (!pcValid(d) || !d.startsWith(y + '-') || !pcWe(d)) p.push('неверная запись рабочего выходного: ' + String(d).slice(0, 12)); });
+  if (p.length) return p;
+  const L = prodcalLaw(y), off = new Set(rec.off), work = new Set(rec.work);
+  L.hol.forEach(h => { if (!pcWe(h) && !off.has(h)) p.push('праздник ' + pcFmt(h) + ' отмечен рабочим днём'); if (work.has(h)) p.push('праздник ' + pcFmt(h) + ' объявлен рабочим'); });
+  const expected = L.hol.filter(h => !pcWe(h)).length + L.moved.length + 2, balance = off.size - work.size;
+  if (balance !== expected) p.push('нерабочих будней ' + off.size + ', рабочих выходных ' + work.size + ' — не сходится со ст. 112 ТК РФ (ожидалась разница ' + expected + ')');
+  return p;
+}
+// файл с сайта → принятые годы и непринятые с причиной; файл не того вида — исключение (текст — пользователю)
+function prodcalAccept(j) {
+  if (!j || typeof j !== 'object' || j.format !== 1 || !j.years || typeof j.years !== 'object') throw new Error('файл календаря не того вида');
+  const years = {}, rejected = [];
+  for (const k of Object.keys(j.years).sort()) {
+    if (!/^\d{4}$/.test(k) || +k < 2000 || +k > 2100) { rejected.push({ year: String(k).slice(0, 8), why: 'не год' }); continue; }
+    const rec = j.years[k], probs = prodcalYearProbs(+k, rec);
+    if (probs.length) { rejected.push({ year: k, why: probs.slice(0, 3).join('; ') }); continue; }
+    years[k] = { off: [...new Set(rec.off)].sort(), work: [...new Set(rec.work)].sort(), basis: typeof rec.basis === 'string' ? rec.basis.slice(0, 200) : '' };
+  }
+  const upd = typeof j.updated === 'string' && pcValid(j.updated) ? j.updated : '';
+  return { updated: upd, years, rejected };
+}
+// загруженный ранее файл — с устройства, один раз; испорченный — как будто его нет
+function prodcalFile() {
+  const s = prodcalState();
+  if (!s.loaded) {
+    s.loaded = true;
+    let j = null; try { j = JSON.parse(localStorage.getItem(PRODCAL_KEY) || 'null'); } catch (e) { j = null; } /* штатно: нет записи или не JSON */
+    if (j) { try { s.file = prodcalAccept({ format: 1, years: j.years, updated: j.updated }); s.file.rejected = Array.isArray(j.rejected) ? j.rejected.slice(0, 10) : []; } catch (e) { logErr('prodcal:load', e); s.file = null; } }
+  }
+  return s.file;
+}
+function prodcalReset() { const s = prodcalState(); s.years = new Map(); }
+// календарь года: src — file (с сайта программы) | builtin (встроен) | law (предварительно, по ст. 112 ТК РФ)
+function prodcalYear(y) {
+  const s = prodcalState(), k = String(y);
+  if (s.years.has(k)) return s.years.get(k);
+  const f = prodcalFile(), fy = f && f.years[k];
+  let r;
+  if (fy) r = { src: 'file', off: new Set(fy.off), work: new Set(fy.work), basis: fy.basis, updated: f.updated };
+  else if (PRODCAL_BUILTIN[k] && typeof NEXT_CAL_OFF === 'object') r = { src: 'builtin', off: new Set([...NEXT_CAL_OFF].filter(d => d.startsWith(k + '-'))), work: new Set([...NEXT_CAL_WORK].filter(d => d.startsWith(k + '-'))), basis: PRODCAL_BUILTIN[k] };
+  else { const L = prodcalLaw(+k); r = { src: 'law', off: new Set(L.off), work: new Set(), basis: '', moved: L.moved }; }
+  s.years.set(k, r); return r;
+}
+// особый день: 'off' — нерабочий (праздник, перенос, свой список), 'work' — рабочий выходной, '' — обычный по дню недели.
+// Одна функция для расчёта сроков (isWorkdayISO в next/acts.js) и для онлайн-записи (sync/booking.js) — урок 147.
+function prodcalSpecial(iso) {
+  if (!pcValid(iso)) return '';
+  if (typeof CAL_OFF === 'object' && CAL_OFF && CAL_OFF.has(iso)) return 'off';
+  if (typeof CAL_WORK === 'object' && CAL_WORK && CAL_WORK.has(iso)) return 'work';
+  if (PRODCAL_HOL.includes(iso.slice(5))) return 'off';
+  const Y = prodcalYear(+iso.slice(0, 4));
+  if (Y.off.has(iso)) return 'off';
+  if (Y.work.has(iso)) return 'work';
+  return '';
+}
+function prodcalDayKind(iso) { if (!pcValid(iso)) return 'work'; const s = prodcalSpecial(iso); return s || (pcWe(iso) ? 'off' : 'work'); }
+// свои даты пользователя в году
+function prodcalOwn(y) { const p = String(y) + '-'; let n = 0; [typeof CAL_OFF === 'object' && CAL_OFF, typeof CAL_WORK === 'object' && CAL_WORK].forEach(s => { if (s) s.forEach(d => { if (String(d).startsWith(p)) n++; }); }); return n; }
+// строка «откуда календарь года» — для паспорта срока, почты и калькуляторов
+function prodcalNote(y) {
+  y = String(y); const Y = prodcalYear(+y), own = prodcalOwn(y), tail = own ? '; свои даты из справочника: ' + own : '';
+  if (Y.src === 'file') return y + ': ' + (Y.basis || 'производственный календарь') + ' — загружен с сайта программы' + (Y.updated ? ' (обновлён ' + pcFmt(Y.updated) + ')' : '') + tail;
+  if (Y.src === 'builtin') return y + ': ' + Y.basis + ' — встроен в программу' + tail;
+  return y + ': предварительно — по ст. 112 ТК РФ (праздники и перенос выходного, совпавшего с праздником); переносы выходных Правительством не учтены' + tail;
+}
+function prodcalYearLine(y) {
+  const Y = prodcalYear(+y), own = prodcalOwn(y), cnt = ' · нерабочих будней ' + Y.off.size + ', рабочих выходных ' + Y.work.size, tail = own ? ' · своих дат: ' + own : '';
+  if (Y.src === 'file') return (Y.basis || 'производственный календарь') + ' · с сайта программы' + (Y.updated ? ', обновлён ' + pcFmt(Y.updated) : '') + cnt + tail;
+  if (Y.src === 'builtin') return Y.basis + ' · встроен в программу' + cnt + tail;
+  return 'предварительно — по ст. 112 ТК РФ: праздники и перенос выходного, совпавшего с праздником; переносов Правительства нет' + tail;
+}
+const PRODCAL_SRC_WORD = { file: 'с сайта программы', builtin: 'встроен', law: 'предварительно' };
+function prodcalShort(nowIso) { const y = +String(nowIso || todayISO()).slice(0, 4); return [y, y + 1].map(x => x + ' — ' + PRODCAL_SRC_WORD[prodcalYear(x).src]).join(', '); }
+// годы диапазона без постановления (расчёт по ст. 112 ТК РФ) — для пометки «предварительно» в калькуляторах
+function prodcalPrelim(fromIso, toIso) {
+  if (!pcValid(fromIso) || !pcValid(toIso)) return [];
+  let a = +fromIso.slice(0, 4), b = +toIso.slice(0, 4); if (b < a) { const t = a; a = b; b = t; }
+  const out = []; for (let y = a; y <= b && y - a < 12; y++) if (prodcalYear(y).src === 'law') out.push(y); return out;
+}
+function prodcalPrelimText(ys) { return ys.length ? 'За ' + ys.join(', ') + ' — предварительно: праздники по ст. 112 ТК РФ учтены, переносы выходных Правительством — нет (календарь ' + (ys.length > 1 ? 'этих лет' : 'этого года') + ' ещё не загружен)' : ''; }
+// отпечаток календаря: меняется — «Сегодня» снова показывает сроки, дата которых по календарю другая (ui/deadlines.js)
+function prodcalStamp() { const f = prodcalFile(); return 'cal' + PRODCAL_VER + ':' + (f ? (f.updated || '') + ':' + Object.keys(f.years).join(',') : '-'); }
+
+// ── загрузка с сайта программы ──
+function prodcalUrl() { return location.origin + '/dist/calendar.json'; }
+async function prodcalCheck(force) {
+  const s = prodcalState(), now = Date.now();
+  if (s.busy) return { ok: false, busy: true, error: 'проверка уже идёт' };
+  if (!force && now - Number(localStorage.getItem(PRODCAL_TRY) || 0) < PRODCAL_EVERY) return { ok: true, skip: true };
+  s.busy = true; localStorage.setItem(PRODCAL_TRY, String(now));
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null, t = ctl ? setTimeout(() => ctl.abort(), PRODCAL_TIMEOUT) : 0;
+  try {
+    const before = prodcalStamp();
+    let text;
+    try {
+      const r = await fetch(prodcalUrl(), { cache: 'no-store', signal: ctl ? ctl.signal : undefined });
+      if (r.status === 404) throw new Error('на сайте программы файла календаря пока нет');
+      if (!r.ok) throw new Error('сайт программы ответил ' + r.status);
+      text = await r.text();
+    } catch (e) { throw new Error(e && e.name === 'AbortError' ? 'сайт программы не ответил за ' + PRODCAL_TIMEOUT / 1000 + ' с' : /^(на сайте|сайт программы)/.test(String(e && e.message)) ? e.message : 'нет связи с сайтом программы (' + String((e && e.message) || e).slice(0, 80) + ')'); }
+    if (text.length > PRODCAL_MAX) throw new Error('файл календаря больше ' + PRODCAL_MAX / 1000 + ' КБ — не принят');
+    let j; try { j = JSON.parse(text); } catch (e) { throw new Error('файл календаря не прочитан (не JSON)'); }
+    const a = prodcalAccept(j);
+    if (a.rejected.length) logErr('prodcal:rejected', new Error(a.rejected.map(r => r.year + ': ' + r.why).join(' | ').slice(0, 300)));
+    localStorage.setItem(PRODCAL_KEY, JSON.stringify({ updated: a.updated, years: a.years, rejected: a.rejected, got: now }));
+    s.file = a; s.loaded = true; prodcalReset();
+    localStorage.setItem(PRODCAL_AT, String(now)); localStorage.removeItem(PRODCAL_ERR);
+    const changed = prodcalStamp() !== before;
+    return { ok: true, changed, years: Object.keys(a.years), rejected: a.rejected };
+  } catch (e) {
+    const msg = String((e && e.message) || e).slice(0, 200);
+    localStorage.setItem(PRODCAL_ERR, JSON.stringify({ at: now, msg }));
+    return { ok: false, error: msg };
+  } finally { if (t) clearTimeout(t); s.busy = false; }
+}
+function prodcalResText(r) {
+  if (!r) return 'проверка не выполнена';
+  if (!r.ok) return r.busy ? 'Проверка календаря уже идёт' : 'Календарь не проверен: ' + r.error;
+  const rej = r.rejected && r.rejected.length ? '; не приняты: ' + r.rejected.map(x => x.year).join(', ') : '';
+  return (r.changed ? 'Календарь обновлён — годы: ' + (r.years || []).join(', ') : 'Календарь проверен: изменений нет') + rej;
+}
+// после изменения календаря: «Сегодня» перерисовывается, если на экране он и лист не открыт (урок 71)
+function prodcalAfterChange() { try { if (typeof UI === 'object' && UI.ready && UI.screen === 'today' && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav('today'); } catch (e) { logErr('prodcal:after', e); } }
+async function prodcalCheckUI(from) {
+  const draft = from === 'hol' && document.getElementById('hol-off') ? { off: fv('hol-off'), work: fv('hol-work') } : null;
+  const b = document.getElementById(from === 'hol' ? 'hol-check' : 'prodcal-today-check'); if (b) { b.disabled = true; b.textContent = 'Проверяется…'; }
+  const r = await prodcalCheck(true);
+  toast(prodcalResText(r), !r.ok);
+  if (from === 'hol' && document.getElementById('hol-years')) openHolidaysSheet('replace', draft);
+  else if (r.ok && r.changed) prodcalAfterChange(); else if (b) { b.disabled = false; b.textContent = 'Проверить сейчас'; }
+  return r;
+}
+function prodcalStart() {
+  const tick = () => { prodcalCheck(false).then(r => { if (r && r.ok && r.changed) prodcalAfterChange(); }).catch(e => logErr('prodcal:check', e)); };
+  setTimeout(tick, 7000);
+  if (typeof document === 'object' && document.addEventListener) document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
+}
+// строка состояния для листа «Нерабочие дни» и «Автоматизации»
+function prodcalStatus(now) {
+  now = now || Date.now();
+  const at = Number(localStorage.getItem(PRODCAL_AT) || 0), err = lsJSON(PRODCAL_ERR, null), f = prodcalFile();
+  const when = ts => typeof autoWhen === 'function' ? autoWhen(ts, now) : new Date(ts).toLocaleString('ru-RU');
+  const rej = f && f.rejected && f.rejected.length ? ' Не приняты годы: ' + f.rejected.map(x => x.year + ' (' + x.why + ')').join(', ') + '.' : '';
+  if (err && Number(err.at) >= at) return { cls: 'warn', text: 'Проверка календаря ' + when(err.at) + ' не удалась: ' + err.msg + (f ? ' — действует загруженный ранее.' : ' — действует встроенный календарь и расчёт по ст. 112 ТК РФ.') + rej };
+  if (at) return { cls: 'good', text: 'Календарь проверен ' + when(at) + (f && Object.keys(f.years).length ? ': на сайте программы — ' + Object.keys(f.years).join(', ') + '.' : '.') + rej };
+  return { cls: '', text: 'На этом устройстве календарь ещё не проверялся — проверка идёт сама через несколько секунд после запуска.' };
+}
+
+// ── «Сегодня»: календарь текущего года не загружен, а с 1 декабря — следующего ──
+function prodcalTodayModel(todayIso) {
+  const y = +String(todayIso).slice(0, 4), m = +String(todayIso).slice(5, 7);
+  if (prodcalYear(y).src === 'law') return { year: y, cur: true };
+  if (m === 12 && prodcalYear(y + 1).src === 'law') return { year: y + 1, cur: false };
+  return null;
+}
+function prodcalTodayBox() {
+  const t = typeof todayKeyISO === 'function' ? todayKeyISO() : todayISO(), m = prodcalTodayModel(t);
+  if (!m || localStorage.getItem(PRODCAL_HIDE) === String(m.year)) return '';
+  const e0 = lsJSON(PRODCAL_ERR, null), err = e0 && Number(e0.at) >= Number(localStorage.getItem(PRODCAL_AT) || 0) ? e0 : null;
+  const text = (m.cur ? '' : 'Постановление о переносе выходных на ' + m.year + ' год публикуется не позднее чем за месяц до начала года (ч. 5 ст. 112 ТК РФ). ')
+    + 'Пока календарь не загружен, сроки, которые заканчиваются в ' + m.year + ' году, считаются предварительно: праздники учтены, переносы выходных Правительством — нет. Программа загрузит календарь с сайта программы сама.'
+    + (err && err.msg ? ' Последняя проверка: ' + err.msg + '.' : '');
+  return `<section class="panel t-prodcal" id="prodcal-box"><div class="panel-title"><h2>Календарь на ${m.year} год не загружен</h2><div class="panel-tools"><button type="button" class="text-button" id="prodcal-hide" onclick="prodcalHide(${m.year})">Скрыть</button></div></div>
+    <div class="lic-body"><p class="small">${esc(text)}</p><div class="form-actions" style="margin:8px 0 0"><button type="button" class="button small-btn" id="prodcal-today-check" onclick="prodcalCheckUI('today')">${icon('refresh-cw', 'icon-sm')}Проверить сейчас</button><button type="button" class="button small-btn" id="prodcal-open" onclick="openHolidaysSheet()">Нерабочие дни</button></div></div></section>`;
+}
+function prodcalHide(y) { localStorage.setItem(PRODCAL_HIDE, String(y)); toast('Скрыто, пока календарь на ' + y + ' год не загрузится'); nav('today'); }
 
 // ▼▼▼ next/secmem.js
 // ═══ next/secmem.js — секреты без защищённого хранилища (аудит 14.10.2026, решение пользователя «реализуй») ═══
@@ -8627,8 +8845,10 @@ function bookAvailability(cfg, hearings, meetings, nowTs) {
   const work = typeof CAL_WORK === 'object' && CAL_WORK ? CAL_WORK : new Set(), off = typeof CAL_OFF === 'object' && CAL_OFF ? CAL_OFF : new Set();
   for (let i = 0; i < Math.min(60, Number(cfg.horizonDays) || 14); i++) {
     const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + i), iso = localISO(d);
-    if (off.has(iso)) continue;
-    if (!(cfg.days || []).includes(d.getDay()) && !work.has(iso)) continue;
+    // урок 147: праздники и переносы — той же функцией, что сроки (next/prodcal.js: свой список, календарь с сайта, встроенный, ст. 112 ТК РФ)
+    const sp = typeof prodcalSpecial === 'function' ? prodcalSpecial(iso) : off.has(iso) ? 'off' : work.has(iso) ? 'work' : '';
+    if (sp === 'off') continue;
+    if (!(cfg.days || []).includes(d.getDay()) && sp !== 'work') continue;
     const busy = [];
     (hearings || []).filter(h => h && !h._deleted && h.date === iso && h.status !== 'Отменено').forEach(h => {
       const t = bookMin(h.time); if (t === null) { busy.push([0, 1440]); return; }
@@ -10910,7 +11130,7 @@ openDevRemindSheet: 'уведомления напоминания будиль�
   openPochtaSheet: 'почта трек трек-номер отслеживание письмо отправление',
   openBookSheet: 'запись приём прием консультация окна расписание заявка доверитель страница ссылка',
   openAskSheet: 'вопрос задать вопрос сайт форма кнопка заявка обращение обратная связь страница ссылка telegram телеграм',
-  openSyncSheet: 'синхронизация сервер обмен отправить загрузить база пароль код', openRefsSheet: 'справочники суды судьи списки праздники нерабочие дни',
+  openSyncSheet: 'синхронизация сервер обмен отправить загрузить база пароль код', openRefsSheet: 'справочники суды судьи списки праздники нерабочие дни производственный календарь переносы выходных',
   openIntegritySheet: 'проверка данных дубли ошибки номера доверители', openHelpSheet: 'инструкция помощь справка как',
   openCourtsSheet: 'суды судьи телефон номер кто звонил контакты секретарь помощник адрес маршрут',
 };
@@ -11783,6 +12003,8 @@ function dlPassport(dl, rulesVer, today) {
   if (dl.baseEv || dl.baseDate) rows.push(['Основание', [dl.baseEv, dl.baseDate ? fmtDate(dl.baseDate) : ''].filter(Boolean).join(' · ')]);
   if (dl.norm) rows.push(['Норма', dl.norm]);
   if (dl.calc) rows.push(['Расчёт', dl.calc]);
+  // 14.10.2026: календарь года, в котором оканчивается рассчитанный срок (next/prodcal.js) — загружен, встроен или предварительный
+  if (dl.calc && /^\d{4}-/.test(dl.date || '') && typeof prodcalNote === 'function') rows.push(['Календарь', prodcalNote(dl.date.slice(0, 4))]);
   if (dl.rulesVer) rows.push(['Версия правил', dl.rulesVer + (rulesVer && dl.rulesVer !== rulesVer && !dl.confirmedAt ? ' — есть новее (' + rulesVer + '), срок можно пересчитать' : '')]);
   if (dl.calcDate && dl.date && dl.calcDate !== dl.date) rows.push(['Рассчитано / установлено', fmtDate(dl.calcDate) + ' / ' + fmtDate(dl.date)]);
   if (dl.src) rows.push(['Источник', dl.src]);
@@ -11820,11 +12042,19 @@ async function nextRulesReviewFind() {
       const next = act === 'decision' ? 'appeal' : act === 'appeal' ? 'cass' : '';
       const rules = nextActRules(c0, act).filter(n => !(next && nxHasBase(inp, next) && /:(writ|costs)$/.test(n.autoKey)));
       const missing = rules.filter(n => !dls.some(dl => dl && dl.autoKey === n.autoKey));
-      const changed = rules.filter(n => { const dl = dls.find(x => x && x.autoKey === n.autoKey); return dl && !dl.done && !dl.confirmedAt && (dl.rulesVer || '') !== NEXT_RULES_VER && dl.date !== n.date; }).map(n => ({ title: n.title, from: dls.find(x => x && x.autoKey === n.autoKey).date, to: n.date }));
+      // 14.10.2026 (производственный календарь, next/prodcal.js): при тех же правилах дата другая только из-за календаря — срок предлагается
+      // к пересчёту, если его дата та, что программа рассчитала (calcDate), а не поставлена вручную; подтверждённый — только называется
+      // (то же основание — baseDate: типовой срок от другой даты акта календарём не считается)
+      const dlOf = n => dls.find(x => x && x.autoKey === n.autoKey), sameVer = dl => (dl.rulesVer || '') === NEXT_RULES_VER;
+      const byCal = (dl, n) => sameVer(dl) && dl.calcDate === dl.date && (dl.baseDate || '') === (n.baseDate || '');
+      const changed = rules.filter(n => { const dl = dlOf(n); return dl && !dl.done && !dl.confirmedAt && dl.date !== n.date && (!sameVer(dl) || byCal(dl, n)); }).map(n => ({ title: n.title, from: dlOf(n).date, to: n.date, cal: sameVer(dlOf(n)) }));
+      const marked = rules.filter(n => { const dl = dlOf(n); return dl && !dl.done && dl.confirmedAt && dl.date !== n.date && byCal(dl, n); }).map(n => ({ title: n.title, date: dlOf(n).date, cal: n.date }));
       const base = act === 'decision' ? inp.dec.base : act === 'appeal' ? inp.ap.base : inp.cs.base;
-      if (missing.length || changed.length) out.push({ c: c0, act, base, missing, changed }); } }
+      if (missing.length || changed.length || marked.length) out.push({ c: c0, act, base, missing, changed, marked }); } }
   return out;
 }
+// отметка «Скрыть до следующего обновления»: версия правил и отпечаток календаря — новый календарь показывает блок снова
+function rulesReviewStamp() { return NEXT_RULES_VER + (typeof prodcalStamp === 'function' ? '|' + prodcalStamp() : ''); }
 // ── лист срока: паспорт и действия ──
 async function openDeadlineSheet(caseId, key) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
@@ -11920,7 +12150,7 @@ async function rulesReviewApply(caseId) {
   try { await put('cases', c); } catch (e) { logErr('rules:apply', e); toast('Не удалось сохранить', true); return; }
   toast(msgs.length ? msgs.join('; ').slice(0, 200) : 'Сроки добавлены'); nav('today');
 }
-function rulesReviewHide() { localStorage.setItem('crm_rules_review_hide', NEXT_RULES_VER); nav('today'); }
+function rulesReviewHide() { localStorage.setItem('crm_rules_review_hide', rulesReviewStamp()); nav('today'); }
 
 // ▼▼▼ ui/trash.js
 // ═══ ui/trash.js — удаление записей и корзина (этап 2б) ═══
@@ -12590,9 +12820,14 @@ SCREENS.today = async function () {
   // x.open — своё действие строки (события календаря, sync/calimp.js)
   const impOpen = x => x.open ? x.open : x.kind === 'mail' ? `openMailSheet('${jsq(x.mailId)}')` : x.kind === 'clash' ? (x.hearingId ? `openHearingForm('${jsq(x.hearingId)}')` : `openMeetingForm('${jsq(x.meetingId)}')`) : x.kind === 'poa' ? `openPoaForm('${jsq(x.poaId)}')` : x.kind === 'hearing' ? `openAfterHearing('${jsq(x.hearingId)}')` : x.kind === 'prep' ? `openHearingForm('${jsq(x.hearingId)}')` : x.kind === 'task' ? (x.leadId ? `openLeadSheet('${jsq(x.leadId)}')` : `openTaskForm('${jsq(x.taskId)}')`) : x.dlId ? `openDeadlineSheet('${jsq(x.caseId)}', '${jsq(x.dlId)}')` : `openCaseSheet('${jsq(x.caseId)}')`;
   // v299/v301: правила сроков обновлены — у дел есть неподтверждённые автосроки по прежней версии или недостающие сроки
-  let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== NEXT_RULES_VER) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
-  const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>Правила сроков обновлены ${badge(NEXT_RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
-      ${review.slice(0, 8).map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.c.id)}')"><span class="task-title">${esc([r.c.number, r.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(actLabel(r.c.kind, r.act))} от ${esc(fmtDate(r.base))}: ${esc([r.missing.length ? 'нет сроков — ' + r.missing.map(n => n.title).join(', ') : '', r.changed.length ? 'изменились — ' + r.changed.map(x => x.title + ': ' + fmtDate(x.from) + ' → ' + fmtDate(x.to)).join(', ') : ''].filter(Boolean).join('; '))}</span></button><div class="imp-done"><button type="button" class="button small-btn" onclick="rulesReviewApply('${jsq(r.c.id)}')">${icon('refresh-cw', 'icon-sm')}Пересчитать</button></div></div>`).join('')}${review.length > 8 ? `<p class="panel-foot">Ещё ${review.length - 8}</p>` : ''}</section>` : '';
+  // 14.10.2026: и календарь нерабочих дней (next/prodcal.js) — дата неподтверждённого автосрока по нему другая; подтверждённый только называется
+  const revStamp = typeof rulesReviewStamp === 'function' ? rulesReviewStamp() : NEXT_RULES_VER;
+  let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== revStamp) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
+  const revCalOnly = review.length && review.every(r => !r.missing.length && r.changed.every(x => x.cal));
+  const revText = r => [r.missing.length ? 'нет сроков — ' + r.missing.map(n => n.title).join(', ') : '', r.changed.length ? (r.changed.every(x => x.cal) ? 'по календарю другая дата — ' : 'изменились — ') + r.changed.map(x => x.title + ': ' + fmtDate(x.from) + ' → ' + fmtDate(x.to)).join(', ') : '',
+    (r.marked || []).length ? 'подтверждён, по календарю дата другая — ' + r.marked.map(x => x.title + ': ' + fmtDate(x.date) + ', по календарю ' + fmtDate(x.cal)).join(', ') + ' (проверьте в паспорте срока)' : ''].filter(Boolean).join('; ');
+  const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>${revCalOnly ? 'Календарь нерабочих дней обновлён' : 'Правила сроков обновлены ' + badge(NEXT_RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
+      ${review.slice(0, 8).map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.c.id)}')"><span class="task-title">${esc([r.c.number, r.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(actLabel(r.c.kind, r.act))} от ${esc(fmtDate(r.base))}: ${esc(revText(r))}</span></button>${r.missing.length || r.changed.length ? `<div class="imp-done"><button type="button" class="button small-btn" onclick="rulesReviewApply('${jsq(r.c.id)}')">${icon('refresh-cw', 'icon-sm')}Пересчитать</button></div>` : ''}</div>`).join('')}${review.length > 8 ? `<p class="panel-foot">Ещё ${review.length - 8}</p>` : ''}</section>` : '';
   // Б15 (11.10.2026): строку можно смахнуть вправо — то же действие, что кнопка в строке (ui/swipe.js)
   const swp = (fn, args, label) => typeof swipeAttrs === 'function' ? swipeAttrs(fn, args, label) : '';
   // 13.10.2026 (этап 5): у строки может быть своё действие (x.act: { fn, label, icon }) и своё «×» (x.dismiss — «Задача не нужна» вместо скрытия на 7 дней)
@@ -12650,7 +12885,9 @@ SCREENS.today = async function () {
   const bookBox = typeof bookPendingBox === 'function' ? await bookPendingBox() : '';
   // урок 136: напоминание о копии базы — 14 дней данные не уходили с устройства (sync/files.js); «Скрыть» — на 7 дней
   const backupBox = typeof backupRemindBox === 'function' ? await backupRemindBox() : '';
-  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${bookBox}${licBox}${appBox}${backupBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
+  // 14.10.2026: календарь нерабочих дней текущего года не загружен, с 1 декабря — следующего (next/prodcal.js); «Скрыть» — до загрузки
+  let calBox = ''; try { if (typeof prodcalTodayBox === 'function') calBox = prodcalTodayBox(); } catch (e) { logErr('today:prodcal', e); }
+  out += `<div class="day-grid"><div class="stack">${important}${todoBox}${reviewBox}${calBox}${bookBox}${licBox}${appBox}${backupBox}${stageBox}${monBox}${next}${workBox}</div><div class="stack">${hero}${schedule}${tomorrow}</div></div>`;
   return out;
 };
 
@@ -14896,10 +15133,12 @@ function openCalcTermSheet() {
 function srCalc() {
   const out = document.getElementById('sr-out'); if (!out) return;
   const r = calcTerm(fv('sr-date'), clcNum('sr-num'), fv('sr-unit') || 'd'); CALC_LAST.term = r;
-  out.innerHTML = r ? `<div class="info-box calc-result"><span class="small muted">Дата окончания</span><b class="calc-big" id="sr-end">${esc(calcDateLong(r.end))}</b>${r.moved ? `<span class="small" id="sr-moved">нерабочий день — срок оканчивается ${esc(calcDateLong(r.work))}</span>` : ''}</div>` : '<p class="small muted">Укажите дату начала и срок</p>';
+  // 14.10.2026: год без постановления о переносах — пометка «предварительно» (next/prodcal.js)
+  const pre = r && typeof prodcalPrelim === 'function' ? prodcalPrelimText(prodcalPrelim(r.end, r.work)) : '';
+  out.innerHTML = r ? `<div class="info-box calc-result"><span class="small muted">Дата окончания</span><b class="calc-big" id="sr-end">${esc(calcDateLong(r.end))}</b>${r.moved ? `<span class="small" id="sr-moved">нерабочий день — срок оканчивается ${esc(calcDateLong(r.work))}</span>` : ''}${pre ? `<span class="small muted" id="sr-note">${esc(pre)}</span>` : ''}</div>` : '<p class="small muted">Укажите дату начала и срок</p>';
 }
 function openCalcDaysSheet() {
-  openSheet('Дни в периоде', `<p class="small muted">Рабочие дни — по справочнику нерабочих дней (Справочники → «Нерабочие дни»); если он пуст — будни с понедельника по пятницу.</p>
+  openSheet('Дни в периоде', `<p class="small muted">Рабочие дни — по производственному календарю программы (Справочники → «Нерабочие дни»): праздники и переносы выходных загружаются с сайта программы, свои даты — там же.</p>
     <div class="form-grid">${fInput('dp-from', 'Дата начала', todayISO(), 'type="date"')}${fInput('dp-to', 'Дата окончания', todayISO(), 'type="date"')}${fSelect('dp-incl', 'День начала', '0', [['0', 'Не считать (со следующего дня)'], ['1', 'Считать (включая дату начала)']])}</div>
     <div id="dp-out" role="status"></div>`, sheetIsOpen() ? true : undefined);
   ['dp-from', 'dp-to', 'dp-incl'].forEach(id => { const el = document.getElementById(id); if (el) { el.addEventListener('input', dpCalc); el.addEventListener('change', dpCalc); } });
@@ -14908,7 +15147,8 @@ function openCalcDaysSheet() {
 function dpCalc() {
   const out = document.getElementById('dp-out'); if (!out) return;
   const r = calcPeriodDays(fv('dp-from'), fv('dp-to'), fv('dp-incl') === '1'); CALC_LAST.days = r;
-  out.innerHTML = r ? `<div class="calc-pair"><div class="info-box calc-result"><span class="small muted">Календарных дней</span><b class="calc-big" id="dp-cal">${r.cal.toLocaleString('ru-RU')}</b></div><div class="info-box calc-result"><span class="small muted">Рабочих дней</span><b class="calc-big" id="dp-work">${r.work.toLocaleString('ru-RU')}</b></div></div>` : '';
+  const pre = r && typeof prodcalPrelim === 'function' ? prodcalPrelimText(prodcalPrelim(fv('dp-from'), fv('dp-to'))) : '';
+  out.innerHTML = r ? `<div class="calc-pair"><div class="info-box calc-result"><span class="small muted">Календарных дней</span><b class="calc-big" id="dp-cal">${r.cal.toLocaleString('ru-RU')}</b></div><div class="info-box calc-result"><span class="small muted">Рабочих дней</span><b class="calc-big" id="dp-work">${r.work.toLocaleString('ru-RU')}</b></div></div>${pre ? `<p class="small muted" id="dp-note">${esc(pre)}</p>` : ''}` : '';
 }
 // ── справочники ──
 function openKeyRatesSheet() {
@@ -15511,7 +15751,7 @@ function openRefsSheet(sub) {
   openSheet('Справочники', `<p class="small muted">Списки подставляются в формы; новое значение можно добавить и прямо из формы («Добавить … в справочник»). Здесь — правка: добавить, переименовать (с объединением дублей), удалить; у судов и судей — карточки.</p>
     ${typeof openCourtsSheet === 'function' ? `<div class="list-rows" style="margin-bottom:8px"><button type="button" class="list-btn" id="ref-courts-all" onclick="openCourtsSheet()"><span>Суды и судьи — контакты, поиск «кто звонил»</span><span class="muted">${icon('landmark', 'icon-sm')}</span></button></div>` : ''}
     <div class="section-label">Списки</div><div class="list-rows">${rows}</div>
-    <div class="section-label">Для расчёта сроков</div><div class="list-rows"><button type="button" class="list-btn" id="ref-holidays" onclick="openHolidaysSheet()"><span>Нерабочие дни</span><span class="muted">${off ? off + ' ' + plural(off, 'дата', 'даты', 'дат') : 'не заполнены — переносятся только суббота и воскресенье'}</span></button></div>
+    <div class="section-label">Для расчёта сроков</div><div class="list-rows"><button type="button" class="list-btn" id="ref-holidays" onclick="openHolidaysSheet()"><span>Нерабочие дни</span><span class="muted">${typeof prodcalShort === 'function' ? esc(prodcalShort()) + (off ? ' · своих дат: ' + off : '') : off ? off + ' ' + plural(off, 'дата', 'даты', 'дат') : 'производственный календарь программы'}</span></button></div>
     <div class="section-label">Порядок в данных</div><div class="list-rows"><button type="button" class="list-btn" id="ref-integrity" onclick="openIntegritySheet()"><span>Проверка данных</span><span class="muted">дубли, записи без связей, переплаты, сроки без даты</span></button></div>`, sub);
 }
 function openRefEditSheet(key, mode, msg) {
@@ -15617,10 +15857,17 @@ async function saveJudgeInfoForm(name, from) {
 }
 // ── нерабочие дни (производственный календарь) ──
 const holDatesParse = text => { const out = [], bad = []; String(text || '').split(/[\s,;]+/).map(x => x.trim()).filter(Boolean).forEach(x => { let iso = ''; const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(x); if (m) iso = m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0'); else if (/^\d{4}-\d{2}-\d{2}$/.test(x)) iso = x; const d = iso ? parseLocalDate(iso) : null; if (d && !isNaN(d) && localISO(d) === iso) out.push(iso); else bad.push(x); }); return { dates: [...new Set(out)].sort(), bad }; };
-function openHolidaysSheet() {
+// 14.10.2026 (решение пользователя): праздники и переносы выходных — производственный календарь, который программа загружает сама
+// (next/prodcal.js); в листе — откуда взят каждый год и «Проверить сейчас»; свои даты — важнее календаря (как и раньше, refs/holidays)
+function openHolidaysSheet(mode, draft) {
   const show = set => [...set].sort().map(fmtDate).join('\n');
-  openSheet('Нерабочие дни', `<p class="small muted">Для расчёта процессуальных сроков: срок, выпавший на нерабочий день, переносится на следующий рабочий. Суббота и воскресенье учитываются сами; здесь — праздники, перенесённые выходные и рабочие субботы по постановлению Правительства. Даты — по одной в строке, ДД.ММ.ГГГГ.</p>
-    <div class="form-grid">${fText('hol-off', 'Праздничные и перенесённые выходные дни', show(CAL_OFF), 8)}${fText('hol-work', 'Рабочие субботы и воскресенья', show(CAL_WORK), 3)}</div>${fSaveBar('saveHolidaysForm()')}`, sheetIsOpen() ? true : undefined);
+  const y = +todayISO().slice(0, 4), st = typeof prodcalStatus === 'function' ? prodcalStatus() : null;
+  const cal = st ? `<div class="status-line ${st.cls}" id="hol-state" role="status">${icon(st.cls === 'warn' ? 'circle-alert' : 'calendar-check')}<span>${esc(st.text)}</span></div>
+    <div class="list-rows" id="hol-years">${[y - 1, y, y + 1].map(x => `<div><span>${x}</span><span class="muted">${esc(prodcalYearLine(x))}</span></div>`).join('')}</div>
+    <div class="form-actions"><button type="button" class="button small-btn" id="hol-check" onclick="prodcalCheckUI('hol')">${icon('refresh-cw', 'icon-sm')}Проверить сейчас</button></div>` : '';
+  openSheet('Нерабочие дни', `<p class="small muted">Для расчёта процессуальных сроков: срок, выпавший на нерабочий день, переносится на следующий рабочий. Суббота, воскресенье и праздники (ст. 112 ТК РФ) учитываются сами; переносы выходных по постановлению Правительства программа загружает с сайта программы — календарь собирается из двух источников и публикуется, только если они совпали. Для года без постановления расчёт предварительный.</p>
+    ${cal}<div class="section-label">Свои даты — важнее календаря</div><p class="small muted">Если считаете день иначе, чем календарь, впишите его здесь. Даты — по одной в строке, ДД.ММ.ГГГГ.</p>
+    <div class="form-grid">${fText('hol-off', 'Нерабочие дни', draft ? draft.off : show(CAL_OFF), 4)}${fText('hol-work', 'Рабочие субботы и воскресенья', draft ? draft.work : show(CAL_WORK), 3)}</div>${fSaveBar('saveHolidaysForm()')}`, mode || (sheetIsOpen() ? true : undefined));
 }
 async function saveHolidaysForm() {
   const off = holDatesParse(fv('hol-off')), work = holDatesParse(fv('hol-work'));
@@ -16040,6 +16287,11 @@ function autoModel(now, env) {
   const U = e.upd || {};
   add({ id: 'upd', title: 'Проверка обновлений программы', where: 'open', on: true, last: U.last, err: U.err, stale: 0,
     next: 'при возврате на экран (не чаще раза в 15 минут) и раз в час', note: '', run: 'upd', setup: '' });
+  // 14.10.2026: производственный календарь с сайта программы (next/prodcal.js); две недели без удачной проверки — «требует внимания»
+  const PC = e.prodcal || {};
+  if (PC.mod) add({ id: 'prodcal', title: 'Календарь нерабочих дней', where: 'open', on: true, last: PC.last, err: PC.err, stale: 14 * AUTO_STALE,
+    next: 'через 7 секунд после запуска и при возврате на экран — не чаще раза в 6 часов; файл на сайте программы обновляется раз в неделю',
+    note: PC.text || '', run: 'prodcal', setup: 'openHolidaysSheet()' });
   const BK = e.backup || {};
   add({ id: 'backup', title: 'Копия базы', where: 'manual', on: true, last: BK.at || 0, lastKnown: false, err: null, warn: !!BK.remind, stale: 0,
     next: 'копию сохраняете вы; программа напоминает, если 14 дней данные не уходили с устройства',
@@ -16081,6 +16333,7 @@ function autoEnv(now, cases) {
   env.book = { srv: srvOk, on: !!(tryv(F.bookCfg, {}) || {}).enabled, lastPoll: n('crm_next_book_poll_at'), lastPub: n('crm_next_book_pub_at'), err: j('crm_next_book_err') };
   env.ask = { mod: typeof askCfg === 'function', srv: srvOk, on: typeof askCfg === 'function' && !!(tryv(askCfg, {}) || {}).enabled, last: n('crm_next_ask_poll_at'), lastPub: n('crm_next_ask_pub_at'), err: j('crm_next_ask_err') };
   env.upd = { last: n('crm_next_upd_at'), err: j('crm_next_upd_err') };
+  if (typeof prodcalShort === 'function') env.prodcal = { mod: true, last: n('crm_next_prodcal_at'), err: j('crm_next_prodcal_err'), text: tryv(() => 'годы: ' + prodcalShort(localISO(new Date(now))), '') };
   env.mail = { srv: srvOk, ready: localStorage.getItem('crm_next_pochta_ready'), auto: localStorage.getItem('crm_next_mail_auto') !== '0', last: n('crm_next_mail_track_at'), err: j('crm_next_mail_track_err'),
     used: typeof mailQuotaUsed === 'function' ? tryv(() => mailQuotaUsed(localISO(new Date(now))), 0) : 0 };
   if (F.backupRemindState && F.backupRemindModel && typeof backupLastOut === 'function') {
@@ -16116,6 +16369,7 @@ async function autoRun(id) {
     case 'mail': { const plan = mailTrackPlan(await getAll('mail')); if (!plan.toTrack.length) return { ok: true, text: plan.total ? 'Запрашивать нечего: все отправления вручены' : 'Отправлений с трек-номером нет' }; const r = await mailTrackRun(plan); return r.busy ? { ok: false, text: 'Статусы уже обновляются — повторите через минуту' } : r.ok ? { ok: true, text: mailTrackSummary(r.updated, r.errors, plan.skipped, r.same).text } : { ok: false, text: 'Статусы не обновлены: ' + mailTrackErrText(r) }; }
     case 'calimp': { const r = await calImpRun({ apply: true }); return r.ok ? { ok: true, text: 'Календарь прочитан: ' + calImpResText(r.n, true) } : { ok: false, text: r.busy ? 'Календарь уже читается — повторите через минуту' : 'Календарь не прочитан: ' + r.error }; }
     case 'upd': { const r = await nextUpdateCheck(true); return { ok: r.state !== 'error', text: typeof appUpdProgText === 'function' ? appUpdProgText(r) : r.state }; }
+    case 'prodcal': { const r = await prodcalCheck(true); if (r.ok && r.changed) prodcalAfterChange(); return { ok: !!r.ok, text: prodcalResText(r) }; }
   }
   return { ok: false, text: 'неизвестное действие' };
 }
@@ -16231,6 +16485,8 @@ function mailRespPassport(m, c) {
   else if (c.start) rows.push(['Начало срока', fromWord + ': ' + fmtDate(c.start) + ' (' + c.src + ')']);
   if (c.bad) rows.push(['Порядок счёта', 'число дней не указано — укажите от 1 до 365']);
   else rows.push(['Порядок счёта', c.days + ' ' + (c.unit === 'work' ? plural(c.days, 'рабочий день', 'рабочих дня', 'рабочих дней') + ' по календарю нерабочих дней программы («Справочники» → «Нерабочие дни»)' : plural(c.days, 'календарный день', 'календарных дня', 'календарных дней')) + '; отсчёт — со следующего дня после ' + (c.from === 'recv' ? 'получения' : 'направления') + ' (ст. 191 ГК РФ)']);
+  // 14.10.2026: откуда календарь года окончания (next/prodcal.js) — когда от него зависит результат
+  if (c.due && (c.unit === 'work' || c.endOff) && typeof prodcalNote === 'function') rows.push(['Календарь', prodcalNote(c.due.slice(0, 4))]);
   if (c.due) {
     rows.push(['Срок истекает', fmtDate(c.due) + (c.endOff ? ' — нерабочий день: по ст. 193 ГК РФ днём окончания срока считается следующий рабочий день; применим ли перенос к этому сроку — проверьте, программа дату не переносит' : '')]);
     // последний день нерабочий — обе даты: без переноса и с переносом по ст. 193 ГК РФ (выбор — за пользователем, раздел 8 правил)
@@ -17584,7 +17840,7 @@ const HELP_SECTIONS = [
 <h3>Где что</h3>
 <p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам, доверителям, судам и судьям (и по номеру телефона) и переключатель темы.</p>
 <h3>Справочники</h3>
-<p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта, часы работы, заметка (добавочный, как пройти), откуда контакты и когда проверены; у судьи — суд, кабинет, секретарь, помощник, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — праздники и перенесённые выходные для расчёта сроков. «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, записи, привязанные сразу к двум делам, переплаты, сроки без даты — и ничего не меняет сама: у записи, привязанной к двум делам, вы выбираете верное дело. Если номер дела изменить в форме дела, его задачи, заседания, счета и доверенности переходят на новый номер сами.</p>
+<p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта, часы работы, заметка (добавочный, как пройти), откуда контакты и когда проверены; у судьи — суд, кабинет, секретарь, помощник, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — производственный календарь для расчёта сроков: праздники по ст. 112 ТК РФ программа учитывает сама, а переносы выходных по постановлению Правительства загружает с сайта программы (календарь собирается из двух источников и публикуется, только если они совпали); там же видно, откуда взят каждый год, есть «Проверить сейчас», и можно вписать свои даты — они важнее календаря. Для года без постановления расчёт предварительный — об этом сказано в паспорте срока, в калькуляторе и на «Сегодня». «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, записи, привязанные сразу к двум делам, переплаты, сроки без даты — и ничего не меняет сама: у записи, привязанной к двум делам, вы выбираете верное дело. Если номер дела изменить в форме дела, его задачи, заседания, счета и доверенности переходят на новый номер сами.</p>
 <h3>Суды и судьи, «кто звонил»</h3>
 <p>«Суды и мониторинг» → строка «Кто звонил?» (или «Справочники» → «Суды и судьи»): введите номер, с которого звонили, — в любом написании, с +7, 8, скобками или только последние цифры (от четырёх), — программа найдёт суд, секретаря или помощника судьи с этим номером. Там же поиск по названию суда, городу, судье, секретарю и помощнику. В карточке суда — телефоны с кнопкой «Позвонить», «Сайт суда», «Маршрут» (карта по адресу), ваши дела в этом суде, ближайшие заседания и судьи. Суды Владимирской области (районные и городские, областной, арбитражные суды области, апелляционный и кассационный) уже есть в программе: адреса, телефоны и сайты переписаны с официальных сайтов судов 13.10.2026 — перед звонком или поездкой сверьте; «Записать данные с сайта суда в карточку» переносит их в вашу карточку, дальше её можно править. Если в вашей карточке суда что-то заполнено, показывается ваше. Верхняя строка поиска программы тоже находит доверителя, суд и судью по номеру телефона.</p>` },
   { id: 'today', title: '«Сегодня» и быстрые записи', html: `
@@ -18357,6 +18613,8 @@ document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() 
   if (typeof calFeedStart === 'function') setTimeout(() => { try { calFeedStart(); } catch (e) { logErr('cal:start', e); } }, 5000);
   // 13.10.2026 (этап 5 плана по ЮрТопосу): статусы Почты России сами, пока программа открыта (sync/pochta.js) — первый запрос через 12 секунд
   if (typeof mailAutoStart === 'function') { try { mailAutoStart(); } catch (e) { logErr('mail:start', e); } }
+  // 14.10.2026: производственный календарь с сайта программы (next/prodcal.js) — через 7 секунд и при возврате на экран, не чаще раза в 6 часов
+  if (typeof prodcalStart === 'function') { try { prodcalStart(); } catch (e) { logErr('prodcal:start', e); } }
   // 12.10.2026: события программы в календарь устройства (Google Календарь, приложение для Android 1.24, sync/devcal.js)
   if (typeof devcalStart === 'function') setTimeout(() => { try { devcalStart(); } catch (e) { logErr('devcal:start', e); } }, 6000); }); });
 // Обновление программы (аудит 02.10.2026): новая версия service worker ждёт согласия пользователя — полоса «Доступна новая

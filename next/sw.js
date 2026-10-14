@@ -13,14 +13,16 @@
 
    При выходе новой версии приложения поднимите число в CACHE.
 */
-const CACHE = 'crm-next-v147'; // новая версия: свой кэш, область /next/
+const CACHE = 'crm-next-v148'; // новая версия: свой кэш, область /next/
 const CACHE_PREFIX = CACHE.replace(/\d+$/, ''); // crm-next-v… в /next/, crm-main-v… на основном адресе: удаляем только СВОИ старые кэши — чужие на том же сайте не трогаем
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
 const BASE = new URL('./', self.location).pathname;
 const START_URLS = [BASE, BASE + 'index.html'];
 // основной адрес (переход, п. 10): у /old/ (прежняя программа) и /next/ свои sw; раздача dist/ и apps/ — всегда из сети, без кэша
-const FOREIGN_DIRS = BASE === '/' ? ['/old/', '/next/', '/next-gpt/', '/dist/', '/apps/'] : [];
+// 14.10.2026: и в /next/ — запросы программы к /dist/ (apps.json, calendar.json) шли через этот sw «сначала кэш», и программа видела
+// прежний файл до следующего открытия
+const FOREIGN_DIRS = BASE === '/' ? ['/old/', '/next/', '/next-gpt/', '/dist/', '/apps/'] : ['/dist/', '/apps/'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
