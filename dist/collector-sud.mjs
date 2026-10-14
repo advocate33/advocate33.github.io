@@ -24,6 +24,8 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.19: код функции — только в теле запроса и сравнивается без утечки по времени; страница суда — не больше 5 МБ; переадресация —
+//         только в пределах сайта ссылки и не во внутренние сети; предел ожидания у доставки, бакета и Telegram (аудит 14.10.2026).
 //  v3.18: пустой перечень дел принимается (последнее дело снято с наблюдения), сбор по нему — штатно, «дел для обхода нет»;
 //         collectone для КАД говорит о СУДиДЕЛО, только если задан SUDODELO_API_KEY (аудит 11.10.2026).
 //  v3.17: номер дела ищется без различий в тире, пробелах и «№»; при расхождении названо, какой номер на странице; страница
@@ -76,7 +78,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.18';
+const COLLECTOR_VER = '3.19';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -498,6 +500,8 @@ function errText(e) {
 async function fetchPageSmart(url, timeoutMs, logf) {
   try { return await fetchPage(url, timeoutMs); }
   catch (e) {
+    // v3.19: отказ по правилу (чужой сайт, внутренний адрес, размер) — без повтора по http
+    if (e && e.final) throw e;
     if (/^https:\/\//i.test(url)) {
       const alt = 'http://' + url.slice(8);
       if (logf) logf(`   повтор по http: ${alt}`);
@@ -509,7 +513,7 @@ async function fetchPageSmart(url, timeoutMs, logf) {
 // v3.4: один повтор после паузы при сетевом сбое (таймаут, обрыв) — сайты судов часто отвечают со второго раза
 async function fetchPageRetry(url, timeoutMs, logf, pauseMs) {
   try { return await fetchPageSmart(url, timeoutMs, logf); }
-  catch (e) { if (logf) logf(`   повтор через ${Math.round((pauseMs || 4000) / 1000)} с: ${errText(e)}`); await sleep(pauseMs || 4000); return await fetchPageSmart(url, timeoutMs, logf); }
+  catch (e) { if (e && e.final) throw e; if (logf) logf(`   повтор через ${Math.round((pauseMs || 4000) / 1000)} с: ${errText(e)}`); await sleep(pauseMs || 4000); return await fetchPageSmart(url, timeoutMs, logf); }
 }
 const hostOf = url => { try { return new URL(url).hostname.toLowerCase(); } catch (e) { return ''; } };
 // v3.6: есть ли на странице номер дела (сравнение без пробелов и регистра; «2-1500/2026» найдётся и в «№ 2-1500/2026 ~ М-700/2026»)
@@ -541,31 +545,99 @@ function hostKind(url) {
   if (h.endsWith('kad.arbitr.ru') || h.endsWith('arbitr.ru')) return 'kad';
   return 'other';
 }
+// v3.19 (аудит 14.10.2026): куда коллектор не ходит — внутренние сети и служебные адреса облака (169.254.169.254 — метаданные функции
+// с её токеном), localhost, *.local, *.internal; переадресация — только в пределах сайта ссылки; страница — не больше PAGE_MAX
+const PAGE_MAX = 5 * 1024 * 1024;
+const REDIRECTS_MAX = 5;
+function netHostBad(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) { const a = +m[1], b = +m[2]; return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224; }
+  if (h.includes(':')) return h === '::1' || h === '::' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith('::ffff:');
+  return false;
+}
+const siteOf = h => String(h || '').toLowerCase().replace(/\.$/, '').split('.').filter(Boolean).slice(-2).join('.');
+function sameCourtSite(a, b) {
+  const ha = hostOf(a), hb = hostOf(b); if (!ha || !hb) return false;
+  if (ha === hb) return true;
+  if (hostKind(a) === 'mos' && hostKind(b) === 'mos') return true;
+  return siteOf(ha) === siteOf(hb);
+}
+// отказ по правилу (чужой сайт, внутренний адрес, размер) — окончательный: повтор по http и повтор через паузу его не меняют
+const finalErr = m => Object.assign(new Error(m), { final: true });
+const pageTooBig = max => finalErr('страница больше ' + Math.round(max / 1048576) + ' МБ — коллектор её не читает');
+async function readCapped(r, max) {
+  const len = Number(r.headers && typeof r.headers.get === 'function' ? r.headers.get('content-length') : 0) || 0;
+  if (len > max) throw pageTooBig(max);
+  if (r.body && typeof r.body.getReader === 'function') {
+    const rd = r.body.getReader(); const parts = []; let got = 0;
+    for (;;) {
+      const { done, value } = await rd.read(); if (done) break;
+      got += value.length;
+      if (got > max) { try { await rd.cancel(); } catch (e) { /* штатно: поток уже закрыт */ } throw pageTooBig(max); }
+      parts.push(value);
+    }
+    const buf = new Uint8Array(got); let o = 0; for (const p of parts) { buf.set(p, o); o += p.length; }
+    return buf;
+  }
+  const buf = new Uint8Array(await r.arrayBuffer());
+  if (buf.length > max) throw pageTooBig(max);
+  return buf;
+}
 async function fetchPage(url, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs || 25000);
   try {
-    const r = await fetch(url, {
-      signal: ctrl.signal, redirect: 'follow',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'ru-RU,ru;q=0.9'
+    let cur = url;
+    for (let hop = 0; ; hop++) {
+      let pu = null; try { pu = new URL(cur); } catch (e) { throw finalErr('некорректный адрес страницы'); }
+      if (!/^https?:$/.test(pu.protocol) || netHostBad(pu.hostname)) throw finalErr('адрес не похож на сайт суда (' + pu.protocol + '//' + pu.hostname + ') — коллектор туда не обращается');
+      const r = await fetch(cur, {
+        signal: ctrl.signal, redirect: 'manual',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'ru-RU,ru;q=0.9'
+        }
+      });
+      const loc = r.status >= 300 && r.status < 400 && r.headers && typeof r.headers.get === 'function' ? r.headers.get('location') : null;
+      if (loc) {
+        try { if (r.body && typeof r.body.cancel === 'function') await r.body.cancel(); } catch (e) { /* штатно: тело переадресации не нужно */ }
+        if (hop >= REDIRECTS_MAX) throw finalErr('сайт суда переадресует больше ' + REDIRECTS_MAX + ' раз');
+        let next = ''; try { next = new URL(loc, cur).href; } catch (e) { throw finalErr('сайт суда переадресовал на некорректный адрес'); }
+        if (!sameCourtSite(url, next)) throw finalErr('сайт суда переадресовал на другой сайт (' + (hostOf(next) || 'адрес не распознан') + ') — проверьте ссылку в деле');
+        cur = next; continue;
       }
-    });
-    const buf = new Uint8Array(await r.arrayBuffer());
-    return { status: r.status, text: decodeBody(buf), url: r.url || url };
+      const buf = await readCapped(r, PAGE_MAX);
+      return { status: r.status, text: decodeBody(buf), url: cur };
+    }
   } finally { clearTimeout(timer); }
 }
+// v3.19: запрос функции с пределом ожидания; тело ответа читается в пределах того же ожидания. Ответ — { status, ok, text }.
+async function fetchT(url, opt, ms) {
+  const lim = Number(ms) || 30000;
+  const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), lim);
+  try {
+    const r = await fetch(url, Object.assign({}, opt || {}, { signal: ctrl.signal }));
+    const text = await r.text();
+    return { status: r.status, ok: r.status >= 200 && r.status < 300, text };
+  } catch (e) {
+    if ((e && e.name === 'AbortError') || ctrl.signal.aborted) throw new Error('нет ответа за ' + Math.round(lim / 1000) + ' с (' + (hostOf(url) || 'адрес') + ')');
+    throw e;
+  } finally { clearTimeout(timer); }
+}
+const jsonOf = t => { try { return JSON.parse(t); } catch (e) { return null; } };
 async function sendEvents(cfg, events) {
   let sent = 0, added = 0, updated = 0;
   for (let i = 0; i < events.length; i += 300) {
     const chunk = events.slice(i, i + 300);
-    const r = await fetch(cfg.bridge, {
+    // v3.19: доставка пачки — с пределом ожидания (SEND_TIMEOUT_MS, по умолчанию 45 с)
+    const r = await fetchT(cfg.bridge, {
       method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({ secret: cfg.secret, action: 'eventsput', mode: 'merge', events: chunk })
-    });
-    const j = await r.json().catch(() => null);
+    }, Number(process.env.SEND_TIMEOUT_MS) || 45000);
+    const j = jsonOf(r.text);
     if (!j || !j.ok) throw new Error('сервер ответил: ' + (j && j.error ? j.error : 'HTTP ' + r.status));
     sent += chunk.length; added += Number(j.added || 0); updated += Number(j.updated || 0);
   }
@@ -811,7 +883,8 @@ function runTests() {
     body: Buffer.from(JSON.stringify({ action: 'status', secret: 's1' }), 'utf8').toString('base64') });
   t('http+base64 распознан', dH.kind === 'http' && dH.action === 'status' && dH.secret === 's1');
   const dQ = decodeFnEvent({ httpMethod: 'GET', queryStringParameters: { action: 'status', secret: 'q' } });
-  t('query-параметры распознаны', dQ.action === 'status' && dQ.secret === 'q');
+  // v3.19: действие из адреса принимается, код из адреса — нет
+  t('query: действие распознано, код из адреса не принят', dQ.action === 'status' && dQ.secret === '' && dQ.secretInUrl === true);
   const clean = sanitizeLinksPack({ format: 'crm-advokat-links', version: 1, cases: [
     { number: '2-1/2026', uid: 'U1', client: 'Смирнова Анна Петровна', clientPhone: '+7 900 000-00-00',
       links: [{ url: 'https://a.sudrf.ru/x', stage: 'Первая инстанция', courtNo: '2-1/2026', note: 'лишнее' }] },
@@ -935,21 +1008,23 @@ function fnCfg() {
 async function iamToken(context) {
   const t = context && context.token && (context.token.access_token || context.token.accessToken);
   if (t) return t;
-  const r = await fetch('http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token',
-    { headers: { 'Metadata-Flavor': 'Google' } });
+  // v3.19: с пределом ожидания
+  const r = await fetchT('http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token',
+    { headers: { 'Metadata-Flavor': 'Google' } }, 5000);
   if (!r.ok) throw new Error('IAM-токен недоступен: назначьте функции сервисный аккаунт');
-  return (await r.json()).access_token;
+  return (jsonOf(r.text) || {}).access_token;
 }
 const s3url = key => `https://storage.yandexcloud.net/${ENV.BUCKET}/${key}`;
+// v3.19: бакет — с пределом ожидания 30 с
 async function s3get(key, iam) {
-  const r = await fetch(s3url(key), { headers: { Authorization: 'Bearer ' + iam } });
+  const r = await fetchT(s3url(key), { headers: { Authorization: 'Bearer ' + iam } }, 30000);
   if (r.status === 404) return null;
   if (!r.ok) throw new Error('бакет: HTTP ' + r.status + ' при чтении ' + key);
-  return await r.text();
+  return r.text;
 }
 async function s3put(key, body, iam) {
-  const r = await fetch(s3url(key), { method: 'PUT',
-    headers: { Authorization: 'Bearer ' + iam, 'Content-Type': 'application/json; charset=utf-8' }, body });
+  const r = await fetchT(s3url(key), { method: 'PUT',
+    headers: { Authorization: 'Bearer ' + iam, 'Content-Type': 'application/json; charset=utf-8' }, body }, 30000);
   if (!r.ok) throw new Error('бакет: HTTP ' + r.status + ' при записи ' + key);
 }
 
@@ -978,8 +1053,16 @@ function decodeFnEvent(event) {
   let body = {};
   if (raw) { try { body = JSON.parse(raw); } catch (e) { body = {}; } }
   const q = ev.queryStringParameters || {};
+  // v3.19: код — только из тела запроса; код в адресе отмечается (secretInUrl) и не принимается
   return { kind: 'http', method: ev.httpMethod || 'POST',
-    action: body.action || q.action || '', secret: body.secret || q.secret || '', body };
+    action: body.action || q.action || '', secret: typeof body.secret === 'string' ? body.secret : '', secretInUrl: !!q.secret, body };
+}
+// v3.19: сравнение кода без утечки по времени — отпечатки SHA-256 одинаковой длины
+function secretOk(given) {
+  const want = String(ENV.SECRET || '');
+  if (!want || typeof given !== 'string' || !given) return false;
+  const a = crypto.createHash('sha256').update(given, 'utf8').digest(), b = crypto.createHash('sha256').update(want, 'utf8').digest();
+  return crypto.timingSafeEqual(a, b);
 }
 const fnResp = (code, obj) => ({ statusCode: code,
   headers: { 'Content-Type': 'application/json; charset=utf-8',
@@ -1025,11 +1108,12 @@ function buildDigest(events, status, nowISO, mode, diff) {
 }
 function safeJson(t) { try { return JSON.parse(t || '{}') || {}; } catch (e) { return {}; } }
 async function tgSend(text) {
-  const r = await fetch(`https://api.telegram.org/bot${ENV.TG_TOKEN}/sendMessage`, {
+  // v3.19: с пределом ожидания 15 с; адрес с токеном в текст ошибки не попадает (только имя сайта)
+  const r = await fetchT(`https://api.telegram.org/bot${ENV.TG_TOKEN}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: ENV.TG_CHAT, text, disable_web_page_preview: true })
-  });
-  const j = await r.json().catch(() => null);
+  }, 15000);
+  const j = jsonOf(r.text);
   if (!j || !j.ok) throw new Error('Telegram: ' + (j && j.description ? j.description : 'HTTP ' + r.status));
 }
 
@@ -1149,8 +1233,9 @@ async function bridgeCheck(body) {
     sameAsProgram: body && body.hash ? crypto.createHash('sha256').update(cfg.secret, 'utf8').digest('hex') === String(body.hash).toLowerCase() : null, ping: null };
   if (!cfg.bridge || !cfg.secret) { out.ping = { ok: false, error: 'не заданы BRIDGE_URL / BRIDGE_SECRET в переменных функции' }; return out; }
   try {
-    const r = await fetch(cfg.bridge, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ secret: cfg.secret, action: 'ping' }) });
-    let j = null; try { j = await r.json(); } catch (e) { j = null; }
+    // v3.19: проверка доставки — с пределом ожидания 20 с
+    const r = await fetchT(cfg.bridge, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ secret: cfg.secret, action: 'ping' }) }, 20000);
+    const j = jsonOf(r.text);
     out.ping = { http: r.status, ok: !!(j && j.ok), error: j && j.error ? String(j.error) : (j ? '' : 'ответ не JSON'), serverVer: j && j.ver ? j.ver : undefined };
   } catch (e) { out.ping = { ok: false, error: 'нет связи: ' + String((e && e.message) || e) }; }
   return out;
@@ -1174,7 +1259,7 @@ export async function handler(event, context) {
     const d = decodeFnEvent(event);
     if (d.kind === 'http' && d.method === 'OPTIONS') return fnResp(204, {});
     if (d.kind === 'http') {
-      if (!ENV.SECRET || d.secret !== ENV.SECRET) return fnResp(403, { ok: false, error: 'forbidden' });
+      if (!secretOk(d.secret)) return fnResp(403, d.secretInUrl ? { ok: false, error: 'forbidden', note: 'код в адресе не принимается (коллектор 3.19): программа передаёт его в теле запроса' } : { ok: false, error: 'forbidden' });
       if (d.action === 'status') {
         const iam = await iamToken(context);
         const raw = await s3get(STATUS_KEY, iam);
