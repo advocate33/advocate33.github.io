@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v192: аудит 14.10.2026 — пределы форм по адресу платформы, ответы в пределах функции, код не в журнал, напоминания до 4096 знаков
 //  v191: icalget — закрытая ссылка календаря Google или Apple: события окна дат для «Быстрых записей» программы (этап 6 плана по ЮрТопосу)
 //  v190: «Задать вопрос» — публичная страница ?ask=<страница> и приём вопросов без секрета; askpub/askget/askack для программы
 //  (план по ЮрТопосу 13.10.2026, этап 4)
@@ -99,26 +100,51 @@ function secretOk(given) {
   const a = crypto.createHash('sha256').update(given, 'utf8').digest(), b = crypto.createHash('sha256').update(s, 'utf8').digest();
   return crypto.timingSafeEqual(a, b);
 }
+// v192: секретный код (и имена файлов от него, если STORE_ID не задан) не попадает в журнал функции и в ответы без кода
+function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
+// v192: адрес клиента для пределов публичных форм — тот, что видит платформа. В X-Forwarded-For первые адреса может прислать сам клиент,
+// настоящий платформа дописывает последним; без заголовка — общий предел для всех «без адреса», а не отсутствие предела
+function clientIp(event) {
+  const rc = event && event.requestContext && event.requestContext.identity && event.requestContext.identity.sourceIp;
+  if (rc) return String(rc).slice(0, 64);
+  const h = (event && event.headers) || {}, parts = String(h['X-Forwarded-For'] || h['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean);
+  return (parts.length ? parts[parts.length - 1] : 'нет-адреса').slice(0, 64);
+}
+// v192: ответ в пределах функции (3 670 016 байт — раздел 0а правил): считается в байтах тела JSON
+const RESP_MAX = 3000000;
+const jsonBytes = x => Buffer.byteLength(JSON.stringify(x), 'utf8');
+function fitList(list, base) { const out = []; let n = jsonBytes(base || {}) + 32; for (const x of list || []) { const b = jsonBytes(x) + 1; if (n + b > RESP_MAX) break; out.push(x); n += b; } return { items: out, cut: (list || []).length - out.length }; }
+function fitReply(r) { return r && jsonBytes(r) > 3600000 ? { ok: false, error: 'too_big', note: 'снимок больше предела ответа функции — новая версия программы берёт его по ссылке (snapget); прежней программе — копия базы через файл' } : r; }
+// v192: Telegram — с пределом ожидания: медленный ответ не держит функцию и не превращает принятую заявку в «Нет связи» у клиента
+async function tgSend(text, ms) {
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), ms || 8000);
+  try { return await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }), signal: ctl.signal }); }
+  finally { clearTimeout(timer); }
+}
+// v192: вызов без HTTP — только похожий на сообщение таймера (у каждого сообщения — event_metadata; тип, если указан, — таймер)
+function timerEventOk(e) {
+  return !!e && Array.isArray(e.messages) && e.messages.length > 0 && e.messages.every(m => m && typeof m === 'object' && m.event_metadata && typeof m.event_metadata === 'object' && (!m.event_metadata.event_type || /TimerMessage$/.test(String(m.event_metadata.event_type))));
+}
 
 module.exports.handler = async function (event, context) {
   if (event && context) event._context = context; // v172: IAM-токен сервисного аккаунта
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, headers: JSON_HEADERS, body: '' };
-  if (!event.httpMethod && event.messages) { try { return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
+  if (!event.httpMethod && event.messages) { if (!timerEventOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
 
   const q0 = event.queryStringParameters || {};
   // v187: лента календаря для подписки (Google, Яндекс, телефон) — без секрета, по метке; только чтение готового файла
   if (q0.cal !== undefined) {
     try { return method === 'GET' || method === 'HEAD' ? await calServe(String(q0.cal), method === 'HEAD') : reply({ ok: false, error: 'method' }, 405); }
-    catch (err) { return { statusCode: 500, headers: CAL_TEXT, body: 'Ошибка: ' + (err && err.message || err) }; }
+    catch (err) { return { statusCode: 500, headers: CAL_TEXT, body: 'Ошибка: ' + scrub(err && err.message || err) }; }
   }
   if (q0.ask) { // v190: публичная страница «Задать вопрос» (без секрета)
     try { return method === 'GET' ? await askPage(q0) : reply({ ok: false, error: 'method' }, 405); }
-    catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + (err && err.message || err) }; }
+    catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + scrub(err && err.message || err) }; }
   }
   if (q0.book) { // v174: публичная страница записи (без секрета)
     try { return method === 'GET' ? await bookPage(q0) : reply({ ok: false, error: 'method' }, 405); }
-    catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + (err && err.message || err) }; }
+    catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + scrub(err && err.message || err) }; }
   }
   if (method === 'GET') {
     // v171: CRM забирает события GET-запросом с Bearer-токеном (или ?secret=… для разовой отладки)
@@ -127,12 +153,13 @@ module.exports.handler = async function (event, context) {
     if (secretOk(bearer) || secretOk(q.secret)) { // v178
       try {
         const st = await eventsLoad();
-        return reply(st.events); // массив — формат, который понимает crmMonRows
+        // v192: последние события, что помещаются в ответ функции (массив — формат, который понимает crmMonRows)
+        return reply(fitList(st.events.slice().reverse()).items.reverse());
       } catch (err) { return reply({ ok: false, error: String(err && err.message || err) }, 500); }
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 191,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 192,
       ready: readiness()
     });
   }
@@ -145,14 +172,14 @@ module.exports.handler = async function (event, context) {
     body = JSON.parse(raw);
   } catch (e) { return reply({ ok: false, error: 'bad_json' }); }
 
-  if (body && body.action === 'askreq') { try { return reply(await askRequest(body, event)); } catch (err) { return reply({ ok: false, error: String(err && err.message || err) }); } } // v190: вопрос с сайта, без секрета
-  if (body && body.action === 'bookreq') { try { return reply(await bookRequest(body, event)); } catch (err) { return reply({ ok: false, error: String(err && err.message || err) }); } } // v174: заявка клиента, без секрета
+  if (body && body.action === 'askreq') { try { return reply(await askRequest(body, event)); } catch (err) { return reply({ ok: false, error: scrub(err && err.message || err) }); } } // v190: вопрос с сайта, без секрета
+  if (body && body.action === 'bookreq') { try { return reply(await bookRequest(body, event)); } catch (err) { return reply({ ok: false, error: scrub(err && err.message || err) }); } } // v174: заявка клиента, без секрета
   // v178: без переменной SECRET сервер не работает вовсе — и говорит об этом словами
   if (!process.env.SECRET) return reply({ ok: false, error: 'сервер не настроен: не задана переменная SECRET функции' });
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 191, cal: true, ask: true, ical: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 192, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -163,11 +190,12 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'deltaget')   return reply(await deltaGet(body));   // v186: цепочка изменений с версии since
     if (body.action === 'corscheck')  return reply(await corsCheck());   // v181
     if (body.action === 'dbhistlist') return reply(await dbHistList()); // v178
-    if (body.action === 'dbhistget')  return reply(await dbHistGet(body.ver)); // v178
-    if (body.action === 'dbget')  return reply(await dbGet());
+    // v192: снимок сверх предела ответа функции — отказ словами (dbget, dbhistget)
+    if (body.action === 'dbhistget')  return reply(fitReply(await dbHistGet(body.ver))); // v178
+    if (body.action === 'dbget')  return reply(fitReply(await dbGet()));
     if (body.action === 'dbver')  { const v = await dbVer(); return reply(v.ok ? { ok: true, ver: v.ver } : v); } // v185: ETag — внутреннее
     if (body.action === 'eventsput')   return reply(await eventsPut(body.events, body.mode));   // v171
-    if (body.action === 'eventsget')   { const st = await eventsLoad(); return reply(st.corrupt ? { ok: false, error: 'events_corrupt', note: 'файл событий на сервере повреждён — следующая доставка коллектора сохранит его копию и начнёт новый' } : { ok: true, events: st.events }); }
+    if (body.action === 'eventsget')   { const st = await eventsLoad(); if (st.corrupt) return reply({ ok: false, error: 'events_corrupt', note: 'файл событий на сервере повреждён — следующая доставка коллектора сохранит его копию и начнёт новый' }); const f = fitList(st.events.slice().reverse(), { ok: true, cut: 0 }); return reply({ ok: true, events: f.items.reverse(), cut: f.cut }); }
     // v188: очистка — тем же путём, что доставка: под замком событий, с условной записью
     if (body.action === 'eventsclear') return reply(await eventsPut([], 'replace'));
     if (body.action === 'dict_upload')  return reply(await dictUpload(body));   // v172
@@ -325,7 +353,8 @@ async function calServe(token, head) {
   if (!process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) return { statusCode: 503, headers: CAL_TEXT, body: 'Хранилище сервера не настроено: нет переменных BUCKET / S3_KEY_ID / S3_SECRET у функции.' };
   const r = await s3Get('cal-' + storeId() + '.ics');
   if (r.status === 404) return { statusCode: 404, headers: CAL_TEXT, body: 'Лента ещё не опубликована: включите её в программе («Настройки» -> «Лента календаря») и нажмите «Опубликовать сейчас».' };
-  if (!r.ok) { const t = await r.text().catch(() => ''); return { statusCode: 502, headers: CAL_TEXT, body: 'Хранилище ответило ' + r.status + ': ' + t.slice(0, 160) }; }
+  // v192: при сбое — код ошибки хранилища без его текста (в тексте имя файла, а в нём код сервера)
+  if (!r.ok) { const t = await r.text().catch(() => ''), code = (t.match(/<Code>([A-Za-z]{1,60})<\/Code>/) || [])[1] || ''; return { statusCode: 502, headers: CAL_TEXT, body: 'Хранилище ответило ' + r.status + (code ? ' (' + code + ')' : '') + '. Повторите позже.' }; }
   const txt = await r.text();
   return { statusCode: 200, headers: { 'Content-Type': 'text/calendar; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store', 'Content-Disposition': 'inline; filename="crm-calendar.ics"' }, body: head ? '' : txt };
 }
@@ -573,7 +602,8 @@ const EV_FIELDS = ['externalId', 'title', 'date', 'eventType', 'courtNo', 'caseU
 function evNormalize(e) { // только известные поля, строки, разумной длины
   if (!e || typeof e !== 'object') return null;
   const out = {};
-  for (const f of EV_FIELDS) { const v = e[f]; if (v !== undefined && v !== null) out[f] = String(v).slice(0, f === 'raw' ? 4000 : 400); }
+  // v192: карточка суда (JSON в raw) — до 16 000 знаков: обрезанный JSON не применялся
+  for (const f of EV_FIELDS) { const v = e[f]; if (v !== undefined && v !== null) { const t = String(v); out[f] = t.slice(0, f === 'raw' ? (/^\s*\{/.test(t) ? 16000 : 4000) : 400); } }
   if (!out.externalId || !out.date) return null;
   out.eventType = out.eventType || 'notice';
   out.source = out.source || 'Коллектор судов';
@@ -1116,12 +1146,19 @@ async function remindTick() { // сегодня и завтра — по одн�
   const over = st.items.filter(x => /^t:/.test(x.id) && x.date < today).length, ovKey = 'ov:' + today, ovNeed = over > 0 && st.sent[ovKey] !== today;
   if (!due.length && !ovNeed) return { ok: true, sent: 0 };
   const line = x => `${x.date === today ? '🔴 сегодня' : '🟠 завтра'}${x.time ? ' ' + x.time : ''} — ${x.title}${x.text ? ' (' + x.text + ')' : ''}`;
-  const text = '⚖️ CRM Адвоката · напоминание' + (due.length ? '\n' + due.slice(0, 25).map(line).join('\n') + (due.length > 25 ? `\n… и ещё ${due.length - 25}` : '') : '')
-    + (ovNeed ? `\n⚠️ Просрочено задач: ${over >= 200 ? 'не меньше 200' : over}` : '');
-  const r = await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }) });
+  // v192: сообщение Telegram — не длиннее 4096 знаков (длиннее Telegram отклоняет, и не уходило ни одно напоминание); не поместившиеся — счётом
+  const tail = ovNeed ? `\n⚠️ Просрочено задач: ${over >= 200 ? 'не меньше 200' : over}` : '';
+  let text = '⚖️ CRM Адвоката · напоминание', shown = 0;
+  for (const x of due.slice(0, 25)) { const l = '\n' + line(x); if ((text + l + tail).length > 3900) break; text += l; shown++; }
+  if (due.length > shown) text += `\n… и ещё ${due.length - shown}`;
+  text += tail;
+  let r; try { r = await tgSend(text, 10000); } catch (e) { return { ok: false, error: 'telegram: ' + String(e && e.message || e).slice(0, 80) }; }
   if (!r.ok) return { ok: false, error: 'telegram ' + r.status };
-  due.forEach(x => { st.sent[x.id] = x.date; }); if (ovNeed) st.sent[ovKey] = today;
-  await s3Put(remindKey(), JSON.stringify({ items: st.items, sent: st.sent, updatedAt: st.updatedAt || Date.now() }), 'application/json');
+  // v192: отметки «отправлено» — в список, перечитанный после отправки: список, переданный программой за это время, не затирается
+  const cur = await remindLoad(); const have = new Set(cur.items.map(i => i.id));
+  due.forEach(x => { if (have.has(x.id)) cur.sent[x.id] = x.date; }); if (ovNeed) cur.sent[ovKey] = today;
+  const w = await s3Put(remindKey(), JSON.stringify({ items: cur.items, sent: cur.sent, updatedAt: cur.updatedAt || Date.now() }), 'application/json');
+  if (!w.ok) console.log('remind: отметки об отправке не записаны (s3 ' + w.status + ') — напоминание может прийти повторно');
   return { ok: true, sent: due.length, overdue: ovNeed ? over : 0 };
 }
 
@@ -1170,6 +1207,8 @@ async function blobDel(body) {
 // ════════════════════════════════════════════════════════════
 //  v174: ОНЛАЙН-ЗАПИСЬ НА ПРИЁМ
 // ════════════════════════════════════════════════════════════
+// v192: заявок со страницы в сутки
+const BOOK_PAGE_DAY = 40;
 const PID_RE = /^[a-z0-9]{6,32}$/i;
 const bookKey = pid => 'book-' + pid + '.json';
 const bookingsKey = () => 'bookings-' + storeId() + '.json';
@@ -1198,7 +1237,7 @@ async function bookingsLoad() {
 }
 // записать; false — файл успел измениться (повторить с перечитанным)
 async function bookingsSave(st) {
-  if (st.corrupt) { const saved = bookingsKey().replace(/\.json$/, '.corrupt-' + Date.now() + '.json'); const c = await s3Put(saved, st.text || '', 'application/json; charset=utf-8'); if (!c.ok) throw new Error('файл заявок повреждён, а копию сохранить не удалось (s3 ' + c.status + ')'); console.log('bookings corrupt saved: ' + saved); }
+  if (st.corrupt) { const saved = bookingsKey().replace(/\.json$/, '.corrupt-' + Date.now() + '.json'); const c = await s3Put(saved, st.text || '', 'application/json; charset=utf-8'); if (!c.ok) throw new Error('файл заявок повреждён, а копию сохранить не удалось (s3 ' + c.status + ')'); console.log('bookings: повреждённый файл заявок сохранён копией'); }
   const body = JSON.stringify({ items: st.items }), CT = 'application/json; charset=utf-8';
   const cond = st.exists ? (st.etag ? { 'If-Match': st.etag } : null) : { 'If-None-Match': '*' };
   let r = cond ? await s3PutIf(bookingsKey(), body, CT, cond) : await s3Put(bookingsKey(), body, CT);
@@ -1239,7 +1278,10 @@ async function bookPublish(body) {
 async function bookGet(body) {
   needStorage(); const st = await bookingsLoad(); const since = Number(body.since) || 0;
   if (st.corrupt) return { ok: false, error: 'bookings_corrupt', note: 'файл заявок на сервере повреждён — при следующей заявке он будет сохранён копией и начат заново' };
-  return { ok: true, items: st.items.filter(b => (b.updatedAt || b.createdAt || 0) > since), total: st.items.length };
+  // v192: от ранних изменений к поздним и в пределах ответа — программа продолжит с последней полученной (more: есть ещё)
+  const list = st.items.filter(b => (b.updatedAt || b.createdAt || 0) > since).sort((a, b) => (a.updatedAt || a.createdAt || 0) - (b.updatedAt || b.createdAt || 0));
+  const f = fitList(list, { ok: true, total: st.items.length, more: true });
+  return { ok: true, items: f.items, total: st.items.length, more: f.cut > 0 };
 }
 async function bookSet(body) {
   needStorage();
@@ -1263,16 +1305,26 @@ async function bookRequest(body, event) {
   if (!(body.consent === true || body.consent === 'on' || body.consent === '1')) return { ok: false, error: 'Отметьте согласие на обработку персональных данных — без него заявку принять нельзя' };
   if (String(body.consentVer || '') !== cver) return { ok: false, error: 'Текст согласия на странице обновился — откройте страницу заново и отметьте согласие ещё раз' };
   const day = pub.days.find(d => d.date === date); if (!day || !day.slots.includes(time)) return { ok: false, error: 'Это время недоступно — выберите другое' };
-  const ip = ((event && event.headers && (event.headers['X-Forwarded-For'] || event.headers['x-forwarded-for'])) || '').split(',')[0].trim();
-  const id = 'З' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex'), code = String(1000 + crypto.randomInt(9000));
-  const item = { id, code, publicId: pid, date, time, name, phone, topic, comment, status: 'new', createdAt: Date.now(), updatedAt: Date.now(), ip, consentAt: Date.now(), consentVer: cver };
+  // v192: адрес по платформе, а не первый адрес X-Forwarded-For (его присылает клиент)
+  const ip = clientIp(event);
+  // v192: прошедшие день и время не принимаются (окна — по Москве; запас 2 часа — для адвокатов западнее Москвы)
+  const slotAt = Date.parse(date + 'T' + time + ':00+03:00');
+  if (!Number.isFinite(slotAt) || slotAt < Date.now() - 2 * 3600e3) return { ok: false, error: 'Это время уже прошло — выберите другое' };
+  const id = 'З' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
+  const item = { id, code: '', publicId: pid, date, time, name, phone, topic, comment, status: 'new', createdAt: Date.now(), updatedAt: Date.now(), ip, consentAt: Date.now(), consentVer: cver };
   // v185: проверка «время свободно» и запись — по одному и тому же прочитанному файлу; файл изменился — перечитать и проверить снова
   const res = await bookingsTx(st => {
     if (bookTaken(st.items, date, time)) return { ok: false, error: 'Это время уже занято — выберите другое' };
     const recent = st.items.filter(b => b.ip && b.ip === ip && Date.now() - (b.createdAt || 0) < 3600e3).length; if (recent >= 5) return { ok: false, error: 'Слишком много заявок — попробуйте позже' };
-    st.items.push(item); return { save: true, reply: { ok: true, id, code, date, time, status: 'new' } };
+    // v192: не больше BOOK_PAGE_DAY заявок со страницы в сутки — иначе с разных адресов можно занять все окна и засыпать Telegram
+    if (st.items.filter(b => b.publicId === pid && Date.now() - (b.createdAt || 0) < 864e5).length >= BOOK_PAGE_DAY) return { ok: false, error: 'Сейчас страница не принимает заявки' + (S.phone ? ' — позвоните: ' + S.phone : ' — попробуйте завтра') };
+    // v192: заявки, день которых прошёл больше 400 дней назад, удаляются — файл заявок не растёт без предела
+    const old = new Date(Date.now() + 3 * 3600e3 - 400 * 864e5).toISOString().slice(0, 10); st.items = st.items.filter(b => !(b && b.date && b.date < old));
+    // v192: код заявки — 6 цифр и не повторяется на странице (по 4-значному коду можно было перебрать заявки, и коды совпадали)
+    const used = new Set(st.items.filter(b => b && b.publicId === pid).map(b => String(b.code))); do { item.code = String(100000 + crypto.randomInt(900000)); } while (used.has(item.code));
+    st.items.push(item); return { save: true, reply: { ok: true, id, code: item.code, date, time, status: 'new' } };
   });
-  if (res && res.ok) await bookNotify(pub, item).catch(() => {});
+  if (res && res.ok) await bookNotify(pub, item).catch(e => console.log('book notify: ' + scrub(e && e.message || e)));
   return res;
 }
 async function bookNotify(pub, b) { // Telegram — если в переменных функции моста заданы TG_TOKEN и TG_CHAT
@@ -1281,7 +1333,8 @@ async function bookNotify(pub, b) { // Telegram — если в переменн
   const full = !!(pub && pub.settings && pub.settings.notifyFull);
   const text = full ? `📅 Новая запись на приём\n${ruDate(b.date)} ${b.time} — ${b.name}\n📞 ${b.phone}${b.topic ? '\n' + b.topic : ''}${b.comment ? '\n' + b.comment.slice(0, 200) : ''}\nКод ${b.code}. Подтвердите в CRM.`
     : `📅 Новая запись на приём\n${ruDate(b.date)} ${b.time}\nКод ${b.code}. Имя, телефон и вопрос — в CRM; там же подтвердите запись.`;
-  await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }) });
+  // v192: с пределом ожидания
+  await tgSend(text, 8000);
 }
 // публичная страница: календарь окон + форма; с параметром code — статус заявки
 async function bookPage(q) {
@@ -1301,8 +1354,9 @@ async function bookPage(q) {
   if (q.code) { const st = await bookingsLoad(); const b = st.items.find(x => x.publicId === pid && x.code === String(q.code)); const label = { new: 'ожидает подтверждения', confirmed: 'подтверждена ✅', declined: 'отклонена — выберите другое время', cancelled: 'отменена', done: 'приём состоялся' };
     return html(bookShell(S.title, b ? `<p><b>Заявка ${esc(b.code)}</b>: ${ruDate(b.date)} в ${esc(b.time)} — ${label[b.status] || b.status}.${b.lawyerNote ? '<br>' + esc(b.lawyerNote) : ''}</p>${S.phone ? `<p>Телефон: <a href="tel:${esc(S.phone)}">${esc(S.phone)}</a></p>` : ''}` : '<p>Заявка с таким кодом не найдена.</p>')); }
   const st = await bookingsLoad();
-  const today = new Date().toISOString().slice(0, 10);
-  const days = pub.days.filter(d => d.date >= today).map(d => ({ date: d.date, slots: d.slots.filter(t => !bookTaken(st.items, d.date, t)) })).filter(d => d.slots.length);
+  // v192: «сегодня» — по Москве (было по UTC: с 00:00 до 03:00 показывались вчерашние окна); прошедшие сегодняшние окна не показываются
+  const today = new Date(Date.now() + 3 * 3600e3).toISOString().slice(0, 10), passed = (d, t) => Date.parse(d + 'T' + t + ':00+03:00') < Date.now();
+  const days = pub.days.filter(d => d.date >= today).map(d => ({ date: d.date, slots: d.slots.filter(t => !bookTaken(st.items, d.date, t) && !passed(d.date, t)) })).filter(d => d.slots.length);
   const daysHtml = days.length ? days.map(d => { const dt = new Date(d.date + 'T00:00:00'); return `<div class="day"><div class="dh">${ruDate(d.date)} · ${WD[dt.getDay()]}</div><div class="slots">${d.slots.map(t => `<button type="button" class="slot" data-d="${d.date}" data-t="${t}">${t}</button>`).join('')}</div></div>`; }).join('') : '<p>Свободных окон сейчас нет — позвоните или напишите.</p>';
   const cver = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(bookConsentOf(S));
   const topics = Array.isArray(S.topics) && S.topics.length ? `<label>Вопрос<select name="topic"><option value="">— выберите —</option>${S.topics.map(t => `<option>${esc(t)}</option>`).join('')}</select></label>` : `<label>Вопрос (кратко)<input name="topic" maxlength="120"></label>`;
@@ -1359,7 +1413,7 @@ function asksPrune(items, now) {
   return (items || []).filter(x => { const c = Number(x && x.createdAt) || 0, tk = Number(x && x.takenAt) || 0; return !!x && !(tk && now - tk > ASK_KEEP_TAKEN) && !(now - c > ASK_KEEP_ALL); });
 }
 async function asksSave(st) {
-  if (st.corrupt) { const saved = asksKey().replace(/\.json$/, '.corrupt-' + Date.now() + '.json'); const c = await s3Put(saved, st.text || '', 'application/json; charset=utf-8'); if (!c.ok) throw new Error('файл вопросов повреждён, а копию сохранить не удалось (s3 ' + c.status + ')'); console.log('asks corrupt saved: ' + saved); }
+  if (st.corrupt) { const saved = asksKey().replace(/\.json$/, '.corrupt-' + Date.now() + '.json'); const c = await s3Put(saved, st.text || '', 'application/json; charset=utf-8'); if (!c.ok) throw new Error('файл вопросов повреждён, а копию сохранить не удалось (s3 ' + c.status + ')'); console.log('asks: повреждённый файл вопросов сохранён копией'); }
   const body = JSON.stringify({ items: asksPrune(st.items, Date.now()) }), CT = 'application/json; charset=utf-8';
   const cond = st.exists ? (st.etag ? { 'If-Match': st.etag } : null) : { 'If-None-Match': '*' };
   let r = cond ? await s3PutIf(asksKey(), body, CT, cond) : await s3Put(asksKey(), body, CT);
@@ -1398,7 +1452,11 @@ async function askPublish(body) {
 async function askGet() {
   needStorage(); const st = await asksLoad();
   if (st.corrupt) return { ok: false, error: 'asks_corrupt', note: 'файл вопросов на сервере повреждён — при следующем вопросе он будет сохранён копией и начат заново' };
-  return { ok: true, now: Date.now(), items: asksPrune(st.items, Date.now()).map(x => { const o = Object.assign({}, x); delete o.ip; delete o.nonce; return o; }) };
+  const all = asksPrune(st.items, Date.now()).map(x => { const o = Object.assign({}, x); delete o.ip; delete o.nonce; return o; });
+  // v192: в пределах ответа функции — сначала непринятые, затем принятые от новых к старым; не поместившиеся — счётом
+  const order = all.filter(x => !x.takenAt).concat(all.filter(x => x.takenAt).sort((a, b) => (b.takenAt || 0) - (a.takenAt || 0)));
+  const f = fitList(order, { ok: true, now: Date.now(), cut: 0 });
+  return { ok: true, now: Date.now(), items: f.items, cut: f.cut };
 }
 async function askAck(body) {
   needStorage();
@@ -1428,7 +1486,8 @@ async function askRequest(body, event) {
   const cver = CONSENT_VER_RE.test(S.consentVer || '') ? S.consentVer : consentVer(askConsentOf(S));
   if (!(body.consent === true || body.consent === 'on' || body.consent === '1')) return { ok: false, error: 'Отметьте согласие на обработку персональных данных — без него вопрос принять нельзя' };
   if (String(body.consentVer || '') !== cver) return { ok: false, error: 'Текст согласия на странице обновился — откройте страницу заново и отметьте согласие ещё раз' };
-  const ip = ((event && event.headers && (event.headers['X-Forwarded-For'] || event.headers['x-forwarded-for'])) || '').split(',')[0].trim();
+  // v192: адрес по платформе
+  const ip = clientIp(event);
   const nonce = /^[a-z0-9]{8,40}$/i.test(String(body.nonce || '')) ? String(body.nonce) : '';
   const now = Date.now(), id = 'q' + now.toString(36) + crypto.randomBytes(3).toString('hex'), code = String(1000 + crypto.randomInt(9000));
   const item = { id, code, publicId: pid, name, phone, tg, method, question, createdAt: now, updatedAt: now, ip, nonce, consentAt: now, consentVer: cver };
