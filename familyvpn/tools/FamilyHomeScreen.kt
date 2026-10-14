@@ -84,7 +84,7 @@ fun FamilyHomeScreen(
     val running by TunnelManager.running.collectAsStateWithLifecycle()
     val workers by TunnelManager.activeWorkers.collectAsStateWithLifecycle()
     val transition by TunnelManager.transition.collectAsStateWithLifecycle()
-    val activeProfile by settingsStore.activeProfile.collectAsStateWithLifecycle()
+    val activeProfile by settingsStore.activeProfile.collectAsStateWithLifecycle(initialValue = 0)
     val trustedWaiting by TrustedWifiManager.state.collectAsStateWithLifecycle()
     val profile by settingsStore.activeTunnelProfileContentUiSnapshot.collectAsStateWithLifecycle()
     val updateResult by FamilyUpdateControl.result.collectAsStateWithLifecycle()
