@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="14.10.2026 16:46 · c6eaee0">
+<meta name="build" content="14.10.2026 11:42 · eeaf23a+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2930,20 +2930,25 @@ function nextActRules(c, act) {
 // ── применить к делу при сохранении (замена caseActDeadlinesApply для новой версии) ──
 // Срок с тем же autoKey не дублируется; исполненный не трогается; подтверждённый — только если изменились данные акта и дата
 // по ним другая (правило пользователя 30.09.2026: появилась дата мотивированного акта — пересчёт, подтверждение снимается);
-// при появлении акта следующей инстанции лист и расходы от предыдущего помечаются заменёнными.
+// при появлении акта следующей инстанции лист и расходы от предыдущего помечаются заменёнными. Аудит 14.10.2026 (вечер, A3; урок 151):
+// автосрок, правило которого по нынешним данным дела больше не действует (появилась дата мотивированного решения — заявление о его
+// составлении не нужно; сменился вид дела или порядок производства), не остаётся активным молча: подтверждение снимается, пометка
+// ruleGone и заметка, сообщение при сохранении, бейдж в «Задачах и сроках»; исполненным не отмечается (новый документ не доказывает,
+// что прежнее действие совершено) и не удаляется — решает пользователь; правило вернулось — тот же срок без дубля, пометка снята.
+const NX_RULE_GONE_RE = /^Правило больше не применяется:.*?— снимите срок с контроля или удалите его\.\s*/;
 function nextActDeadlinesApply(obj, prev) {
   const msgs = [], rebased = [];
   obj.deadlines = Array.isArray(obj.deadlines) ? obj.deadlines : [];
   const ni = nextActInputs(obj), pi = prev ? nextActInputs(prev) : null;
   const supersede = { appeal: ['act:decision:writ', 'act:decision:costs'], cass: ['act:appeal:writ', 'act:appeal:costs'] };
-  const lost = [];
+  const lost = [], ruleLost = [];
   for (const act of ['decision', 'appeal', 'cass']) {
     const had = !!(pi && nxHasBase(pi, act));
     if (!nxHasBase(ni, act)) {
       // аудит 14.10.2026 (A1): дата акта была и убрана — зависимые автосроки не остаются подтверждёнными молча: подтверждение снимается,
       // дата и история остаются, в заметке — «основание удалено»; исполненные не трогаются; сами сроки не удаляются (решение за пользователем)
       if (had) obj.deadlines.forEach(dl => {
-        if (!dl || !dl.autoKey || dl.autoKey.indexOf('act:' + act + ':') !== 0 || dl.done || dl.baseGone) return;
+        if (!dl || !dl.autoKey || dl.autoKey.indexOf('act:' + act + ':') !== 0 || dl.done || dl.baseGone || dl.ruleGone) return;
         dl.baseGone = 1; dl.confirmedAt = ''; dl.confirmedDate = '';
         dl.note = ('Основание удалено: ' + (dl.baseEv || 'дата акта') + ' из дела убрана — проверьте срок или удалите его. ' + (dl.note || '')).trim();
         lost.push(dl.title + (dl.date ? ' (' + fmtDate(dl.date) + ')' : ''));
@@ -2955,6 +2960,15 @@ function nextActDeadlinesApply(obj, prev) {
     (supersede[act] || []).forEach(k => obj.deadlines.forEach(dl => {
       if (dl && dl.autoKey === k && !dl.done && !dl.confirmedAt) { dl.done = true; dl.note = ((dl.note || '') + ' · заменён сроком от акта следующей инстанции').trim().replace(/^· /, ''); }
     }));
+    // A3 (урок 151): автосроки этого акта, которых по нынешним данным дела правила больше не дают, — помечаются, не удаляются и не исполняются
+    const keys = new Set(list.map(n => n.autoKey));
+    const why = pi && pi.code !== ni.code ? 'сменился вид дела' : act === 'decision' && pi && !pi.dec.full && ni.dec.full ? 'мотивированное решение изготовлено' : 'изменились порядок производства, суд или данные акта';
+    obj.deadlines.forEach(dl => {
+      if (!dl || !dl.autoKey || dl.autoKey.indexOf('act:' + act + ':') !== 0 || keys.has(dl.autoKey) || dl.done || dl.ruleGone) return;
+      dl.ruleGone = 1; dl.confirmedAt = ''; dl.confirmedDate = '';
+      dl.note = ('Правило больше не применяется: ' + why + ', по нынешним данным дела этот срок не возникает — снимите срок с контроля или удалите его. ' + (dl.note || '')).trim();
+      ruleLost.push(dl.title + (dl.date ? ' (' + fmtDate(dl.date) + ')' : ''));
+    });
     const made = [];
     for (const n of list) {
       const ex = obj.deadlines.find(dl => dl && dl.autoKey === n.autoKey);
@@ -2962,6 +2976,8 @@ function nextActDeadlinesApply(obj, prev) {
         if (ex.done) { msgs.push(`«${ex.title}» оставлен без изменений (исполнен)`); continue; }
         // основание вернулось (A1): пометка «основание удалено» снимается, срок считается заново тем же объектом — дубля нет
         if (ex.baseGone) { delete ex.baseGone; ex.note = String(ex.note || '').replace(/^Основание удалено:.*?— проверьте срок или удалите его\.\s*/, ''); }
+        // правило снова применяется (A3): пометка и заметка снимаются, срок пересчитывается тем же объектом
+        if (ex.ruleGone) { delete ex.ruleGone; ex.note = String(ex.note || '').replace(NX_RULE_GONE_RE, ''); }
         if (ex.confirmedAt) {
           if (!had || ex.date === n.date) { msgs.push(`«${ex.title}» оставлен без изменений (подтверждён)`); continue; }
           ex.confirmedAt = ''; ex.confirmedDate = '';
@@ -2982,6 +2998,7 @@ function nextActDeadlinesApply(obj, prev) {
   obj.deadlines.sort((a, b) => ((a && a.date) || '').localeCompare((b && b.date) || ''));
   if (rebased.length) msgs.push('Подтверждение снято, срок пересчитан от мотивированного акта: ' + rebased.join(', '));
   if (lost.length) msgs.push('Основание срока удалено из дела — проверьте сроки или удалите их: ' + lost.join(', '));
+  if (ruleLost.length) msgs.push('Срок больше не следует из данных дела — снимите его с контроля или удалите: ' + ruleLost.join(', '));
   return msgs;
 }
 
@@ -9663,22 +9680,41 @@ function calImpItemText(e) { return [e.title, calImpWhen(e.date, e.time) || '', 
 // наблюдения передаёт основному (аудит 14.10.2026, A2). Копия по дню, часу и названию из другого источника (14.10.2026, предложение 1): сама
 // становится alias, только когда и запись программы совпала точно (calImpMatch «same» = запись основного); иначе — в «Неразобранные» с пометкой
 // «похоже на разобранное из другого календаря» (cal.same) и кнопкой «Это то же событие» (calImpSameAs). so — последнее наблюдение каждого
-// источника {d, t, at} (14.10.2026, предложение 2; at — когда источник изменил показание): источник, который повторяет своё прежнее показание,
-// пока другой позже сообщил нынешнее, «ещё не обновился» (n.stale) — строка «перенесено/вернули» не чередуется. n.cancelled — отмена уже взятого
+// источника (14.10.2026, предложение 2; аудит 14.10.2026 вечером, A1–A2, урок 151): {d, t, tA, cx, cA, s, sA, p, pA, gone, gA, at} — показание
+// каждого поля отдельно и когда источник его изменил (tA — дата и время, cA — отмена, sA — название, pA — место; at — последнее изменение
+// любого поля; записи до урока 151 — только at, оно считается временем всех полей). Источник, который повторяет своё прежнее показание поля,
+// пока другой позже него сообщил то, что знает программа, по этому полю «ещё не обновился» (n.stale): строки «перенесено/вернули» и
+// «изменено» не чередуются между источниками; устаревшее время не мешает заметить новое название или место. gone — источник, который
+// событие видел, при полном чтении окна его не показывает: «удалено» объявляется, когда его не показывает ни один источник с наблюдением;
+// пока другой показывает — устойчивая строка «нет в одном из календарей» (n.absent, kind absent; у неразобранной записи — cal.absent) без
+// чередования «удалено → вернулось». Прежний источник устройства (другая ссылка, другой календарь телефона) из наблюдений убирается при
+// смене (calImpRetireSrc) — иначе он блокировал бы «удалено» навсегда. n.cancelled — отмена уже взятого
 // события (это новость); n.cxSkip — отменённые события, которые не брались. Перенос, изменение, отмена считаются, только когда пользователь их
 // увидит (строка на «Сегодня» или пометка у записи): иначе фоновая проверка сообщала бы о том, чего на экране нет (урок 143).
 function calImpPlan(events, ctx) {
   const seen = JSON.parse(JSON.stringify(ctx.seen || {})), inbox = ctx.inbox || [], d = ctx.data || {}, cases = d.cases || [], src = ctx.src || '', at = ctx.now || Date.now();
-  const n = { found: 0, own: 0, rec: 0, past: 0, exists: 0, maybe: 0, same: 0, dup: 0, filtered: 0, known: 0, more: 0, added: 0, moved: 0, changed: 0, gone: 0, cancelled: 0, cxSkip: 0, back: 0, stale: 0, tzUnknown: 0 };
-  // наблюдение источника запоминается, только когда его показание изменилось — повторное чтение того же учёт не меняет (урок 138)
+  const n = { found: 0, own: 0, rec: 0, past: 0, exists: 0, maybe: 0, same: 0, dup: 0, filtered: 0, known: 0, more: 0, added: 0, moved: 0, changed: 0, gone: 0, absent: 0, cancelled: 0, cxSkip: 0, back: 0, stale: 0, tzUnknown: 0 };
+  // наблюдение источника запоминается, только когда его показание изменилось — повторное чтение того же учёт не меняет (урок 138); у каждого
+  // поля — своё время изменения (урок 151: одно время на все поля делало старым и то поле, которое источник только что изменил)
   const cxOf = e => (e.cancelled ? 1 : 0);
-  const observe = (s, e) => { if (!src || src === 'f') return; const o = s.so && s.so[src]; if (o && o.d === e.date && (o.t || '') === e.time && (o.cx || 0) === cxOf(e)) return; s.so = Object.assign({}, s.so, { [src]: { d: e.date, t: e.time, cx: cxOf(e), at } }); };
-  // показание источника принято как перенос или возврат — время наблюдения обновляется и при том же показании: с этого момента именно этот
-  // источник сообщил то, что знает программа (отмену и её снятие observe видит сам — cx входит в показание)
-  const touch = (s, e) => { if (!src || src === 'f') return; s.so = Object.assign({}, s.so, { [src]: { d: e.date, t: e.time, cx: cxOf(e), at } }); };
-  // источник повторяет своё прежнее показание, а другой источник позже него сообщил то, что известно программе, — этот источник ещё не
-  // обновился (предложение 2 по аудиту 14.10.2026): f — «показание другого источника совпадает с тем, что знает программа»
-  const stale = (s, f) => { const mine = s.so && s.so[src]; return !!mine && Object.keys(s.so).some(o => o !== src && s.so[o].at > mine.at && f(s.so[o])); };
+  const observe = (s, e) => {
+    if (!src || src === 'f') return;
+    const o = (s.so && s.so[src]) || {}, nw = Object.assign({}, o), t1 = e.title.slice(0, 120), p1 = e.place.slice(0, 120); let ch = false;
+    if (o.d !== e.date || (o.t || '') !== e.time) { nw.d = e.date; nw.t = e.time; nw.tA = at; ch = true; }
+    if ((o.cx || 0) !== cxOf(e)) { nw.cx = cxOf(e); nw.cA = at; ch = true; }
+    if (!('s' in o) || calImpNorm(o.s) !== calImpNorm(t1)) { nw.s = t1; nw.sA = at; ch = true; }
+    if (!('p' in o) || calImpNorm(o.p) !== calImpNorm(p1)) { nw.p = p1; nw.pA = at; ch = true; }
+    if (o.gone) { delete nw.gone; delete nw.gA; ch = true; }
+    if (ch) { nw.at = at; s.so = Object.assign({}, s.so, { [src]: nw }); }
+  };
+  // показание источника принято как перенос или возврат — время наблюдения даты и времени обновляется и при том же показании: с этого момента
+  // именно этот источник сообщил то, что знает программа (отмену и её снятие observe видит сам — cx входит в показание)
+  const touch = (s, e) => { if (!src || src === 'f') return; const o = (s.so && s.so[src]) || {}; s.so = Object.assign({}, s.so, { [src]: Object.assign({}, o, { d: e.date, t: e.time, tA: at, at }) }); };
+  // время изменения поля fA у наблюдения o (записи до урока 151 — общее at)
+  const atOf = (o, fA) => (o[fA] != null ? o[fA] : o.at || 0);
+  // источник повторяет своё прежнее показание поля, а другой источник позже него сообщил то, что известно программе, — этот источник по
+  // этому полю ещё не обновился (предложение 2 по аудиту 14.10.2026): f — «показание другого источника совпадает с тем, что знает программа»
+  const stale = (s, fA, f) => { const mine = s.so && s.so[src]; return !!mine && Object.keys(s.so).some(o => o !== src && atOf(s.so[o], fA) > atOf(mine, fA) && f(s.so[o])); };
   const add = [], upd = {}, notes = [], drop = [], rows = [], present = new Set(), room = Math.max(0, Math.min(ctx.max == null ? CALIMP.max : ctx.max, 200 - inbox.length));
   const byKey = {}; inbox.forEach(x => { if (x && x.cal && x.cal.key) byKey[x.cal.key] = x; });
   const keyOf = e => (/^dev:/.test(e.uid) ? e.uid : 'i:' + e.uid);
@@ -9717,38 +9753,55 @@ function calImpPlan(events, ctx) {
         if (src && src !== 'f' && !calImpSrcsOf(prim).includes(src)) prim.srcs = calImpSrcsOf(prim).concat(src).slice(-4);
         key = s.of; s = prim;
       }
-      // вернулось в календарь: учёт восстанавливается, строка «удалено» у разобранного снимается, пометка у неразобранного — тоже
-      if (s.st === 'gone') { s.st = s.prev || 'skip'; delete s.prev; if (s.st === 'done') drop.push(key); else if (s.st === 'inbox') patch(key, { gone: 0 }); }
+      // вернулось в календарь: учёт восстанавливается, строка «удалено» у разобранного снимается, пометка у неразобранного — тоже.
+      // Урок 151: источник, который событие не показывал, снова его показывает — его отметка снимается; если другой источник его всё ещё
+      // не показывает — остаётся «нет в одном из календарей» (устойчиво, без чередования «удалено → вернулось»)
+      const back = s.st === 'gone', mine0 = s.so && s.so[src], wasAbs = !!(mine0 && mine0.gone);
+      if (back) { s.st = s.prev || 'skip'; delete s.prev; }
+      if (wasAbs) { const o = Object.assign({}, mine0); delete o.gone; delete o.gA; s.so = Object.assign({}, s.so, { [src]: o }); }
+      if (back || wasAbs) {
+        const othersGone = Object.keys(s.so || {}).some(o => o !== src && s.so[o].gone);
+        if (othersGone) { if (back) { if (s.st === 'done') { note(key, s, 'absent'); n.absent++; } else if (s.st === 'inbox' && patch(key, { gone: 0, absent: 1 })) n.absent++; } }
+        else if (s.st === 'done') { if (s.od && !back) note(key, s, 'moved', { d: s.d, t: s.t }); else drop.push(key); }
+        else if (s.st === 'inbox') patch(key, { gone: 0, absent: 0 });
+      }
       // отмена или её снятие, о которых этот источник ещё не знает (другой позже сообщил то, что знает программа), — не новость
       const mine = s.so && s.so[src];
-      if (mine && (mine.cx || 0) === cxOf(e) && cxOf(e) !== (s.cx ? 1 : 0) && stale(s, o => (o.cx || 0) === (s.cx ? 1 : 0))) { n.stale++; continue; }
+      if (mine && (mine.cx || 0) === cxOf(e) && cxOf(e) !== (s.cx ? 1 : 0) && stale(s, 'cA', o => (o.cx || 0) === (s.cx ? 1 : 0))) { n.stale++; continue; }
       if (e.cancelled) {
         if (!s.cx && (s.st === 'done' || s.st === 'inbox')) { s.cx = 1; if (s.st === 'done') { note(key, s, 'cancelled'); n.cancelled++; } else if (patch(key, { cancelled: 1 })) n.cancelled++; }
         observe(s, e); continue;
       }
       if (s.cx) { delete s.cx; if (s.st === 'inbox') patch(key, { cancelled: 0 }); else if (s.st === 'done') drop.push(key); }
       // источник повторяет своё прежнее время, а другой источник позже него сообщил то время, что известно программе, — этот источник ещё не
-      // обновился: не перенос и не «вернули», учёт не меняется (предложение 2 по аудиту 14.10.2026)
+      // обновился: не перенос и не «вернули», учёт времени не меняется (предложение 2 по аудиту 14.10.2026); название и место при этом
+      // сравниваются как обычно (урок 151: устаревшее время не должно прятать новый адрес)
+      let news = false, staleT = false;
       if ((s.d !== e.date || s.t !== e.time) && mine && mine.d === e.date && (mine.t || '') === e.time
-        && stale(s, o => o.d === s.d && (o.t || '') === (s.t || ''))) { n.stale++; continue; }
-      let news = false;
-      if (s.d !== e.date || s.t !== e.time) {
+        && stale(s, 'tA', o => o.d === s.d && (o.t || '') === (s.t || ''))) { n.stale++; staleT = true; }
+      // название или место (урок 144); учёт прежней версии без места — место записывается молча. Источник, который повторяет своё прежнее
+      // название или место, пока другой позже него сообщил то, что знает программа, по этому полю «ещё не обновился» (урок 151): его
+      // показание не принимается и не чередует «изменено» между источниками; в текст неразобранной записи идут только принятые значения (e2)
+      const chT = calImpNorm(s.s) !== calImpNorm(t1), chP = 'p' in s && calImpNorm(s.p) !== calImpNorm(p1), ch = {};
+      const staleS = chT && !!mine && 's' in mine && calImpNorm(mine.s) === calImpNorm(t1) && stale(s, 'sA', o => 's' in o && calImpNorm(o.s) === calImpNorm(s.s));
+      const staleP = chP && !!mine && 'p' in mine && calImpNorm(mine.p) === calImpNorm(p1) && stale(s, 'pA', o => 'p' in o && calImpNorm(o.p) === calImpNorm(s.p));
+      if ((staleS || staleP) && !staleT) n.stale++;
+      const e2 = (staleT || staleS || staleP) && byKey[key] ? Object.assign({}, e, staleT ? { date: s.d, time: s.t } : {}, { title: staleS ? byKey[key].cal.title : e.title, place: staleP ? byKey[key].cal.place : e.place }) : e;
+      if (!staleT && (s.d !== e.date || s.t !== e.time)) {
         if (s.st === 'done') {
           if (!s.od) { s.od = s.d; s.ot = s.t || ''; }
           // перенесли обратно на время, записанное в программе, — сообщать не о чем
           if (s.od === e.date && (s.ot || '') === e.time) { delete s.od; delete s.ot; drop.push(key); n.back++; }
           else { note(key, s, 'moved', { d: e.date, t: e.time }); n.moved++; }
           news = true;
-        } else if (s.st === 'inbox' && byKey[key]) { const was = byKey[key].cal.moved || calImpWhen(s.d, s.t); patch(key, { due: e.date, time: e.time, moved: was }, calImpItemText(e)); n.moved++; news = true; }
+        } else if (s.st === 'inbox' && byKey[key]) { const was = byKey[key].cal.moved || calImpWhen(s.d, s.t); patch(key, { due: e.date, time: e.time, moved: was }, calImpItemText(e2)); n.moved++; news = true; }
         s.d = e.date; s.t = e.time; touch(s, e);
       }
-      // название или место изменились (урок 144); учёт прежней версии без места — место записывается молча
-      const chT = calImpNorm(s.s) !== calImpNorm(t1), chP = 'p' in s && calImpNorm(s.p) !== calImpNorm(p1), ch = {};
-      if (chT) ch.s = [s.s || '', t1]; if (chP) ch.p = [s.p || '', p1];
-      s.s = t1; s.p = p1;
-      if (chT || chP) {
+      if (chT && !staleS) ch.s = [s.s || '', t1]; if (chP && !staleP) ch.p = [s.p || '', p1];
+      if (!staleS) s.s = t1; if (!staleP) s.p = p1;
+      if (ch.s || ch.p) {
         if (s.st === 'done') { note(key, s, 'changed', null, ch); n.changed++; news = true; }
-        else if (s.st === 'inbox' && patch(key, { title: e.title, place: e.place, type: calImpType(e), changed: 1 }, calImpItemText(e))) { n.changed++; news = true; }
+        else if (s.st === 'inbox' && patch(key, { title: e2.title, place: e2.place, type: calImpType(e2), changed: 1 }, calImpItemText(e2))) { n.changed++; news = true; }
       }
       observe(s, e);
       if (!news) n.known++;
@@ -9782,11 +9835,16 @@ function calImpPlan(events, ctx) {
     seen[key] = { d: e.date, t: e.time, s: t1, p: p1, st: 'inbox', src, at }; observe(seen[key], e);
     n.added++; row.state = row.state || (mt ? 'maybe' : 'new'); rows.push(row);
   }
-  // удалено из календаря: только когда прочитано всё окно (complete) и только источником, который событие видел (урок 144)
-  if (ctx.complete) Object.keys(seen).forEach(key => {
+  // удалено из календаря: только когда прочитано всё окно (complete) и только источником, который событие видел (урок 144). Урок 151: источник,
+  // который событие не показывает, отмечается у наблюдения (so[src].gone); «удалено» — когда его не показывает ни один источник с
+  // наблюдением; пока другой показывает — «нет в одном из календарей» (одна устойчивая строка: повторное чтение ничего не добавляет)
+  if (ctx.complete && src && src !== 'f') Object.keys(seen).forEach(key => {
     const s = seen[key];
     if (present.has(key) || !calImpSrcsOf(s).includes(src) || !(s.st === 'inbox' || s.st === 'done') || !s.d || s.d < ctx.today || s.d < ctx.from || s.d > ctx.to) return;
-    if (s.st === 'done') { note(key, s, 'gone'); n.gone++; } else if (patch(key, { gone: 1 })) n.gone++;
+    const mine = s.so && s.so[src]; if (mine && mine.gone) return;
+    s.so = Object.assign({}, s.so, { [src]: Object.assign({}, mine, { gone: 1, gA: at }) });
+    if (Object.keys(s.so).some(o => o !== src && !s.so[o].gone)) { if (s.st === 'done') { note(key, s, 'absent'); n.absent++; } else if (patch(key, { absent: 1 })) n.absent++; return; }
+    if (s.st === 'done') { note(key, s, 'gone'); n.gone++; } else if (patch(key, { gone: 1, absent: 0 })) n.gone++;
     s.prev = s.st; s.st = 'gone';
   });
   // учёт старше 60 дней не нужен
@@ -9832,6 +9890,18 @@ function calImpLinked(key, store, id) {
   if (s.st === want.st && (s.rec || '') === want.rec) return;
   s.st = want.st; if (want.rec) s.rec = want.rec; else delete s.rec;
   localStorage.setItem(CALIMP.keySeen, JSON.stringify(seen)); if (typeof bumpSettings === 'function') bumpSettings();
+}
+// прежний источник устройства заменён (другая ссылка, другой календарь телефона, ссылка удалена) — его наблюдения (so) убираются из учёта
+// (урок 151): иначе источник, которого больше нет, блокировал бы «удалено из календаря» навсегда. Отметка «видел» (srcs) остаётся —
+// повторный перенос того же события не произойдёт. Чистая часть — calImpRetireSrcPlan; возвращает, изменился ли учёт
+function calImpRetireSrcPlan(seen, id) {
+  let ch = false; if (!id || id === 'f') return ch;
+  Object.keys(seen || {}).forEach(k => { const s = seen[k]; if (s && s.so && s.so[id]) { const so = Object.assign({}, s.so); delete so[id]; if (Object.keys(so).length) s.so = so; else delete s.so; ch = true; } });
+  return ch;
+}
+function calImpRetireSrc(id) {
+  const seen = calImpSeenLoad(); if (!calImpRetireSrcPlan(seen, id)) return false;
+  localStorage.setItem(CALIMP.keySeen, JSON.stringify(seen)); if (typeof bumpSettings === 'function') bumpSettings(); return true;
 }
 // удалённая из «Неразобранных» запись больше не переносится и о её переносах не сообщается
 function calImpSkipped(key) {
@@ -9949,6 +10019,7 @@ function calImpResText(n, applied) {
   if (n.same) parts.push('из них похожи на события, разобранные из другого календаря (подтвердите в «Неразобранных»): ' + n.same);
   if (n.stale) parts.push('календарь ещё показывает прежнее время (другой календарь уже сообщил нынешнее): ' + n.stale);
   if (n.moved) parts.push('перенесено в календаре: ' + n.moved); if (n.changed) parts.push('изменено название или место: ' + n.changed); if (n.back) parts.push('в календаре вернули на прежнее время: ' + n.back); if (n.cancelled) parts.push('отменено: ' + n.cancelled); if (n.gone) parts.push('удалено из календаря: ' + n.gone);
+  if (n.absent) parts.push('нет в одном из календарей, в другом есть (проверьте, где верно): ' + n.absent);
   if (n.exists) parts.push('уже есть в программе: ' + n.exists); if (n.dup) parts.push('уже в «Неразобранных»: ' + n.dup); if (n.known) parts.push('переносились раньше: ' + n.known);
   if (n.filtered) parts.push('не похожи на дела: ' + n.filtered); if (n.rec) parts.push('повторяющихся (не переносятся): ' + n.rec); if (n.cxSkip) parts.push('отменённых в календаре (не переносятся): ' + n.cxSkip); if (n.own) parts.push('события самой программы: ' + n.own);
   if (n.more) parts.push('не поместилось (в «Неразобранных» не больше 200, за раз — не больше ' + CALIMP.max + '): ' + n.more);
@@ -9957,7 +10028,7 @@ function calImpResText(n, applied) {
 }
 // ── строки на «Сегодня»: перенос, отмена, удаление уже разобранного события ──
 function calImpTodayItems(today) {
-  const label = { moved: 'В календаре перенесено: ', cancelled: 'В календаре отменено: ', gone: 'Удалено из календаря: ', changed: 'В календаре изменено: ' };
+  const label = { moved: 'В календаре перенесено: ', cancelled: 'В календаре отменено: ', gone: 'Удалено из календаря: ', changed: 'В календаре изменено: ', absent: 'Нет в одном из календарей: ' };
   const q = v => '«' + (String(v || '').length > 60 ? String(v).slice(0, 59) + '…' : String(v || '')) + '»';
   // аудит 14.10.2026: события прочитаны, а записать не удалось — строкой с «Повторить», пока чтение не пройдёт (урок 144)
   const err = lsJSON(CALIMP.keyErr, null), errRow = err && err.save ? [{ key: 'ci:err:' + (err.at || 0), kind: 'calimp', pr: 0, date: '', title: 'События из календаря прочитаны, но не записаны', sub: err.msg || '', when: 'из календаря', badges: [['Не сохранено', 'bad']],
@@ -9967,7 +10038,8 @@ function calImpTodayItems(today) {
     // изменения названия и места (урок 144): что было → что стало в календаре
     const chText = [ch.s ? 'название ' + q(ch.s[0]) + ' → ' + q(ch.s[1]) : '', ch.p ? 'место ' + (ch.p[0] ? q(ch.p[0]) : 'не указано') + ' → ' + (ch.p[1] ? q(ch.p[1]) : 'не указано') : ''].filter(Boolean).join(' · ');
     const when = x.kind === 'moved' && x.now ? 'было ' + calImpWhen(x.was.d, x.was.t) + ' → в календаре ' + calImpWhen(x.now.d, x.now.t) : x.kind === 'changed' ? '' : 'было ' + calImpWhen(x.was.d, x.was.t);
-    const sub = [when, chText, 'в программе не изменено'].filter(Boolean).join(' · ');
+    // урок 151: расхождение календарей — в одном события нет, в другом есть; какой прав — решает пользователь
+    const sub = [x.kind === 'absent' ? 'в другом календаре есть — проверьте, где верно' : '', when, chText, 'в программе не изменено'].filter(Boolean).join(' · ');
     const title = (x.kind === 'moved' && hasCh ? 'В календаре перенесено и изменено: ' : label[x.kind] || '') + (x.title || 'событие');
     return { key: 'ci:' + x.key, kind: 'calimp', pr: 1, date: (x.now && x.now.d) || x.was.d || today, title, sub, when: 'из календаря', badges: [['Проверьте', 'warn']],
       open, act: { fn: `calImpNoteDone('${jsq(x.key)}')`, label: 'Разобрано', icon: 'check' }, dismiss: `calImpNoteDone('${jsq(x.key)}')`, dismissLabel: 'Разобрано' };
@@ -9993,7 +10065,7 @@ async function calImpAutoTick() {
   if (typeof document === 'object' && document.visibilityState && document.visibilityState !== 'visible') return;
   if (Date.now() - Number(localStorage.getItem(CALIMP.keyAt) || 0) < CALIMP.staleMs) return;
   const r = await calImpRun({ apply: true });
-  if (r.ok && r.n && (r.n.added || r.n.moved || r.n.changed || r.n.back || r.n.cancelled || r.n.gone)) { toast('Из календаря: ' + calImpResText(r.n, true)); if (typeof UI === 'object' && UI.ready && (UI.screen === 'today' || UI.screen === 'inbox') && !sheetIsOpen()) nav(UI.screen); }
+  if (r.ok && r.n && (r.n.added || r.n.moved || r.n.changed || r.n.back || r.n.cancelled || r.n.gone || r.n.absent)) { toast('Из календаря: ' + calImpResText(r.n, true)); if (typeof UI === 'object' && UI.ready && (UI.screen === 'today' || UI.screen === 'inbox') && !sheetIsOpen()) nav(UI.screen); }
 }
 function calImpStart() {
   if (typeof window !== 'object' || typeof setInterval !== 'function' || CALIMP.loop) return;
@@ -10081,11 +10153,16 @@ async function calImpSaveUrl() {
   if (!url) { openCalImportSheet('replace', { text: 'Это не ссылка календаря Google (…calendar.google.com/calendar/ical/…/basic.ics) или iCloud (…icloud.com/published/…). Для Google нужна «Закрытая ссылка в формате iCal», а не адрес страницы календаря.', bad: true }); return; }
   // другая ссылка — новый номер источника (урок 144): события прежнего календаря не объявляются «удалёнными»; та же ссылка — номер прежний.
   // Тот же календарь с новой ссылкой (в Google «Сбросить») узнаётся по событиям: каждое увиденное запоминает новый источник
-  if (url !== (localStorage.getItem(CALIMP.keyUrl) || '') || !localStorage.getItem(CALIMP.keyUsid)) localStorage.setItem(CALIMP.keyUsid, 'u-' + calImpRand());
+  if (url !== (localStorage.getItem(CALIMP.keyUrl) || '') || !localStorage.getItem(CALIMP.keyUsid)) {
+    // прежний номер источника выбывает из наблюдений (урок 151)
+    calImpRetireSrc(localStorage.getItem(CALIMP.keyUsid) || '');
+    localStorage.setItem(CALIMP.keyUsid, 'u-' + calImpRand());
+  }
   localStorage.setItem(CALIMP.keyUrl, url); localStorage.setItem(CALIMP.keySrc, JSON.stringify({ kind: 'url' })); localStorage.removeItem(CALIMP.keyErr); CALIMP_UI.pick = 'url';
   openCalImportSheet('replace', { text: 'Ссылка сохранена. Нажмите «Посмотреть события».' });
 }
 function calImpDropUrl() {
+  calImpRetireSrc(localStorage.getItem(CALIMP.keyUsid) || '');
   localStorage.removeItem(CALIMP.keyUrl); localStorage.removeItem(CALIMP.keyUsid); const s = calImpSrc(); if (s && s.kind === 'url') { localStorage.removeItem(CALIMP.keySrc); localStorage.setItem(CALIMP.keyAuto, '0'); }
   openCalImportSheet('replace', { text: 'Ссылка удалена с этого устройства. Учёт перенесённых событий остался — после новой ссылки они не повторятся.' });
 }
@@ -10099,6 +10176,8 @@ function calImpPickCal(id) {
   // номер источника — случайный на этом устройстве (урок 144): номера календаря и событий Android на разных телефонах совпадают у разных
   // календарей, а учёт общий; тот же календарь выбран снова — номер прежний
   const s0 = calImpSrc(), sid = s0 && s0.kind === 'dev' && String(s0.id) === String(c.id) && s0.sid ? s0.sid : 'd-' + calImpRand();
+  // другой календарь телефона — прежний номер источника выбывает из наблюдений (урок 151)
+  if (s0 && s0.kind === 'dev' && s0.sid && s0.sid !== sid) calImpRetireSrc(s0.sid);
   localStorage.setItem(CALIMP.keySrc, JSON.stringify({ kind: 'dev', id: c.id, name: c.name || '', sid })); localStorage.removeItem(CALIMP.keyErr);
   openCalImportSheet('replace', { text: 'Выбран календарь «' + (c.name || '') + '». Нажмите «Посмотреть события».' });
 }
@@ -11646,8 +11725,9 @@ async function saveCaseForm(id) {
     // сроки по датам актов: правила v312 + правило пользователя о мотивированном акте (ui/deadlines.js)
     const msgs = typeof nextActDeadlines === 'function' ? nextActDeadlines(r.obj, prev) : [];
     if (msgs && msgs.length) addCaseHistoryEvent(r.obj, 'deadline', '', msgs.join(' | '), id ? 'form' : 'created');
-    // аудит 14.10.2026 (A1): дата акта убрана — предупреждение о зависимых сроках видно сразу, а не только в журнале дела
-    dlWarn = (msgs || []).filter(m => /^Основание срока удалено/.test(m));
+    // аудит 14.10.2026 (A1): дата акта убрана — предупреждение о зависимых сроках видно сразу, а не только в журнале дела;
+    // аудит 14.10.2026 вечером (A3, урок 151): то же для автосрока, правило которого по данным дела больше не действует
+    dlWarn = (msgs || []).filter(m => /^(Основание срока удалено|Срок больше не следует из данных дела)/.test(m));
     // решение пользователя 04.10.2026: правка добавила данные более высокой инстанции — стадия поднимается (data/stageauto.js)
     stageUp = typeof caseStageAutoForm === 'function' ? caseStageAutoForm(prev, r.obj, await getAll('hearings')) : null;
     if (typeof caseCourtAddrFill === 'function') caseCourtAddrFill(r.obj, prev);
@@ -13890,7 +13970,7 @@ function tasksModel(cases, tasks, p, today) {
   (cases || []).filter(activeCase).forEach(c => (c.deadlines || []).forEach((dl, i) => {
     if (!dl || !dl.date) return;
     items.push({ kind: 'deadline', id: dl.id || 'i:' + i, caseId: c.id, date: dl.date, time: '', title: dl.title || 'Срок', sub: caseTitle(c), basis: [dl.baseEv, dl.norm ? String(dl.norm).split(' — ')[0] : ''].filter(Boolean).join(' · '),
-      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '' });
+      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, ruleGone: !!dl.ruleGone && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '' });
   }));
   (tasks || []).forEach(t => { if (!t || t._deleted) return; const c = t.caseNum ? (cases || []).find(x => x.number === t.caseNum) : null;
     items.push({ kind: 'task', id: t.id, date: t.due || '', time: t.time || '', title: t.title || 'Задача', sub: c ? caseTitle(c) : (t.caseNum || ''), basis: '', priority: t.priority || '', done: !!t.done, doneAt: t.doneAt || '' }); });
@@ -13911,7 +13991,7 @@ SCREENS.tasks = async function () {
   // Б15 (11.10.2026): невыполненную строку можно смахнуть вправо — «Выполнено» (ui/swipe.js)
   const rows = m.rows.map(x => `<div class="agenda-row tasks-row"${!x.done && typeof swipeAttrs === 'function' ? swipeAttrs('tasksMarkDone', [x.kind, x.kind === 'deadline' ? x.caseId : x.id, x.id], 'Выполнено') : ''}><span class="agenda-time">${esc(x.date ? fmtDate(x.date).slice(0, 5) : '—')}${x.time ? `<br>${esc(x.time)}` : ''}</span>
     <button type="button" class="agenda-stripe ${x.kind}${x.done ? ' done' : ''} tasks-main" onclick="${open(x)}"><span class="agenda-title">${esc(x.title)}</span><span class="agenda-sub">${esc([x.kind === 'deadline' ? (x.control ? 'контрольный срок' : 'процессуальный срок') : 'задача' + (x.priority && x.priority !== 'Средний' ? ' · ' + x.priority.toLowerCase() + ' приоритет' : ''), x.sub, x.basis].filter(Boolean).join(' · '))}</span>
-      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
+      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.ruleGone ? badge('правило не применяется', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
     ${x.done ? '' : `<button type="button" class="icon-button tasks-done" aria-label="Выполнено" title="Выполнено" onclick="tasksMarkDone('${x.kind}', '${jsq(x.kind === 'deadline' ? x.caseId : x.id)}', '${jsq(x.id)}')">${icon('check')}</button>`}</div>`).join('');
   const notice = m.unconfirmed ? `<div class="info-box warning">Сроков, рассчитанных автоматически и ещё не подтверждённых: ${m.unconfirmed}. Откройте срок, проверьте исчисление по паспорту и нажмите «Подтвердить дату».</div>` : '';
   return pageHead('Задачи и сроки', `${m.tabCounts.deadlines} ${plural(m.tabCounts.deadlines, 'срок', 'срока', 'сроков')} · ${m.tabCounts.tasks} ${plural(m.tabCounts.tasks, 'задача', 'задачи', 'задач')}`, btn('Задача', 'openTaskForm()', 'primary', 'plus')) +
@@ -15381,7 +15461,8 @@ function inboxUndoHtml() { const u = INBOX_UNDO; return u ? `<div class="info-bo
 function inboxRowHtml(x, i, cases, now) {
   const r = inboxParseX(x, now, cases), [label, ico] = INBOX_TYPES[r.type];
   // из календаря: пометка источника, перенос и отмена в календаре — словами (sync/calimp.js)
-  const k = x.cal, calNote = k ? ' <span class="muted">из календаря' + (k.cancelled ? ' · отменено в календаре' : k.gone ? ' · удалено из календаря' : k.moved ? ' · перенесено (было ' + esc(k.moved) + ')' : '') + (k.changed && !k.cancelled && !k.gone ? ' · изменено в календаре' : '') + '</span>' : '';
+  // урок 151: cal.absent — в одном из календарей события нет, в другом есть (не «удалено»)
+  const k = x.cal, calNote = k ? ' <span class="muted">из календаря' + (k.cancelled ? ' · отменено в календаре' : k.gone ? ' · удалено из календаря' : k.absent ? ' · нет в одном из календарей' : k.moved ? ' · перенесено (было ' + esc(k.moved) + ')' : '') + (k.changed && !k.cancelled && !k.gone ? ' · изменено в календаре' : '') + '</span>' : '';
   // урок 144 (аудит GPT 13.10.2026): неполное совпадение с записью программы — событие не отброшено, а показано с найденной записью; решает
   // пользователь: «Открыть запись» — посмотреть, «×» — не нужно (о событии больше не спрашивать), «Так и есть» — это другое событие
   // предложение 1 по аудиту 14.10.2026: похоже на событие, уже разобранное из другого календаря (тот же день, час и название), — решает
@@ -17998,7 +18079,7 @@ const HELP_SECTIONS = [
 <p><b>Сводка</b> — дело одним листом для печати или PDF: «Досье» (служебное: сведения, движение дела, заседания, сроки, задачи, ордера, участники, расходы, счета, заметки) и «Отчёт доверителю» (без внутренних заметок, гонорара, задач, ордеров и контактов участников). «Скачать для Word» — тот же документ файлом, чтобы поправить текст перед отправкой.</p>
 <p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
 <p><b>Стадия</b> меняется нажатием на плашку в карточке. Она поднимается и сама, когда в деле появляются данные более высокой инстанции: номер или ссылка апелляции, кассации, Верховного Суда, заседание в апелляционном или кассационном суде. Если стадию вернули вручную, по тем же данным она не поднимается. Дела, где данные выше стадии, перечислены на «Сегодня» с кнопкой «Поднять».</p>
-<p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё.</p>
+<p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё. Если дату акта из дела убрали, у зависимых сроков появляется отметка «основание удалено»; если по новым данным дела срок больше не возникает (например, изготовлено мотивированное решение — заявление о его составлении уже не нужно), отметка «правило не применяется» — такой срок программа не исполняет и не удаляет сама: снимите его с контроля или удалите.</p>
 <p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение.</p>
 <p><b>Папка документов</b> — путь к папке дела на компьютере и ссылка на папку в облаке. Задаётся в форме дела (группа «Папка документов», видна сразу) или кнопкой «Папка документов» в карточке дела — она есть всегда. Папку называете и раскладываете как удобно. В приложении для компьютера: «Выбрать папку» открывает окно Windows, в карточке — список файлов папки (файл открывается программой, назначенной в Windows), «Открыть папку» — проводник, «Создать папку» — если её ещё нет. В браузере путь копируется — вставьте его в адресную строку проводника.</p>` },
   { id: 'people', title: 'Доверители, доверенности, обращения', html: `
@@ -18128,7 +18209,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <li>Для Google: в браузере на компьютере — календарь в «Мои календари» → «⋮» → «Настройки и общий доступ» → «Интеграция календаря» → «Закрытый адрес в формате iCal» (в английском интерфейсе — Settings and sharing → Integrate calendar → Secret address in iCal format) → вставьте в программу → «Сохранить ссылку». Ссылка — секрет: по ней календарь читается без входа.</li>
 <li>«Посмотреть события» — программа покажет, что добавится, а что уже есть; «Добавить в «Быстрые записи»». Можно включить проверку самой программой — при открытии и раз в 6 часов.</li></ol>
 <p>Не переносятся события самой программы (лента и «Google Календарь»), повторяющиеся (планёрки, дни рождения), прошедшие и уже имеющиеся в программе. «Уже есть» — это запись того же вида, того же дела, в тот же день и час (у задачи — то же название): такое событие программа связывает с записью. Если совпадение неполное (дело в событии не узнано, а в это время уже стоит заседание; у заседания в программе не указано время), событие всё равно попадает в «Неразобранные» с пометкой «Возможно, уже есть в программе» и кнопкой «Открыть запись» — решаете вы: «Так и есть», если это другое событие, или «×», если то же.</p>
-<p>Если разобранное событие в календаре перенесли, отменили, удалили или изменили его название или место, на «Сегодня» появится строка «В календаре перенесено …» («изменено …») с тем, что было и что стало, — программа сама заседание не меняет: проверьте и нажмите «Разобрано». У неразобранной записи новые дата, время, название и место подставляются сами. Сменили ссылку на календарь — программа не сочтёт события прежнего календаря удалёнными.</p>` },
+<p>Если разобранное событие в календаре перенесли, отменили, удалили или изменили его название или место, на «Сегодня» появится строка «В календаре перенесено …» («изменено …») с тем, что было и что стало, — программа сама заседание не меняет: проверьте и нажмите «Разобрано». У неразобранной записи новые дата, время, название и место подставляются сами. Сменили ссылку на календарь — программа не сочтёт события прежнего календаря удалёнными. Если событие читается из двух календарей (ссылка на компьютере и календарь телефона), календарь, который ещё показывает прежние время, название или место после того, как другой сообщил новые, считается «ещё не обновившимся» — строки не чередуются; событие, которого нет в одном календаре, но есть в другом, отмечается строкой «Нет в одном из календарей» (не «удалено») — проверьте, где верно; «Удалено из календаря» — когда его не показывает ни один из них.</p>` },
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
 <p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями.</p>
