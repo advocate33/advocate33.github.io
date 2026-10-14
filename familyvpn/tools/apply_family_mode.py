@@ -61,7 +61,7 @@ gradle = replace_once(gradle,
     '        buildConfigField("String", "FAMILY_UPDATE_REPO", ' + json.dumps(json.dumps(repo)) + ')',
     'applicationId & family flags')
 gradle = replace_once(gradle,
-    'versionCode = appVersionCode\n        versionName = appVersionName',
+    'versionCode = 20\n        versionName = appVersionName',
     f'versionCode = appVersionCode * 100000 + {build_number}\n        versionName = appVersionName + ".family.{build_number}"',
     'family monotonic version')
 gradle = replace_once(gradle,
