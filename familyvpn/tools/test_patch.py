@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert run.returncode == 0, f'{run.stdout}\n{run.stderr}'
     patched = paths['gradle'].read_text()
     assert 'applicationId = "ru.familyvpn.wdtt"' in patched
-    assert 'versionCode = 20 * 100000 + 8' in patched
+    assert 'versionCode = appVersionCode * 100000 + 8' in patched
     assert '"FAMILY_UPDATE_REPO", "\\"test/familyvpn\\""' in patched
     assert 'androidx.work:work-runtime-ktx' in patched
     updated = paths['update_app'].read_text()
