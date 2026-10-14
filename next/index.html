@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="14.10.2026 01:53 · 4d05549">
+<meta name="build" content="14.10.2026 08:40 · a2190f1">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2731,6 +2731,294 @@ function errLogGet() {
   if (!Array.isArray(l)) l = [];
   return ERRLOG_MEM.length || ERRLOG_FAIL ? [...l, ...ERRLOG_MEM, ...(ERRLOG_FAIL ? [ERRLOG_FAIL] : [])].slice(-ERRLOG_MAX) : l;
 }
+
+// ▼▼▼ next/acts.js
+// ═══ next/acts.js — сроки по судебным актам и нерабочие дни новой версии (14.10.2026, аудит 14.10.2026) ═══
+// rules/deadlines.js и rules/calendar.js перенесены из v310 дословно и сверяются с прежней программой, поэтому правила новой
+// версии живут здесь: свои функции расчёта и повторное объявление isWorkdayISO (в одном скрипте действует последнее объявление).
+// Нормы сверены 14.10.2026 по текстам действующих редакций (КонсультантПлюс):
+// — ч. 1 ст. 376.1 ГПК (абзац введён ФЗ от 12.06.2024 № 135-ФЗ): кассация — 3 месяца; если решение обжаловано в апелляции —
+//   со дня изготовления мотивированного апелляционного определения; ч. 1 ст. 390.3 ГПК: в ВС — 3 месяца со дня вынесения
+//   определения кассационного суда в окончательной форме;
+// — ч. 4 ст. 401.3 и ч. 3 ст. 390 УПК: сплошная кассация — 6 месяцев со дня вступления приговора в силу, а после апелляции он
+//   вступает в силу в день вынесения апелляционного решения (о мотивированном решении норма не говорит);
+// — ч. 2 ст. 318 КАС, пп. 8, 9, 19 постановления Пленума ВС от 09.07.2020 № 17 (ред. 19.11.2024): срок в кассационный суд и
+//   в Судебную коллегию ВС единый — 6 месяцев со дня, следующего за принятием апелляционного определения; время составления
+//   отложенного мотивированного определения и время рассмотрения жалобы в кассационном суде из него исключаются;
+// — ч. 3, 5, 8 ст. 232.4 ГПК, ч. 2–4 ст. 229 АПК, ст. 294 КАС: упрощённое производство — 15 дней (КАС — со дня получения копии);
+// — ч. 3 ст. 107 ГПК, ч. 3 ст. 113 АПК, ч. 2 ст. 92 КАС: в сроки, исчисляемые днями, не включаются нерабочие дни;
+// — ч. 5 ст. 329 ГПК, ч. 5 ст. 271 АПК: апелляционный акт вступает в силу со дня принятия (отсюда — исполнительный лист и расходы);
+// — постановления Правительства РФ от 24.09.2025 № 1466 и от 17.09.2026 № 1187 — перенос выходных в 2026 и 2027 годах.
+// Не сверено (в тексте нормы прямо не сказано): дата принятия постановления арбитражного апелляционного суда — по практике дата
+// изготовления в полном объёме (ч. 2 ст. 176 АПК); начало «времени рассмотрения жалобы» по п. 9 Пленума № 17 — с подачи или с
+// поступления в кассационный суд. Оба места названы в паспорте срока.
+
+const NEXT_RULES_VER = '2026-10-14';
+
+// ── встроенный календарь: будние нерабочие дни и рабочие выходные; список пользователя (Справочники → Нерабочие дни) важнее ──
+const NEXT_CAL_OFF = new Set(['2026-01-01', '2026-01-02', '2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09', '2026-02-23', '2026-03-09',
+  '2026-05-01', '2026-05-11', '2026-06-12', '2026-11-04', '2026-12-31',
+  '2027-01-01', '2027-01-04', '2027-01-05', '2027-01-06', '2027-01-07', '2027-01-08', '2027-02-22', '2027-02-23', '2027-03-08', '2027-05-03',
+  '2027-05-10', '2027-06-14', '2027-11-04', '2027-11-05', '2027-12-31']);
+const NEXT_CAL_WORK = new Set(['2027-02-20']);
+const NEXT_CAL_YEARS = '2026–2027';
+function isWorkdayISO(iso) {
+  if (CAL_OFF.has(iso)) return false;
+  if (CAL_WORK.has(iso)) return true;
+  if (NEXT_CAL_OFF.has(iso)) return false;
+  if (NEXT_CAL_WORK.has(iso)) return true;
+  const d = parseLocalDate(iso); if (!d || isNaN(d)) return true;
+  return d.getDay() !== 0 && d.getDay() !== 6;
+}
+
+// ── входные данные дела для расчёта ──
+const nxIso = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : '';
+function nxDays(a, b) { const x = parseLocalDate(a), y = parseLocalDate(b); if (!x || !y || isNaN(x) || isNaN(y)) return 0; return Math.max(0, Math.round((y - x) / 86400000)); }
+function nextActInputs(c) {
+  c = c || {};
+  const code = caseCodeOf(c.kind);
+  const simple = c.i1Mode === 'Упрощённое производство' && (code === 'ГПК' || code === 'АПК' || code === 'КАС');
+  const mag = code === 'ГПК' && isMagistrateCourt(c.court);
+  const dec = code === 'КоАП' ? { res: '', full: '', base: nxIso(c.koapServedDate || c.koapDate), served: !!c.koapServedDate }
+    : { res: nxIso(c.i1DecisionDate || (code === 'УПК' ? c.crimVerdictDate : '')), full: nxIso(c.i1DecisionFullDate) };
+  if (!dec.base) dec.base = dec.full || dec.res;
+  const ap = { adopt: nxIso(c.apDecisionDate), full: nxIso(c.apDecisionFullDate) }; ap.base = ap.adopt || ap.full;
+  const cs = { adopt: nxIso(c.csDecisionDate), full: nxIso(c.csDecisionFullDate), filed: nxIso(c.csFilingDate) }; cs.base = cs.adopt || cs.full;
+  return { code, simple, mag, dec, ap, cs };
+}
+function nxHasBase(inp, act) { return !!(act === 'decision' ? inp.dec.base : act === 'appeal' ? inp.ap.base : inp.cs.base); }
+// подпись входных данных акта: изменилась — сроки акта пересчитываются (КАС: срок в ВС зависит и от апелляции)
+function nxSig(inp, act) {
+  if (act === 'decision') return JSON.stringify([inp.code, inp.simple, inp.mag, inp.dec]);
+  if (act === 'appeal') return JSON.stringify([inp.code, inp.mag, inp.ap]);
+  return JSON.stringify([inp.code, inp.cs, inp.code === 'КАС' ? inp.ap : '']);
+}
+
+// ── один срок: шаги от даты-основания, перенос с нерабочего дня, паспорт «расчёт» словами ──
+function nxItem(act, key, title, from, fromEv, steps, norm, kind, term) {
+  let d = from, calc = fmtDate(from);
+  for (const s of steps) {
+    if (s.m) { d = addMonthsLocalISO(d, s.m); calc += ' + ' + s.m + ' мес.'; }
+    else if (s.wd) { d = addBusinessDaysISO(d, s.wd); calc += ' + ' + s.wd + ' раб. дн.'; }
+    else if (s.d) { d = addDaysLocalISO(d, s.d); calc += ' + ' + s.d + ' дн.' + (s.why ? ' (' + s.why + ')' : ''); }
+  }
+  const fin = shiftToWorkdayISO(d);
+  calc += ' = ' + fmtDate(d) + (fin !== d ? ' → перенос на рабочий день ' + fmtDate(fin) : '');
+  return { autoKey: 'act:' + act + ':' + key, title, date: fin, norm, kind: kind || 'procedural', baseEv: fromEv, baseDate: from, calc, term: term || '' };
+}
+const NX_WRIT_T = 'Заявление о выдаче исполнительного листа — не ранее этой даты';
+const NX_229 = 'ст. 21 Закона № 229-ФЗ — 3 года на предъявление листа';
+
+// ── сроки акта (decision | appeal | cass) по данным дела ──
+function nextActRules(c, act) {
+  const inp = nextActInputs(c), { code, simple, mag, dec, ap, cs } = inp, out = [];
+  const lbl = cap1(actLabel(c.kind, act));
+  if (act === 'decision') {
+    const base = dec.base; if (!base) return out;
+    const ev = (code === 'КоАП' && !dec.served) ? 'Постановление от ' + fmtDate(base) + ' (дата вручения копии не указана — срок от даты вынесения)' : lbl + ' от ' + fmtDate(base);
+    if (code === 'ГПК') {
+      if (!dec.full && dec.res && mag) out.push(nxItem(act, 'motivated', 'Заявление о составлении мотивированного решения (мировой судья)', dec.res, 'Резолютивная часть от ' + fmtDate(dec.res), [{ wd: 3 }],
+        'ч. 4 ст. 199 ГПК РФ — 3 дня со дня объявления резолютивной части, если участвовали в заседании; 15 дней — если не участвовали; нерабочие дни не включаются (ч. 3 ст. 107 ГПК). Без заявления срок апелляции — от резолютивной части', '', '3 раб. дн.'));
+      else if (!dec.full && dec.res && simple) out.push(nxItem(act, 'motivated', 'Заявление о составлении мотивированного решения (упрощённое производство)', dec.res, 'Резолютивная часть от ' + fmtDate(dec.res), [{ wd: 5 }],
+        'ч. 3 ст. 232.4 ГПК РФ — 5 дней со дня подписания резолютивной части; нерабочие дни не включаются (ч. 3 ст. 107 ГПК)', '', '5 раб. дн.'));
+      out.push(nxItem(act, 'copy', 'Заявление о выдаче копии решения', base, ev, [{ d: 3 }], 'ст. 214 ГПК РФ — копия высылается в течение 5 дней после изготовления решения в окончательной форме; при задержке — заявление о выдаче (в т.ч. в электронном виде)', '', '3 дн.'));
+      const ap1 = simple ? nxItem(act, 'appeal', 'Апелляционная жалоба (упрощённое производство)', base, ev, [{ wd: 15 }], 'ч. 8 ст. 232.4 ГПК РФ — 15 дней со дня принятия решения, а если составлено мотивированное решение — со дня принятия его в окончательной форме; нерабочие дни не включаются (ч. 3 ст. 107 ГПК)', '', '15 раб. дн.')
+        : nxItem(act, 'appeal', 'Апелляционная жалоба', base, ev, [{ m: 1 }], 'ст. 321 ГПК РФ — 1 месяц со дня принятия решения в окончательной форме (ст. 108 ГПК — перенос с нерабочего дня)', '', '1 мес.');
+      out.push(ap1);
+      const force = addDaysLocalISO(ap1.date, 1), fev = 'Решение вступает в силу ' + fmtDate(force) + ', если его не обжалуют';
+      out.push(nxItem(act, 'writ', NX_WRIT_T, force, fev, [], (simple ? 'ч. 5 ст. 232.4' : 'ст. 209') + ' ГПК РФ — решение вступает в силу по истечении срока апелляционного обжалования; ст. 428 ГПК — лист выдаётся после вступления в силу; ' + NX_229, 'control'));
+      out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', force, fev, [{ m: 3 }], 'ст. 103.1 ГПК РФ — 3 месяца со дня вступления в законную силу последнего судебного акта (здесь — решения, если его не обжалуют)', '', '3 мес.'));
+    } else if (code === 'АПК') {
+      if (!dec.full && dec.res && simple) out.push(nxItem(act, 'motivated', 'Заявление о составлении мотивированного решения (упрощённое производство)', dec.res, 'Решение (резолютивная часть) от ' + fmtDate(dec.res), [{ wd: 5 }],
+        'ч. 2 ст. 229 АПК РФ — 5 дней со дня размещения решения на сайте суда (здесь — от даты решения: раньше закона, проверьте дату размещения); нерабочие дни не включаются (ч. 3 ст. 113 АПК)', '', '5 раб. дн.'));
+      out.push(nxItem(act, 'copy', 'Заявление о выдаче копии решения', base, ev, [{ d: 5 }], 'ст. 177 АПК РФ — решение направляется в течение 5 дней (в электронном виде — размещается в КАД); при отсутствии — заявление о выдаче', '', '5 дн.'));
+      const ap1 = simple ? nxItem(act, 'appeal', 'Апелляционная жалоба (упрощённое производство)', base, ev, [{ wd: 15 }], 'ч. 4 ст. 229 АПК РФ — 15 дней со дня принятия решения, а если составлено мотивированное решение — со дня принятия его в полном объёме; нерабочие дни не включаются (ч. 3 ст. 113 АПК)', '', '15 раб. дн.')
+        : nxItem(act, 'appeal', 'Апелляционная жалоба', base, ev, [{ m: 1 }], 'ст. 259 АПК РФ — 1 месяц со дня принятия решения (ст. 114 АПК — перенос с нерабочего дня)', '', '1 мес.');
+      out.push(ap1);
+      const force = addDaysLocalISO(ap1.date, 1), fev = 'Решение вступает в силу ' + fmtDate(force) + ', если его не обжалуют';
+      if (simple) out.push(nxItem(act, 'writ', NX_WRIT_T, dec.res || base, 'Решение от ' + fmtDate(dec.res || base) + ' — подлежит немедленному исполнению', [], 'ч. 3 ст. 229 АПК РФ — решение по делу в упрощённом порядке подлежит немедленному исполнению; ст. 319 АПК — лист выдаётся по ходатайству взыскателя; ' + NX_229, 'control'));
+      else out.push(nxItem(act, 'writ', NX_WRIT_T, force, fev, [], 'ст. 180, 318, 319 АПК РФ — решение вступает в силу по истечении месяца, если не обжаловано; лист выдаётся после вступления в силу; ' + NX_229, 'control'));
+      out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', force, fev, [{ m: 3 }], 'ч. 2 ст. 112 АПК РФ — 3 месяца со дня вступления в законную силу последнего судебного акта (здесь — решения, если его не обжалуют)', '', '3 мес.'));
+    } else if (code === 'КАС') {
+      out.push(nxItem(act, 'copy', 'Заявление о выдаче копии решения', base, ev, [{ d: 3 }], 'ст. 182 КАС РФ — копии решения вручаются или направляются не позднее 3 дней после принятия в окончательной форме', '', '3 дн.'));
+      const ap1 = simple ? nxItem(act, 'appeal', 'Апелляционная жалоба (упрощённое производство)', base, ev, [{ wd: 15 }], 'ст. 294 КАС РФ — 15 дней со дня получения копии решения (здесь — от даты решения: раньше закона; если копию получили позже, установите дату по её получению); нерабочие дни не включаются (ч. 2 ст. 92 КАС)', '', '15 раб. дн.')
+        : nxItem(act, 'appeal', 'Апелляционная жалоба', base, ev, [{ m: 1 }], 'ст. 298 КАС РФ — 1 месяц со дня принятия решения в окончательной форме (ст. 93 КАС — перенос с нерабочего дня)', '', '1 мес.');
+      out.push(ap1);
+      const force = addDaysLocalISO(ap1.date, 1), fev = 'Решение вступает в силу ' + fmtDate(force) + ', если его не обжалуют';
+      out.push(nxItem(act, 'writ', NX_WRIT_T, force, fev, [], 'ст. 186, 353 КАС РФ — лист выдаётся после вступления решения в законную силу; ' + NX_229, 'control'));
+      out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', force, fev, [{ m: 3 }], 'ст. 114.1 КАС РФ — 3 месяца со дня вступления в законную силу последнего судебного акта (здесь — решения, если его не обжалуют)', '', '3 мес.'));
+    } else if (code === 'УПК') {
+      out.push(nxItem(act, 'appeal', 'Апелляционная жалоба на приговор', base, ev, [{ d: 15 }], 'ст. 389.4 УПК РФ — 15 суток со дня постановления приговора (осуждённым под стражей — со дня вручения копии); ст. 128 УПК — перенос с нерабочего дня', '', '15 сут.'));
+    } else if (code === 'КоАП') {
+      out.push(nxItem(act, 'appeal', 'Жалоба на постановление по делу об АП', base, ev, [{ d: 10 }], 'ст. 30.3 КоАП РФ — 10 дней со дня вручения или получения копии постановления (ст. 4.8 КоАП — перенос с нерабочего дня)', '', '10 дн.'));
+    }
+    return out;
+  }
+  if (act === 'appeal') {
+    if (!ap.base) return out;
+    const adoptEv = lbl + ' от ' + fmtDate(ap.base);
+    if (code === 'ГПК') {
+      if (mag) out.push(nxItem(act, 'cass', 'Кассационная жалоба в президиум областного суда (по делу мирового судьи)', ap.base, adoptEv, [{ m: 3 }],
+        'гл. 40.1 ГПК РФ (ст. 375.1–375.15, введена ФЗ от 09.04.2026 № 79-ФЗ, с 10.05.2026) — 3 месяца со дня вступления в силу; выборочная кассация; подаётся через суд первой инстанции. Срок здесь — от даты апелляционного определения; сверьте с редакцией ГПК, считается ли он от мотивированного определения', '', '3 мес.'));
+      else {
+        const f = ap.full || ap.base;
+        out.push(nxItem(act, 'cass', 'Кассационная жалоба (в кассационный суд общей юрисдикции)', f, ap.full ? 'Мотивированное апелляционное определение от ' + fmtDate(ap.full) : adoptEv, [{ m: 3 }],
+          'ч. 1 ст. 376.1 ГПК РФ — 3 месяца; если решение обжаловано в апелляции — со дня изготовления мотивированного апелляционного определения' + (ap.full ? '' : '. Даты мотивированного определения в деле нет — срок от даты определения (раньше закона); укажите её — срок пересчитается'), '', '3 мес.'));
+      }
+      out.push(nxItem(act, 'writ', NX_WRIT_T, ap.base, adoptEv + ' — решение вступило в силу', [], 'ч. 5 ст. 329 ГПК РФ — апелляционное определение вступает в силу со дня принятия; ст. 428 ГПК — лист выдаётся после вступления в силу; ' + NX_229, 'control'));
+      out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', ap.base, adoptEv, [{ m: 3 }], 'ст. 103.1 ГПК РФ — 3 месяца со дня вступления в законную силу последнего судебного акта; апелляционное определение вступает в силу со дня принятия (ч. 5 ст. 329 ГПК)', '', '3 мес.'));
+    } else if (code === 'АПК') {
+      const f = ap.full || ap.base, ev = lbl + ' от ' + fmtDate(f);
+      out.push(nxItem(act, 'cass', 'Кассационная жалоба (в арбитражный суд округа)', f, ev, [{ m: 2 }], 'ч. 1 ст. 276 АПК РФ — 2 месяца со дня вступления в силу обжалуемого акта; постановление апелляции вступает в силу со дня принятия (ч. 5 ст. 271), датой принятия по практике считается дата изготовления в полном объёме (ч. 2 ст. 176 АПК) — сверьте', '', '2 мес.'));
+      out.push(nxItem(act, 'writ', NX_WRIT_T, f, ev + ' — решение вступило в силу', [], 'ч. 5 ст. 271, ст. 319 АПК РФ — лист выдаётся после вступления в силу; ' + NX_229, 'control'));
+      out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', f, ev, [{ m: 3 }], 'ч. 2 ст. 112 АПК РФ — 3 месяца со дня вступления в силу последнего судебного акта (постановление апелляции)', '', '3 мес.'));
+    } else if (code === 'КАС') {
+      const steps = [{ m: 6 }]; const late = ap.full && ap.adopt ? nxDays(ap.adopt, ap.full) : 0;
+      if (late) steps.push({ d: late, why: 'составление мотивированного определения' });
+      out.push(nxItem(act, 'cass', 'Кассационная жалоба (в кассационный суд общей юрисдикции)', ap.base, adoptEv, steps,
+        'ч. 2 ст. 318 КАС РФ, пп. 8, 9 постановления Пленума ВС от 09.07.2020 № 17 — 6 месяцев со дня, следующего за принятием апелляционного определения; время составления отложенного мотивированного определения исключается' + (ap.full ? '' : '. Даты мотивированного определения в деле нет — исключать нечего'), '', '6 мес.'));
+      out.push(nxItem(act, 'writ', NX_WRIT_T, ap.base, adoptEv + ' — решение вступило в силу', [], 'ст. 186, 353 КАС РФ — лист выдаётся после вступления решения в силу (со дня принятия апелляционного определения); ' + NX_229, 'control'));
+      out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', ap.base, adoptEv, [{ m: 3 }], 'ст. 114.1 КАС РФ — 3 месяца со дня вступления в силу последнего судебного акта (апелляционное определение)', '', '3 мес.'));
+    } else if (code === 'УПК') {
+      out.push(nxItem(act, 'cass', 'Кассационная жалоба (сплошная кассация, ст. 401.7–401.8 УПК)', ap.base, adoptEv + ' — приговор вступил в силу', [{ m: 6 }],
+        'ч. 4 ст. 401.3 УПК РФ — 6 месяцев со дня вступления приговора в законную силу; после апелляции он вступает в силу в день вынесения апелляционного решения (ч. 3 ст. 390 УПК), дата мотивированного решения срок не сдвигает; осуждённому под стражей — со дня вручения копии вступившего в силу акта (укажите её в подтверждённой дате); пропуск восстанавливается по ч. 5 ст. 401.3; после — выборочная кассация без срока (ст. 401.10–401.12)', '', '6 мес.'));
+    } else if (code === 'КоАП') {
+      out.push(nxItem(act, 'cass', 'Жалоба на вступившее в силу постановление (кассационный суд)', ap.base, adoptEv, [], 'ст. 30.12–30.14 КоАП РФ — срок не установлен; подаётся после вступления в силу', 'control'));
+    }
+    return out;
+  }
+  // кассация
+  if (!cs.base) return out;
+  const csEv = lbl + ' от ' + fmtDate(cs.base);
+  if (code === 'ГПК') {
+    const f = cs.full || cs.base;
+    out.push(nxItem(act, 'cass2', 'Кассационная жалоба в Верховный Суд РФ', f, cs.full ? 'Мотивированное кассационное определение от ' + fmtDate(cs.full) : csEv, [{ m: 3 }],
+      'ч. 1 ст. 390.3 ГПК РФ — 3 месяца со дня вынесения определения кассационного суда в окончательной форме' + (cs.full ? '' : '. Даты мотивированного определения в деле нет — срок от даты определения (раньше закона); укажите её — срок пересчитается'), '', '3 мес.'));
+    out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', cs.base, csEv, [{ m: 3 }], 'ст. 103.1 ГПК РФ — 3 месяца со дня вступления в законную силу последнего судебного акта (кассационное определение)', '', '3 мес.'));
+  } else if (code === 'АПК') {
+    const f = cs.full || cs.base, ev = lbl + ' от ' + fmtDate(f);
+    out.push(nxItem(act, 'cass2', 'Кассационная жалоба в Верховный Суд РФ', f, ev, [{ m: 2 }], 'ч. 1 ст. 291.2 АПК РФ — 2 месяца со дня вступления в силу последнего обжалуемого акта', '', '2 мес.'));
+    out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', f, ev, [{ m: 3 }], 'ч. 2 ст. 112 АПК РФ — 3 месяца со дня вступления в силу последнего судебного акта (постановление кассации)', '', '3 мес.'));
+  } else if (code === 'КАС') {
+    if (ap.base) {
+      const steps = [{ m: 6 }]; const late = ap.full && ap.adopt ? nxDays(ap.adopt, ap.full) : 0;
+      if (late) steps.push({ d: late, why: 'составление мотивированного апелляционного определения' });
+      const inCass = cs.filed && cs.base >= cs.filed ? nxDays(cs.filed, cs.base) : 0;
+      if (inCass) steps.push({ d: inCass, why: 'рассмотрение жалобы в кассационном суде с ' + fmtDate(cs.filed) + ' по ' + fmtDate(cs.base) });
+      out.push(nxItem(act, 'cass2', 'Кассационная жалоба в Верховный Суд РФ', ap.base, cap1(actLabel(c.kind, 'appeal')) + ' от ' + fmtDate(ap.base), steps,
+        'ч. 2 ст. 318 КАС РФ, пп. 8, 9, 19 постановления Пленума ВС от 09.07.2020 № 17 — срок единый с кассацией: 6 месяцев со дня, следующего за принятием апелляционного определения, обращение в ВС его не возобновляет; время составления мотивированного определения и время рассмотрения жалобы в кассационном суде исключаются'
+        + (cs.filed ? '. Время рассмотрения считано с даты подачи кассационной жалобы — если суд считает с даты её поступления в кассационный суд, срок на несколько дней раньше' : '. Даты подачи кассационной жалобы в деле нет — время рассмотрения не исключено, срок раньше закона; укажите дату подачи (вкладка «Кассация») — срок пересчитается'), '', '6 мес.'));
+    } else {
+      out.push(nxItem(act, 'cass2', 'Кассационная жалоба в Верховный Суд РФ', cs.base, csEv, [{ m: 6 }],
+        'ч. 2 ст. 318 КАС РФ — срок единый с кассацией и считается от апелляционного определения (п. 8 постановления Пленума ВС от 09.07.2020 № 17); даты апелляционного определения в деле нет — срок посчитан от кассационного определения и, вероятно, позже закона: укажите дату апелляционного определения', '', '6 мес.'));
+    }
+    out.push(nxItem(act, 'costs', 'Заявление о взыскании судебных расходов', cs.base, csEv, [{ m: 3 }], 'ст. 114.1 КАС РФ — 3 месяца со дня вступления в силу последнего судебного акта (кассационное определение)', '', '3 мес.'));
+  }
+  return out;
+}
+
+// ── применить к делу при сохранении (замена caseActDeadlinesApply для новой версии) ──
+// Срок с тем же autoKey не дублируется; исполненный не трогается; подтверждённый — только если изменились данные акта и дата
+// по ним другая (правило пользователя 30.09.2026: появилась дата мотивированного акта — пересчёт, подтверждение снимается);
+// при появлении акта следующей инстанции лист и расходы от предыдущего помечаются заменёнными.
+function nextActDeadlinesApply(obj, prev) {
+  const msgs = [], rebased = [];
+  obj.deadlines = Array.isArray(obj.deadlines) ? obj.deadlines : [];
+  const ni = nextActInputs(obj), pi = prev ? nextActInputs(prev) : null;
+  const supersede = { appeal: ['act:decision:writ', 'act:decision:costs'], cass: ['act:appeal:writ', 'act:appeal:costs'] };
+  for (const act of ['decision', 'appeal', 'cass']) {
+    if (!nxHasBase(ni, act)) continue;
+    const had = !!(pi && nxHasBase(pi, act));
+    if (pi && nxSig(ni, act) === nxSig(pi, act)) continue;
+    const list = nextActRules(obj, act); if (!list.length) continue;
+    (supersede[act] || []).forEach(k => obj.deadlines.forEach(dl => {
+      if (dl && dl.autoKey === k && !dl.done && !dl.confirmedAt) { dl.done = true; dl.note = ((dl.note || '') + ' · заменён сроком от акта следующей инстанции').trim().replace(/^· /, ''); }
+    }));
+    const made = [];
+    for (const n of list) {
+      const ex = obj.deadlines.find(dl => dl && dl.autoKey === n.autoKey);
+      if (ex) {
+        if (ex.done) { msgs.push(`«${ex.title}» оставлен без изменений (исполнен)`); continue; }
+        if (ex.confirmedAt) {
+          if (!had || ex.date === n.date) { msgs.push(`«${ex.title}» оставлен без изменений (подтверждён)`); continue; }
+          ex.confirmedAt = ''; ex.confirmedDate = '';
+          ex.note = ('Основание изменилось: ' + n.baseEv + (ex.baseDate && ex.baseDate !== n.baseDate ? ' (было ' + fmtDate(ex.baseDate) + ')' : '') + ' — срок пересчитан, подтвердите заново. ' + (ex.note || '')).trim();
+          rebased.push(ex.title);
+        }
+        if (ex.date !== n.date) msgs.push(`«${ex.title}»: было ${fmtDate(ex.date)} → стало ${fmtDate(n.date)}`);
+        Object.assign(ex, { title: n.title, kind: n.kind, date: n.date, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, rulesVer: NEXT_RULES_VER, calc: n.calc });
+      } else {
+        obj.deadlines.push({ id: uid('СР'), title: n.title, date: n.date, note: n.kind === 'control' ? 'рассчитан автоматически — дата, с которой можно действовать' : 'рассчитан автоматически — проверьте и подтвердите', done: false,
+          kind: n.kind, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, src: 'Судебный акт', autoKey: n.autoKey, confirmedAt: '', confirmedDate: '', createdAt: Date.now(), rulesVer: NEXT_RULES_VER, calc: n.calc });
+      }
+      made.push(`${n.title} — ${n.kind === 'control' ? 'с' : 'до'} ${fmtDate(n.date)}`);
+    }
+    const base = act === 'decision' ? ni.dec.base : act === 'appeal' ? ni.ap.base : ni.cs.base;
+    if (made.length) msgs.push(`${cap1(actLabel(obj.kind, act))} от ${fmtDate(base)}: ${made.join('; ')}`);
+  }
+  obj.deadlines.sort((a, b) => ((a && a.date) || '').localeCompare((b && b.date) || ''));
+  if (rebased.length) msgs.push('Подтверждение снято, срок пересчитан от мотивированного акта: ' + rebased.join(', '));
+  return msgs;
+}
+
+// ── типовые сроки для листа «Добавить срок»: по данным дела, дата акта — введённая пользователем ──
+function nextPresetCase(c, act, base) {
+  const x = Object.assign({}, c);
+  if (act === 'decision') { if (caseCodeOf(c.kind) === 'КоАП') { x.koapServedDate = base; x.koapDate = base; } else { x.i1DecisionDate = base; x.i1DecisionFullDate = base; if (caseCodeOf(c.kind) === 'УПК') x.crimVerdictDate = base; } }
+  else if (act === 'appeal') { x.apDecisionDate = base; x.apDecisionFullDate = base; }
+  else { x.csDecisionDate = base; x.csDecisionFullDate = base; }
+  return x;
+}
+function nextPresetRules(c) {
+  const out = [], t = todayISO();
+  for (const act of ['decision', 'appeal', 'cass']) nextActRules(nextPresetCase(c, act, t), act).forEach(n => { if (n.kind !== 'control') out.push([act, { key: n.autoKey.split(':')[2], t: n.title, term: n.term }]); });
+  return out;
+}
+
+// ▼▼▼ next/secmem.js
+// ═══ next/secmem.js — секреты без защищённого хранилища (аудит 14.10.2026, решение пользователя «реализуй») ═══
+// security/secrets.js перенесён из v310 дословно: если браузер не даёт WebCrypto или IndexedDB (или ключ устройства не создался),
+// пароли и ключи (пароль синхронизации, код сервера, токены) ложатся в localStorage открытым текстом. Новая версия так не делает:
+// секрет держится только в памяти страницы до перезапуска, на диск не попадает, прежние открытые значения убираются с диска в
+// память; программа говорит об этом (сообщение один раз за запуск и строка «Пароли и ключи» в «Настройки → О программе»).
+// secretsInit объявлена заново (в одном скрипте действует последнее объявление) — тело v310 с двумя отличиями: при отказе слоя —
+// режим «только в памяти»; секрет, записанный до окончания запуска, не теряется при чтении сохранённых.
+const SECMEM = { warned: false };
+function secMemOnly() { return !!(_sec.ready && !_sec.ok); }
+function secMemWarn() {
+  if (SECMEM.warned) return; SECMEM.warned = true;
+  setTimeout(() => { if (typeof toast === 'function') toast('Защищённое хранилище браузера недоступно: пароли и ключи хранятся только до перезапуска программы и на диск не записываются', true); }, 1500);
+}
+function secMemTakePlain() { // открытые значения прежних запусков — в память, с диска удалить
+  if (!_lsRaw) return 0; let n = 0;
+  for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { if (!(k in _sec.map)) _sec.map[k] = v; _lsRaw.removeItem.call(localStorage, k); n++; } }
+  return n;
+}
+async function secretsInit() {
+  const early = Object.assign({}, _sec.map);
+  try {
+    if (!_lsRaw || !window.crypto || !crypto.subtle || !window.indexedDB) { _sec.ready = true; if (secMemTakePlain() || Object.keys(early).length) secMemWarn(); return; }
+    let key = await kvGet('devkey');
+    if (!key) { key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']); await kvSet('devkey', key); }
+    _sec.key = key; _sec.ok = true;
+    const blob = await kvGet('secrets');
+    if (blob && blob.iv && blob.ct) { try { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct)); const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
+      if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); } } else _sec.map = Object.assign(obj, early); } catch (e) { logErr('secrets:decrypt', e); } }
+    let moved = Object.keys(early).length > 0;
+    for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { _sec.map[k] = v; _lsRaw.removeItem.call(localStorage, k); moved = true; } }
+    if (moved) await secretsPersist();
+  } catch (e) { logErr('secrets:init', e); if (!_sec.ok && secMemTakePlain()) secMemWarn(); }
+  _sec.ready = true;
+}
+// запись секрета, пока защищённого слоя нет (запуск не закончен или слой недоступен), — только в память
+if (typeof _lsRaw !== 'undefined' && _lsRaw) {
+  const secPrevSet = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (k, v) {
+    if (this === localStorage && SECRET_KEYS_PROTECTED.includes(k) && !_sec.ok) { _sec.map[k] = String(v); _lsRaw.removeItem.call(this, k); if (_sec.ready) secMemWarn(); return; }
+    return secPrevSet.call(this, k, v);
+  };
+}
+function secMemLine() { return !_sec.ready ? 'проверяется' : _sec.ok ? (_sec.pending ? 'защищены, ждут PIN-кода' : 'защищены ключом устройства') : 'только в памяти до перезапуска — защищённое хранилище браузера недоступно'; }
 
 // ▼▼▼ data/numbering.js
 // ═══ data/numbering.js — автонумерация дел и соглашений (поручение пользователя 03.10.2026) ═══
@@ -10452,7 +10740,8 @@ async function openSettingsSheet(sub) {
       <div><span>Сборка</span><span class="muted">${esc(BUILD_ID)}</span></div>
       <div><span>Обмен с сервером</span><span class="muted">${esc(typeof syncDiagLine === 'function' ? syncDiagLine() : '—')}</span></div>
       ${typeof deltaLastText === 'function' && deltaLastText() ? `<div><span>Получение с сервера</span><span class="muted">${esc(deltaLastText())}</span></div>` : ''}
-      <div><span>Правила сроков</span><span class="muted">${esc(RULES_VER)}</span></div>
+      <div><span>Правила сроков</span><span class="muted">${esc(NEXT_RULES_VER)}</span></div>
+      <div><span>Пароли и ключи</span><span class="muted" id="set-secmem">${esc(typeof secMemLine === 'function' ? secMemLine() : '—')}</span></div>
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
@@ -10872,13 +11161,17 @@ async function openCaseForm(id, full) {
     oppReq: fInnRow('cf-opp', 'ИНН противной стороны', opp && opp.inn) + fInput('cf-oppOgrn', 'ОГРН', opp && opp.ogrn, 'autocomplete="off" inputmode="numeric"') + fAddr('cf-oppAddr', 'Адрес противной стороны', opp && opp.addr) + fInput('cf-oppKpp', 'КПП', opp && opp.kpp, 'autocomplete="off" inputmode="numeric"') + (typeof fReqPaste === 'function' ? fReqPaste('cf-opp') : ''),
     next: fInput('cf-nextAction', 'Следующее действие', c.nextAction, 'autocomplete="off"') + fInput('cf-nextActionDue', 'Срок действия', c.nextActionDue, 'type="date"'),
     comment: fText('cf-comment', 'Примечание', c.comment, 3),
+    // 14.10.2026: папка документов — в основной части формы; в приложении для компьютера 1.4.1 — «Выбрать папку» (окно Windows)
+    docs: (() => { const [p, u] = CASE_DOCS_FIELDS, pick = typeof caseDocsModel === 'function' && caseDocsModel({}).pick;
+      return `<label class="field wide"><span>${esc(p[1])}</span><div class="inn-row"><input id="cf-docsPath" value="${esc(c.docsPath || '')}" autocomplete="off" spellcheck="false" placeholder="${esc(p[3].ph)}">${pick ? `<button type="button" class="button small-btn" id="cf-docs-pick" onclick="caseDocsPick('cf-docsPath')">${icon('hard-drive', 'icon-sm')}Выбрать папку</button>` : ''}</div></label>`
+        + wide(fInput('cf-docsUrl', u[1], c.docsUrl || '', 'type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="' + esc(u[3].ph) + '"')); })(),
   };
   // группа краткой формы: раскрыта, если в ней что-то заполнено (правка дела); в заголовке — сколько полей заполнено
   const grp = (gid, title, html) => `<details class="fgroup" id="${gid}"><summary>${icon('chevron-down', 'icon-sm')}<span>${esc(title)}</span><span class="fgroup-cnt"></span></summary><div class="form-grid">${html}</div></details>`;
   const main = full
-    ? `<div class="form-grid" id="cx-pane-main">${F.number}${F.client}${F.clientReq}${F.subject}${F.kind}${F.category}${F.stageStatus}${F.court}${F.opponent}${F.oppReq}${F.next}${CASE_MAIN_EXTRA.map(f => caseFormField(f, c[f[0]], refs)).join('')}${F.comment}</div>`
+    ? `<div class="form-grid" id="cx-pane-main">${F.number}${F.client}${F.clientReq}${F.subject}${F.kind}${F.category}${F.stageStatus}${F.court}${F.opponent}${F.oppReq}${F.next}${CASE_MAIN_EXTRA.map(f => caseFormField(f, c[f[0]], refs)).join('')}${F.docs}${F.comment}</div>`
     : `<div class="form-grid" id="cx-pane-main">${F.number}${F.client}${F.subject}${F.kind}${F.next}
-    ${grp('cfg-client', 'Реквизиты доверителя', F.clientReq)}${grp('cfg-court', 'Суд, категория, стадия', F.category + F.stageStatus + F.court)}${grp('cfg-opp', 'Противная сторона', F.opponent + F.oppReq)}${grp('cfg-note', 'Примечание', F.comment)}
+    ${grp('cfg-client', 'Реквизиты доверителя', F.clientReq)}${grp('cfg-court', 'Суд, категория, стадия', F.category + F.stageStatus + F.court)}${grp('cfg-opp', 'Противная сторона', F.opponent + F.oppReq)}${grp('cfg-docs', 'Папка документов', F.docs)}${grp('cfg-note', 'Примечание', F.comment)}
   </div>`;
   const tabs = full ? caseTabsFor(c.kind || '') : [];
   const tabBar = full ? `<div class="choice case-tabs" id="cx-tabs">${CASE_FORM_TABS.map(t => `<button type="button" class="button small-btn" data-tab="${t.id}" data-kinds="${(t.kinds || []).join('|')}" aria-pressed="${t.id === 'main'}" onclick="caseTabPick('${t.id}')"${tabs.some(x => x.id === t.id) ? '' : ' hidden'}>${esc(t.title)}</button>`).join('')}</div>` : '';
@@ -10992,6 +11285,8 @@ async function saveCaseForm(id) {
   // полная форма — вкладки по виду дела; адреса судов апелляции и кассации дополняются из справочника (ui/casefeed.js, caseCourtAddrFill)
   // аудит 14.10.2026: суммы — пробелы между разрядами допускаются («10 000» раньше давало 0), отрицательные и нечисловые — отказ с текстом, копейки
   if (document.getElementById('cx-tabs')) { const ex = caseFormValues(k => fv('cx-' + k), caseTabsFor(r.obj.kind || '')); for (const k of Object.keys(ex)) { const val = ex[k]; if (k === 'amount' || k === 'recovered' || /^ip(Sum|Collected|Fee)$/.test(k)) { if (String(val).trim() === '') { r.obj[k] = ''; continue; } const num = Number(String(val).replace(/[\s ]/g, '').replace(',', '.')); if (!Number.isFinite(num) || num < 0 || num > 1e12) { fErr('Сумма «' + String(val).trim() + '» — укажите число не меньше нуля (например, 150000 или 150 000,50)'); return; } r.obj[k] = Math.round(num * 100) / 100; } else if (k === 'labels') r.obj[k] = String(val).split(',').map(s => s.trim()).filter(Boolean); else r.obj[k] = val; } }
+  // папка документов (14.10.2026): поля в основной части формы — и в краткой, и в полной
+  if (document.getElementById('cf-docsPath') || document.getElementById('cf-docsUrl')) { const dv = caseDocsInput(fv('cf-docsPath'), fv('cf-docsUrl')); if (dv.error) { fErr(dv.error); return; } r.obj.docsPath = dv.path; r.obj.docsUrl = dv.url; }
   // автонумерация соглашений (03.10.2026): новому делу без номера — следующий; номер, занятый другим делом, — отказ
   if (typeof nextAgreementNo === 'function') {
     if (!id && !String(r.obj.agreementNo || '').trim()) { r.obj.agreementNo = nextAgreementNo(numCases); r.obj.agreementDate = r.obj.agreementDate || todayISO(); }
@@ -11386,9 +11681,9 @@ const CASE_FORM_TABS = [
   { id: 'main', title: 'Основное' },
   { id: 'agreement', title: 'Соглашение', fields: [['agreementNo', 'Номер соглашения', 'text', { auto: 'autoAgreementNo' }], ['agreementDate', 'Дата соглашения', 'date'], ['agreementSigned', 'Соглашение подписано', 'select', ['Да', 'Нет — ждёт подписи']],
     ['actSigned', 'Акт оказанных услуг', 'select', ['Подписан', 'Не подписан', 'Не требуется']], ['orderNo', 'Номер ордера'], ['orderDate', 'Дата ордера', 'date'], ['regdate', 'Дата принятия поручения', 'date'],
-    ['recovered', 'Взыскано фактически, ₽', 'number'], ['labels', 'Метки (через запятую)', 'text', { wide: true }],
-    // решение пользователя 04.10.2026: папка документов — на компьютере (путь) и в облаке (ссылка); в карточке — «Папка документов»
-    ['docsPath', 'Папка документов на компьютере (путь)', 'text', { wide: true, ph: 'D:\\Дела\\Иванов 2-1500-2026' }], ['docsUrl', 'Папка документов в облаке (ссылка)', 'url', { wide: true, ph: 'ссылка на папку: Яндекс Диск, Google Диск, Dropbox' }]] },
+    ['recovered', 'Взыскано фактически, ₽', 'number'], ['labels', 'Метки (через запятую)', 'text', { wide: true }]] },
+  // решение пользователя 04.10.2026: папка документов — на компьютере (путь) и в облаке (ссылка); 14.10.2026 — поля перенесены из
+  // вкладки «Соглашение» в основную часть формы (видны без «Все поля»), см. CASE_DOCS_FIELDS и ui/forms.js
   // ── УПК ──
   { id: 'crim0', title: 'Проверка сообщения', kinds: ['Уголовное'], hint: 'Решение по сообщению о преступлении — не позднее 3 суток, продление до 10 суток, а при необходимости документальных проверок, ревизий, экспертиз — до 30 суток (ч. 1, 3 ст. 144 УПК РФ).',
     fields: [['crimReportDate', 'Сообщение о преступлении (дата)', 'date'], ['crimReportNo', '№ КУСП / регистрации'], ['crimCheckDue', 'Срок проверки до', 'date'], ['crimCheckResult', 'Результат проверки', 'select', CRIM_CHECK_RESULTS], ['crimCheckDate', 'Дата решения по сообщению', 'date'], ['crimCheckNote', 'Заметки (проверка)', 'area']] },
@@ -11422,19 +11717,19 @@ const CASE_FORM_TABS = [
   { id: 'order', title: 'Судебный приказ', kinds: KIND_CIV, hint: { 'ГПК': 'Копия приказа высылается должнику в 5 дней; возражения — в 10 дней со дня получения (ст. 128 ГПК РФ); при возражениях приказ отменяется (ст. 129).', 'АПК': 'Копия приказа высылается должнику в 5 дней; возражения — в 10 дней со дня получения (ч. 4 ст. 229.5 АПК РФ).' },
     fields: [['judOrderFiled', 'Заявление подано', 'date'], ['judOrderDate', 'Приказ вынесен', 'date'], ['judOrderNo', '№ приказа'], ['judOrderServed', 'Копия получена должником', 'date'], ['judOrderObjDate', 'Возражения поданы', 'date'], ['judOrderResult', 'Результат', 'select', ORDER_RESULTS], ['judOrderNote', 'Заметки', 'area']] },
   // ── суд первой инстанции ──
-  { id: 'i1', title: 'Первая инстанция', kinds: KIND_COURT, hint: { 'ГПК': 'Мотивированное решение — не позднее 10 дней после разбирательства (ч. 2 ст. 199 ГПК РФ); у мирового судьи — по заявлению: 3 дня, если участвовали, 15 — если нет (ч. 4 ст. 199).', 'АПК': 'Решение направляется в 5 дней (ст. 177 АПК РФ); упрощённое производство — гл. 29.', 'КАС': 'Копии решения вручаются или направляются не позднее 3 дней после принятия в окончательной форме (ст. 182 КАС РФ).', 'УПК': 'Судебное разбирательство по уголовному делу — вкладка «Суд»; здесь — гражданский иск в уголовном деле и общие реквизиты.' },
+  { id: 'i1', title: 'Первая инстанция', kinds: KIND_COURT, hint: { 'ГПК': 'Мотивированное решение — не позднее 10 дней после разбирательства (ч. 2 ст. 199 ГПК РФ); у мирового судьи — по заявлению: 3 дня, если участвовали, 15 — если нет (ч. 4 ст. 199); в упрощённом производстве — заявление в 5 дней со дня подписания резолютивной части (ч. 3 ст. 232.4). Дни — рабочие (ч. 3 ст. 107 ГПК РФ).', 'АПК': 'Решение направляется в 5 дней (ст. 177 АПК РФ); упрощённое производство — гл. 29.', 'КАС': 'Копии решения вручаются или направляются не позднее 3 дней после принятия в окончательной форме (ст. 182 КАС РФ).', 'УПК': 'Судебное разбирательство по уголовному делу — вкладка «Суд»; здесь — гражданский иск в уголовном деле и общие реквизиты.' },
     // замечание пользователя 05.10.2026: адрес суда первой инстанции (поле прежней программы courtAddress) — в форме, как у апелляции и кассации
     fields: [['courtAddress', 'Адрес суда', 'text'], ['i1Mode', 'Порядок рассмотрения', 'select', I1_MODES], ['i1FilingDate', 'Подано в суд', 'date'], ['i1AcceptedDate', 'Принято к производству', 'date'], ['i1NoMotionDate', 'Оставлено без движения до', 'date'], ['i1FixDueDate', 'Срок устранения недостатков', 'date'],
     ['i1SecurityDate', 'Обеспечительные меры (дата)', 'date'], ['i1SecurityNote', 'Обеспечительные меры (что принято)'], ['i1DecisionDate', 'Резолютивная часть (дата решения)', 'date'], ['i1DecisionFullDate', 'Мотивированное решение изготовлено', 'date'], ['i1PublishedDate', 'Опубликовано / выдано', 'date'], ['i1Result', 'Результат', 'select', I1_RESULTS],
     ['secretary', 'Помощник / секретарь судьи'], ['secretaryPhone', 'Телефон помощника'], ['cabinet', 'Кабинет'], ['i1Note', 'Заметки', 'area']] },
   // ── обжалование ──
-  { id: 'ap', title: 'Апелляция', kinds: KIND_COURT, hint: { 'ГПК': 'Апелляционная жалоба — 1 месяц со дня принятия решения в окончательной форме (ст. 321 ГПК РФ). Срок кассации считается от даты определения; появится дата мотивированного определения — срок пересчитается от неё.', 'АПК': 'Апелляционная жалоба — 1 месяц со дня принятия решения (ст. 259 АПК РФ).', 'КАС': 'Апелляционная жалоба — 1 месяц со дня принятия решения в окончательной форме; по избирательным делам — 5 дней, по госпитализации — 10 дней (ст. 298 КАС РФ).', 'УПК': 'Апелляционная жалоба — 15 суток со дня постановления приговора; осуждённому под стражей — со дня вручения копии (ст. 389.4 УПК РФ).' },
+  { id: 'ap', title: 'Апелляция', kinds: KIND_COURT, hint: { 'ГПК': 'Апелляционная жалоба — 1 месяц со дня принятия решения в окончательной форме (ст. 321 ГПК РФ); упрощённое производство — 15 рабочих дней (ч. 8 ст. 232.4). Кассация — 3 месяца со дня изготовления мотивированного апелляционного определения (ч. 1 ст. 376.1 ГПК РФ): пока его даты нет, срок считается от даты определения.', 'АПК': 'Апелляционная жалоба — 1 месяц со дня принятия решения (ст. 259 АПК РФ); упрощённое производство — 15 рабочих дней (ч. 4 ст. 229).', 'КАС': 'Апелляционная жалоба — 1 месяц со дня принятия решения в окончательной форме; по избирательным делам — 5 дней, по госпитализации — 10 дней (ст. 298 КАС РФ). Кассация — 6 месяцев со дня, следующего за принятием апелляционного определения; время составления отложенного мотивированного определения исключается (п. 9 постановления Пленума ВС от 09.07.2020 № 17).', 'УПК': 'Апелляционная жалоба — 15 суток со дня постановления приговора; осуждённому под стражей — со дня вручения копии (ст. 389.4 УПК РФ). Кассация — 6 месяцев со дня апелляционного решения: в этот день приговор вступает в силу (ч. 3 ст. 390, ч. 4 ст. 401.3 УПК РФ), дата мотивированного решения срок не сдвигает.' },
     fields: [['apFilingDate', 'Жалоба подана', 'date'], ['apBy', 'Кто обжалует', 'select', APPEAL_BY], ['apCourt', 'Апелляционный суд', 'text', { list: 'courts' }], ['courtAddressApp', 'Адрес апелляционного суда', 'text', { wide: true }], ['courtNoApp', '№ дела в апелляции'], ['judgeApp', 'Судья (апелляция)', 'text', { list: 'judges' }],
     ['apDecisionDate', 'Дата апелляционного определения', 'date'], ['apDecisionFullDate', 'Мотивированное определение изготовлено', 'date'], ['apResult', 'Результат апелляции', 'select', AP_RESULTS], ['linkApp', 'Ссылка на дело (апелляция)', 'url'], ['secretaryApp', 'Помощник судьи'], ['secretaryPhoneApp', 'Телефон помощника'], ['cabinetApp', 'Кабинет'], ['apNote', 'Заметки (апелляция)', 'area']] },
-  { id: 'cs', title: 'Кассация', hint: { 'ГПК': 'Кассационная жалоба в кассационный суд общей юрисдикции — 3 месяца со дня вступления в силу обжалуемого акта (ст. 376.1 ГПК РФ); по делам мировых судей с 10.05.2026 — гл. 40.1.', 'АПК': 'Кассационная жалоба в арбитражный суд округа — 2 месяца со дня вступления в силу обжалуемого акта (ст. 276 АПК РФ).', 'КАС': 'Кассационная жалоба — 6 месяцев со дня вступления в силу обжалуемого акта (ст. 318 КАС РФ).', 'УПК': 'Сплошная кассация — 6 месяцев со дня вступления приговора в законную силу (ч. 4 ст. 401.3 УПК РФ); далее — выборочная кассация без срока (ст. 401.10–401.12).', 'КоАП': 'Жалоба на вступившее в силу постановление — в кассационный суд общей юрисдикции, срок не установлен (ст. 30.12–30.14 КоАП РФ).' },
+  { id: 'cs', title: 'Кассация', hint: { 'ГПК': 'Кассационная жалоба в кассационный суд общей юрисдикции — 3 месяца; после апелляции — со дня изготовления мотивированного апелляционного определения (ч. 1 ст. 376.1 ГПК РФ); по делам мировых судей с 10.05.2026 — гл. 40.1. Жалоба в ВС — 3 месяца со дня определения кассационного суда в окончательной форме (ст. 390.3): укажите дату мотивированного определения.', 'АПК': 'Кассационная жалоба в арбитражный суд округа — 2 месяца со дня вступления в силу обжалуемого акта (ст. 276 АПК РФ).', 'КАС': 'Кассационная жалоба — 6 месяцев (ст. 318 КАС РФ); срок в ВС с ней единый, время рассмотрения жалобы в кассационном суде исключается (пп. 8, 9, 19 постановления Пленума ВС от 09.07.2020 № 17) — для его расчёта нужна дата подачи жалобы.', 'УПК': 'Сплошная кассация — 6 месяцев со дня вступления приговора в законную силу (ч. 4 ст. 401.3 УПК РФ); далее — выборочная кассация без срока (ст. 401.10–401.12).', 'КоАП': 'Жалоба на вступившее в силу постановление — в кассационный суд общей юрисдикции, срок не установлен (ст. 30.12–30.14 КоАП РФ).' },
     fields: [['csFilingDate', 'Жалоба подана', 'date'], ['csBy', 'Кто обжалует', 'select', APPEAL_BY], ['courtCass', 'Кассационный суд', 'text', { list: 'courts' }], ['courtAddressCass', 'Адрес кассационного суда', 'text', { wide: true }], ['courtNoCass', '№ дела в кассации'], ['judgeCass', 'Судья (кассация)', 'text', { list: 'judges' }],
-    ['csDecisionDate', 'Дата кассационного определения', 'date'], ['csResult', 'Результат кассации', 'select', CS_RESULTS], ['linkCass', 'Ссылка на дело (кассация)', 'url'], ['secretaryCass', 'Помощник судьи'], ['secretaryPhoneCass', 'Телефон помощника'], ['cabinetCass', 'Кабинет'], ['csNote', 'Заметки (кассация)', 'area']] },
-  { id: 'cs2', title: 'Верховный Суд', kinds: KIND_COURT, hint: { 'ГПК': 'Кассационная жалоба в Судебную коллегию ВС РФ — 3 месяца со дня вынесения определения кассационного суда общей юрисдикции (ст. 390.3 ГПК РФ); надзор — гл. 41.1.', 'АПК': 'Кассационная жалоба в ВС РФ — 2 месяца со дня вступления в силу последнего обжалуемого акта (ст. 291.2 АПК РФ).', 'КАС': 'Кассационная жалоба в ВС РФ — 6 месяцев (ст. 318 КАС РФ).', 'УПК': 'Выборочная кассация в ВС РФ и надзор (гл. 47.1, 48.1 УПК РФ) — срок не установлен.' },
+    ['csDecisionDate', 'Дата кассационного определения', 'date'], ['csDecisionFullDate', 'Мотивированное определение изготовлено', 'date'], ['csResult', 'Результат кассации', 'select', CS_RESULTS], ['linkCass', 'Ссылка на дело (кассация)', 'url'], ['secretaryCass', 'Помощник судьи'], ['secretaryPhoneCass', 'Телефон помощника'], ['cabinetCass', 'Кабинет'], ['csNote', 'Заметки (кассация)', 'area']] },
+  { id: 'cs2', title: 'Верховный Суд', kinds: KIND_COURT, hint: { 'ГПК': 'Кассационная жалоба в Судебную коллегию ВС РФ — 3 месяца со дня вынесения определения кассационного суда общей юрисдикции в окончательной форме (ч. 1 ст. 390.3 ГПК РФ); надзор — гл. 41.1.', 'АПК': 'Кассационная жалоба в ВС РФ — 2 месяца со дня вступления в силу последнего обжалуемого акта (ст. 291.2 АПК РФ).', 'КАС': 'Кассационная жалоба в ВС РФ — в пределах единого 6-месячного срока, который считается от апелляционного определения; время рассмотрения жалобы в кассационном суде из него исключается (ч. 2 ст. 318 КАС РФ, пп. 8, 9, 19 постановления Пленума ВС от 09.07.2020 № 17).', 'УПК': 'Выборочная кассация в ВС РФ и надзор (гл. 47.1, 48.1 УПК РФ) — срок не установлен.' },
     // решение пользователя 04.10.2026: номер и ссылка дела в ВС (вторая кассация: ст. 390.2 ГПК, ст. 291.1 АПК, ст. 319 КАС) — стадия «Кассация»
     fields: [['cs2FilingDate', 'Жалоба подана', 'date'], ['cs2By', 'Кто обжалует', 'select', APPEAL_BY], ['courtNoVs', '№ дела в ВС РФ'], ['linkVs', 'Ссылка на дело (ВС РФ)', 'url'], ['cs2DecisionDate', 'Дата определения (постановления)', 'date'], ['cs2Result', 'Результат', 'select', CS_RESULTS], ['cs2Note', 'Заметки', 'area']] },
   // надзор — Президиум ВС РФ (ст. 391.1 ГПК, ст. 308.1 АПК, ст. 332 КАС; сверено 04.10.2026) — стадия «Надзор»
@@ -11447,6 +11742,8 @@ const CASE_FORM_TABS = [
     ['ipStatus', 'Состояние ИП', 'select', IP_STATUSES], ['ipStatusDate', 'Дата состояния', 'date'], ['ipSum', 'Сумма к взысканию, ₽', 'number'], ['ipCollected', 'Взыскано, ₽', 'number'], ['ipFee', 'Исполнительский сбор, ₽', 'number'], ['ipSummaryNo', '№ сводного ИП'], ['ipStatusNote', 'Заметки', 'area']] },
 ];
 const CASE_MAIN_EXTRA = [['caseUid', 'УИД дела (ГАС «Правосудие»)', 'text', { wide: false }], ['clientRole', 'Роль доверителя', 'select', 'clientRole'], ['amount', 'Сумма, ₽', 'number'], ['link', 'Ссылка на дело (сайт суда)', 'url']]; // добавка к краткой форме
+// папка документов дела — в основной части формы (краткой и полной): путь на компьютере и ссылка на папку в облаке
+const CASE_DOCS_FIELDS = [['docsPath', 'Папка документов на компьютере (путь)', 'text', { wide: true, ph: 'D:\\Дела\\Иванов 2-1500-2026' }], ['docsUrl', 'Папка документов в облаке (ссылка)', 'url', { wide: true, ph: 'ссылка на папку: Яндекс Диск, Google Диск, Dropbox' }]];
 function caseTabsFor(kind) { return CASE_FORM_TABS.filter(t => !t.kinds || t.kinds.includes(kind)); }
 function caseTabHint(t, kind) { if (!t.hint) return ''; return typeof t.hint === 'string' ? t.hint : (t.hint[caseCodeOf(kind)] || ''); }
 const caseFieldIds = tabs => tabs.flatMap(t => (t.fields || []).map(f => f[0]));
@@ -11509,38 +11806,22 @@ function dlEditModel(prev, v, now) {
 
 // ── правило пользователя 30.09.2026: срок считается от даты решения (апелляционного определения); когда появляется дата
 // мотивированного акта — вручную или с сайта суда (мониторинг, этап 4) — срок пересчитывается от неё, даже подтверждённый:
-// подтверждение снимается, в заметке сказано почему, срок снова «требует проверки». Правила v312 читают i1DecisionFullDate
-// сами; для апелляции поле apDecisionFullDate — новое, поэтому расчёт получает копию дела, где оно подставлено вместо даты.
-function dlCalcView(c) { if (!c) return c; return { ...c, apDecisionDate: c.apDecisionFullDate || c.apDecisionDate || '' }; }
-function dlActBases(c) { const v = dlCalcView(c || {}); return { decision: v.kind === 'КоАП' ? (v.koapServedDate || v.koapDate || '') : (v.i1DecisionFullDate || v.i1DecisionDate || (v.kind === 'Уголовное' ? v.crimVerdictDate : '')), appeal: v.apDecisionDate || '', cass: v.csDecisionDate || '' }; }
-// подтверждённые автосроки от акта, основание которого сменилось (появилась дата мотивированного акта), теряют подтверждение
-function dlRebaseModel(obj, prev) {
-  const nb = dlActBases(obj), pb = dlActBases(prev), out = [];
-  for (const act of ['decision', 'appeal', 'cass']) {
-    if (!nb[act] || !pb[act] || nb[act] === pb[act]) continue;
-    for (const dl of (obj.deadlines || [])) {
-      if (!dl || dl.done || !dl.confirmedAt || !String(dl.autoKey || '').startsWith('act:' + act + ':')) continue;
-      dl.confirmedAt = ''; dl.confirmedDate = ''; dl.note = ('Основание изменилось: ' + actLabel(obj.kind, act) + ' от ' + fmtDate(nb[act]) + ' (было ' + fmtDate(pb[act]) + ') — срок пересчитан, подтвердите заново. ' + (dl.note || '')).trim(); out.push(dl.title);
-    }
-  }
-  return out;
-}
-function nextActDeadlines(obj, prev) {
-  const rebased = dlRebaseModel(obj, prev);
-  const co = dlCalcView(obj), cp = prev ? dlCalcView(prev) : null; co.deadlines = obj.deadlines;
-  const msgs = caseActDeadlinesApply(co, cp); obj.deadlines = co.deadlines;
-  if (rebased.length) msgs.push('Подтверждение снято, срок пересчитан от мотивированного акта: ' + rebased.join(', '));
-  return msgs;
-}
-// «Правила сроков обновлены» (логика rulesReviewFind v299/v301) с учётом даты мотивированного апелляционного определения
+// подтверждение снимается, в заметке сказано почему, срок снова «требует проверки». С 14.10.2026 (аудит) — по кодексу: от
+// мотивированного акта считаются только сроки, которые закон от него считает (next/acts.js), остальные — от даты принятия.
+function dlActBases(c) { const v = c || {}; return { decision: v.kind === 'КоАП' ? (v.koapServedDate || v.koapDate || '') : (v.i1DecisionFullDate || v.i1DecisionDate || (v.kind === 'Уголовное' ? v.crimVerdictDate : '')), appeal: v.apDecisionFullDate || v.apDecisionDate || '', cass: v.csDecisionFullDate || v.csDecisionDate || '' }; }
+function nextActDeadlines(obj, prev) { return nextActDeadlinesApply(obj, prev); }
+// «Правила сроков обновлены» (логика rulesReviewFind v299/v301) по правилам новой версии; сроки, которые заменяет акт
+// следующей инстанции (лист и расходы), не предлагаются
 async function nextRulesReviewFind() {
   const out = [];
   for (const c0 of await getAll('cases')) { if (!c0 || c0._deleted || c0.archived || c0.status === 'Завершено') continue;
-    const c = dlCalcView(c0), bases = dlActBases(c0);
-    for (const act of ['decision', 'appeal', 'cass']) { const base = bases[act]; if (!base) continue;
-      const rules = caseActDeadlines(c.kind, act, base, c.court), dls = c0.deadlines || [];
-      const missing = rules.filter(n => !dls.some(dl => dl.autoKey === n.autoKey));
-      const changed = rules.filter(n => { const dl = dls.find(x => x.autoKey === n.autoKey); return dl && !dl.done && !dl.confirmedAt && (dl.rulesVer || '') !== RULES_VER && dl.date !== n.date; }).map(n => ({ title: n.title, from: dls.find(x => x.autoKey === n.autoKey).date, to: n.date }));
+    const inp = nextActInputs(c0), dls = c0.deadlines || [];
+    for (const act of ['decision', 'appeal', 'cass']) { if (!nxHasBase(inp, act)) continue;
+      const next = act === 'decision' ? 'appeal' : act === 'appeal' ? 'cass' : '';
+      const rules = nextActRules(c0, act).filter(n => !(next && nxHasBase(inp, next) && /:(writ|costs)$/.test(n.autoKey)));
+      const missing = rules.filter(n => !dls.some(dl => dl && dl.autoKey === n.autoKey));
+      const changed = rules.filter(n => { const dl = dls.find(x => x && x.autoKey === n.autoKey); return dl && !dl.done && !dl.confirmedAt && (dl.rulesVer || '') !== NEXT_RULES_VER && dl.date !== n.date; }).map(n => ({ title: n.title, from: dls.find(x => x && x.autoKey === n.autoKey).date, to: n.date }));
+      const base = act === 'decision' ? inp.dec.base : act === 'appeal' ? inp.ap.base : inp.cs.base;
       if (missing.length || changed.length) out.push({ c: c0, act, base, missing, changed }); } }
   return out;
 }
@@ -11549,7 +11830,7 @@ async function openDeadlineSheet(caseId, key) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
   const dl = dlFind(c, key); if (!dl) { toast('Срок не найден', true); return; }
   const today = todayISO(), k = dl.date ? todayDayDiff(dl.date, today) : null, unconfirmed = !dlIsControl(dl) && !dl.confirmedAt && !dl.done;
-  const rows = dlPassport(dl, typeof RULES_VER === 'string' ? RULES_VER : '', today).map(([a, b]) => `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>`).join('');
+  const rows = dlPassport(dl, NEXT_RULES_VER, today).map(([a, b]) => `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>`).join('');
   const body = `<p class="small muted">${esc([c.number, c.client].filter(Boolean).join(' · '))}</p>
     <div class="dl-date ${dl.done ? 'done' : k !== null && k < 0 ? 'overdue' : ''}">${esc(dl.date ? fmtDate(dl.date) : '—')}</div>
     <div class="task-badges">${unconfirmed ? badge('Требует проверки', 'warn') : ''}${dl.autoKey ? badge('Рассчитан автоматически', 'accent') : ''}${dl.done ? badge('Выполнен', 'good') : ''}</div>
@@ -11611,34 +11892,35 @@ async function saveDeadlineForm(caseId, key) {
 // ── типовой срок по кодексу (presetRulesFor v211) или свой ──
 async function openDeadlineAdd(caseId) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
-  const rules = presetRulesFor(c.kind);
+  const rules = nextPresetRules(c);
   const body = `<p class="small muted">${esc([c.number, c.client].filter(Boolean).join(' · '))} · ${esc(caseCodeOf(c.kind))} — срок отсчитывается от даты акта (для решения — от изготовления в окончательной форме)</p>
     <div class="form-grid">${fInput('pd-date', 'Дата акта (решение, определение, постановление)', todayISO(), 'type="date"')}</div>
     <div class="section-label">Типовые сроки по кодексу</div>
-    <div class="list-rows">${rules.length ? rules.map(([act, r]) => `<button type="button" class="list-btn" onclick="dlPreset('${jsq(caseId)}', '${act}', '${r.key}')"><span>${esc(r.t)}</span><span class="muted">${esc(ruleTerm(r))} · ${esc(actLabel(c.kind, act))}</span></button>`).join('') : '<div><span class="muted">Для этого вида дела типовых сроков нет</span></div>'}</div>
+    <div class="list-rows">${rules.length ? rules.map(([act, r]) => `<button type="button" class="list-btn" onclick="dlPreset('${jsq(caseId)}', '${act}', '${r.key}')"><span>${esc(r.t)}</span><span class="muted">${esc(r.term)} · ${esc(actLabel(c.kind, act))}</span></button>`).join('') : '<div><span class="muted">Для этого вида дела типовых сроков нет</span></div>'}</div>
     <div class="info-box">Типовые сроки — ориентир: сверьте с кодексом для вашей категории и инстанции, затем подтвердите дату в паспорте срока.</div>
     <div class="form-actions">${btn('Свой срок', `openDeadlineForm('${jsq(caseId)}', '')`, '', 'plus')}</div>`;
   openSheet('Добавить срок', body, UI.cur ? true : undefined);
 }
 async function dlPreset(caseId, act, key) {
   const base = fv('pd-date') || todayISO(); let title = '';
-  const c = await dlSave(caseId, c => { const n = caseActDeadlines(c.kind, act, base, c.court).find(x => x.autoKey === 'act:' + act + ':' + key); if (!n) { toast('Правило не найдено', true); return false; }
+  const c = await dlSave(caseId, c => { const n = nextActRules(nextPresetCase(c, act, base), act).find(x => x.autoKey === 'act:' + act + ':' + key); if (!n) { toast('Правило не найдено', true); return false; }
     const ex = c.deadlines.find(dl => dl.autoKey === n.autoKey && !dl.done);
     if (ex && ex.confirmedAt) { toast(`«${ex.title}» уже есть и подтверждён — ${fmtDate(ex.date)}`, true); return false; }
-    if (ex) Object.assign(ex, { date: n.date, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, calc: n.calc || '', rulesVer: typeof RULES_VER === 'string' ? RULES_VER : '' });
-    else c.deadlines.push({ id: uid('СР'), title: n.title, date: n.date, note: 'типовой срок — проверьте и подтвердите', done: false, kind: n.kind, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, calc: n.calc || '', rulesVer: typeof RULES_VER === 'string' ? RULES_VER : '', src: 'Типовой срок', autoKey: n.autoKey, confirmedAt: '', confirmedDate: '', createdAt: Date.now() });
+    if (ex) Object.assign(ex, { title: n.title, date: n.date, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, calc: n.calc || '', rulesVer: NEXT_RULES_VER });
+    else c.deadlines.push({ id: uid('СР'), title: n.title, date: n.date, note: 'типовой срок — проверьте и подтвердите', done: false, kind: n.kind, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, calc: n.calc || '', rulesVer: NEXT_RULES_VER, src: 'Типовой срок', autoKey: n.autoKey, confirmedAt: '', confirmedDate: '', createdAt: Date.now() });
     title = n.title; addCaseHistoryEvent(c, 'deadline', '', 'Типовой срок: ' + n.title + ' — до ' + fmtDate(n.date), 'form'); }, null);
   if (c) { toast(`Срок «${title}» добавлен — проверьте и подтвердите`); await dlReopen(caseId, ''); }
 }
 // ── обновление правил (v299/v301): пересчёт неподтверждённых автосроков и добавление недостающих ──
 async function rulesReviewApply(caseId) {
   const c = await getOne('cases', caseId); if (!c) return;
-  const prevLike = Object.assign({}, c, { i1DecisionFullDate: '', i1DecisionDate: '', crimVerdictDate: '', koapServedDate: '', koapDate: '', apDecisionDate: '', csDecisionDate: '' }); // как будто даты появились только что
+  // как будто даты актов появились только что: подтверждённые сроки не трогаются
+  const prevLike = { kind: c.kind, court: c.court, i1Mode: c.i1Mode };
   const msgs = nextActDeadlines(c, prevLike);
   try { await put('cases', c); } catch (e) { logErr('rules:apply', e); toast('Не удалось сохранить', true); return; }
   toast(msgs.length ? msgs.join('; ').slice(0, 200) : 'Сроки добавлены'); nav('today');
 }
-function rulesReviewHide() { localStorage.setItem('crm_rules_review_hide', typeof RULES_VER === 'string' ? RULES_VER : '1'); nav('today'); }
+function rulesReviewHide() { localStorage.setItem('crm_rules_review_hide', NEXT_RULES_VER); nav('today'); }
 
 // ▼▼▼ ui/trash.js
 // ═══ ui/trash.js — удаление записей и корзина (этап 2б) ═══
@@ -12308,8 +12590,8 @@ SCREENS.today = async function () {
   // x.open — своё действие строки (события календаря, sync/calimp.js)
   const impOpen = x => x.open ? x.open : x.kind === 'mail' ? `openMailSheet('${jsq(x.mailId)}')` : x.kind === 'clash' ? (x.hearingId ? `openHearingForm('${jsq(x.hearingId)}')` : `openMeetingForm('${jsq(x.meetingId)}')`) : x.kind === 'poa' ? `openPoaForm('${jsq(x.poaId)}')` : x.kind === 'hearing' ? `openAfterHearing('${jsq(x.hearingId)}')` : x.kind === 'prep' ? `openHearingForm('${jsq(x.hearingId)}')` : x.kind === 'task' ? (x.leadId ? `openLeadSheet('${jsq(x.leadId)}')` : `openTaskForm('${jsq(x.taskId)}')`) : x.dlId ? `openDeadlineSheet('${jsq(x.caseId)}', '${jsq(x.dlId)}')` : `openCaseSheet('${jsq(x.caseId)}')`;
   // v299/v301: правила сроков обновлены — у дел есть неподтверждённые автосроки по прежней версии или недостающие сроки
-  let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== RULES_VER) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
-  const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>Правила сроков обновлены ${badge(RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
+  let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== NEXT_RULES_VER) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
+  const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>Правила сроков обновлены ${badge(NEXT_RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
       ${review.slice(0, 8).map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.c.id)}')"><span class="task-title">${esc([r.c.number, r.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(actLabel(r.c.kind, r.act))} от ${esc(fmtDate(r.base))}: ${esc([r.missing.length ? 'нет сроков — ' + r.missing.map(n => n.title).join(', ') : '', r.changed.length ? 'изменились — ' + r.changed.map(x => x.title + ': ' + fmtDate(x.from) + ' → ' + fmtDate(x.to)).join(', ') : ''].filter(Boolean).join('; '))}</span></button><div class="imp-done"><button type="button" class="button small-btn" onclick="rulesReviewApply('${jsq(r.c.id)}')">${icon('refresh-cw', 'icon-sm')}Пересчитать</button></div></div>`).join('')}${review.length > 8 ? `<p class="panel-foot">Ещё ${review.length - 8}</p>` : ''}</section>` : '';
   // Б15 (11.10.2026): строку можно смахнуть вправо — то же действие, что кнопка в строке (ui/swipe.js)
   const swp = (fn, args, label) => typeof swipeAttrs === 'function' ? swipeAttrs(fn, args, label) : '';
@@ -12629,7 +12911,7 @@ async function openCaseSheet(id, keep) {
     <div class="task-badges">${badge(c.status || 'Без статуса', c.status === 'Завершено' ? 'good' : c.status === 'Ожидание' ? 'warn' : 'accent')}${c.kind ? badge(c.kind) : ''}${c.category ? badge(c.category) : ''}${c.archived ? badge('Архив') : ''}</div>
     ${cHead.court || cHead.judge ? `<div class="case-court">${cHead.court ? `<div>${icon('landmark', 'icon-sm')}<span>${esc(cHead.court)}${c.stage && c.stage !== 'Первая инстанция' ? ' · ' + esc(String(c.stage).toLowerCase()) : ''}</span></div>` : ''}${cHead.judge ? `<div>${icon('users-round', 'icon-sm')}<span>Судья: ${esc(cHead.judge)}</span></div>` : ''}</div>` : ''}
     ${!cHead.judge && c.court ? `<div class="case-step">${icon('circle-alert', 'icon-sm')}<span>Судья не указан — ${hasLink ? 'нажмите «Данные с сайта суда»' : 'впишите в форме дела («Изменить»)'}</span></div>` : ''}
-    <div class="actions" style="margin:10px 0 8px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Контакты суда', `openCourtContacts('${jsq(c.id)}')`, 'small-btn', 'landmark')}${typeof openCourtSites === 'function' ? `<button type="button" class="button small-btn" id="case-sites" onclick="openCourtSites('${jsq(c.id)}')">${icon('arrow-right', 'icon-sm')}Сайты судов</button>` : ''}${typeof openCaseSummarySheet === 'function' ? `<button type="button" class="button small-btn" id="case-summary" onclick="openCaseSummarySheet('${jsq(c.id)}')">${icon('files', 'icon-sm')}Сводка</button>` : ''}${typeof openDocTplPicker === 'function' ? `<button type="button" class="button small-btn" id="case-doctpl" onclick="openDocTplPicker('case', '${jsq(c.id)}')">${icon('notebook-pen', 'icon-sm')}Документы</button>` : ''}${(c.docsPath || c.docsUrl) ? btn('Папка документов', `openCaseDocs('${jsq(c.id)}')`, 'small-btn', 'files') : ''}${hasLink ? `<button type="button" class="button small-btn" id="case-card-fetch" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button>` : ''}${typeof kadProtoButton === 'function' ? kadProtoButton(c) : ''}${cl && contactLinks(cl.phone).tel ? `<button type="button" class="button small-btn" id="case-contact" onclick="openContactSheet('${jsq(cl.id)}')">${icon('phone', 'icon-sm')}Связаться с доверителем</button>` : ''}</div>
+    <div class="actions" style="margin:10px 0 8px">${btn('Изменить', `openCaseForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Контакты суда', `openCourtContacts('${jsq(c.id)}')`, 'small-btn', 'landmark')}${typeof openCourtSites === 'function' ? `<button type="button" class="button small-btn" id="case-sites" onclick="openCourtSites('${jsq(c.id)}')">${icon('arrow-right', 'icon-sm')}Сайты судов</button>` : ''}${typeof openCaseSummarySheet === 'function' ? `<button type="button" class="button small-btn" id="case-summary" onclick="openCaseSummarySheet('${jsq(c.id)}')">${icon('files', 'icon-sm')}Сводка</button>` : ''}${typeof openDocTplPicker === 'function' ? `<button type="button" class="button small-btn" id="case-doctpl" onclick="openDocTplPicker('case', '${jsq(c.id)}')">${icon('notebook-pen', 'icon-sm')}Документы</button>` : ''}${btn('Папка документов', `openCaseDocs('${jsq(c.id)}')`, 'small-btn', 'files')}${hasLink ? `<button type="button" class="button small-btn" id="case-card-fetch" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button>` : ''}${typeof kadProtoButton === 'function' ? kadProtoButton(c) : ''}${cl && contactLinks(cl.phone).tel ? `<button type="button" class="button small-btn" id="case-contact" onclick="openContactSheet('${jsq(cl.id)}')">${icon('phone', 'icon-sm')}Связаться с доверителем</button>` : ''}</div>
     ${cHead.next ? `<button type="button" class="case-next" onclick="openHearingForm('${jsq(cHead.next.id)}')">${icon('calendar-days')}<span><b>${esc(fmtDate(cHead.next.date))}${cHead.next.time ? ' · ' + esc(cHead.next.time) : ''}</b><small>Заседание${cHead.next.room ? ' · зал ' + esc(cHead.next.room) : ''} · ${esc(todayDayLabel(cHead.next.date, localISO(new Date())).toLowerCase())}</small></span>${icon('chevron-right', 'icon-sm')}</button>` : ''}
     ${c.nextAction ? `<div class="case-step${m.nextOverdue ? ' overdue' : ''}">${icon('check-check', 'icon-sm')}<span>Следующий шаг: ${esc(c.nextAction)}${c.nextActionDue ? ' — ' + esc(m.nextWhen) + ', ' + esc(fmtDate(c.nextActionDue)) : ''}</span></div>` : ''}
     ${m.fin.amount || m.fin.paid ? `<button type="button" class="case-money" onclick="caseMoneyOpen()"><span><small>Начислено</small><b>${esc(fmtMoney(m.fin.amount))}</b></span><span><small>Оплачено</small><b>${esc(fmtMoney(m.fin.paid))}</b></span><span><small>Долг</small><b class="${m.fin.debt ? 'bad' : ''}">${esc(fmtMoney(m.fin.debt))}</b></span></button>` : ''}
@@ -12850,20 +13132,95 @@ function caseCourtAddrFill(obj, prev) {
   }
 }
 // ── папка документов дела: путь на компьютере и ссылка в облаке ──
+// Решение пользователя 14.10.2026: каждый сам привязывает и называет папку как удобно — без шаблонов и общей папки архива.
+// Кнопка «Папка документов» в карточке видна всегда: пустая папка привязывается прямо из листа. Приложение для компьютера 1.4.1:
+// «Выбрать папку» — окно Windows «Выбор папки» (pickFolder), список файлов папки (listDir), «Создать папку» (makeDir), файл —
+// программой, назначенной в Windows (openPath; программы и сценарии приложение не запускает). В браузере путь только копируется.
 function caseDocsModel(c) {
   const path = String((c && c.docsPath) || '').trim(), url = c && c.docsUrl && typeof safeExternalUrl === 'function' ? safeExternalUrl(c.docsUrl) : '';
-  return { path, url, desktop: !!(typeof window !== 'undefined' && window.CRMDesktop && typeof window.CRMDesktop.openPath === 'function') };
+  const d = typeof window !== 'undefined' && window.CRMDesktop ? window.CRMDesktop : null;
+  return { path, url, desktop: !!(d && typeof d.openPath === 'function'), pick: !!(d && typeof d.pickFolder === 'function'), list: !!(d && typeof d.listDir === 'function'), make: !!(d && typeof d.makeDir === 'function') };
+}
+// список папки: сначала папки, затем файлы по имени; не больше 300 строк
+function caseDocsListModel(items) {
+  const arr = (Array.isArray(items) ? items : []).filter(x => x && typeof x.name === 'string' && x.name && !/^\./.test(x.name));
+  arr.sort((a, b) => (b.dir ? 1 : 0) - (a.dir ? 1 : 0) || a.name.localeCompare(b.name, 'ru'));
+  return { rows: arr.slice(0, 300), more: Math.max(0, arr.length - 300) };
+}
+// путь к файлу внутри папки: разделитель — как в пути папки
+function caseDocsJoin(dir, name) { const d = String(dir || '').replace(/[\\/]+$/, ''), sep = /\\/.test(dir) || /^[A-Za-z]:/.test(dir) ? '\\' : '/'; return d + sep + String(name || ''); }
+// отказ чтения папки «нет такой папки» (Windows: os error 2/3; Linux: No such file)
+const caseDocsMissing = msg => /os error [23](?!\d)|cannot find|не удается найти|no such file/i.test(String(msg || ''));
+let CASE_DOCS = { caseId: '', path: '', rows: [] };
+function caseDocsBindHtml(c, m, open) {
+  return `<details class="fgroup" id="docs-bind"${open ? ' open' : ''}><summary>${icon('chevron-down', 'icon-sm')}<span>${m.path || m.url ? 'Изменить папку' : 'Привязать папку'}</span></summary><div class="form-grid">
+    <label class="field wide"><span>Папка документов на компьютере (путь)</span><div class="inn-row"><input id="docs-in-path" value="${esc(c.docsPath || '')}" autocomplete="off" spellcheck="false" placeholder="D:\\Дела\\Иванов 2-1500-2026">${m.pick ? `<button type="button" class="button small-btn" id="docs-pick" onclick="caseDocsPick('docs-in-path')">${icon('hard-drive', 'icon-sm')}Выбрать папку</button>` : ''}</div></label>
+    ${wide(fInput('docs-in-url', 'Папка документов в облаке (ссылка)', c.docsUrl || '', 'type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="ссылка на папку: Яндекс Диск, Google Диск, Dropbox"'))}
+  </div><p class="small muted">${m.pick ? 'Путь можно выбрать мышью: «Выбрать папку» откроет окно Windows.' : 'Путь — из адресной строки проводника (например, D:\\Дела\\Иванов). В приложении для компьютера папку можно выбрать мышью.'} Ссылка — из облака: «Поделиться» → «Копировать ссылку».</p>
+  <div class="form-actions"><button type="button" class="button primary" id="docs-save" onclick="caseDocsSave('${jsq(c.id)}')">${icon('check', 'icon-sm')}Сохранить</button></div></details>`;
 }
 async function openCaseDocs(caseId) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
   const m = caseDocsModel(c);
+  CASE_DOCS = { caseId: c.id, path: m.path, rows: [] };
   const pathHtml = m.path ? `<div class="section-label">На компьютере</div><div class="list-rows"><div><span class="muted">Путь</span><span id="docs-path" style="word-break:break-all">${esc(m.path)}</span></div></div>
       <div class="form-actions" style="margin:8px 0">${m.desktop ? `<button type="button" class="button small-btn primary" id="docs-open" onclick="caseDocsOpen('${jsq(c.id)}')">${icon('hard-drive', 'icon-sm')}Открыть папку</button>` : ''}<button type="button" class="button small-btn" id="docs-copy" onclick="caseDocsCopy('${jsq(c.id)}')">${icon('files', 'icon-sm')}Скопировать путь</button></div>
-      ${m.desktop ? '' : '<p class="small muted">Браузер не открывает папки компьютера: скопируйте путь и вставьте его в адресную строку проводника. В приложении для компьютера — кнопка «Открыть папку».</p>'}` : '';
+      ${m.list ? '<div id="docs-files"><p class="small muted">Читаю папку…</p></div>' : ''}
+      ${m.desktop ? '' : '<p class="small muted">Браузер не открывает папки компьютера: скопируйте путь и вставьте его в адресную строку проводника. В приложении для компьютера — кнопка «Открыть папку» и список файлов.</p>'}` : '';
   const urlHtml = m.url ? `<div class="section-label">В облаке</div><div class="form-actions" style="margin:8px 0"><a class="button small-btn primary" id="docs-cloud" href="${esc(m.url)}" target="_blank" rel="noopener noreferrer">${icon('cloud-download', 'icon-sm')}Открыть папку в облаке</a></div>` : '';
+  const empty = !m.path && !m.url ? '<p class="small" id="docs-none">Папка документов не указана — укажите путь к папке на компьютере и (или) ссылку на папку в облаке.</p>' : '';
   if (typeof sheetFreeze === 'function') sheetFreeze();
-  openSheet('Папка документов', (pathHtml + urlHtml || '<p class="small">Папка документов не указана.</p>') + `<p class="small muted" style="margin-top:10px">Путь и ссылка задаются в форме дела: «Изменить» → «Все поля» → «Соглашение».</p>
+  openSheet('Папка документов', empty + pathHtml + urlHtml + caseDocsBindHtml(c, m, !m.path && !m.url) + `
     <div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Назад</button></div>`, sheetIsOpen() ? true : undefined);
+  if (m.path && m.list) caseDocsLoad();
+}
+// список файлов папки (приложение для компьютера)
+async function caseDocsLoad() {
+  const box = document.getElementById('docs-files'), path = CASE_DOCS.path; if (!box || !path) return;
+  let items;
+  try { items = await window.CRMDesktop.listDir(path); }
+  catch (e) {
+    const msg = String((e && e.message) || e || '');
+    if (caseDocsMissing(msg)) { box.innerHTML = `<div class="info-box" id="docs-missing">Папки по этому пути нет. Её можно создать — или выберите другую папку ниже.</div>${caseDocsModel({}).make ? `<div class="form-actions"><button type="button" class="button small-btn" id="docs-make" onclick="caseDocsMake()">${icon('plus', 'icon-sm')}Создать папку</button></div>` : ''}`; return; }
+    logErr('docs:list', e); box.innerHTML = `<div class="info-box warn" id="docs-list-err">Не удалось прочитать папку: ${esc(msg.slice(0, 200))}</div>`; return;
+  }
+  const lm = caseDocsListModel(items); CASE_DOCS.rows = lm.rows;
+  box.innerHTML = lm.rows.length ? `<div class="section-label">Файлы в папке</div><div class="list-rows" id="docs-list">${lm.rows.map((x, i) => `<button type="button" class="list-btn" onclick="caseDocsOpenFile(${i})"><span style="display:inline-flex;align-items:center;gap:8px;min-width:0;overflow-wrap:anywhere">${x.dir ? icon('hard-drive', 'icon-sm') : icon('files', 'icon-sm')}${esc(x.name)}</span><span class="muted">${x.dir ? 'папка' : esc(fmtSize(x.size))}${x.at ? ' · ' + esc(fmtDate(localISO(new Date(Number(x.at))))) : ''}</span></button>`).join('')}</div>${lm.more ? `<p class="small muted">Ещё ${lm.more} — откройте папку в проводнике</p>` : ''}`
+    : '<p class="small muted" id="docs-empty">Папка пуста.</p>';
+}
+function fmtSize(n) { n = Number(n) || 0; return n < 1024 ? n + ' Б' : n < 1048576 ? Math.round(n / 1024) + ' КБ' : (n / 1048576).toFixed(1).replace('.', ',') + ' МБ'; }
+async function caseDocsOpenFile(i) {
+  const x = CASE_DOCS.rows[i]; if (!x || !CASE_DOCS.path) return;
+  try { await window.CRMDesktop.openPath(caseDocsJoin(CASE_DOCS.path, x.name)); } catch (e) { logErr('docs:file', e); toast('Не удалось открыть: ' + String((e && e.message) || e).slice(0, 160), true); }
+}
+async function caseDocsMake() {
+  const path = CASE_DOCS.path; if (!path) return;
+  try { await window.CRMDesktop.makeDir(path); toast('Папка создана'); await caseDocsLoad(); } catch (e) { logErr('docs:make', e); toast('Не удалось создать папку: ' + String((e && e.message) || e).slice(0, 160), true); }
+}
+// «Выбрать папку» — окно Windows; пустой ответ — окно закрыли
+async function caseDocsPick(inputId) {
+  const d = window.CRMDesktop; if (!d || typeof d.pickFolder !== 'function') return;
+  const el = document.getElementById(inputId);
+  try { const p = await d.pickFolder((el && el.value.trim()) || ''); if (p && el) { el.value = p; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); } }
+  catch (e) { logErr('docs:pick', e); toast('Окно выбора папки не открылось: ' + String((e && e.message) || e).slice(0, 160), true); }
+}
+// проверка ввода: путь — до 400 знаков без перевода строки; ссылка — только http(s)
+function caseDocsInput(path, url) {
+  const p = String(path || '').trim(), u = String(url || '').trim();
+  if (p.length > 400 || /[\r\n]/.test(p)) return { error: 'Путь к папке слишком длинный или с переводом строки' };
+  if (u && !(typeof safeExternalUrl === 'function' && safeExternalUrl(u))) return { error: 'Ссылка на папку в облаке — адрес, начинающийся с https://' };
+  return { path: p, url: u };
+}
+async function caseDocsSave(caseId) {
+  const v = caseDocsInput(fv('docs-in-path'), fv('docs-in-url')); if (v.error) { toast(v.error, true); return; }
+  const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
+  if (String(c.docsPath || '') === v.path && String(c.docsUrl || '') === v.url) { toast('Без изменений'); return; }
+  c.docsPath = v.path; c.docsUrl = v.url;
+  try { await put('cases', c); } catch (e) { logErr('docs:save', e); toast('Не удалось сохранить: ' + ((e && e.message) || 'сбой записи'), true); return; }
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast(v.path || v.url ? 'Папка привязана к делу' : 'Папка отвязана от дела');
+  // карточка дела открывается заново, поверх неё — лист папки (порядок строго последовательный, урок 51)
+  closeSheet(true); await nav(UI.screen); await openCaseSheet(caseId); await openCaseDocs(caseId);
 }
 async function caseDocsCopy(caseId) {
   const c = await getOne('cases', caseId), p = c && String(c.docsPath || '').trim(); if (!p) return;
@@ -17246,7 +17603,8 @@ const HELP_SECTIONS = [
 <p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
 <p><b>Стадия</b> меняется нажатием на плашку в карточке. Она поднимается и сама, когда в деле появляются данные более высокой инстанции: номер или ссылка апелляции, кассации, Верховного Суда, заседание в апелляционном или кассационном суде. Если стадию вернули вручную, по тем же данным она не поднимается. Дела, где данные выше стадии, перечислены на «Сегодня» с кнопкой «Поднять».</p>
 <p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё.</p>
-<p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение, папка документов на компьютере и в облаке.</p>` },
+<p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение.</p>
+<p><b>Папка документов</b> — путь к папке дела на компьютере и ссылка на папку в облаке. Задаётся в форме дела (группа «Папка документов», видна сразу) или кнопкой «Папка документов» в карточке дела — она есть всегда. Папку называете и раскладываете как удобно. В приложении для компьютера: «Выбрать папку» открывает окно Windows, в карточке — список файлов папки (файл открывается программой, назначенной в Windows), «Открыть папку» — проводник, «Создать папку» — если её ещё нет. В браузере путь копируется — вставьте его в адресную строку проводника.</p>` },
   { id: 'people', title: 'Доверители, доверенности, обращения', html: `
 <p>«Доверители» — реестр с поиском; в карточке — дела, доверенности, связь (звонок, SMS, Telegram, WhatsApp, email).</p>
 <h3>Реквизиты по ИНН и подсказки адресов</h3>
@@ -17962,7 +18320,7 @@ const NEXT_BOOT = {
   },
   async report() {
     const counts = {}; for (const st of STORES) counts[st] = (await getAllRaw(st)).length;
-    return { версия: APP_VER, сборка: BUILD_ID, изоляция: NEXT_NS.ok, база: db && db.name, версияБазы: db && db.version, правилаСроков: RULES_VER, секреты: _sec.ok, записей: counts };
+    return { версия: APP_VER, сборка: BUILD_ID, изоляция: NEXT_NS.ok, база: db && db.name, версияБазы: db && db.version, правилаСроков: NEXT_RULES_VER, секреты: _sec.ok, записей: counts };
   },
   async start() {
     if (!NEXT_NS.ok) { this.say('Изоляция от прежней версии не сработала (' + NEXT_NS.why + ') — программа остановлена, данные не тронуты.', true); return; }
