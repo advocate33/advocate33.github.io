@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="14.10.2026 10:37 · a4909aa">
+<meta name="build" content="14.10.2026 13:44 · 6e95e9a">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -2930,9 +2930,20 @@ function nextActDeadlinesApply(obj, prev) {
   obj.deadlines = Array.isArray(obj.deadlines) ? obj.deadlines : [];
   const ni = nextActInputs(obj), pi = prev ? nextActInputs(prev) : null;
   const supersede = { appeal: ['act:decision:writ', 'act:decision:costs'], cass: ['act:appeal:writ', 'act:appeal:costs'] };
+  const lost = [];
   for (const act of ['decision', 'appeal', 'cass']) {
-    if (!nxHasBase(ni, act)) continue;
     const had = !!(pi && nxHasBase(pi, act));
+    if (!nxHasBase(ni, act)) {
+      // аудит 14.10.2026 (A1): дата акта была и убрана — зависимые автосроки не остаются подтверждёнными молча: подтверждение снимается,
+      // дата и история остаются, в заметке — «основание удалено»; исполненные не трогаются; сами сроки не удаляются (решение за пользователем)
+      if (had) obj.deadlines.forEach(dl => {
+        if (!dl || !dl.autoKey || dl.autoKey.indexOf('act:' + act + ':') !== 0 || dl.done || dl.baseGone) return;
+        dl.baseGone = 1; dl.confirmedAt = ''; dl.confirmedDate = '';
+        dl.note = ('Основание удалено: ' + (dl.baseEv || 'дата акта') + ' из дела убрана — проверьте срок или удалите его. ' + (dl.note || '')).trim();
+        lost.push(dl.title + (dl.date ? ' (' + fmtDate(dl.date) + ')' : ''));
+      });
+      continue;
+    }
     if (pi && nxSig(ni, act) === nxSig(pi, act)) continue;
     const list = nextActRules(obj, act); if (!list.length) continue;
     (supersede[act] || []).forEach(k => obj.deadlines.forEach(dl => {
@@ -2943,6 +2954,8 @@ function nextActDeadlinesApply(obj, prev) {
       const ex = obj.deadlines.find(dl => dl && dl.autoKey === n.autoKey);
       if (ex) {
         if (ex.done) { msgs.push(`«${ex.title}» оставлен без изменений (исполнен)`); continue; }
+        // основание вернулось (A1): пометка «основание удалено» снимается, срок считается заново тем же объектом — дубля нет
+        if (ex.baseGone) { delete ex.baseGone; ex.note = String(ex.note || '').replace(/^Основание удалено:.*?— проверьте срок или удалите его\.\s*/, ''); }
         if (ex.confirmedAt) {
           if (!had || ex.date === n.date) { msgs.push(`«${ex.title}» оставлен без изменений (подтверждён)`); continue; }
           ex.confirmedAt = ''; ex.confirmedDate = '';
@@ -2962,6 +2975,7 @@ function nextActDeadlinesApply(obj, prev) {
   }
   obj.deadlines.sort((a, b) => ((a && a.date) || '').localeCompare((b && b.date) || ''));
   if (rebased.length) msgs.push('Подтверждение снято, срок пересчитан от мотивированного акта: ' + rebased.join(', '));
+  if (lost.length) msgs.push('Основание срока удалено из дела — проверьте сроки или удалите их: ' + lost.join(', '));
   return msgs;
 }
 
@@ -3037,15 +3051,25 @@ function prodcalYearProbs(y, rec) {
 // файл с сайта → принятые годы и непринятые с причиной; файл не того вида — исключение (текст — пользователю)
 function prodcalAccept(j) {
   if (!j || typeof j !== 'object' || j.format !== 1 || !j.years || typeof j.years !== 'object') throw new Error('файл календаря не того вида');
-  const years = {}, rejected = [];
+  const years = {}, rejected = [], upd = typeof j.updated === 'string' && pcValid(j.updated) ? j.updated : '';
   for (const k of Object.keys(j.years).sort()) {
     if (!/^\d{4}$/.test(k) || +k < 2000 || +k > 2100) { rejected.push({ year: String(k).slice(0, 8), why: 'не год' }); continue; }
     const rec = j.years[k], probs = prodcalYearProbs(+k, rec);
     if (probs.length) { rejected.push({ year: k, why: probs.slice(0, 3).join('; ') }); continue; }
-    years[k] = { off: [...new Set(rec.off)].sort(), work: [...new Set(rec.work)].sort(), basis: typeof rec.basis === 'string' ? rec.basis.slice(0, 200) : '' };
+    // upd — дата публикации этого года (у года, оставленного с прошлого файла, — его прежняя; аудит 14.10.2026, A3)
+    years[k] = { off: [...new Set(rec.off)].sort(), work: [...new Set(rec.work)].sort(), basis: typeof rec.basis === 'string' ? rec.basis.slice(0, 200) : '', upd: typeof rec.upd === 'string' && pcValid(rec.upd) ? rec.upd : upd };
   }
-  const upd = typeof j.updated === 'string' && pcValid(j.updated) ? j.updated : '';
   return { updated: upd, years, rejected };
+}
+// слияние нового файла с загруженным ранее (аудит 14.10.2026, A3): год из файла заменяет прежний только когда принят; непринятый или
+// отсутствующий в файле год остаётся прежним (удаление опубликованного года отдельным правилом не предусмотрено — год не исчезает из-за
+// ошибки проверки); файл без единого принятого года — не замена, а ошибка
+function prodcalMerge(prev, a) {
+  const years = Object.assign({}, prev ? prev.years : {}), kept = [];
+  if (!Object.keys(a.years).length) throw new Error('ни один год из файла календаря не принят' + (a.rejected.length ? ' (' + a.rejected.map(r => r.year + ': ' + r.why).join('; ').slice(0, 160) + ')' : '') + (prev && Object.keys(prev.years).length ? ' — действует загруженный ранее' : ''));
+  Object.keys(a.years).forEach(k => { years[k] = a.years[k]; });
+  const rejected = a.rejected.map(r => (years[r.year] ? (kept.push(r.year), { year: r.year, why: r.why + ' — действует загруженный ранее' }) : r));
+  return { updated: a.updated || (prev && prev.updated) || '', years, rejected, kept };
 }
 // загруженный ранее файл — с устройства, один раз; испорченный — как будто его нет
 function prodcalFile() {
@@ -3064,7 +3088,7 @@ function prodcalYear(y) {
   if (s.years.has(k)) return s.years.get(k);
   const f = prodcalFile(), fy = f && f.years[k];
   let r;
-  if (fy) r = { src: 'file', off: new Set(fy.off), work: new Set(fy.work), basis: fy.basis, updated: f.updated };
+  if (fy) r = { src: 'file', off: new Set(fy.off), work: new Set(fy.work), basis: fy.basis, updated: fy.upd || f.updated };
   else if (PRODCAL_BUILTIN[k] && typeof NEXT_CAL_OFF === 'object') r = { src: 'builtin', off: new Set([...NEXT_CAL_OFF].filter(d => d.startsWith(k + '-'))), work: new Set([...NEXT_CAL_WORK].filter(d => d.startsWith(k + '-'))), basis: PRODCAL_BUILTIN[k] };
   else { const L = prodcalLaw(+k); r = { src: 'law', off: new Set(L.off), work: new Set(), basis: '', moved: L.moved }; }
   s.years.set(k, r); return r;
@@ -3106,8 +3130,11 @@ function prodcalPrelim(fromIso, toIso) {
   const out = []; for (let y = a; y <= b && y - a < 12; y++) if (prodcalYear(y).src === 'law') out.push(y); return out;
 }
 function prodcalPrelimText(ys) { return ys.length ? 'За ' + ys.join(', ') + ' — предварительно: праздники по ст. 112 ТК РФ учтены, переносы выходных Правительством — нет (календарь ' + (ys.length > 1 ? 'этих лет' : 'этого года') + ' ещё не загружен)' : ''; }
-// отпечаток календаря: меняется — «Сегодня» снова показывает сроки, дата которых по календарю другая (ui/deadlines.js)
-function prodcalStamp() { const f = prodcalFile(); return 'cal' + PRODCAL_VER + ':' + (f ? (f.updated || '') + ':' + Object.keys(f.years).join(',') : '-'); }
+// отпечаток календаря: меняется — «Сегодня» снова показывает сроки, дата которых по календарю другая (ui/deadlines.js).
+// Аудит 14.10.2026 (A4): в отпечатке — содержимое списков дней каждого года (свёртка FNV-1a), а не дата публикации: исправление
+// календаря тем же днём меняет отпечаток, та же дата с другими днями — тоже; дата публикации — только для показа
+function pcHash(str) { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16); }
+function prodcalStamp() { const f = prodcalFile(); return 'cal' + PRODCAL_VER + ':' + (f ? Object.keys(f.years).sort().map(y => y + '=' + pcHash(f.years[y].off.join(',') + '|' + f.years[y].work.join(','))).join(',') : '-'); }
 
 // ── загрузка с сайта программы ──
 function prodcalUrl() { return location.origin + '/dist/calendar.json'; }
@@ -3128,13 +3155,15 @@ async function prodcalCheck(force) {
     } catch (e) { throw new Error(e && e.name === 'AbortError' ? 'сайт программы не ответил за ' + PRODCAL_TIMEOUT / 1000 + ' с' : /^(на сайте|сайт программы)/.test(String(e && e.message)) ? e.message : 'нет связи с сайтом программы (' + String((e && e.message) || e).slice(0, 80) + ')'); }
     if (text.length > PRODCAL_MAX) throw new Error('файл календаря больше ' + PRODCAL_MAX / 1000 + ' КБ — не принят');
     let j; try { j = JSON.parse(text); } catch (e) { throw new Error('файл календаря не прочитан (не JSON)'); }
-    const a = prodcalAccept(j);
-    if (a.rejected.length) logErr('prodcal:rejected', new Error(a.rejected.map(r => r.year + ': ' + r.why).join(' | ').slice(0, 300)));
+    const a0 = prodcalAccept(j);
+    if (a0.rejected.length) logErr('prodcal:rejected', new Error(a0.rejected.map(r => r.year + ': ' + r.why).join(' | ').slice(0, 300)));
+    // A3: по годам — принятый год заменяет прежний, непринятый или пропавший остаётся; без принятых лет — ошибка, прежнее не трогается
+    const a = prodcalMerge(prodcalFile(), a0);
     localStorage.setItem(PRODCAL_KEY, JSON.stringify({ updated: a.updated, years: a.years, rejected: a.rejected, got: now }));
-    s.file = a; s.loaded = true; prodcalReset();
+    s.file = { updated: a.updated, years: a.years, rejected: a.rejected }; s.loaded = true; prodcalReset();
     localStorage.setItem(PRODCAL_AT, String(now)); localStorage.removeItem(PRODCAL_ERR);
     const changed = prodcalStamp() !== before;
-    return { ok: true, changed, years: Object.keys(a.years), rejected: a.rejected };
+    return { ok: true, changed, years: Object.keys(a0.years), kept: a.kept, rejected: a.rejected };
   } catch (e) {
     const msg = String((e && e.message) || e).slice(0, 200);
     localStorage.setItem(PRODCAL_ERR, JSON.stringify({ at: now, msg }));
@@ -3144,7 +3173,7 @@ async function prodcalCheck(force) {
 function prodcalResText(r) {
   if (!r) return 'проверка не выполнена';
   if (!r.ok) return r.busy ? 'Проверка календаря уже идёт' : 'Календарь не проверен: ' + r.error;
-  const rej = r.rejected && r.rejected.length ? '; не приняты: ' + r.rejected.map(x => x.year).join(', ') : '';
+  const rej = r.rejected && r.rejected.length ? '; не приняты: ' + r.rejected.map(x => x.year + (r.kept && r.kept.includes(x.year) ? ' (действует загруженный ранее)' : '')).join(', ') : '';
   return (r.changed ? 'Календарь обновлён — годы: ' + (r.years || []).join(', ') : 'Календарь проверен: изменений нет') + rej;
 }
 // после изменения календаря: «Сегодня» перерисовывается, если на экране он и лист не открыт (урок 71)
@@ -3170,7 +3199,7 @@ function prodcalStatus(now) {
   const when = ts => typeof autoWhen === 'function' ? autoWhen(ts, now) : new Date(ts).toLocaleString('ru-RU');
   const rej = f && f.rejected && f.rejected.length ? ' Не приняты годы: ' + f.rejected.map(x => x.year + ' (' + x.why + ')').join(', ') + '.' : '';
   if (err && Number(err.at) >= at) return { cls: 'warn', text: 'Проверка календаря ' + when(err.at) + ' не удалась: ' + err.msg + (f ? ' — действует загруженный ранее.' : ' — действует встроенный календарь и расчёт по ст. 112 ТК РФ.') + rej };
-  if (at) return { cls: 'good', text: 'Календарь проверен ' + when(at) + (f && Object.keys(f.years).length ? ': на сайте программы — ' + Object.keys(f.years).join(', ') + '.' : '.') + rej };
+  if (at) return { cls: 'good', text: 'Календарь проверен ' + when(at) + (f && Object.keys(f.years).length ? ': загружены с сайта программы — ' + Object.keys(f.years).sort().join(', ') + '.' : '.') + rej };
   return { cls: '', text: 'На этом устройстве календарь ещё не проверялся — проверка идёт сама через несколько секунд после запуска.' };
 }
 
@@ -9626,16 +9655,25 @@ function calImpPlan(events, ctx) {
     n.found++;
     // аудит 14.10.2026: событие за окном чтения есть в календаре — оно «присутствует» (раньше его пропускали до учёта, и перенос заседания за
     // окно назывался удалением); уже учтённое за окном — перенос, как обычно; новое за окном не берётся
-    const key = keyOf(e); present.add(key);
+    let key = keyOf(e); present.add(key);
     if (e.date > ctx.to && !seen[key]) continue;
     if (e.own) { n.own++; continue; }
     if (e.rec) { n.rec++; continue; }
-    const s = seen[key];
+    let s = seen[key];
     if (s) {
       // источник, который видит событие, запоминается (смена ссылки на тот же календарь, урок 144); файл — разовый снимок, не запоминается
       if (src && src !== 'f' && !calImpSrcsOf(s).includes(src)) s.srcs = calImpSrcsOf(s).concat(src).slice(-4);
       const t1 = e.title.slice(0, 120), p1 = e.place.slice(0, 120);
-      if (s.st === 'alias') { s.d = e.date; s.t = e.time; s.s = t1; s.p = p1; n.known++; continue; }
+      if (s.st === 'alias') {
+        // аудит 14.10.2026 (A2): копия из другого источника передаёт наблюдение основному событию — перенос, отмена, удаление и возврат
+        // видны и когда опрашивается только этот источник; дальше запись обрабатывается как само основное событие (одна новость — одна строка)
+        s.d = e.date; s.t = e.time; s.s = t1; s.p = p1;
+        const prim = s.of && seen[s.of];
+        if (!prim || prim.st === 'alias') { n.known++; continue; }
+        present.add(s.of);
+        if (src && src !== 'f' && !calImpSrcsOf(prim).includes(src)) prim.srcs = calImpSrcsOf(prim).concat(src).slice(-4);
+        key = s.of; s = prim;
+      }
       // вернулось в календарь: учёт восстанавливается, строка «удалено» у разобранного снимается, пометка у неразобранного — тоже
       if (s.st === 'gone') { s.st = s.prev || 'skip'; delete s.prev; if (s.st === 'done') drop.push(key); else if (s.st === 'inbox') patch(key, { gone: 0 }); }
       if (e.cancelled) {
@@ -9668,7 +9706,12 @@ function calImpPlan(events, ctx) {
     if (e.cancelled) { n.cxSkip++; continue; }
     if (e.date < ctx.today) { n.past++; continue; }
     const t1 = e.title.slice(0, 120), p1 = e.place.slice(0, 120), ak = byFp[fp(e.date, e.time, t1)];
-    if (ak && ak !== key) { seen[key] = { d: e.date, t: e.time, s: t1, p: p1, st: 'alias', of: ak, src, at }; n.known++; continue; }
+    if (ak && ak !== key) {
+      seen[key] = { d: e.date, t: e.time, s: t1, p: p1, st: 'alias', of: ak, src, at }; n.known++;
+      // основное событие теперь видно и через этот источник (A2): «удалено» он сможет объявить, присутствие — отметить
+      present.add(ak); if (src && src !== 'f' && seen[ak] && !calImpSrcsOf(seen[ak]).includes(src)) seen[ak].srcs = calImpSrcsOf(seen[ak]).concat(src).slice(-4);
+      continue;
+    }
     const m = typeof inboxCaseMatch === 'function' ? inboxCaseMatch(calImpText4(e), cases) : { case: null }, c = m.case, type = calImpType(e);
     if (e.tzUnknown) n.tzUnknown++;
     const row = { title: e.title, date: e.date, time: e.time, place: e.place, type, caseNum: c ? c.number : '', state: '' };
@@ -11516,7 +11559,7 @@ async function saveCaseForm(id) {
   // разбор GPT 04.10.2026 (вечер), п. 1: id нового дела — один на всё время формы (повтор «Сохранить» после сбоя пишет ту же запись)
   if (!id && typeof formNewId === 'function') r.obj.id = formNewId('Д', r.obj.id);
   // разбор GPT 04.10.2026, п. 5: сообщение об ошибке — по фактически выполненным шагам
-  let clientSaved = false, stageUp = null;
+  let clientSaved = false, stageUp = null, dlWarn = [];
   // разбор GPT 05.10.2026, п. 4: доверитель, дело и события журнала — одной транзакцией (putMany, next/fixes.js); события собираются в пакет
   const batch = typeof CASE_EVENTS_BATCH === 'object' && typeof putMany === 'function'; if (batch) CASE_EVENTS_BATCH.list = [];
   try {
@@ -11526,6 +11569,8 @@ async function saveCaseForm(id) {
     // сроки по датам актов: правила v312 + правило пользователя о мотивированном акте (ui/deadlines.js)
     const msgs = typeof nextActDeadlines === 'function' ? nextActDeadlines(r.obj, prev) : [];
     if (msgs && msgs.length) addCaseHistoryEvent(r.obj, 'deadline', '', msgs.join(' | '), id ? 'form' : 'created');
+    // аудит 14.10.2026 (A1): дата акта убрана — предупреждение о зависимых сроках видно сразу, а не только в журнале дела
+    dlWarn = (msgs || []).filter(m => /^Основание срока удалено/.test(m));
     // решение пользователя 04.10.2026: правка добавила данные более высокой инстанции — стадия поднимается (data/stageauto.js)
     stageUp = typeof caseStageAutoForm === 'function' ? caseStageAutoForm(prev, r.obj, await getAll('hearings')) : null;
     if (typeof caseCourtAddrFill === 'function') caseCourtAddrFill(r.obj, prev);
@@ -11539,7 +11584,7 @@ async function saveCaseForm(id) {
   let relinked = 0; if (prev && prev.number && r.obj.number && prev.number !== r.obj.number) { try { relinked = await caseRelinkRenamed(r.obj.id, prev.number, r.obj.number); } catch (e) { logErr('case:relink', e); toast('Дело сохранено, но связанные записи не переведены на новый номер: ' + ((e && e.message) || e) + '. Сохраните дело ещё раз', true); } }
   // Б3 (11.10.2026): «Номер ордера» в форме дела — в журнал ордеров, если такого номера там ещё нет (ui/depord.js)
   let ordMade = null; if (typeof orderFromCase === 'function') { try { ordMade = await orderFromCase(r.obj, prev); } catch (e) { logErr('case:order', e); } }
-  toast((id ? 'Дело сохранено' : 'Дело создано') + (relinked ? ' · записей переведено на новый номер: ' + relinked : '') + (ordMade ? ' · ордер № ' + ordMade.num + ' записан в журнал' : '') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : ''));
+  toast((id ? 'Дело сохранено' : 'Дело создано') + (relinked ? ' · записей переведено на новый номер: ' + relinked : '') + (ordMade ? ' · ордер № ' + ordMade.num + ' записан в журнал' : '') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : '') + (dlWarn.length ? '. ' + dlWarn.join('; ') : ''), dlWarn.length > 0);
   // новая ссылка на сайт суда — карточка дела читается сразу (судья, номер, УИД), как в v312; без коллектора — ничего не делается
   if (typeof caseFetchCard === 'function' && ['link', 'linkApp', 'linkCass'].some(f => r.obj[f] && r.obj[f] !== (prev && prev[f])) && crmCollectorSrvCfg().url) setTimeout(() => caseFetchCard(r.obj.id, { silent: true }).catch(e => logErr('case:card', e)), 800);
   // 09.10.2026: перечень дел со ссылками у коллектора обновляется сам (sync/monauto.js) — иначе новое дело он не обойдёт
@@ -13768,7 +13813,7 @@ function tasksModel(cases, tasks, p, today) {
   (cases || []).filter(activeCase).forEach(c => (c.deadlines || []).forEach((dl, i) => {
     if (!dl || !dl.date) return;
     items.push({ kind: 'deadline', id: dl.id || 'i:' + i, caseId: c.id, date: dl.date, time: '', title: dl.title || 'Срок', sub: caseTitle(c), basis: [dl.baseEv, dl.norm ? String(dl.norm).split(' — ')[0] : ''].filter(Boolean).join(' · '),
-      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '' });
+      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '' });
   }));
   (tasks || []).forEach(t => { if (!t || t._deleted) return; const c = t.caseNum ? (cases || []).find(x => x.number === t.caseNum) : null;
     items.push({ kind: 'task', id: t.id, date: t.due || '', time: t.time || '', title: t.title || 'Задача', sub: c ? caseTitle(c) : (t.caseNum || ''), basis: '', priority: t.priority || '', done: !!t.done, doneAt: t.doneAt || '' }); });
@@ -13789,7 +13834,7 @@ SCREENS.tasks = async function () {
   // Б15 (11.10.2026): невыполненную строку можно смахнуть вправо — «Выполнено» (ui/swipe.js)
   const rows = m.rows.map(x => `<div class="agenda-row tasks-row"${!x.done && typeof swipeAttrs === 'function' ? swipeAttrs('tasksMarkDone', [x.kind, x.kind === 'deadline' ? x.caseId : x.id, x.id], 'Выполнено') : ''}><span class="agenda-time">${esc(x.date ? fmtDate(x.date).slice(0, 5) : '—')}${x.time ? `<br>${esc(x.time)}` : ''}</span>
     <button type="button" class="agenda-stripe ${x.kind}${x.done ? ' done' : ''} tasks-main" onclick="${open(x)}"><span class="agenda-title">${esc(x.title)}</span><span class="agenda-sub">${esc([x.kind === 'deadline' ? (x.control ? 'контрольный срок' : 'процессуальный срок') : 'задача' + (x.priority && x.priority !== 'Средний' ? ' · ' + x.priority.toLowerCase() + ' приоритет' : ''), x.sub, x.basis].filter(Boolean).join(' · '))}</span>
-      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
+      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
     ${x.done ? '' : `<button type="button" class="icon-button tasks-done" aria-label="Выполнено" title="Выполнено" onclick="tasksMarkDone('${x.kind}', '${jsq(x.kind === 'deadline' ? x.caseId : x.id)}', '${jsq(x.id)}')">${icon('check')}</button>`}</div>`).join('');
   const notice = m.unconfirmed ? `<div class="info-box warning">Сроков, рассчитанных автоматически и ещё не подтверждённых: ${m.unconfirmed}. Откройте срок, проверьте исчисление по паспорту и нажмите «Подтвердить дату».</div>` : '';
   return pageHead('Задачи и сроки', `${m.tabCounts.deadlines} ${plural(m.tabCounts.deadlines, 'срок', 'срока', 'сроков')} · ${m.tabCounts.tasks} ${plural(m.tabCounts.tasks, 'задача', 'задачи', 'задач')}`, btn('Задача', 'openTaskForm()', 'primary', 'plus')) +
