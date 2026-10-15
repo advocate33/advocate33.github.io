@@ -24,6 +24,9 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.21: жалобы в дайджесте Telegram без имён — новые и изменившиеся (слепок хранит состояние жалобы), раздел «Жалобы за 3 дня» (15.10.2026).
+//  v3.20: дело на странице узнаётся по УИД и по любому номеру дела из программы (не только своей инстанции); стороны — только из
+//         строки таблицы; жалобы (вкладка «ЖАЛОБЫ» кассации, «Обжалование решений» первой инстанции) — событие complaint (15.10.2026).
 //  v3.19: код функции — только в теле запроса и сравнивается без утечки по времени; страница суда — не больше 5 МБ; переадресация —
 //         только в пределах сайта ссылки и не во внутренние сети; предел ожидания у доставки, бакета и Telegram (аудит 14.10.2026).
 //  v3.18: пустой перечень дел принимается (последнее дело снято с наблюдения), сбор по нему — штатно, «дел для обхода нет»;
@@ -78,7 +81,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.19';
+const COLLECTOR_VER = '3.21';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -187,14 +190,17 @@ const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raq
 function decodeEntities(t) { return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
 const CARD_LABELS = {
   number: /^(номер дела( ?[~(\/].{0,20})?|№ дела|дело №|номер дела в суде|номер материала)\s*:?$/i, uid: /^(уникальный идентификатор дела|уид)\s*:?$/i, // v3.12: «Номер дела ~ материала» (ГАС «Правосудие»)
-  judge: /^(судья|председательствующий судья|судья, рассматривающий дело)\s*:?$/i, registered: /^(дата поступления|дата регистрации|дата поступления в суд)\s*:?$/i,
+  judge: /^(судья|председательствующий судья|судья, рассматривающий дело|судья-докладчик|судья докладчик)\s*:?$/i, registered: /^(дата поступления|дата регистрации|дата поступления в суд)\s*:?$/i,
   category: /^(категория дела|категория)\s*:?$/i, result: /^(результат рассмотрения|результат)\s*:?$/i, decided: /^(дата рассмотрения|дата решения)\s*:?$/i
 };
 const ROLE_RE = /^(истец|ответчик|третье лицо|заявитель|заинтересованное лицо|должник|взыскатель|административный истец|административный ответчик|представитель|прокурор|потерпевший|подсудимый|обвиняемый)/i;
+// v3.20: ячейка рядом с ролью, которая именем быть не может — подписи соседних таблиц и заголовки
+const PARTY_NOT_NAME = /^(вышестоящий|нижестоящий)\s+суд|^судебн\S*\s+акт|^(суд|дата|номер|результат|инстанция|категория|статья|перечень)(?![а-яёa-z])|^№|#\d|^вид лица|^лицо$|^фамилия|^наименование/i;
 function parseCaseCard(html) {
   const cells = cellsOf(html), card = { parties: [] };
-  const pick = (re) => { for (let i = 0; i < cells.length - 1; i++) if (re.test(cells[i])) { const v = cells[i + 1]; if (v && v.length < 300 && !Object.values(CARD_LABELS).some(r => r.test(v))) return v; } return ''; };
-  for (const [k, re] of Object.entries(CARD_LABELS)) { const v = pick(re); if (v) card[k] = v; }
+  // v3.20: у дат — только ячейка с датой (заголовок таблицы жалоб «Дата поступления» стоит перед «Процессуальный статус заявителя»)
+  const pick = (re, needDate) => { for (let i = 0; i < cells.length - 1; i++) if (re.test(cells[i])) { const v = cells[i + 1]; if (needDate && !RE_DATE.test(v)) continue; if (v && v.length < 300 && !Object.values(CARD_LABELS).some(r => r.test(v))) return v; } return ''; };
+  for (const [k, re] of Object.entries(CARD_LABELS)) { const v = pick(re, k === 'registered' || k === 'decided'); if (v) card[k] = v; }
   if (!card.uid) card.uid = parseUid(html);
   // v3.12: номер в любом виде — 2-1500/2026, 33а-123/2026, 8Г-12345/2026, 88-1/2026, А11-1234/2026, 02-2485/2026
   const RE_CASE_NO = /(?:[АA]\d{2}|\d{1,2}[а-яёa-z]{0,2})[-–]\d{1,7}\/\d{4}/i;
@@ -205,15 +211,21 @@ function parseCaseCard(html) {
   if (!card.number) delete card.number;
   for (const k of ['registered', 'decided']) if (card[k]) { const m = card[k].match(RE_DATE); card[k] = m ? isoOf(m[0]) : ''; }
   const t = String(html || '').match(/<title>([^<]{3,160})<\/title>/i); if (t) card.court = norm(t[1]).replace(/\s*[-–—|].*$/, '');
-  // стороны: «Вид лица | Лицо» (ГАС) или «Истец: ФИО» (Москва)
-  const seen = new Set();
-  for (let i = 0; i < cells.length; i++) {
-    const c = cells[i]; const m = c.match(/^(истец|ответчик|третье лицо|заявитель|заинтересованное лицо|должник|взыскатель|административн\S+ истец|административн\S+ ответчик|потерпевший|подсудимый|обвиняемый)\s*:\s*(.{3,120})$/i);
-    if (m) { const name = norm(m[2]); if (!seen.has(name)) { seen.add(name); card.parties.push({ role: cap(m[1]), name }); } continue; }
-    if (ROLE_RE.test(c) && c.length < 40 && cells[i + 1] && !ROLE_RE.test(cells[i + 1]) && cells[i + 1].length < 120 && /[А-Яа-яA-Za-z]{2,}/.test(cells[i + 1]) && !/^(вид лица|лицо|перечень статей)$/i.test(cells[i + 1])) {
-      const name = cells[i + 1]; if (!seen.has(name)) { seen.add(name); card.parties.push({ role: cap(c.replace(/\s*:$/, '')), name }); }
+  // стороны: «Истец: ФИО» одной ячейкой (Москва) или «Вид лица | Лицо» (ГАС) — роль и имя в ОДНОЙ строке таблицы.
+  // v3.20 (жалоба 15.10.2026, урок 155): до 3.19 роль и имя брались соседними ячейками всего текста страницы, и роль без имени
+  // «прихватывала» первую ячейку следующей вкладки («Вышестоящий суд», «Судебный акт #1 (Решения)» со страницы кассации)
+  const seen = new Set(), add = (role, name) => { name = norm(name); if (!name || seen.has(name)) return; seen.add(name); card.parties.push({ role, name }); };
+  for (const c of cells) { const m = c.match(/^(истец|ответчик|третье лицо|заявитель|заинтересованное лицо|должник|взыскатель|административн\S+ истец|административн\S+ ответчик|потерпевший|подсудимый|обвиняемый)\s*:\s*(.{3,120})$/i); if (m) add(cap(m[1]), m[2]); }
+  const rows = rowsOf(html), cmpRows = complaintRows(rows).idx;
+  rows.forEach((rc, ri) => {
+    if (cmpRows.has(ri)) return;
+    for (let i = 0; i < rc.length - 1; i++) {
+      const c = rc[i]; if (!ROLE_RE.test(c) || c.length >= 40) continue;
+      const nm = decodeEntities(rc.slice(i + 1).find(x => x) || '');
+      if (nm && !ROLE_RE.test(nm) && nm.length < 120 && /[А-Яа-яA-Za-z]{2,}/.test(nm) && !PARTY_NOT_NAME.test(nm)) add(cap(c.replace(/\s*:$/, '')), nm);
+      break;
     }
-  }
+  });
   card.parties = card.parties.slice(0, 20);
   return card;
 }
@@ -299,6 +311,87 @@ function buildFlowEvents(flow, ctx) {
   return ev;
 }
 
+// ── v3.20: жалобы — вкладка «ЖАЛОБЫ» кассационных судов, «ОБЖАЛОВАНИЕ РЕШЕНИЙ, ОПРЕДЕЛЕНИЙ (ПОСТ.)» первой инстанции ──
+// Таблица узнаётся по строке заголовков: столбец со словом «жалоб…» и столбец «Дата поступления…»; столбцы — по словам
+// заголовков, порядок и число столбцов не важны. Разметка настоящей страницы 2kas.sudrf.ru не проверена (сайт закрыт для
+// роботов): названия столбцов — со снимка пользователя 15.10.2026; первая инстанция — по памяти о ГАС «Правосудие».
+const CMP_COLS = [['date', /^дата поступления(?! исправл)/], ['kind', /вид жалоб|вид обращ/], ['by', /кем подан|лиц[оа],? подавш|подавш\S* жалоб/],
+  ['status', /процессуальн\S* (статус|положени)/], ['result', /^результат/], ['noMotion', /без движени/], ['fixDue', /срок (для )?устранени/],
+  ['fixed', /исправленн/], ['sentUp', /направлени\S* (дела )?в вышестоящ/], ['decided', /вынесени\S* определени|по итогам/], ['returned', /возврат/],
+  ['toStudy', /передачи жалобы/], ['withCase', /истребовани/]];
+function complaintHeadCols(cells) {
+  const head = cells.map(x => String(x || '').toLowerCase());
+  if (cells.length < 2 || !head.some(h => /жалоб/.test(h)) || !head.some(h => /^дата поступления/.test(h))) return null;
+  const col = {}; for (const [k, re] of CMP_COLS) { const i = head.findIndex(h => re.test(h)); if (i >= 0) col[k] = i; }
+  return col.date === undefined || (col.by === undefined && col.kind === undefined) ? null : col;
+}
+// строки таблиц жалоб среди всех <tr> страницы: { list, idx } — idx нужен parseCaseCard, чтобы не брать стороны из таблицы жалоб
+function complaintRows(rows) {
+  const list = [], idx = new Set(); let col = null;
+  (rows || []).forEach((cells, ri) => {
+    const h = complaintHeadCols(cells); if (h) { col = h; idx.add(ri); return; }
+    if (!col) return;
+    const dm = String(cells[col.date] || '').match(RE_DATE);
+    // строка без даты поступления в своём столбце — таблица жалоб кончилась (пустые строки-прокладки пропускаются)
+    if (!dm) { if (cells.some(x => /[А-Яа-яA-Za-z]{3,}/.test(x))) col = null; return; }
+    idx.add(ri);
+    const g = k => col[k] === undefined ? '' : norm(decodeEntities(cells[col[k]] || ''));
+    const dOf = k => { const x = g(k).match(RE_DATE); return x ? isoOf(x[1]) : ''; };
+    list.push({ date: isoOf(dm[1]), kind: g('kind'), by: g('by'), status: g('status'), result: g('result'), noMotion: dOf('noMotion'), fixDue: dOf('fixDue'),
+      fixed: dOf('fixed'), sentUp: dOf('sentUp'), decided: dOf('decided'), returned: dOf('returned'), toStudy: dOf('toStudy'), withCase: g('withCase') });
+  });
+  const seen = new Set();
+  return { list: list.filter(x => { const k = x.date + '|' + x.kind + '|' + x.by; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 20), idx };
+}
+function parseComplaints(html) { return complaintRows(rowsOf(html)).list; }
+// инстанция жалобы: по виду жалобы («Кассационная жалоба», «Частная жалоба» — апелляция), иначе по инстанции страницы
+function cmpInstOf(x, stage) {
+  const t = [x.kind, x.status, x.result].join(' ').toLowerCase();
+  if (/надзорн/.test(t)) return 'Надзор'; if (/кассацион/.test(t)) return 'Кассация'; if (/апелляцион|частн\S* жалоб/.test(t)) return 'Апелляция';
+  return /кассац/i.test(stage || '') ? 'Кассация' : /апелляц/i.test(stage || '') ? 'Апелляция' : /надзор/i.test(stage || '') ? 'Надзор' : '';
+}
+// событие complaint: ключ — дата, инстанция и кто подал (один и тот же факт с двух страниц сводится на сервере по externalId);
+// заголовок несёт состояние (без движения, срок устранения, результат) — изменение состояния обновляет запись в программе
+function buildComplaintEvents(list, ctx) {
+  const key = ctx.uid || ctx.courtNo || ctx.number || ctx.url || '';
+  const ru = iso => iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '';
+  const ev = [];
+  for (const x of list || []) {
+    if (!x || !x.date) continue;
+    const inst = cmpInstOf(x, ctx.stage);
+    const kind = cmpKindOf(x, inst);
+    const tail = cmpTail(x);
+    const title = `Подана ${kind} ${ru(x.date)}${x.by ? ' — ' + x.by : ''}${tail.length ? ' · ' + tail.join(' · ') : ''}`;
+    const raw = { st: ctx.stage || '', inst, kind: x.kind || '', by: x.by || '', status: x.status || '', result: x.result || '', noMotion: x.noMotion || '', fixDue: x.fixDue || '',
+      fixed: x.fixed || '', sentUp: x.sentUp || '', decided: x.decided || '', returned: x.returned || '', url: ctx.url || '' };
+    ev.push({ externalId: `cmp:${key}:${h8(x.date + '|' + inst + '|' + norm(x.by).toLowerCase())}`, title, date: x.date, eventType: 'complaint',
+      courtNo: ctx.courtNo || '', caseUid: ctx.uid || '', judge: '', source: 'Коллектор судов', crmNumber: ctx.number || '', court: ctx.court || '', raw: JSON.stringify(raw) });
+  }
+  return ev;
+}
+
+// v3.21: вид жалобы словами и хвост состояния — общие для заголовка события (с именем) и дайджеста (без имени)
+function cmpKindOf(x, inst) {
+  return x.kind ? x.kind.toLowerCase() : inst === 'Кассация' ? 'кассационная жалоба' : inst === 'Апелляция' ? 'апелляционная жалоба' : inst === 'Надзор' ? 'надзорная жалоба' : 'жалоба';
+}
+function cmpTail(x) {
+  const ru = iso => iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}` : '';
+  return [x.noMotion ? 'оставлена без движения ' + ru(x.noMotion) + (x.fixDue ? ', срок устранения до ' + ru(x.fixDue) : '') : (x.fixDue ? 'срок устранения недостатков до ' + ru(x.fixDue) : ''),
+    x.fixed ? 'исправленная жалоба ' + ru(x.fixed) : '', x.result || '', x.decided ? 'определение ' + ru(x.decided) : '', x.sentUp ? 'дело направлено в вышестоящий суд ' + ru(x.sentUp) : '',
+    x.returned ? 'возвращена ' + ru(x.returned) : ''].filter(Boolean);
+}
+// v3.21: состояние жалобы одной строкой — для слепка (изменилось ли с прошлого сбора)
+function cmpStateOf(raw) {
+  return [raw.noMotion, raw.fixDue, raw.fixed, raw.result, raw.decided, raw.sentUp, raw.returned].map(v => String(v || '')).join('|');
+}
+// v3.21: строка жалобы для дайджеста Telegram — без имени подавшего (только статус заявителя: «истец», «ответчик»)
+function cmpDigestText(e) {
+  const raw = safeJson(e.raw);
+  const ru = iso => iso ? `${iso.slice(8, 10)}.${iso.slice(5, 7)}` : '';
+  const tail = cmpTail(raw);
+  return `подана ${cmpKindOf(raw, raw.inst || '')} ${ru(e.date)}${raw.status ? ' (' + String(raw.status).toLowerCase() + ')' : ''}${tail.length ? ' · ' + tail.join(' · ') : ''}`;
+}
+
 // Универсальный разбор карточки дела: заседания, публикации актов, судья
 function parseCasePage(html) {
   const out = { hearings: [], acts: [], judge: '' };
@@ -363,16 +456,21 @@ function buildEvents(page, ctx) {
 }
 
 // ── v3.4: слепок прошлого прогона и точные изменения ─────────────────
-// Слепок: { at, items: { externalId: { d: дата, t: заголовок, r: результат, k: тип, c: courtNo } } }
+// Слепок: { at, items: { externalId: { d: дата, t: заголовок, r: результат, k: тип, c: courtNo, s: состояние жалобы (v3.21, только у complaint) } } }
 function snapshotOf(events, at) {
   const items = {};
-  for (const e of events) { const raw = safeJson(e.raw); items[e.externalId] = { d: e.date, t: String(e.title || '').slice(0, 160), r: String(raw.result || '').slice(0, 160), k: e.eventType, c: e.courtNo || '' }; }
+  for (const e of events) {
+    const raw = safeJson(e.raw);
+    const it = { d: e.date, t: String(e.title || '').slice(0, 160), r: String(raw.result || '').slice(0, 160), k: e.eventType, c: e.courtNo || '' };
+    if (e.eventType === 'complaint') { it.s = cmpStateOf(raw); it.x = String(e.raw || '').slice(0, 4000); }
+    items[e.externalId] = it;
+  }
   return { at: at || new Date().toISOString(), items };
 }
 // Изменения: перенесённые заседания (у того же дела прежнее будущее заседание исчезло, появилось новое),
 // новые результаты (результат появился или изменился), новые акты, новые заседания и строки движения
 function diffEvents(prev, events, todayISO) {
-  const out = { moved: [], results: [], acts: [], newHearings: [], newFlow: [] };
+  const out = { moved: [], results: [], acts: [], newHearings: [], newFlow: [], complaints: [] };
   const old = (prev && prev.items) || {}; if (!Object.keys(old).length) return out;
   const today = todayISO || new Date().toISOString().slice(0, 10);
   const cur = snapshotOf(events, '').items;
@@ -383,8 +481,11 @@ function diffEvents(prev, events, todayISO) {
       if (e.k === 'hearing' && e.d >= today) (byCaseNewFuture[e.c] = byCaseNewFuture[e.c] || []).push(e);
       else if (e.k === 'notice') out.acts.push(e);
       else if (e.k === 'caseflow') { out.newFlow.push(e); if (e.r) out.results.push(e); }
+      else if (e.k === 'complaint') out.complaints.push({ ...e, chg: false });
       continue;
     }
+    // v3.21: жалоба с изменившимся состоянием; слепок прежней версии без поля s — изменение не выдумывается
+    if (e.k === 'complaint') { if (o.s !== undefined && e.s !== o.s) out.complaints.push({ ...e, chg: true }); continue; }
     if (e.r && e.r !== o.r) out.results.push(e);
   }
   for (const [id, o] of Object.entries(old)) if (!cur[id] && o.k === 'hearing' && o.d >= today) (byCaseGoneFuture[o.c] = byCaseGoneFuture[o.c] || []).push(o);
@@ -401,9 +502,11 @@ function changesText(diff) {
   diff.newHearings.slice(0, 10).forEach(e => lines.push(`• назначено: № ${e.c} ${ru(e.d)} — ${e.t}`));
   diff.results.slice(0, 10).forEach(e => lines.push(`• результат: № ${e.c} ${ru(e.d)} ${e.t} → ${e.r}`));
   diff.acts.slice(0, 10).forEach(e => lines.push(`• акт: № ${e.c} ${ru(e.d)} — ${e.t}`));
+  // v3.21: жалобы — без имён (текст из raw, не из заголовка)
+  (diff.complaints || []).slice(0, 10).forEach(e => lines.push(`• жалоба${e.chg ? ' (изменение)' : ''}: № ${e.c} — ${cmpDigestText({ date: e.d, raw: e.x })}`));
   return lines;
 }
-const diffCount = d => d ? d.moved.length + d.newHearings.length + d.results.length + d.acts.length : 0;
+const diffCount = d => d ? d.moved.length + d.newHearings.length + d.results.length + d.acts.length + (d.complaints || []).length : 0;
 
 // ── v3.5: КАД Арбитр через открытое API СУДиДЕЛО ─────────────────────
 // Записи их справочников — SectionRecordDto: { id, name, attributes:[{code, name, stringValue, dateValue, …}] }.
@@ -533,9 +636,28 @@ function pageBrief(r) {
 // v3.17: номера дел на странице (2-2586/2026, 2а-15/2026, 12-1311/2026, М-2190/2026) — чтобы сказать, на какое дело ведёт ссылка
 function pageCaseNumbers(html) {
   const t = String(html || '').replace(/<[^>]+>/g, ' ').replace(/&#(\d+);/g, (m, d) => String.fromCharCode(+d)).replace(/[\u2010-\u2015\u2212]/g, '-');
-  const out = []; const re = /(?:^|[^0-9А-Яа-яA-Za-z])((?:\d{1,3}[аАaA]?|[МмM])-\d{1,6}\/\d{4})(?!\d)/g; let m;
+  // v3.20: и номера с буквами — 8Г-31317/2026 (кассация), 33а-512/2026, А11-1234/2026 (арбитраж)
+  const out = []; const re = /(?:^|[^0-9А-Яа-яA-Za-z])((?:[АA]\d{2}|\d{1,3}[а-яёa-zА-ЯЁA-Z]{0,2}|[МмM])-\d{1,7}\/\d{4})(?!\d)/g; let m;
   while ((m = re.exec(t)) && out.length < 4) if (!out.includes(m[1])) out.push(m[1]);
   return out;
+}
+// v3.20 (жалоба 15.10.2026: верная ссылка первой инстанции отвергалась как «другое дело» — в деле стоял номер апелляции): дело на
+// странице узнаётся по номеру своей инстанции, иначе по УИД (один на все инстанции), иначе по любому другому номеру дела из программы.
+// l — { courtNo } ссылки, c — { uid, numbers, courtNo, courtNoApp, courtNoCass } дела. Ответ: { ok, byUid, byOther, found, known }
+function pageHasUid(html, uid) {
+  const u = String(uid || '').trim().toUpperCase(); if (!u) return false;
+  return String(html || '').replace(/<[^>]+>/g, ' ').toUpperCase().includes(u);
+}
+function pageMatchesCase(html, l, c) {
+  const own = String((l && l.courtNo) || '').trim();
+  if (!own || pageHasNumber(html, own)) return { ok: true, byUid: false, byOther: '', found: [] };
+  const uid = String((c && c.uid) || '').trim();
+  if (uid && pageHasUid(html, uid)) return { ok: true, byUid: true, byOther: '', found: pageCaseNumbers(html) };
+  const others = [].concat((c && c.numbers) || [], c ? [c.courtNo, c.courtNoApp, c.courtNoCass] : []).map(x => String(x || '').trim())
+    .filter((x, i, a) => x && normCaseNo(x) !== normCaseNo(own) && a.findIndex(y => normCaseNo(y) === normCaseNo(x)) === i);
+  const hit = others.find(x => pageHasNumber(html, x));
+  if (hit) return { ok: true, byUid: false, byOther: hit, found: pageCaseNumbers(html) };
+  return { ok: false, byUid: false, byOther: '', found: pageCaseNumbers(html), known: [own].concat(others) };
 }
 function hostKind(url) {
   let h = '';
@@ -677,15 +799,17 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
     }
     // v3.14: вид сайта нужен здесь (tryAA ниже); в 3.13 kind был объявлен только в цикле группировки — «kind is not defined»
     const kind = hostKind(l.url);
-    const apply = (page, flow, cardP, uidOnPage, via) => { // v3.13: общий хвост — события из разобранной карточки
+    const apply = (page, flow, cardP, uidOnPage, via, cmpP) => { // v3.13: общий хвост — события из разобранной карточки; v3.20: cmpP — жалобы
       stats.flowRows += flow.length;
       const ctx = { number: c.number, uid: uidOnPage, courtNo: l.courtNo || c.courtNo, stage: l.stage, url: l.url, sinceDays, judge: page.judge || cardP.judge || '', court: cardP.court || '' };
       for (const e of buildEvents(page, ctx)) byId.set(e.externalId, e);
       for (const e of buildFlowEvents(flow, ctx)) byId.set(e.externalId, e);
       const cardEv = buildCardEvent(cardP, ctx); if (cardEv) byId.set(cardEv.externalId, cardEv); // v3.7
-      const empty = !page.hearings.length && !page.acts.length && !flow.length;
+      // v3.20: жалобы — событиями complaint
+      const cmpEv = buildComplaintEvents(cmpP || [], ctx); for (const e of cmpEv) byId.set(e.externalId, e); stats.complaints = (stats.complaints || 0) + cmpEv.length;
+      const empty = !page.hearings.length && !page.acts.length && !flow.length && !cmpEv.length;
       if (empty) { stats.unparsed++; logf(`· ${c.number} (${l.stage}${via ? ', ' + via : ''}): таблицы не распознаны — откройте страницу глазами`); }
-      else logf(`✓ ${c.number} (${l.stage}${via ? ', ' + via : ''}): заседаний ${page.hearings.length}, актов ${page.acts.length}, движение ${flow.length}${uidOnPage ? ', УИД ✓' : ''}`);
+      else logf(`✓ ${c.number} (${l.stage}${via ? ', ' + via : ''}): заседаний ${page.hearings.length}, актов ${page.acts.length}, движение ${flow.length}${cmpEv.length ? ', жалоб ' + cmpEv.length : ''}${uidOnPage ? ', УИД ✓' : ''}`);
       return !empty;
     };
     const tryAA = async (why) => { // v3.13: карточка через API Assist
@@ -696,20 +820,23 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
     try {
       if (AA.mode === 'primary' && await tryAA('')) return;
       const r = await fetchPageRetry(l.url, cfg.timeoutMs, logf, Math.max(2000, delay));
-      stats.pages++;
+      stats.pages++; let pm = null;
       if (r.status >= 400 || BLOCK_RE.test(r.text.slice(0, 6000))) {
         if (AA.mode !== 'primary' && await tryAA(`сайт суда не отдал страницу (HTTP ${r.status})`)) return;
         stats.blocked++; logf(`⚠ ${c.number} (${l.stage}): сайт суда не отдал страницу (HTTP ${r.status}${BLOCK_RE.test(r.text.slice(0, 6000)) ? ', похоже на капчу/блокировку' : ''}) — проверьте вручную`);
-      } else if (l.courtNo && !pageHasNumber(r.text, l.courtNo)) { // v3.6: страница не про это дело
+      } else if (!(pm = pageMatchesCase(r.text, l, c)).ok) { // v3.6: страница не про это дело; v3.20: дело узнаётся и по УИД, и по любому его номеру
         // v3.17: названо, какой номер на странице; номеров дел на странице нет вовсе — это нераспознанная страница, а не «другое дело»
-        const found = pageCaseNumbers(r.text);
-        if (found.length) { stats.linkMismatch = (stats.linkMismatch || 0) + 1; stats.errors.push({ number: c.number, stage: l.stage, err: 'ссылка ведёт на другое дело: на странице номер ' + found.join(', ') + ', а в деле ' + l.courtNo }); }
+        const found = pm.found;
+        if (found.length) { stats.linkMismatch = (stats.linkMismatch || 0) + 1; stats.errors.push({ number: c.number, stage: l.stage, err: 'ссылка ведёт на другое дело: на странице номер ' + found.join(', ') + ', а в деле ' + pm.known.join(', ') + (c.uid ? ' (и УИД дела на странице нет)' : '') }); }
         else { stats.unparsed++; stats.errors.push({ number: c.number, stage: l.stage, err: 'страница не распознана: на ней нет номера дела — получено ' + pageBrief(r) + ' (возможно, сайт суда показал облаку страницу проверки, а не дело)' }); }
         logf(`⚠ ${c.number} (${l.stage}): на странице суда нет номера ${l.courtNo}${found.length ? ' (на странице ' + found.join(', ') + ')' : ' и вообще нет номера дела'}; события не отправлены: ${l.url}`);
       } else {
-        const page = parseCasePage(r.text), flow = parseFlow(r.text), cardP = parseCaseCard(r.text); // v3.11: суд страницы (из title) — в события
+        // v3.20: номера своей инстанции на странице нет, дело узнано по УИД или другому номеру — страница читается; в журнале назван номер со
+        // страницы (карточка дела в программе предложит исправить номер)
+        if (pm.byUid || pm.byOther) logf(`· ${c.number} (${l.stage}): номера ${l.courtNo} на странице нет, дело узнано по ${pm.byUid ? 'УИД' : 'номеру ' + pm.byOther}${pm.found.length ? '; на странице номер ' + pm.found.join(', ') : ''} — проверьте номер в деле`);
+        const page = parseCasePage(r.text), flow = parseFlow(r.text), cardP = parseCaseCard(r.text), cmpP = parseComplaints(r.text); // v3.11: суд страницы (из title) — в события
         if (!page.hearings.length && !page.acts.length && !flow.length && AA.mode !== 'primary' && await tryAA('таблицы не распознаны')) return;
-        apply(page, flow, cardP, parseUid(r.text) || c.uid || '', '');
+        apply(page, flow, cardP, parseUid(r.text) || c.uid || '', '', cmpP);
       }
     } catch (e) {
       if (await tryAA(`сайт суда: ${errText(e)}`)) return;
@@ -987,6 +1114,51 @@ function runTests() {
   t('v3.12: номера с буквами и арбитраж', parseCaseCard('<div>Номер дела</div><div>33а-512/2026</div>').number === '33а-512/2026' && parseCaseCard('<div>ДЕЛО № 8Г-12345/2026</div>').number === '8Г-12345/2026' && parseCaseCard('<div>Номер дела</div><div>А11-1234/2026</div>').number === 'А11-1234/2026');
   t('v3.12: нет номера — поле отсутствует', parseCaseCard('<div>Судья</div><div>Иванов</div>').number === undefined);
   t('категория с &rarr; читается со стрелкой', parseCaseCard('<div>Категория дела</div><div>Споры, связанные с имущественными правами &rarr; О взыскании</div>').category === 'Споры, связанные с имущественными правами → О взыскании');
+  // ── v3.20: дело по УИД и любому номеру, стороны по строкам таблицы, жалобы (данные вымышленные; разметка кассации — по снимку) ──
+  const C320 = `<html><head><title>Второй кассационный суд общей юрисдикции - Судебное делопроизводство</title></head><body>
+<ul><li>ПРОИЗВОДСТВО</li><li>РАССМОТРЕНИЕ В НИЖЕСТОЯЩЕМ СУДЕ</li><li>ЖАЛОБЫ</li><li>УЧАСТНИКИ</li></ul>
+<table><tr><td>Уникальный идентификатор дела</td><td>33RS0011-01-2025-004499-82</td></tr><tr><td>Номер дела</td><td>8Г-31317/2026</td></tr><tr><td>Дата поступления</td><td>07.10.2026</td></tr><tr><td>Судья-докладчик</td><td>Вымышленный Сергей Сергеевич</td></tr></table>
+<table><tr><th>Вид лица, участвующего в деле</th><th>Фамилия / наименование</th><th>Перечень статей</th></tr><tr><td>Истец</td><td>ИП Вымышлова Е.А.</td><td></td></tr><tr><td>Ответчик</td><td>Громов Пётр Ильич</td><td></td></tr><tr><td>Представитель</td><td></td><td></td></tr></table>
+<table><tr><td>Вышестоящий суд</td><td>Владимирский областной суд</td></tr><tr><td>Номер дела</td><td>33-2422/2026</td></tr><tr><td>Процессуальный статус</td><td>Взыскатель</td></tr></table>
+<table><tr><td>Судебный акт #1 (Решения)</td><td>Апелляционное определение от 20.08.2026</td></tr></table>
+<table><tr><th>Дата поступления</th><th>Процессуальный статус заявителя</th><th>Лицо подавшее жалобу (заявитель)</th><th>Дата передачи жалобы на изучение</th><th>С истребованием дела</th><th>Дата опр. об оставл. жалобы без движения / напр. уведомления</th><th>Срок для устранения недостатков</th><th>Дата поступления исправленной жалобы</th><th>Дата вынесения определения по итогам изучения</th></tr>
+<tr><td>05.10.2026</td><td>Истец</td><td>ИП Вымышлова Е.А.</td><td>08.10.2026</td><td>Да</td><td>09.10.2026</td><td>30.10.2026</td><td></td><td></td></tr></table></body></html>`;
+  const cd320 = parseCaseCard(C320);
+  t('v3.20: стороны только из строки таблицы — роль без имени не берёт ячейку соседней таблицы', cd320.parties.map(p => p.role + ':' + p.name).join('; ') === 'Истец:ИП Вымышлова Е.А.; Ответчик:Громов Пётр Ильич');
+  t('v3.20: карточка кассации — номер, УИД, судья-докладчик, дата поступления', cd320.number === '8Г-31317/2026' && cd320.uid === '33RS0011-01-2025-004499-82' && cd320.judge === 'Вымышленный Сергей Сергеевич' && cd320.registered === '2026-10-07');
+  const cmp320 = parseComplaints(C320);
+  t('v3.20: вкладка «Жалобы» кассации прочитана по заголовкам столбцов', cmp320.length === 1 && cmp320[0].date === '2026-10-05' && cmp320[0].by === 'ИП Вымышлова Е.А.' && cmp320[0].status === 'Истец' && cmp320[0].noMotion === '2026-10-09' && cmp320[0].fixDue === '2026-10-30' && cmp320[0].toStudy === '2026-10-08' && cmp320[0].withCase === 'Да');
+  const cev = buildComplaintEvents(cmp320, { number: 'Д-61/2026', uid: '33RS0011-01-2025-004499-82', courtNo: '8Г-31317/2026', stage: 'Кассация', url: 'https://x' });
+  t('v3.20: событие complaint — заголовок с состоянием, инстанция, ключ по УИД', cev.length === 1 && cev[0].eventType === 'complaint' && cev[0].date === '2026-10-05' && cev[0].crmNumber === 'Д-61/2026'
+    && cev[0].title === 'Подана кассационная жалоба 05.10.2026 — ИП Вымышлова Е.А. · оставлена без движения 09.10.2026, срок устранения до 30.10.2026' && JSON.parse(cev[0].raw).inst === 'Кассация' && JSON.parse(cev[0].raw).fixDue === '2026-10-30' && cev[0].externalId.startsWith('cmp:33RS0011-01-2025-004499-82:'));
+  const F320 = '<html><head><title>Ковровский городской суд</title></head><body><div>Дело № 2-67/2026</div><div>ОБЖАЛОВАНИЕ РЕШЕНИЙ, ОПРЕДЕЛЕНИЙ (ПОСТ.)</div><table><tr><th>Вид жалобы (представления)</th><th>Дата поступления жалобы (представления)</th><th>Кем подана жалоба (представление)</th><th>Результат рассмотрения жалобы</th><th>Дата направления дела в вышестоящий суд</th></tr><tr><td>Апелляционная жалоба</td><td>12.07.2026</td><td>Громов П.И.</td><td>Передано в апелляцию</td><td>25.07.2026</td></tr></table><table><tr><th>Вид лица</th><th>Лицо</th></tr><tr><td>ОТВЕТЧИК</td><td>Громов Пётр Ильич</td></tr></table></body></html>';
+  const fc320 = parseComplaints(F320), fev320 = buildComplaintEvents(fc320, { number: 'Д-61/2026', uid: '', courtNo: '2-67/2026', stage: 'Первая инстанция', url: 'https://x' });
+  t('v3.20: «Обжалование решений» первой инстанции — апелляционная жалоба, кто подал, результат, направление дела', fc320.length === 1 && fc320[0].kind === 'Апелляционная жалоба' && fc320[0].by === 'Громов П.И.' && fc320[0].sentUp === '2026-07-25' && fev320[0].title === 'Подана апелляционная жалоба 12.07.2026 — Громов П.И. · Передано в апелляцию · дело направлено в вышестоящий суд 25.07.2026' && JSON.parse(fev320[0].raw).inst === 'Апелляция');
+  t('v3.20: строка таблицы жалоб не становится стороной; стороны первой инстанции читаются', parseCaseCard(F320).parties.map(p => p.role + ':' + p.name).join() === 'Ответчик:Громов Пётр Ильич');
+  t('v3.20: дело узнано по УИД / по номеру другой инстанции / не узнано', pageMatchesCase(C320, { courtNo: '2-67/2026' }, { uid: '33RS0011-01-2025-004499-82' }).byUid === true && pageMatchesCase(C320, { courtNo: '2-67/2026' }, { uid: '', numbers: ['33-2422/2026'] }).byOther === '33-2422/2026'
+    && pageMatchesCase(C320, { courtNo: '2-67/2026' }, { uid: '77RS0001-01-2026-000001-01', courtNoApp: '33-1/2026' }).ok === false && pageMatchesCase(C320, { courtNo: '8Г-31317/2026' }, {}).ok === true && pageMatchesCase(C320, { courtNo: '' }, {}).ok === true);
+  t('v3.20: номера с буквами на странице', pageCaseNumbers(C320).includes('8Г-31317/2026') && pageCaseNumbers(C320).includes('33-2422/2026') && pageCaseNumbers('<div>Дело № 33а-512/2026 и А11-1234/2026</div>').join() === '33а-512/2026,А11-1234/2026');
+  // ── v3.21: жалобы в дайджесте без имён ──
+  const dt321 = cmpDigestText(cev[0]);
+  t('v3.21: строка жалобы для дайджеста — без имени, со статусом заявителя и состоянием', dt321 === 'подана кассационная жалоба 05.10 (истец) · оставлена без движения 09.10.2026, срок устранения до 30.10.2026' && !dt321.includes('Вымышлова'));
+  const snap321 = snapshotOf(cev, '2026-10-10T00:00:00Z');
+  t('v3.21: слепок хранит состояние жалобы', snap321.items[cev[0].externalId].s === '2026-10-09|2026-10-30|||||' && snap321.items[cev[0].externalId].k === 'complaint');
+  const cevUpd = buildComplaintEvents([{ ...cmp320[0], fixed: '2026-10-20' }], { number: 'Д-61/2026', uid: '33RS0011-01-2025-004499-82', courtNo: '8Г-31317/2026', stage: 'Кассация', url: 'https://x' });
+  const dd321 = diffEvents(snap321, cevUpd.concat(fev320), '2026-10-21');
+  t('v3.21: изменения — новая жалоба и жалоба с изменившимся состоянием', dd321.complaints.length === 2 && dd321.complaints.some(x => x.chg === true && x.c === '8Г-31317/2026') && dd321.complaints.some(x => x.chg === false && x.c === '2-67/2026') && diffCount(dd321) === 2);
+  t('v3.21: то же состояние — изменения нет', diffEvents(snap321, cev, '2026-10-21').complaints.length === 0);
+  const snapOld = { at: '2026-10-10T00:00:00Z', items: { [cev[0].externalId]: { d: '2026-10-05', t: cev[0].title, r: '', k: 'complaint', c: '8Г-31317/2026' } } };
+  t('v3.21: слепок прежней версии без состояния — изменение не выдумывается', diffEvents(snapOld, cevUpd, '2026-10-21').complaints.length === 0);
+  const ct321 = changesText(dd321).join('\n');
+  t('v3.21: текст изменений — без имён, с номером дела', ct321.includes('• жалоба (изменение): № 8Г-31317/2026 — подана кассационная жалоба 05.10 (истец) · оставлена без движения 09.10.2026, срок устранения до 30.10.2026 · исправленная жалоба 20.10.2026') && ct321.includes('• жалоба: № 2-67/2026 — подана апелляционная жалоба 12.07 · Передано в апелляцию · дело направлено в вышестоящий суд 25.07.2026') && !ct321.includes('Вымышлова') && !ct321.includes('Громов'));
+  const dg321 = buildDigest(cev, { added: 1, updated: 0 }, '2026-10-07T04:31:00.000Z', 'changes');
+  t('v3.21: раздел «Жалобы за 3 дня» в дайджесте без имени', dg321.includes('Жалобы за 3 дня:') && dg321.includes('• № 8Г-31317/2026 — подана кассационная жалоба 05.10 (истец) · оставлена без движения 09.10.2026') && !dg321.includes('Вымышлова'));
+  t('v3.21: жалоба старше 3 дней в раздел не попадает', !buildDigest(cev, { added: 1 }, '2026-10-20T04:31:00.000Z', 'changes').includes('Жалобы за 3 дня'));
+  const dg321c = buildDigest([], { added: 0, updated: 0 }, '2026-10-21T04:31:00.000Z', 'changes', dd321);
+  t('v3.21: новая жалоба сама запускает дайджест (режим changes)', dg321c.includes('Изменения с прошлого сбора (2)') && dg321c.includes('• жалоба: № 2-67/2026'));
+  t('v3.21 (урок 156): ярлыки «Номер дела», «Дата поступления», «Суд» именем не считаются, фамилии с теми же буквами — считаются', PARTY_NOT_NAME.test('Номер дела') && PARTY_NOT_NAME.test('Дата поступления') && PARTY_NOT_NAME.test('Суд') && PARTY_NOT_NAME.test('Результат рассмотрения') && !PARTY_NOT_NAME.test('Судакова Анна Петровна') && !PARTY_NOT_NAME.test('Номеров Пётр Ильич') && !PARTY_NOT_NAME.test('Датаев Р. Р.'));
+  t('v3.21 (урок 156): роль без имени перед ярлыком «Номер дела» не даёт участника', parseCaseCard('<html><body><table><tr><td>Представитель</td><td>Номер дела</td><td>33-1/2026</td></tr><tr><td>Истец</td><td>Громов Пётр Ильич</td></tr></table></body></html>').parties.map(p => p.role + ':' + p.name).join() === 'Истец:Громов Пётр Ильич');
+  t('v3.21: возвращённая жалоба — в хвосте состояния и в заголовке события', cmpTail({ returned: '2026-10-12' }).join() === 'возвращена 12.10.2026' && buildComplaintEvents([{ ...cmp320[0], returned: '2026-10-12' }], { number: 'Д-61/2026', uid: '', courtNo: '8Г-31317/2026', stage: 'Кассация', url: '' })[0].title.endsWith(' · возвращена 12.10.2026') && cmpStateOf({ returned: '2026-10-12' }) === '||||||2026-10-12');
   console.log(`коллектор: ${pass}/${pass + fail}`);
   process.exit(fail ? 1 : 0);
 }
@@ -1098,6 +1270,13 @@ function buildDigest(events, status, nowISO, mode, diff) {
     flow.slice(0, 10).forEach(e => { const raw = safeJson(e.raw); lines.push(`• ${ru(e.date)} ${e.courtNo ? '№ ' + e.courtNo + ' — ' : ''}${e.title}${raw.result ? ' → ' + raw.result : ''}`); });
     if (flow.length > 10) lines.push(`… и ещё ${flow.length - 10}`);
   }
+  // v3.21: жалобы, поступившие за 3 дня (по дате поступления) — без имён; новые и изменившиеся жалобы — в разделе изменений
+  const cmps = events.filter(e => e.eventType === 'complaint' && e.date >= recent && e.date <= today).sort((a, b) => b.date.localeCompare(a.date));
+  if (cmps.length) {
+    lines.push('', 'Жалобы за 3 дня:');
+    cmps.slice(0, 10).forEach(e => lines.push(`• ${e.courtNo ? '№ ' + e.courtNo + ' — ' : ''}${cmpDigestText(e)}`));
+    if (cmps.length > 10) lines.push(`… и ещё ${cmps.length - 10}`);
+  }
   if (errors) {
     lines.push('', `Ошибок: ${errors}`);
     (status.failed || []).slice(0, 3).forEach(f => lines.push(`• ${f.number || ''} (${f.stage || ''}): ${f.err || ''}`));
@@ -1203,27 +1382,33 @@ function aaToPage(j) {
 }
 async function collectOne(body) {
   const url = String(body.url || '').trim(), courtNo = String(body.courtNo || '').trim(), number = String(body.number || '').trim(), stage = String(body.stage || 'Первая инстанция');
+  // v3.20: УИД дела и все его номера — дело на странице узнаётся по ним, когда номера своей инстанции на странице нет
+  const uidIn = String(body.uid || '').trim(), numbers = Array.isArray(body.numbers) ? body.numbers.map(x => String(x || '').trim()).filter(Boolean) : [];
   const kind = hostKind(url);
   if (kind === 'bad') return { ok: false, error: 'некорректная ссылка' };
   // v3.18 (урок 99): о СУДиДЕЛО — только когда ключ задан; без него называется путь, который действительно работает
   if (kind === 'kad') return { ok: false, error: (ENV.SUDODELO_API_KEY ? 'КАД Арбитр: карточка читается через СУДиДЕЛО при плановом сборе' : 'КАД Арбитр не отдаёт карточку дела скриптам — коллектор её не читает; карточку читает приложение для Android (кнопка «Карточка КАД» в деле)') };
   const timeoutMs = Number(ENV.TIMEOUT_MS) || 25000;
-  let card, page, flow, via = 'сайт суда';
+  let card, page, flow, via = 'сайт суда', cmp = [], match = null;
   const viaAA = async () => { const j = await aaFetchCase(url, timeoutMs); const m = aaToPage(j); card = m.card; page = m.page; flow = m.flow; via = 'API Assist'; }; // v3.13
   if (kind === 'sudrf' && aaEnabled() && AA.mode === 'primary') { try { await viaAA(); } catch (e) { /* ниже — сайт суда */ } }
   if (!page) {
     let r = null; try { r = await fetchPageRetry(url, timeoutMs, () => {}, 3000); } catch (e) { if (!(kind === 'sudrf' && aaEnabled())) throw e; }
     const bad = !r || r.status >= 400 || BLOCK_RE.test(r.text.slice(0, 6000));
     // v3.17: при расхождении назван номер со страницы; страница без номера дела — «не распознана»
-    if (!bad && courtNo && !pageHasNumber(r.text, courtNo)) { const found = pageCaseNumbers(r.text); return found.length ? { ok: false, error: `ссылка ведёт на другое дело: на странице номер ${found.join(', ')}, а в деле ${courtNo}`, mismatch: true, found } : { ok: false, error: `страница не распознана: на ней нет номера дела ${courtNo} — получено ${pageBrief(r)}`, unparsed: true }; }
-    if (!bad) { card = parseCaseCard(r.text); page = parseCasePage(r.text); flow = parseFlow(r.text); }
+    // v3.20: дело узнаётся по номеру своей инстанции, по УИД и по любому номеру дела из программы
+    const pm = bad ? null : pageMatchesCase(r.text, { courtNo }, { uid: uidIn, numbers });
+    if (pm && !pm.ok) { const found = pm.found; return found.length ? { ok: false, error: `ссылка ведёт на другое дело: на странице номер ${found.join(', ')}, а в деле ${pm.known.join(', ')}${uidIn ? ' (и УИД дела на странице нет)' : ''}`, mismatch: true, found } : { ok: false, error: `страница не распознана: на ней нет номера дела ${courtNo} — получено ${pageBrief(r)}`, unparsed: true }; }
+    if (pm && (pm.byUid || pm.byOther)) match = { byUid: pm.byUid, byOther: pm.byOther, found: pm.found, link: courtNo };
+    if (!bad) { card = parseCaseCard(r.text); page = parseCasePage(r.text); flow = parseFlow(r.text); cmp = parseComplaints(r.text); }
     if ((bad || (!page.hearings.length && !page.acts.length && !flow.length)) && kind === 'sudrf' && aaEnabled() && AA.mode !== 'primary') { try { await viaAA(); } catch (e) { if (bad) return { ok: false, error: `сайт суда не отдал страницу (HTTP ${r ? r.status : '—'}); ${errText(e)}` }; } }
     else if (bad) return { ok: false, error: `сайт суда не отдал страницу (HTTP ${r ? r.status : '—'})` };
   }
   const full = body.full !== false; // v3.9: по умолчанию — вся история заседаний
   const ctx = { number, uid: card.uid || '', courtNo: courtNo || card.number || '', stage, url, sinceDays: full ? 36500 : 45, allPast: full, judge: page.judge || card.judge || '', court: card.court || '' };
-  const events = [...buildEvents(page, ctx), ...buildFlowEvents(flow, ctx)];
-  return { ok: true, card, events, hearings: page.hearings.length, flow: flow.length, via };
+  // v3.20: события жалоб; match — номер своей инстанции на странице не найден, дело узнано по УИД или другому номеру
+  const events = [...buildEvents(page, ctx), ...buildFlowEvents(flow, ctx), ...buildComplaintEvents(cmp, ctx)];
+  return Object.assign({ ok: true, card, events, hearings: page.hearings.length, flow: flow.length, complaints: cmp.length, via }, match ? { match } : {});
 }
 // v3.15: проверка доставки на личный сервер. Возвращает только несекретное: адрес сервера, длину кода, были ли пробелы по краям,
 // совпадает ли код с кодом программы (программа присылает SHA-256 своего кода в body.hash), и ответ сервера на ping.
