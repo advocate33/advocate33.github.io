@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="15.10.2026 11:14 · 69d9b56+">
+<meta name="build" content="15.10.2026 14:08 · 08ffcca+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -1454,7 +1454,9 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
   if (Array.isArray(parsed.data && parsed.data.docVersions) && parsed.data.docVersions.some(v => v && v.dataUrl)) await docBlobsMigrate(true);
   if (added + updated) { _integrityCache = null; } // v281: после слияния карточка целостности пересчитывается
   if (!dry) { try { const n = await purgedApply(); if (n) logErr('purged', 'удалено по реестру: ' + n); } catch (e) { logErr('purged', e); } } // v299: реестр удалений применяется в том же цикле
-  return { added, updated, skipped, failed, failedIds, conflicts: conflicts.length, settingsChanged, secretsChanged, settingsUpd: settingsResult.upd != null ? settingsResult.upd : null };
+  // v160 (S2): purgedMerged — реестр удалений пополнен при НЕ более свежих входящих настройках: отметка «синхронизировано» по настройкам
+  // не ставится (settingsChanged false), но данные для отправки есть
+  return { added, updated, skipped, failed, failedIds, conflicts: conflicts.length, settingsChanged, secretsChanged, purgedMerged: !!settingsResult.purgedMerged, settingsUpd: settingsResult.upd != null ? settingsResult.upd : null };
 }
 function syncConflicts() { try { return JSON.parse(localStorage.getItem('crm_sync_conflicts')||'[]'); } catch(e){ return []; } }
 async function conflictRestore(store, id, field, idx) { // v297: вернуть значение этого устройства в одном поле
@@ -1572,15 +1574,20 @@ function applyIncomingSettings(incoming, allowSecrets) {
   if (!incoming || typeof incoming !== 'object') return { changed:false, secretsChanged:false };
   const theirs = Number(incoming._upd || 0);
   const mine = Number(localStorage.getItem('crm_settings_upd') || 0);
-  let changed = false, upd = null;
+  let changed = false, upd = null, purgedMerged = false;
+  // v299: реестр окончательных удалений — объединение по максимуму меток, не замена. v160 (аудит сборки 159, S2): объединяется
+  // НЕЗАВИСИМО от того, свежее ли входящие настройки в целом — иначе смена темы на этом устройстве блокировала бы удаление, сделанное на
+  // другом, и старая копия вернула бы удалённую запись. Если общие настройки входящие не обновили, объединённый реестр должен уйти с
+  // этого устройства — метка настроек поднимается (bumpSettings), отметка «синхронизировано» по ней не ставится (purgedMerged ≠ changed)
+  const fresher = !(theirs <= mine && mine > 0);
+  if (incoming.crm_purged !== undefined) {
+    try { const mp = lsJSON('crm_purged', {}) || {}, tp = JSON.parse(incoming.crm_purged) || {}; let ch = false; for (const id of Object.keys(tp)) { const t = Number(tp[id] || 0); if (t > Number(mp[id] || 0)) { mp[id] = t; ch = true; } } if (ch) { localStorage.setItem('crm_purged', JSON.stringify(mp)); purgedMerged = true; if (fresher) changed = true; else if (typeof bumpSettings === 'function') bumpSettings(); } } catch (e) { logErr('purged:merge', e); }
+  }
   // «Чистый» браузер (mine=0) принимает настройки всегда — включая старые
   // файлы без метки. На настроенном устройстве побеждает более новая версия.
-  if (!(theirs <= mine && mine > 0)) {
+  if (fresher) {
     SYNC_SETTINGS_KEYS.forEach(k => {
-      if (k === 'crm_purged' && incoming[k] !== undefined) { // v299: реестр удалений — объединение по максимуму меток, не замена
-        try { const mine = lsJSON('crm_purged', {}) || {}, theirs = JSON.parse(incoming[k]) || {}; let ch = false; for (const id of Object.keys(theirs)) { const t = Number(theirs[id] || 0); if (t > Number(mine[id] || 0)) { mine[id] = t; ch = true; } } if (ch) { localStorage.setItem('crm_purged', JSON.stringify(mine)); changed = true; } } catch (e) { logErr('purged:merge', e); }
-        return;
-      }
+      if (k === 'crm_purged') return;
       if (incoming[k] !== undefined && incoming[k] !== localStorage.getItem(k)) {
         localStorage.setItem(k, incoming[k]); changed = true;
       }
@@ -1649,7 +1656,7 @@ function applyIncomingSettings(incoming, allowSecrets) {
     // биометрию можно включить заново в настройках этого устройства.
   }
   if (changed) { try { applyTheme(localStorage.getItem('crm_theme') || 'dark'); applyFontSettings(); } catch (e) { if (typeof logErr === "function") logErr("", e); } }
-  return { changed, secretsChanged, upd };
+  return { changed, secretsChanged, upd, purgedMerged };
 }
 
 async function buildEncryptedBackup() {
@@ -2529,27 +2536,30 @@ async function docBlobGet(v) {
 //    совпасть с прочитанной при чтении раздела. Не совпала — запись не трогается, слияние считается неполным (failed, raced): метка слияния и
 //    версия сервера не сдвигаются, и следующий обмен объединит записи заново, уже со свежей правкой. Записи, которых при чтении не было, и
 //    повторные записи самого слияния проверяются по своей последней метке. Отправки на сервер такая запись не вызывает (как putRaw, урок 66).
-const MERGE_SEEN = { on: false, upd: new Map(), raced: 0 };
+//    v160 (аудит сборки 159, S1): отсутствие записи при чтении раздела — тоже ожидаемое состояние (null): запись, созданная на устройстве
+//    после чтения под тем же id, не затирается входящей — проверка «записи нет» идёт в той же транзакции (MERGE_SEEN.read — прочитанные
+//    разделы; id не из них — как раньше, без проверки: по ним слияние решений не принимало)
+const MERGE_SEEN = { on: false, upd: new Map(), read: new Set(), raced: 0 };
 const mergeSeenKey = (store, id) => store + '\u0001' + id;
 // модули данных есть в сборке всегда; в тестовых песочницах без них переопределение пропускается
 if (typeof putRaw === 'function' && typeof mergeIncoming === 'function') {
   const getAllRawUnguarded = getAllRaw;
   getAllRaw = async function (store) {
     const a = await getAllRawUnguarded(store);
-    if (MERGE_SEEN.on) for (const r of a) if (r && r.id != null && !MERGE_SEEN.upd.has(mergeSeenKey(store, r.id))) MERGE_SEEN.upd.set(mergeSeenKey(store, r.id), r._upd || 0);
+    if (MERGE_SEEN.on) { MERGE_SEEN.read.add(store); for (const r of a) if (r && r.id != null && !MERGE_SEEN.upd.has(mergeSeenKey(store, r.id))) MERGE_SEEN.upd.set(mergeSeenKey(store, r.id), r._upd || 0); }
     return a;
   };
   const putRawUnguarded = putRaw;
   putRaw = function (store, obj) {
-    if (!MERGE_SEEN.on || !obj || obj.id == null || !MERGE_SEEN.upd.has(mergeSeenKey(store, obj.id))) return putRawUnguarded(store, obj);
-    const key = mergeSeenKey(store, obj.id), seen = MERGE_SEEN.upd.get(key);
+    if (!MERGE_SEEN.on || !obj || obj.id == null || !(MERGE_SEEN.upd.has(mergeSeenKey(store, obj.id)) || MERGE_SEEN.read.has(store))) return putRawUnguarded(store, obj);
+    const key = mergeSeenKey(store, obj.id), seen = MERGE_SEEN.upd.has(key) ? MERGE_SEEN.upd.get(key) : null;
     return new Promise((res, rej) => {
       let done = false; const finish = (ok, e) => { if (done) return; done = true; if (ok) res(true); else rej(e); };
       let t; try { t = db.transaction(store, 'readwrite'); } catch (e) { storageWriteError(e); finish(false, new Error('Не удалось сохранить: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
       const os = t.objectStore(store), g = os.get(obj.id);
       g.onsuccess = () => {
         const fresh = g.result, now = fresh ? (fresh._upd || 0) : null;
-        if (now !== seen) { MERGE_SEEN.raced++; finish(false, new Error('запись «' + obj.id + '» изменилась на этом устройстве во время обмена — объединится при следующем обмене')); try { t.abort(); } catch (e) { /* штатно: транзакция уже завершается */ } return; }
+        if (now !== seen) { MERGE_SEEN.raced++; finish(false, new Error('запись «' + obj.id + '» ' + (seen === null ? 'появилась' : 'изменилась') + ' на этом устройстве во время обмена — объединится при следующем обмене')); try { t.abort(); } catch (e) { /* штатно: транзакция уже завершается */ } return; }
         os.put(obj);
       };
       t.oncomplete = () => { MERGE_SEEN.upd.set(key, obj._upd || 0); finish(true); };
@@ -2560,9 +2570,9 @@ if (typeof putRaw === 'function' && typeof mergeIncoming === 'function') {
   const mergeIncomingUnguarded = mergeIncoming;
   mergeIncoming = async function (parsed, allowSecrets, opts) {
     if (opts && opts.dryRun) return mergeIncomingUnguarded(parsed, allowSecrets, opts);
-    MERGE_SEEN.on = true; MERGE_SEEN.upd.clear(); MERGE_SEEN.raced = 0;
+    MERGE_SEEN.on = true; MERGE_SEEN.upd.clear(); MERGE_SEEN.read.clear(); MERGE_SEEN.raced = 0;
     try { const r = await mergeIncomingUnguarded(parsed, allowSecrets, opts); return Object.assign(r, { raced: MERGE_SEEN.raced }); }
-    finally { MERGE_SEEN.on = false; MERGE_SEEN.upd.clear(); }
+    finally { MERGE_SEEN.on = false; MERGE_SEEN.upd.clear(); MERGE_SEEN.read.clear(); }
   };
 }
 // Разбор GPT 04.10.2026 (вечер), п. 6: запись из формы правки (ui/guard.js: formRecMark при открытии, formRecFor при записи) — проверка версии
@@ -2644,7 +2654,7 @@ if (typeof collectAll === 'function') {
   collectAll = function () {
     return new Promise((res, rej) => {
       const data = {}; let t; try { t = db.transaction(STORES, 'readonly'); } catch (e) { rej(new Error('Не удалось прочитать базу: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
-      for (const s of STORES) { const r = t.objectStore(s).getAll(); r.onsuccess = () => { data[s] = r.result || []; if (MERGE_SEEN.on) for (const x of data[s]) if (x && x.id != null && !MERGE_SEEN.upd.has(mergeSeenKey(s, x.id))) MERGE_SEEN.upd.set(mergeSeenKey(s, x.id), x._upd || 0); }; }
+      for (const s of STORES) { const r = t.objectStore(s).getAll(); r.onsuccess = () => { data[s] = r.result || []; if (MERGE_SEEN.on) { MERGE_SEEN.read.add(s); for (const x of data[s]) if (x && x.id != null && !MERGE_SEEN.upd.has(mergeSeenKey(s, x.id))) MERGE_SEEN.upd.set(mergeSeenKey(s, x.id), x._upd || 0); } }; }
       t.oncomplete = () => res({ _fmt: SYNC_FMT, _ver: DB_VER, _exportedAt: Date.now(), data, settings: collectSettings() });
       t.onerror = () => rej(new Error('Не удалось прочитать базу: ' + ((t.error && t.error.message) || 'ошибка чтения')));
       t.onabort = () => rej(new Error('Не удалось прочитать базу: чтение прервано'));
@@ -3986,7 +3996,8 @@ async function srvdbMergeSnapshot(snapshot, silent, slot) {
   // аудит GPT 03.10.2026: при недосохранённых записях (failed) версия сервера не считается полученной — следующая проверка загрузит снова
   if (!merged.failed) D.ver = Number(snapshot.ver || 0);
   D.lastAt = Date.now();
-  if (merged.added || merged.updated || merged.settingsChanged) {
+  // v160 (S2): purgedMerged — реестр удалений пополнен, его нужно донести до другого сервера
+  if (merged.added || merged.updated || merged.settingsChanged || merged.purgedMerged) {
     // записанное с этого сервера должно дойти до другого: записи слияния ревизию не двигают (putRaw), поэтому — отметка (sync/srv2.js)
     if (typeof srvFwdMark === 'function') srvFwdMark(slot || 0);
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('pull:refresh', e); }
@@ -6178,7 +6189,7 @@ async function backupApply() {
   try {
     const r = await mergeIncoming(m.parsed, false, backupMergeOpts());
     // записанное из файла должно дойти до серверов: записи слияния ревизию не двигают — отметка «есть что отправить» каждому серверу
-    if ((r.added || r.updated || r.settingsChanged) && typeof srvFwdMark === 'function') srvFwdMark(-1);
+    if ((r.added || r.updated || r.settingsChanged || r.purgedMerged) && typeof srvFwdMark === 'function') srvFwdMark(-1);
     if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
     BACKUP_PENDING = null;
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('backup:refresh', e); }
@@ -6580,7 +6591,7 @@ async function fsyncDecrypt(text, pass) {
 // аудит 14.10.2026 (свой): правки устройства ещё не в файле — база коллизий файла не сдвигается (как у сервера, sync/pull.js); сдвигает её запись файла
 async function fsyncMergeDump(dump) {
   const r = await mergeIncoming(dump, false, fsyncNeedsWrite() ? { baseKey: null, base: Number(localStorage.getItem(FS_K.base) || 0) } : { baseKey: FS_K.base });
-  if (r.added || r.updated || r.settingsChanged) {
+  if (r.added || r.updated || r.settingsChanged || r.purgedMerged) {
     if (typeof srvFwdMark === 'function') srvFwdMark('fs');
     if (typeof srvdbTouch === 'function') srvdbTouch();
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('fsync:refresh', e); }
@@ -6636,7 +6647,7 @@ async function fsyncReadIncoming(h, force) {
     if (r.failed) { out.bad.push(name + ' — не записано записей: ' + r.failed); continue; }
     seen[name] = sig; out.files++; out.added += r.added || 0; out.updated += r.updated || 0; fsyncMapKeep(fsyncMapOf(d.dump));
     // данные телефона должны попасть в главный файл, чтобы их увидели остальные устройства
-    if (r.added || r.updated || r.settingsChanged) localStorage.setItem(FS_K.fwd, '1');
+    if (r.added || r.updated || r.settingsChanged || r.purgedMerged) localStorage.setItem(FS_K.fwd, '1');
   }
   localStorage.setItem(FS_K.seen, JSON.stringify(seen));
   return out;
@@ -7841,6 +7852,8 @@ function crmComplaintRekeyDeadlines(c, e) {
 function crmComplaintReapply(c, e) {
   if (!e || e.eventType !== 'complaint' || !e.cmpApplied) return false;
   if (e.cmpSideManual && e.cmpSideManual !== 'none' && e.cmpSide !== e.cmpSideManual) return true;
+  // v160 (M1): выбор «Не установлена» при вычисленной стороне — тоже смена стороны, последствия прежней снимаются
+  if (e.cmpSideManual === 'none' && e.cmpSide) return true;
   if (e.cmpSide === '' && !e.cmpSideManual) { const i = crmComplaintInfo(e); return !!(CMP_FIELDS[i.inst] && CMP_FIELDS[i.inst][1] && crmComplaintWho(c, i.by)); }
   return false;
 }
@@ -7867,6 +7880,34 @@ function crmComplaintWho(c, by) {
   if ((c.participants || []).some(p => p && p.name && roles.has(String(p.role || '')) && partySame(by, p.name))) return 'Жалоба оппонента';
   return '';
 }
+// v160 (аудит сборки 159, M1): сторона ОДНОЙ и той же жалобы исправлена (ручной выбор, уточнённый доверитель) — это не вторая жалоба:
+// сроки, поставленные по прежней стороне этого события (cmp:fix — наша, cmp:obj — оппонента), закрываются с пометкой sideDone, если не
+// подтверждены (при возврате стороны открываются снова), подтверждённые — остаются с пометкой sideCheck «сторона жалобы изменена»
+// (пользовательская работа молча не снимается); поле-сводка дела «Кто обжалует» пересчитывается по живым жалобам инстанции
+function crmComplaintSideSummary(c, e, inst, who, events) {
+  const sides = new Set();
+  for (const x of events || []) { if (!x || x._deleted || x.eventType !== 'complaint' || x.id === e.id || x.caseId !== c.id || x.status === 'ignored') continue; const j = crmComplaintInfo(x); if (j.inst !== inst || j.back || crmComplaintIsPrivate(j)) continue; if (x.cmpSide === 'Наша жалоба' || x.cmpSide === 'Жалоба оппонента') sides.add(x.cmpSide); }
+  if (who) sides.add(who);
+  return sides.size === 2 ? 'Обе стороны' : sides.size === 1 ? [...sides][0] : '';
+}
+function crmComplaintSideChanged(c, e, i, f, prevSide, who, events, priv) {
+  const ch = [], ext = String(e.externalId || e.id || ''), lab = s => s ? '«' + s + '»' : 'не установлена';
+  ch.push('сторона жалобы изменена: ' + lab(prevSide) + ' → ' + lab(who));
+  const closeKeys = [];
+  if (who !== 'Наша жалоба') closeKeys.push('cmp:fix:');
+  if (who !== 'Жалоба оппонента') closeKeys.push('cmp:obj:');
+  const exts = [ext, ...crmComplaintLegacyExts(e)];
+  for (const d of (Array.isArray(c.deadlines) ? c.deadlines : [])) {
+    if (!d || d.done || !d.autoKey || !closeKeys.some(k => exts.some(x => d.autoKey === k + x))) continue;
+    if (!d.confirmedAt) { d.done = true; d.doneAt = todayISO(); d.sideDone = 1; d.note = ((d.note || '') + ' · сторона жалобы изменена (' + lab(prevSide) + ' → ' + lab(who) + ') — срок снят ' + fmtDate(todayISO())).replace(/^ · /, ''); ch.push('срок «' + d.title + '» снят: ставился по прежней стороне жалобы'); }
+    else { d.sideCheck = 1; d.note = ((d.note || '') + ' · сторона жалобы изменена (' + lab(prevSide) + ' → ' + lab(who) + ') — срок подтверждён вами, проверьте, нужен ли он').replace(/^ · /, ''); ch.push('срок «' + d.title + '» подтверждён вами и остаётся — помечен «сторона жалобы изменена»'); }
+  }
+  if (!priv && f[1]) {
+    const sum = crmComplaintSideSummary(c, e, i.inst, who, events);
+    if ((c[f[1]] || '') !== sum) { c[f[1]] = sum; ch.push('кто обжалует: ' + (sum ? sum.toLowerCase() : 'не установлено') + ' (пересчитано по жалобам инстанции)'); }
+  }
+  return ch;
+}
 // применить жалобу к делу: только пустые поля; возвращает перечень записанного (пусто — ничего не изменилось).
 // v158 (аудит сборки 157, A1): сторона считается для КАЖДОЙ жалобы по подавшему (e.cmpSide) — заполненное поле дела «Кто обжалует» к
 // чужой жалобе не относится; поле дела — сводка: пустое заполняется стороной жалобы, одна сторона при жалобе другой — «Обе стороны».
@@ -7880,7 +7921,12 @@ function crmComplaintApply(c, e, events) {
   if (crmComplaintRekeyDeadlines(c, e)) ch.push('сроки по жалобе переведены на новый ключ события');
   if (!priv && !c[f[0]]) { c[f[0]] = e.date; ch.push('жалоба подана (' + instName + '): ' + fmtDate(e.date)); }
   const who = f[1] ? ((e.cmpSideManual === 'Наша жалоба' || e.cmpSideManual === 'Жалоба оппонента') ? e.cmpSideManual : (e.cmpSideManual === 'none' ? '' : crmComplaintWho(c, i.by))) : '';
+  // v160 (аудит сборки 159, M1): сторона той же жалобы изменилась (исправление, не вторая жалоба) — последствия прежней классификации
+  // снимаются: сроки другой стороны по этому событию закрываются (неподтверждённые) или помечаются (подтверждённые), поле-сводка дела
+  // «Кто обжалует» пересчитывается по живым жалобам инстанции, а не накапливается в «Обе стороны»
+  const prevSide = f[1] ? String(e.cmpSide || '') : '', sideChanged = !!(f[1] && prevSide && prevSide !== who);
   if (f[1]) e.cmpSide = who;
+  if (sideChanged) ch.push(...crmComplaintSideChanged(c, e, i, f, prevSide, who, events, priv));
   if (priv && f[1]) ch.push('частная жалоба (' + instName + ')' + (who ? ' — ' + who.toLowerCase() : '') + ': поля «Жалоба подана» и «Кто обжалует» не меняются — это не жалоба на решение');
   else if (f[1] && who) {
     if (!c[f[1]]) { c[f[1]] = who; ch.push('кто обжалует: ' + who); }
@@ -7901,8 +7947,10 @@ function crmComplaintApply(c, e, events) {
   // КонсультантПлюс; дата контроля — 10 дней от поступления жалобы, подтверждается пользователем по определению
   if (who === 'Жалоба оппонента' && f[1] && (i.inst === 'Апелляция' || i.inst === 'Кассация')) {
     c.deadlines = Array.isArray(c.deadlines) ? c.deadlines : [];
-    const key = 'cmp:obj:' + (e.externalId || e.id);
-    if (!c.deadlines.some(d => d.autoKey === key)) {
+    const key = 'cmp:obj:' + (e.externalId || e.id), exo = c.deadlines.find(d => d.autoKey === key);
+    // v160 (M1): срок, закрытый прежней сменой стороны, при возврате стороны открывается снова, а не создаётся вторым
+    if (exo && exo.sideDone) { exo.done = false; delete exo.doneAt; delete exo.sideDone; exo.note = ((exo.note || '') + ' · сторона жалобы снова «Жалоба оппонента» — срок открыт').replace(/^ · /, ''); ch.push('контрольный срок на возражения открыт снова'); }
+    else if (!exo) {
       const due = typeof addDaysLocalISO === 'function' ? addDaysLocalISO(e.date, 10) : e.date;
       // v157: сведения о жалобе получены после контрольной даты — срок создаётся исполненным с пометкой (как у сроков от поздно записанного акта)
       const late = due < todayISO();
@@ -7920,11 +7968,18 @@ function crmComplaintApply(c, e, events) {
     if (!ex) { c.deadlines.push({ id: uid('СР'), title: 'Устранить недостатки ' + (i.inst === 'Кассация' ? 'кассационной' : 'апелляционной') + ' жалобы (оставлена без движения)', date: i.fixDue, note: 'срок из карточки дела на сайте суда — проверьте по определению и подтвердите', done: false, kind: 'procedural',
       baseEv: 'Определение об оставлении жалобы без движения' + (i.noMotion ? ' от ' + fmtDate(i.noMotion) : ''), baseDate: i.noMotion || '', norm: i.inst === 'Кассация' ? 'ст. 378.2 ГПК РФ / ст. 280 АПК РФ — срок из определения (сверить по КонсультантПлюс)' : 'ст. 323 ГПК РФ / ст. 263 АПК РФ — срок из определения (сверить по КонсультантПлюс)',
       calcDate: i.fixDue, src: 'Судебный акт', autoKey: key, confirmedAt: '', confirmedDate: '' }); c.deadlines.sort((a, b) => (a.date || '').localeCompare(b.date || '')); ch.push('срок устранения недостатков жалобы — до ' + fmtDate(i.fixDue)); }
+    else if (ex.sideDone) { ex.done = false; delete ex.doneAt; delete ex.sideDone; ex.date = i.fixDue; ex.calcDate = i.fixDue; ex.note = ((ex.note || '') + ' · сторона жалобы снова «Наша жалоба» — срок открыт').replace(/^ · /, ''); ch.push('срок устранения недостатков жалобы открыт снова — до ' + fmtDate(i.fixDue)); }
     else if (!ex.confirmedAt && !ex.done && ex.date !== i.fixDue) { ex.date = i.fixDue; ex.calcDate = i.fixDue; if (ex.srcCheck) { delete ex.srcCheck; delete ex.srcDate; } ch.push('срок устранения недостатков жалобы — до ' + fmtDate(i.fixDue)); }
     // v159 (аудит сборки 158, R2): подтверждённый срок молча не меняется и не молчит — дата с сайта хранится отдельно (srcDate), срок
-    // получает пометку «требует повторной проверки» (srcCheck); то же наблюдение второй раз пометку не повторяет; совпавшая дата пометку снимает
-    else if (ex.confirmedAt && !ex.done && ex.date !== i.fixDue && ex.srcDate !== i.fixDue && ex.srcSeen !== i.fixDue) { ex.srcDate = i.fixDue; ex.srcCheck = 1; ch.push('срок устранения недостатков: на сайте суда до ' + fmtDate(i.fixDue) + ', у вас подтверждено до ' + fmtDate(ex.date) + ' — проверьте (в паспорте срока: «Принять дату суда» или «Оставить мою»)'); }
-    else if (ex.srcCheck && ex.date === i.fixDue) { delete ex.srcCheck; delete ex.srcDate; ch.push('срок устранения недостатков: дата на сайте суда снова совпадает с вашей'); }
+    // получает пометку «требует повторной проверки» (srcCheck); совпавшая дата пометку снимает.
+    // v160 (аудит сборки 159, M2): srcDate — всегда ПОСЛЕДНЕЕ наблюдение источника; отклонённая пользователем дата (srcSeen) — только
+    // решение пользователя: источник вернулся к ней — устаревшее предложение снимается, предупреждение не повторяется; «Принять дату суда»
+    // всегда принимает последнее полученное
+    else if (ex.confirmedAt && !ex.done) {
+      if (ex.date === i.fixDue) { if (ex.srcCheck || ex.srcDate) { delete ex.srcCheck; delete ex.srcDate; ch.push('срок устранения недостатков: дата на сайте суда снова совпадает с вашей'); } }
+      else if (ex.srcSeen === i.fixDue) { if (ex.srcCheck || ex.srcDate) { delete ex.srcCheck; delete ex.srcDate; ch.push('срок устранения недостатков: на сайте суда снова до ' + fmtDate(i.fixDue) + ' — вы оставили свою дату ' + fmtDate(ex.date) + ', прежнее предложение снято'); } }
+      else if (ex.srcDate !== i.fixDue) { ex.srcDate = i.fixDue; ex.srcCheck = 1; ch.push('срок устранения недостатков: на сайте суда до ' + fmtDate(i.fixDue) + ', у вас подтверждено до ' + fmtDate(ex.date) + ' — проверьте (в паспорте срока: «Принять дату суда» или «Оставить мою»)'); }
+    }
   }
   return ch;
 }
@@ -10958,7 +11013,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openCalImportSheet()', "openToCalSheet('hearings','Х3')", 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", "openMonitorEventSheet('МН4')", "openMonitorEventSheet('МН5')", "openPartyFix('Д-16/2026')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", "openStageForm('Ф1', '')", "openStageForm('Ф1', 'э1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineSheet('Д-41/2026', 'dl-41d')","openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openCalImportSheet()', "openToCalSheet('hearings','Х3')", 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", "openMonitorEventSheet('МН4')", "openMonitorEventSheet('МН5')", "openPartyFix('Д-16/2026')", 'openErrlogSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", "openStageForm('Ф1', '')", "openStageForm('Ф1', 'э1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineSheet('Д-41/2026', 'dl-41d')", "openDeadlineSheet('Д-41/2026', 'dl-41e')","openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -12586,7 +12641,7 @@ async function openDeadlineSheet(caseId, key) {
   const rows = dlPassport(dl, NEXT_RULES_VER, today).map(([a, b]) => `<div><span class="muted">${esc(a)}</span><span>${esc(b)}</span></div>`).join('');
   const body = `<p class="small muted">${esc([c.number, c.client].filter(Boolean).join(' · '))}</p>
     <div class="dl-date ${dl.done ? 'done' : k !== null && k < 0 ? 'overdue' : ''}">${esc(dl.date ? fmtDate(dl.date) : '—')}</div>
-    <div class="task-badges">${unconfirmed ? badge('Требует проверки', 'warn') : ''}${dl.srcCheck && !dl.done ? badge('На сайте суда иная дата', 'bad') : ''}${dl.autoKey ? badge('Рассчитан автоматически', 'accent') : ''}${dl.done ? badge('Выполнен', 'good') : ''}</div>
+    <div class="task-badges">${unconfirmed ? badge('Требует проверки', 'warn') : ''}${dl.srcCheck && !dl.done ? badge('На сайте суда иная дата', 'bad') : ''}${dl.sideCheck && !dl.done ? badge('Сторона жалобы изменена', 'bad') : ''}${dl.autoKey ? badge('Рассчитан автоматически', 'accent') : ''}${dl.done ? badge('Выполнен', 'good') : ''}</div>
     <div class="section-label">Паспорт срока</div><div class="list-rows">${rows}</div>
     ${unconfirmed ? `<div class="info-box">Срок справочный: проверьте исчисление по норме и обстоятельствам дела, затем подтвердите. Подтверждённый срок при пересчёте правил не меняется.</div>` : ''}
     ${dl.srcCheck && dl.srcDate && !dl.done ? `<div class="info-box warning">На сайте суда срок устранения недостатков — до ${esc(fmtDate(dl.srcDate))}, у вас подтверждено до ${esc(fmtDate(dl.date))}. Подтверждённая дата не заменена: проверьте по определению суда.<div class="form-actions" style="margin-top:8px">${btn('Принять дату суда', `dlAcceptSrc('${jsq(caseId)}', '${jsq(dl.id || key)}')`, 'primary small-btn', 'check')}${btn('Оставить мою', `dlKeepMine('${jsq(caseId)}', '${jsq(dl.id || key)}')`, 'small-btn', 'x')}</div></div>` : ''}
@@ -14388,7 +14443,7 @@ function tasksModel(cases, tasks, p, today) {
   (cases || []).filter(activeCase).forEach(c => (c.deadlines || []).forEach((dl, i) => {
     if (!dl || !dl.date) return;
     items.push({ kind: 'deadline', id: dl.id || 'i:' + i, caseId: c.id, date: dl.date, time: '', title: dl.title || 'Срок', sub: caseTitle(c), basis: [dl.baseEv, dl.norm ? String(dl.norm).split(' — ')[0] : ''].filter(Boolean).join(' · '),
-      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, ruleGone: !!dl.ruleGone && !dl.done, srcCheck: !!dl.srcCheck && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '' });
+      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, ruleGone: !!dl.ruleGone && !dl.done, srcCheck: !!dl.srcCheck && !dl.done, sideCheck: !!dl.sideCheck && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '' });
   }));
   (tasks || []).forEach(t => { if (!t || t._deleted) return; const c = t.caseNum ? (cases || []).find(x => x.number === t.caseNum) : null;
     items.push({ kind: 'task', id: t.id, date: t.due || '', time: t.time || '', title: t.title || 'Задача', sub: c ? caseTitle(c) : (t.caseNum || ''), basis: '', priority: t.priority || '', done: !!t.done, doneAt: t.doneAt || '' }); });
@@ -14409,7 +14464,7 @@ SCREENS.tasks = async function () {
   // Б15 (11.10.2026): невыполненную строку можно смахнуть вправо — «Выполнено» (ui/swipe.js)
   const rows = m.rows.map(x => `<div class="agenda-row tasks-row"${!x.done && typeof swipeAttrs === 'function' ? swipeAttrs('tasksMarkDone', [x.kind, x.kind === 'deadline' ? x.caseId : x.id, x.id], 'Выполнено') : ''}><span class="agenda-time">${esc(x.date ? fmtDate(x.date).slice(0, 5) : '—')}${x.time ? `<br>${esc(x.time)}` : ''}</span>
     <button type="button" class="agenda-stripe ${x.kind}${x.done ? ' done' : ''} tasks-main" onclick="${open(x)}"><span class="agenda-title">${esc(x.title)}</span><span class="agenda-sub">${esc([x.kind === 'deadline' ? (x.control ? 'контрольный срок' : 'процессуальный срок') : 'задача' + (x.priority && x.priority !== 'Средний' ? ' · ' + x.priority.toLowerCase() + ' приоритет' : ''), x.sub, x.basis].filter(Boolean).join(' · '))}</span>
-      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.ruleGone ? badge('правило не применяется', 'bad') : x.srcCheck ? badge('на сайте суда иная дата', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
+      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.ruleGone ? badge('правило не применяется', 'bad') : x.srcCheck ? badge('на сайте суда иная дата', 'bad') : x.sideCheck ? badge('сторона жалобы изменена', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
     ${x.done ? '' : `<button type="button" class="icon-button tasks-done" aria-label="Выполнено" title="Выполнено" onclick="tasksMarkDone('${x.kind}', '${jsq(x.kind === 'deadline' ? x.caseId : x.id)}', '${jsq(x.id)}')">${icon('check')}</button>`}</div>`).join('');
   const notice = m.unconfirmed ? `<div class="info-box warning">Сроков, рассчитанных автоматически и ещё не подтверждённых: ${m.unconfirmed}. Откройте срок, проверьте исчисление по паспорту и нажмите «Подтвердить дату».</div>` : '';
   return pageHead('Задачи и сроки', `${m.tabCounts.deadlines} ${plural(m.tabCounts.deadlines, 'срок', 'срока', 'сроков')} · ${m.tabCounts.tasks} ${plural(m.tabCounts.tasks, 'задача', 'задачи', 'задач')}`, btn('Задача', 'openTaskForm()', 'primary', 'plus')) +
@@ -18742,7 +18797,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <ul><li>События приходят сами: при открытии программы, при возвращении в неё и раз в 30 минут (на «Сегодня» — когда проверено и когда следующая проверка). Коллектор обходит сайты по расписанию (утром и днём); «Обновить с сайтов судов» в «Судах и мониторинге» или «Обновить» на «Сегодня» — обойти прямо сейчас, это несколько минут; «Получить события» — только забрать то, что коллектор уже собрал. Перечень дел со ссылками уходит коллектору сам после сохранения дела и при открытии программы. Если отправка не удалась, на экране «Суды и мониторинг» — предупреждение «Список дел коллектору не отправлен» с причиной и кнопкой «Отправить список дел»; повтор — и сам, при следующем открытии программы.</li>
 <li>Заседание по своему делу программа вносит сама (с отметкой источника); дату решения и мотивированного акта записывает в дело и пересчитывает сроки — каждый срок подтверждаете вы.</li>
 <li>Если сбор «частично»: программа называет причину по каждой ссылке — сайт не ответил (повторится сам), страница не распознана (проверьте ссылку), на странице другое дело (ссылка ведёт не туда — исправьте в деле). С коллектора 3.20 дело на странице узнаётся не только по номеру своей инстанции, но и по УИД и по номерам других инстанций: если в поле «№ в суде» по ошибке стоит номер апелляции, страница первой инстанции всё равно читается, а «Данные с сайта суда» исправляют номер (номер первой инстанции, совпадающий с номером апелляции или кассации, заменяется номером со страницы сам; иное расхождение — кнопкой «Заменить на данные сайта»).</li>
-<li>Жалобы (коллектор 3.20): со страницы кассационного суда читается вкладка «Жалобы», со страницы первой инстанции — «Обжалование решений, определений»: дата поступления жалобы, кто подал, статус заявителя, оставление без движения и срок устранения недостатков, результат. Поданная жалоба — событие «жалоба» в «Судах и мониторинге» и в ленте дела; на «Сегодня» появляется строка «Подана … жалоба по делу …» с кнопкой «Разобрано» (после неё событие — «применено»; «×» — скрыть на 7 дней). В пустые поля дела записываются «Жалоба подана» нужной инстанции и «Кто обжалует» (сторона считается для каждой жалобы по имени подавшего: доверитель — «Наша жалоба», противная сторона дела или участник с ролью, противоположной роли доверителя, — «Жалоба оппонента»; представитель, третье лицо, иное лицо или незнакомое имя — сторона не установлена: поле не заполняется, сроки по такой жалобе не ставятся, на «Сегодня» это сказано в строке жалобы; при жалобах обеих сторон поле дела — «Обе стороны»; заполненное вами поле к чужой жалобе не относится). Сроки ставятся по стороне самой жалобы: у жалобы оппонента — контрольный срок возражений, у нашей жалобы без движения — срок устранения недостатков. Сторону можно задать самому в карточке события («Наша жалоба», «Жалоба оппонента», «Не установлена») — программа разберёт жалобу заново; «Разобрать заново» делает то же после исправления данных дела. Частная жалоба (на определение) поля «Жалоба подана», «Кто обжалует» и результат инстанции не заполняет — это не жалоба на решение, срок на подачу апелляции она не закрывает. Если срок устранения недостатков уже подтверждён вами, а на сайте суда появилась другая дата, срок получает пометку «На сайте суда иная дата» — в паспорте срока выберите «Принять дату суда» или «Оставить мою». Возврат одной из нескольких жалоб результатом всей инстанции не записывается. Если наша жалоба оставлена без движения и на сайте указан срок устранения недостатков, в деле появляется срок «Устранить недостатки … жалобы» — подтвердите его по определению суда. Изменилось состояние жалобы (без движения, результат) — событие снова становится новым и снова показывается на «Сегодня».</li>
+<li>Жалобы (коллектор 3.20): со страницы кассационного суда читается вкладка «Жалобы», со страницы первой инстанции — «Обжалование решений, определений»: дата поступления жалобы, кто подал, статус заявителя, оставление без движения и срок устранения недостатков, результат. Поданная жалоба — событие «жалоба» в «Судах и мониторинге» и в ленте дела; на «Сегодня» появляется строка «Подана … жалоба по делу …» с кнопкой «Разобрано» (после неё событие — «применено»; «×» — скрыть на 7 дней). В пустые поля дела записываются «Жалоба подана» нужной инстанции и «Кто обжалует» (сторона считается для каждой жалобы по имени подавшего: доверитель — «Наша жалоба», противная сторона дела или участник с ролью, противоположной роли доверителя, — «Жалоба оппонента»; представитель, третье лицо, иное лицо или незнакомое имя — сторона не установлена: поле не заполняется, сроки по такой жалобе не ставятся, на «Сегодня» это сказано в строке жалобы; при жалобах обеих сторон поле дела — «Обе стороны»; заполненное вами поле к чужой жалобе не относится). Сроки ставятся по стороне самой жалобы: у жалобы оппонента — контрольный срок возражений, у нашей жалобы без движения — срок устранения недостатков. Сторону можно задать самому в карточке события («Наша жалоба», «Жалоба оппонента», «Не установлена») — программа разберёт жалобу заново; «Разобрать заново» делает то же после исправления данных дела. Если сторона той же жалобы изменилась, сроки, поставленные по прежней стороне, снимаются (подтверждённые вами остаются с пометкой «Сторона жалобы изменена»), а «Кто обжалует» пересчитывается по жалобам инстанции — исправление одной жалобы не превращается в две. Частная жалоба (на определение) поля «Жалоба подана», «Кто обжалует» и результат инстанции не заполняет — это не жалоба на решение, срок на подачу апелляции она не закрывает. Если срок устранения недостатков уже подтверждён вами, а на сайте суда появилась другая дата, срок получает пометку «На сайте суда иная дата» — в паспорте срока выберите «Принять дату суда» (принимается последняя дата с сайта) или «Оставить мою»; если сайт потом вернётся к отклонённой вами дате, прежнее предложение снимается без нового предупреждения. Возврат одной из нескольких жалоб результатом всей инстанции не записывается. Если наша жалоба оставлена без движения и на сайте указан срок устранения недостатков, в деле появляется срок «Устранить недостатки … жалобы» — подтвердите его по определению суда. Изменилось состояние жалобы (без движения, результат) — событие снова становится новым и снова показывается на «Сегодня».</li>
 <li>Что ещё делает программа по жалобе: стадия дела поднимается до «Апелляция» или «Кассация» по дате подачи жалобы (поле «Жалоба подана» в форме или событие с сайта), как по номеру дела или заседанию вышестоящей инстанции; по жалобе оппонента ставится контрольный срок «Возражения (отзыв) на … жалобу оппонента» — 10 дней от поступления, срок устанавливает суд в определении (ч. 2 ст. 325 ГПК РФ; по АПК отзыв — до начала заседания, ст. 262, 279) — уточните и подтвердите; жалоба возвращена или оставлена без рассмотрения — строка «Возвращена … жалоба по делу …» (или «Оставлена без рассмотрения …») с кнопкой «Снять срок», которая исполняет поставленные по этой жалобе сроки с пометкой (без таких сроков — «Разобрано»), в поле результата инстанции записывается «Жалоба возвращена» или «Оставлена без рассмотрения»; жалоба, уже показанная в «Требует внимания», в блоке «События судов» не повторяется. С карточки апелляции и кассации (и первой инстанции по гражданским, арбитражным и административным делам) в пустые поля дела записываются дата рассмотрения и результат, если результат на сайте переводится в значение списка формы («Оставлено без изменения», «Отменено полностью», «Отменено частично», «Изменено», «Жалоба возвращена», «Оставлена без рассмотрения», «Отказано в передаче»; для первой инстанции — «Удовлетворено», «Отказано» и другие); иначе в листе — строка «на сайте «…», выберите в форме вручную». Записанная дата акта пересчитывает сроки, как при вводе в форме. В утренней сводке Telegram (личный сервер) новая жалоба — строкой «Подана … жалоба по делу …» на следующее утро после получения, без имён (кто подал — только по отметке «Полные названия и имена в Telegram»); дайджест коллектора 3.21 называет жалобы тоже без имён.</li>
 <li>«Исправить участников» (карточка дела, рядом с «Изменить участников» — кнопка видна, когда есть что исправить): программа находит среди участников подписи со страницы суда («Вышестоящий суд», «Судебный акт …», роль без имени), доверителя в другом написании и одно лицо в двух написаниях («ИП … Е.А.» и «ИП … Екатерина Анатольевна») и предлагает убрать их отметками; «Применить» — одной записью дела, реквизиты дубля переходят к оставленной записи, убранные не вернутся при обмене и с сайта суда. Сама программа участников не удаляет.</li></ul>
 <h3>Карточки всех дел разом</h3>
