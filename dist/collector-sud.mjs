@@ -24,6 +24,7 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.23: raw.keyVer 2 у события complaint — поколение ключа, чтобы программа отличала новую запись от прежней на сервере (аудит сборки 158, R1).
 //  v3.22: вид жалобы входит в ключ события complaint — апелляционная и частная жалобы одного лица в один день не сливаются (аудит сборки 157, A3).
 //  v3.21: жалобы в дайджесте Telegram без имён — новые и изменившиеся (слепок хранит состояние жалобы), раздел «Жалобы за 3 дня» (15.10.2026).
 //  v3.20: дело на странице узнаётся по УИД и по любому номеру дела из программы (не только своей инстанции); стороны — только из
@@ -82,7 +83,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.22';
+const COLLECTOR_VER = '3.23';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -365,13 +366,15 @@ function buildComplaintEvents(list, ctx) {
     const tail = cmpTail(x);
     const title = `Подана ${kind} ${ru(x.date)}${x.by ? ' — ' + x.by : ''}${tail.length ? ' · ' + tail.join(' · ') : ''}`;
     const raw = { st: ctx.stage || '', inst, kind: x.kind || '', by: x.by || '', status: x.status || '', result: x.result || '', noMotion: x.noMotion || '', fixDue: x.fixDue || '',
-      fixed: x.fixed || '', sentUp: x.sentUp || '', decided: x.decided || '', returned: x.returned || '', url: ctx.url || '' };
+      fixed: x.fixed || '', sentUp: x.sentUp || '', decided: x.decided || '', returned: x.returned || '', url: ctx.url || '', keyVer: CMP_KEY_VER };
     ev.push({ externalId: `cmp:${key}:${h8(x.date + '|' + inst + '|' + norm(x.by).toLowerCase() + cmpKindKey(x))}`, title, date: x.date, eventType: 'complaint',
       courtNo: ctx.courtNo || '', caseUid: ctx.uid || '', judge: '', source: 'Коллектор судов', crmNumber: ctx.number || '', court: ctx.court || '', raw: JSON.stringify(raw) });
   }
   return ev;
 }
 
+// v3.23: поколение ключа события жалобы (в raw.keyVer): 2 — ключ с видом жалобы (3.22+); записи без отметки — прежнее поколение
+const CMP_KEY_VER = 2;
 // v3.22: часть ключа события — нормализованный вид жалобы со страницы («|частная жалоба»); без вида — пусто (ключ 3.21 сохраняется)
 function cmpKindKey(x) {
   const k = norm(String(x && x.kind || '')).toLowerCase();
@@ -1171,6 +1174,7 @@ function runTests() {
   t('v3.22 (аудит 157, A3): апелляционная и частная жалобы одного лица в один день — разные ключи, обе в слепке', two322.length === 2 && two322[0].externalId !== two322[1].externalId && Object.keys(snapshotOf(two322, '2026-10-10T00:00:00Z').items).length === 2);
   t('v3.22: изменение состояния жалобы ключ не меняет', buildComplaintEvents([{ ...fc320[0], noMotion: '2026-07-20', fixDue: '2026-08-01', result: 'Возвращена' }], { number: 'Д-61/2026', uid: '', courtNo: '2-67/2026', stage: 'Первая инстанция', url: 'https://x' })[0].externalId === fev320[0].externalId);
   t('v3.22: вид в ключе — без регистра и лишних пробелов; без вида — ключ 3.21', cmpKindKey({ kind: ' Частная  ЖАЛОБА ' }) === '|частная жалоба' && cmpKindKey({ kind: '' }) === '' && buildComplaintEvents([{ ...cmp320[0], kind: '' }], { number: 'Д-61/2026', uid: '33RS0011-01-2025-004499-82', courtNo: '8Г-31317/2026', stage: 'Кассация', url: 'https://x' })[0].externalId === cev[0].externalId);
+  t('v3.23 (аудит 158, R1): поколение ключа в raw события жалобы', JSON.parse(two322[0].raw).keyVer === 2 && JSON.parse(cev[0].raw).keyVer === 2 && CMP_KEY_VER === 2);
   console.log(`коллектор: ${pass}/${pass + fail}`);
   process.exit(fail ? 1 : 0);
 }
