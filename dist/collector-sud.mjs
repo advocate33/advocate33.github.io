@@ -24,6 +24,7 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.22: вид жалобы входит в ключ события complaint — апелляционная и частная жалобы одного лица в один день не сливаются (аудит сборки 157, A3).
 //  v3.21: жалобы в дайджесте Telegram без имён — новые и изменившиеся (слепок хранит состояние жалобы), раздел «Жалобы за 3 дня» (15.10.2026).
 //  v3.20: дело на странице узнаётся по УИД и по любому номеру дела из программы (не только своей инстанции); стороны — только из
 //         строки таблицы; жалобы (вкладка «ЖАЛОБЫ» кассации, «Обжалование решений» первой инстанции) — событие complaint (15.10.2026).
@@ -81,7 +82,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.21';
+const COLLECTOR_VER = '3.22';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -350,7 +351,8 @@ function cmpInstOf(x, stage) {
   if (/надзорн/.test(t)) return 'Надзор'; if (/кассацион/.test(t)) return 'Кассация'; if (/апелляцион|частн\S* жалоб/.test(t)) return 'Апелляция';
   return /кассац/i.test(stage || '') ? 'Кассация' : /апелляц/i.test(stage || '') ? 'Апелляция' : /надзор/i.test(stage || '') ? 'Надзор' : '';
 }
-// событие complaint: ключ — дата, инстанция и кто подал (один и тот же факт с двух страниц сводится на сервере по externalId);
+// событие complaint: ключ — дата, инстанция, кто подал и вид жалобы (v3.22; один и тот же факт с двух страниц сводится на сервере по
+// externalId; состояния — без движения, срок, результат — в ключ не входят: их изменение обновляет ту же запись);
 // заголовок несёт состояние (без движения, срок устранения, результат) — изменение состояния обновляет запись в программе
 function buildComplaintEvents(list, ctx) {
   const key = ctx.uid || ctx.courtNo || ctx.number || ctx.url || '';
@@ -364,12 +366,17 @@ function buildComplaintEvents(list, ctx) {
     const title = `Подана ${kind} ${ru(x.date)}${x.by ? ' — ' + x.by : ''}${tail.length ? ' · ' + tail.join(' · ') : ''}`;
     const raw = { st: ctx.stage || '', inst, kind: x.kind || '', by: x.by || '', status: x.status || '', result: x.result || '', noMotion: x.noMotion || '', fixDue: x.fixDue || '',
       fixed: x.fixed || '', sentUp: x.sentUp || '', decided: x.decided || '', returned: x.returned || '', url: ctx.url || '' };
-    ev.push({ externalId: `cmp:${key}:${h8(x.date + '|' + inst + '|' + norm(x.by).toLowerCase())}`, title, date: x.date, eventType: 'complaint',
+    ev.push({ externalId: `cmp:${key}:${h8(x.date + '|' + inst + '|' + norm(x.by).toLowerCase() + cmpKindKey(x))}`, title, date: x.date, eventType: 'complaint',
       courtNo: ctx.courtNo || '', caseUid: ctx.uid || '', judge: '', source: 'Коллектор судов', crmNumber: ctx.number || '', court: ctx.court || '', raw: JSON.stringify(raw) });
   }
   return ev;
 }
 
+// v3.22: часть ключа события — нормализованный вид жалобы со страницы («|частная жалоба»); без вида — пусто (ключ 3.21 сохраняется)
+function cmpKindKey(x) {
+  const k = norm(String(x && x.kind || '')).toLowerCase();
+  return k ? '|' + k : '';
+}
 // v3.21: вид жалобы словами и хвост состояния — общие для заголовка события (с именем) и дайджеста (без имени)
 function cmpKindOf(x, inst) {
   return x.kind ? x.kind.toLowerCase() : inst === 'Кассация' ? 'кассационная жалоба' : inst === 'Апелляция' ? 'апелляционная жалоба' : inst === 'Надзор' ? 'надзорная жалоба' : 'жалоба';
@@ -1159,6 +1166,11 @@ function runTests() {
   t('v3.21 (урок 156): ярлыки «Номер дела», «Дата поступления», «Суд» именем не считаются, фамилии с теми же буквами — считаются', PARTY_NOT_NAME.test('Номер дела') && PARTY_NOT_NAME.test('Дата поступления') && PARTY_NOT_NAME.test('Суд') && PARTY_NOT_NAME.test('Результат рассмотрения') && !PARTY_NOT_NAME.test('Судакова Анна Петровна') && !PARTY_NOT_NAME.test('Номеров Пётр Ильич') && !PARTY_NOT_NAME.test('Датаев Р. Р.'));
   t('v3.21 (урок 156): роль без имени перед ярлыком «Номер дела» не даёт участника', parseCaseCard('<html><body><table><tr><td>Представитель</td><td>Номер дела</td><td>33-1/2026</td></tr><tr><td>Истец</td><td>Громов Пётр Ильич</td></tr></table></body></html>').parties.map(p => p.role + ':' + p.name).join() === 'Истец:Громов Пётр Ильич');
   t('v3.21: возвращённая жалоба — в хвосте состояния и в заголовке события', cmpTail({ returned: '2026-10-12' }).join() === 'возвращена 12.10.2026' && buildComplaintEvents([{ ...cmp320[0], returned: '2026-10-12' }], { number: 'Д-61/2026', uid: '', courtNo: '8Г-31317/2026', stage: 'Кассация', url: '' })[0].title.endsWith(' · возвращена 12.10.2026') && cmpStateOf({ returned: '2026-10-12' }) === '||||||2026-10-12');
+  // ── v3.22: вид жалобы в ключе события ──
+  const two322 = buildComplaintEvents([{ ...fc320[0], kind: 'Апелляционная жалоба' }, { ...fc320[0], kind: 'Частная жалоба' }], { number: 'Д-61/2026', uid: '', courtNo: '2-67/2026', stage: 'Первая инстанция', url: 'https://x' });
+  t('v3.22 (аудит 157, A3): апелляционная и частная жалобы одного лица в один день — разные ключи, обе в слепке', two322.length === 2 && two322[0].externalId !== two322[1].externalId && Object.keys(snapshotOf(two322, '2026-10-10T00:00:00Z').items).length === 2);
+  t('v3.22: изменение состояния жалобы ключ не меняет', buildComplaintEvents([{ ...fc320[0], noMotion: '2026-07-20', fixDue: '2026-08-01', result: 'Возвращена' }], { number: 'Д-61/2026', uid: '', courtNo: '2-67/2026', stage: 'Первая инстанция', url: 'https://x' })[0].externalId === fev320[0].externalId);
+  t('v3.22: вид в ключе — без регистра и лишних пробелов; без вида — ключ 3.21', cmpKindKey({ kind: ' Частная  ЖАЛОБА ' }) === '|частная жалоба' && cmpKindKey({ kind: '' }) === '' && buildComplaintEvents([{ ...cmp320[0], kind: '' }], { number: 'Д-61/2026', uid: '33RS0011-01-2025-004499-82', courtNo: '8Г-31317/2026', stage: 'Кассация', url: 'https://x' })[0].externalId === cev[0].externalId);
   console.log(`коллектор: ${pass}/${pass + fail}`);
   process.exit(fail ? 1 : 0);
 }
