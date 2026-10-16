@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="16.10.2026 10:10 · 9528c8f+">
+<meta name="build" content="16.10.2026 12:21 · 0294269+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -4037,6 +4037,21 @@ function nextSrvError(j) {
   return pm ? 'облако прервало работу сервера: «' + pm.slice(0, 140) + '»' : 'сервер прервал запрос, не назвав причину — пришлите строки с ошибкой из журнала функции crm-bridge (Яндекс Облако → crm-bridge → «Логи»)';
 }
 const nextSrvConfigured = () => !!(SRV.url && SRV.secret && SRVDB.pass);
+// 16.10.2026 (урок 164): расшифровка базы с сервера. Пароль не подошёл, а на этом устройстве есть пароль из /next/ (основной адрес после
+// перехода; nextSecretsFromNext — next/migrate.js) — пробуем его; подошёл — запоминаем как пароль шифрования (его же увидит прежняя программа
+// в /old/: база на сервере зашифрована им). Не подошёл — прежняя ошибка, ничего не меняется
+async function nextSrvDecrypt(data) {
+  try { return await decryptDump(data, SRVDB.pass); }
+  catch (e) {
+    if (nextDecryptWhy(e) !== 'decrypt' || typeof nextSecretsFromNext !== 'function') throw e;
+    const s = await nextSecretsFromNext(), p = s && s.map && s.map.crm_sync_pass;
+    if (!p || p === SRVDB.pass) throw e;
+    let dump; try { dump = await decryptDump(data, p); } catch (e2) { throw e; }
+    localStorage.setItem('crm_sync_pass', p); if (typeof bumpSecrets === 'function') bumpSecrets('crm_sync_pass');
+    toast('Пароль шифрования взят из новой версии (/next/) на этом устройстве — база на сервере открылась');
+    return dump;
+  }
+}
 
 // Проверка связи: сервер отвечает и принимает секретный код. Ничего не меняет ни здесь, ни на сервере.
 // slot — номер сервера (sync/srv2.js): 0 или не указан — основной, 1 — запасной; у каждого свои отметки
@@ -4060,7 +4075,7 @@ async function srvdbMergeSnapshot(snapshot, silent, slot) {
   if (!snapshot || !snapshot.ok || !snapshot.exists || (!snapshot.data && !snapshot.dump)) return { ok: true, empty: true, added: 0, updated: 0 };
   // Д6: изменения с сервера 186 приходят уже расшифрованными и сведёнными в одну пачку (sync/delta.js)
   let dump = snapshot.dump || null;
-  if (!dump) { try { dump = await decryptDump(snapshot.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextDecryptWhy(e) }; } }
+  if (!dump) { try { dump = slot ? await decryptDump(snapshot.data, SRVDB.pass) : await nextSrvDecrypt(snapshot.data); } catch (e) { return { ok: false, error: nextDecryptWhy(e) }; } }
   if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: 'format' };
   // аудит 14.10.2026 (свой): при неотправленных правках устройства база коллизий не сдвигается. Иначе следующее слияние сочтёт
   // правку «старше базы», запись с сервера победит целиком, и правка поля, не дошедшая до сервера, пропадёт (отправка сорвалась после
@@ -4167,7 +4182,7 @@ async function nextMergePreview() {
     const g = await nextDbGet();
     if (!g || !g.ok) return { ok: false, error: nextSrvError(g) };
     if (!g.exists || !g.data) return { ok: true, empty: true };
-    let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { return { ok: false, error: nextSrvError({ error: nextDecryptWhy(e) }) }; }
+    let dump; try { dump = await nextSrvDecrypt(g.data); } catch (e) { return { ok: false, error: nextSrvError({ error: nextDecryptWhy(e) }) }; }
     if (!dump || dump._fmt !== SYNC_FMT || !dump.data) return { ok: false, error: nextSrvError({ error: 'format' }) };
     const local = {}; for (const s of STORES) local[s] = await getAllRaw(s);
     const model = mergePreviewModel(local, dump.data, Number(localStorage.getItem('crm_merge_base') || 0));
@@ -6578,7 +6593,7 @@ async function openSnapRollback(ver) {
   const g = await nextDbGet(ver);
   if (!g || !g.ok) { toast('Снимок не получен: ' + nextSrvError(g), true); return null; }
   if (!g.exists || !g.data) { toast('Такого снимка на сервере уже нет', true); return null; }
-  let dump; try { dump = await decryptDump(g.data, SRVDB.pass); } catch (e) { toast('Снимок не открыт: ' + nextSrvError({ error: nextDecryptWhy(e) }), true); return null; }
+  let dump; try { dump = typeof nextSrvDecrypt === 'function' ? await nextSrvDecrypt(g.data) : await decryptDump(g.data, SRVDB.pass); } catch (e) { toast('Снимок не открыт: ' + nextSrvError({ error: nextDecryptWhy(e) }), true); return null; }
   const checked = validateBackup(dump); if (!checked.ok) { toast('Снимок не прочитан: ' + checked.error, true); return null; }
   return openSnapRbSheet('server', Number(ver) || Number(g.ver) || 0, checked.parsed.data);
 }
@@ -11217,6 +11232,29 @@ async function migrateReadAll(ndb) {
     data[s] = await new Promise((resolve, reject) => { const tx = ndb.transaction(s, 'readonly'); const r = tx.objectStore(s).getAll(); r.onsuccess = () => resolve(r.result || []); r.onerror = () => reject(r.error); });
   }
   return data;
+}
+// 16.10.2026 (урок 164, снимок пользователя 19:13 «пароль шифрования не подошёл»): секреты /next/ при переходе не переносятся, а база на сервере
+// могла быть отправлена из /next/ с его паролем. Пароли /next/ лежат на этом же устройстве в его хранилище секретов (crm_advocate_local_next:
+// devkey + secrets, тот же формат, что security/secrets.js). Читаем их только по просьбе (сбой расшифровки) и ничего не меняем там.
+// Ответ: { map } — секреты /next/; { pin: true } — закрыты PIN-слоем /next/; null — хранилища /next/ нет или прочитать не удалось
+async function nextSecretsFromNext() {
+  const ndb = await new Promise(resolve => {
+    let req; try { req = indexedDB.open('crm_advocate_local_next'); } catch (e) { logErr('migrate:secopen', e); resolve(null); return; }
+    req.onupgradeneeded = (ev) => { if (ev.oldVersion === 0) { try { req.transaction.abort(); } catch (e) { logErr('migrate:secabort', e); } } };
+    req.onsuccess = () => resolve(req.result); req.onerror = () => resolve(null); req.onblocked = () => resolve(null);
+  });
+  if (!ndb) return null;
+  try {
+    if (!ndb.objectStoreNames.contains('kv')) return null;
+    const get = k => new Promise(res => { const t = ndb.transaction('kv').objectStore('kv').get(k); t.onsuccess = () => res(t.result); t.onerror = () => res(undefined); });
+    const key = await get('devkey'), blob = await get('secrets');
+    if (!key || !blob || !blob.iv || !blob.ct) return null;
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct));
+    const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
+    if (obj && obj.pin === 1 && obj.ct) return { pin: true };
+    return { map: obj };
+  } catch (e) { logErr('migrate:secread', e); return null; }
+  finally { try { ndb.close(); } catch (e) { logErr('migrate:secclose', e); } }
 }
 async function nextMigrateFromNext() {
   if (!(typeof NEXT_NS === 'object' && NEXT_NS.root) || localStorage.getItem('crm_next_migrated')) return null;
