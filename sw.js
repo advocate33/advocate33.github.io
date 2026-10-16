@@ -1,4 +1,5 @@
-/* CRM Адвоката — Service Worker для надёжной офлайн-работы.
+/* CRM Адвоката (новая версия, /next/) — Service Worker. Отличия от корневого: свой кэш и удаление только своих кэшей.
+   CRM Адвоката — Service Worker для надёжной офлайн-работы.
    Кладётся РЯДОМ с файлом приложения (index.html) на том же сайте.
 
    Что делает:
@@ -11,23 +12,24 @@
    • Остальные запросы (шрифты и пр.): кэш-первым, обновление в фоне.
 
    При выходе новой версии приложения поднимите число в CACHE.
-
-   v146 (CRM v311): стартовой страницей в кэше становится только сама программа (BASE, BASE+index.html),
-   а не любая открытая страница сайта (eula.html, страницы подписи); папки next/ и old/ не обслуживаются
-   (у них свой service worker); при активации удаляются только свои кэши (crm-advocate-v…), чужие не трогаются.
 */
-const CACHE = 'crm-advocate-v149';
+const CACHE = 'crm-main-v1'; // новая версия: свой кэш, область /next/
+const CACHE_PREFIX = CACHE.replace(/\d+$/, ''); // crm-next-v… в /next/, crm-main-v… на основном адресе: удаляем только СВОИ старые кэши — чужие на том же сайте не трогаем
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
 const BASE = new URL('./', self.location).pathname;
 const START_URLS = [BASE, BASE + 'index.html'];
-const OWN_PREFIX = 'crm-advocate-v';
-const FOREIGN_DIRS = [BASE + 'next/', BASE + 'old/'];
+// основной адрес (переход, п. 10): у /old/ (прежняя программа) и /next/ свои sw; раздача dist/ и apps/ — всегда из сети, без кэша
+// 14.10.2026: и в /next/ — запросы программы к /dist/ (apps.json, calendar.json) шли через этот sw «сначала кэш», и программа видела
+// прежний файл до следующего открытия
+const FOREIGN_DIRS = BASE === '/' ? ['/old/', '/next/', '/next-gpt/', '/dist/', '/apps/'] : ['/dist/', '/apps/'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil((async () => {
     const c = await caches.open(CACHE);
-    await Promise.allSettled(START_URLS.map((u) => c.add(new Request(u, { cache: 'reload' }))));
+    // Стартовая страница обязана лечь в кэш: иначе установка считается неудачной и остаётся прежний sw (аудит 02.10.2026)
+    await c.add(new Request(BASE, { cache: 'reload' }));
+    await c.add(new Request(BASE + 'index.html', { cache: 'reload' })).catch(() => {});
     // Новая версия НЕ активируется сама — ждёт подтверждения из приложения
     // (баннер «Доступна новая версия»), чтобы не перезагружать экран посреди работы.
   })());
@@ -41,7 +43,7 @@ self.addEventListener('message', (e) => {
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k !== CACHE && k.startsWith(OWN_PREFIX)).map((k) => caches.delete(k)));
+    await Promise.all(keys.filter((k) => k !== CACHE && k.startsWith(CACHE_PREFIX)).map((k) => caches.delete(k)));
     if (self.registration.navigationPreload) {
       try { await self.registration.navigationPreload.disable(); } catch (e) {}
     }
@@ -66,7 +68,6 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   const sameOrigin = url.origin === self.location.origin;
   if (sameOrigin && FOREIGN_DIRS.some((d) => url.pathname.startsWith(d))) return;
-  const isStartPage = sameOrigin && (url.pathname === BASE || url.pathname === BASE + 'index.html');
 
   const isNavigation =
     req.mode === 'navigate' ||
@@ -76,17 +77,14 @@ self.addEventListener('fetch', (e) => {
     e.respondWith((async () => {
       try {
         const resp = await fetch(req);
-        if (resp && resp.ok && isStartPage) {
+        // Стартовой в кэше становится только сама программа (урок 39): другая страница в /next/ её не подменит
+        if (resp && resp.ok && sameOrigin && (url.pathname === BASE || url.pathname === BASE + 'index.html')) {
           const c = await caches.open(CACHE);
           c.put(BASE, resp.clone()).catch(() => {});
           c.put(BASE + 'index.html', resp.clone()).catch(() => {});
         }
         return resp;
       } catch (err) {
-        if (!isStartPage && sameOrigin) {
-          const own = await caches.match(req);
-          if (own) return own;
-        }
         const cached = await cachedStart();
         if (cached) return cached;
         return new Response(
@@ -109,5 +107,16 @@ self.addEventListener('fetch', (e) => {
       })
       .catch(() => cached);
     return cached || network;
+  })());
+});
+// напоминания на устройстве (04.10.2026): нажатие на уведомление открывает программу (вкладку, если она уже открыта)
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil((async () => {
+    const scope = new URL(self.registration.scope).pathname;
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const w = wins.find((c) => new URL(c.url).pathname.startsWith(scope));
+    if (w) return w.focus();
+    return self.clients.openWindow(self.registration.scope);
   })());
 });
