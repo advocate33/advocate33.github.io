@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="16.10.2026 07:57 · dcebc6c+">
+<meta name="build" content="16.10.2026 09:10 · 9528c8f+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -1227,19 +1227,23 @@ async function undelete(store, id) {
 // Окончательно удалить запись (стереть из базы)
 // v294: окончательно удалённые id запоминаются (crm_purged, синхронизируется с настройками) — старая копия с другого устройства их не вернёт
 function purgedList() { return lsJSON('crm_purged', {}) || {}; }
-function purgedAdd(id) { const p = purgedList(); const lim = Date.now() - 180 * 864e5; for (const k of Object.keys(p)) if (p[k] < lim) delete p[k]; p[id] = Date.now(); const keys = Object.keys(p); if (keys.length > 3000) keys.sort((a, b) => p[a] - p[b]).slice(0, keys.length - 3000).forEach(k => delete p[k]); localStorage.setItem('crm_purged', JSON.stringify(p)); bumpSettings?.(); }
+// v164 (аудит сборки 163, N1): отметка удаления не меньше версии удаляемой записи + 1 (at) — запись могла прийти с устройства, у которого
+// часы впереди, и отметка «по здешним часам» оказалась бы меньше её версии: устаревшая копия вернула бы запись, а реестр её бы не убрал
+function purgedAdd(id, at) { const p = purgedList(); const lim = Date.now() - 180 * 864e5; for (const k of Object.keys(p)) if (p[k] < lim) delete p[k]; p[id] = Math.max(Date.now(), Number(at) || 0, Number(p[id]) || 0); const keys = Object.keys(p); if (keys.length > 3000) keys.sort((a, b) => p[a] - p[b]).slice(0, keys.length - 3000).forEach(k => delete p[k]); localStorage.setItem('crm_purged', JSON.stringify(p)); bumpSettings?.(); }
 // v161 (аудит сборки 160, D2, D3): удаление по реестру — проверка версии и удаление в ОДНОЙ транзакции (purgeRaw с before: запись,
 // изменённая после отметки удаления, не удаляется); успех — только по завершении транзакции (откат — не успех); сбои чтения и удаления
 // считаются (purgedApply.lastFailed) — слияние не ставит метку полного успеха, повторный обмен доделает
 async function purgedApply() { const p = purgedList(); const ids = Object.keys(p); purgedApply.lastFailed = 0; if (!ids.length) return 0; let n = 0, failed = 0; for (const st of STORES) { let rows; try { rows = await getAllRaw(st); } catch (e) { failed++; continue; } for (const r of rows) if (r && p[r.id] && (r._upd || 0) < p[r.id]) { const ok = await purgeRaw(st, r.id, p[r.id]); if (ok === true) n++; else if (ok === false) failed++; } } purgedApply.lastFailed = failed; return n; }
-function purge(store, id) { purgedAdd(id); return purgeRaw(store, id); }
+// v164 (N1): отметка ставится в той же транзакции, что удаление, после чтения записи — по её версии (mark)
+function purge(store, id) { return purgeRaw(store, id, null, true); }
 // before — отметка удаления из реестра: запись удаляется, только если её версия (_upd) всё ещё меньше (ответ 'kept' — запись новее, не тронута)
-function purgeRaw(store, id, before) {
+function purgeRaw(store, id, before, mark) {
   return new Promise(res => {
     let done = false, kept = false; const fin = v => { if (!done) { done = true; res(v); } };
-    let t; try { t = tx(store, 'readwrite').transaction; } catch (e) { storageWriteError(e); fin(false); return; }
-    let os; try { os = t.objectStore(store); } catch (e) { storageWriteError(e); fin(false); return; }
-    if (before != null) { const g = os.get(id); g.onsuccess = () => { const cur = g.result; if (cur && (cur._upd || 0) >= before) { kept = true; return; } os.delete(id); }; }
+    let t; try { t = tx(store, 'readwrite').transaction; } catch (e) { if (mark) purgedAdd(id); storageWriteError(e); fin(false); return; }
+    let os; try { os = t.objectStore(store); } catch (e) { if (mark) purgedAdd(id); storageWriteError(e); fin(false); return; }
+    if (mark) { const g = os.get(id); g.onsuccess = () => { const cur = g.result; purgedAdd(id, cur ? (Number(cur._upd) || 0) + 1 : 0); os.delete(id); }; g.onerror = () => { purgedAdd(id); }; }
+    else if (before != null) { const g = os.get(id); g.onsuccess = () => { const cur = g.result; if (cur && (cur._upd || 0) >= before) { kept = true; return; } os.delete(id); }; }
     else os.delete(id);
     t.oncomplete = () => { if (!kept && typeof cloudTouch === 'function') cloudTouch(); fin(kept ? 'kept' : true); };
     t.onerror = () => { storageWriteError(t.error); fin(false); };
@@ -2656,7 +2660,9 @@ function putMany(list, opts) {
         if (ex && ((ex.absent && cur) || (ex.mustExist && !cur))) { finish(false, new Error(ex.absent ? 'Запись появилась после сравнения (пришла с другого устройства или создана здесь) — сравните заново' : 'Запись удалена окончательно после сравнения — сравните заново')); try { t.abort(); } catch (e) { /* штатно */ } return; }
         if (ex && cur && !ex.absent) { const now = cur._upd || 0; if (now !== ex.upd && now !== ex.ack) { const msg = typeof formRecConflictText === 'function' && ex.snap ? formRecConflictText(ex, cur, obj) : (ex.msg || 'Запись изменили, пока она была открыта — откройте заново'); ex.ack = now; finish(false, new Error(msg)); try { t.abort(); } catch (e) { /* штатно */ } return; } }
         // v163 (R1): записи нет, а реестр окончательного удаления помнит её удаление позже прочитанной версии — устаревшая копия не возвращает её
-        if (ex && !cur && !ex.absent && ex.purgedAt && (ex.upd || 0) <= ex.purgedAt) { finish(false, new Error(ex.goneMsg || 'Запись удалена окончательно после того, как была открыта, — изменение не сохранено')); try { t.abort(); } catch (e) { /* штатно */ } return; }
+        // v164 (аудит сборки 163, N1): правка прочитанной записи (editOf), которой в базе больше нет, отклоняется всегда — не по сравнению
+        // отметки удаления с версией (часы источника могли быть впереди) и даже когда отметку уже вытеснил предел реестра
+        if (ex && !cur && !ex.absent && (ex.editOf || (ex.purgedAt && (ex.upd || 0) <= ex.purgedAt))) { finish(false, new Error(ex.goneMsg || 'Запись удалена окончательно после того, как была открыта, — изменение не сохранено')); try { t.abort(); } catch (e) { /* штатно */ } return; }
         // v163 (R3): версия больше версии записи в базе (запись могла прийти с устройства, у которого часы впереди)
         if (cur && (cur._upd || 0) >= obj._upd) { obj._upd = (cur._upd || 0) + 1; if (obj._upd > Number(localStorage.getItem('crm_last_write_stamp') || 0)) localStorage.setItem('crm_last_write_stamp', String(obj._upd)); }
         try { fieldStamps(obj, cur, obj._upd); } catch (e) { logErr('putMany:stamps', e); }
@@ -2763,7 +2769,10 @@ if (typeof put === 'function') { const putPlain = put; put = function (store, ob
   if (o && typeof o.mutate === 'function' && obj && obj.id != null && typeof db === 'object' && db && typeof db.transaction === 'function') return recMutatePut(store, obj, o.mutate);
   const r = typeof formRecFor === 'function' ? formRecFor(store, obj) : null; if (r) return formRecPut(store, obj, r);
   if (REC_GUARD.on && obj && obj.id != null && obj._upd != null && typeof db === 'object' && db && typeof db.transaction === 'function') {
-    const ex = { store, id: obj.id, upd: obj._upd || 0, ack: null, msg: REC_GUARD_MSG, purgedAt: recPurgedAt(obj.id), goneMsg: REC_GONE_MSG };
+    // v164 (N1): запись с версией (_upd > 0) прочитана из базы — это правка, а не создание; запись без версии (новая, или прежняя с нулём)
+    // отличить от создания нельзя — для неё действует только реестр удалений (отметка есть — запись удалена окончательно, не создаётся снова)
+    const pa = recPurgedAt(obj.id);
+    const ex = { store, id: obj.id, upd: obj._upd || 0, ack: null, msg: REC_GUARD_MSG, purgedAt: pa ? Math.max(pa, obj._upd || 0) : 0, editOf: (obj._upd || 0) > 0, goneMsg: REC_GONE_MSG };
     const upd0 = obj._upd;
     return putMany([[store, obj]], { expect: ex }).catch(e => { obj._upd = upd0; if (e && (e.message === REC_GUARD_MSG || e.message === REC_GONE_MSG)) { REC_GUARD.conflicts++; logErr('put:stale', store + ':' + obj.id); } throw e; });
   }
@@ -6190,20 +6199,54 @@ async function backupPreviewModel(text, pass) {
   const per = []; for (const st of STORES) { const n = (checked.parsed.data[st] || []).length; if (n) per.push({ store: st, title: PREVIEW_TITLES[st] || st, count: n }); }
   // статус полноты, записанный при создании копии (_files; validateBackup его отбрасывает, поэтому читается из исходного разбора)
   const files = parsed && parsed._files && typeof parsed._files === 'object' ? { state: String(parsed._files.state || 'unknown'), text: String(parsed._files.text || '').slice(0, 300), total: Number(parsed._files.total || 0), have: Number(parsed._files.have || 0), missing: Number(parsed._files.missing || 0) } : null;
-  return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files, verify, block };
+  // v164 (N3): для режима «без повреждённых файлов» предпросмотр считается по очищенному плану — тем же, что будет применён
+  let safe = null;
+  if (block === 'blobs') { try { safe = await backupSafePrepare({ parsed: checked.parsed, verify }); const sd = await mergeIncoming(JSON.parse(JSON.stringify(safe.plan)), false, backupMergeOpts({ dryRun: true })); safe.added = sd.added; safe.updated = sd.updated; safe.skipped = sd.skipped; } catch (e) { logErr('backup:safe-preview', e); safe = null; } }
+  return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files, verify, block, safe };
 }
 // v163 (R2): что закрывает применение копии: '' — можно; 'blobs' — не сошлись только файлы документов (можно объединить без них);
 // 'all' — не хватает записей, ошибка проверки или формат сумм новее программы
+// v164 (аудит сборки 163, N2): ошибка проверки, неизвестный или испорченный формат сумм проверяются РАНЬШЕ «сошлось» — копия неизвестного
+// формата могла дать ok по знакомым полям и открыть объединение, хотя текст просил обновить программу. Копия без сумм (none) — отдельный
+// случай прежних копий: открывается, как раньше, с пояснением, что проверены только пароль и расшифровка
 function backupBlockOf(v) {
-  if (!v || v.none || v.ok) return '';
-  if (v.error || Number(v.fmt || 0) > BACKUP_SUMS_FMT || (v.countBad && v.countBad.length)) return 'all';
+  if (!v || v.none) return '';
+  if (v.error || v.invalid || v.unsupported || Number(v.fmt) !== BACKUP_SUMS_FMT || (v.countBad && v.countBad.length)) return 'all';
+  if (v.ok) return '';
   return 'blobs';
 }
-// копия без файлов документов, суммы которых не сошлись или которых нет: эти файлы не попадают в базу (исправные на устройстве остаются)
-function backupDropBadBlobs(parsed, v) {
-  const bad = new Set([...(v && v.blobBad || []), ...(v && v.blobMissing || [])]);
-  const d = parsed && parsed.data; if (!d || !Array.isArray(d.docBlobs)) return 0;
-  const before = d.docBlobs.length; d.docBlobs = d.docBlobs.filter(b => !(b && bad.has(b.id))); return before - d.docBlobs.length;
+// v164 (N3): план «без повреждённых файлов» — на копии исходного разбора (повторная попытка начинается с того же плана, исходник не
+// меняется). Повреждённые и отсутствующие файлы документов — защищаемые id: их строки docBlobs из копии не принимаются; если такой файл есть
+// на устройстве — не принимаются и сведения о версии документа из копии (docVersions того же id), чтобы здешний файл не остался со
+// сведениями другой версии; если файла на устройстве нет — сведения принимаются, документ будет без файла (noLocal — так и сказано).
+// Реестр окончательных удалений из такой копии не применяется вовсе: отметка удаления из неё удалила бы здешний исправный файл.
+// localHas — набор защищаемых id, файлы которых есть на устройстве. Чистая функция для тестов
+function backupSafePlan(parsed, v, localHas) {
+  const plan = JSON.parse(JSON.stringify(parsed || {})), bad = new Set([...(v && v.blobBad || []), ...(v && v.blobMissing || [])]);
+  const d = plan.data || {}, has = localHas || new Set(); let dropped = 0, keptLocal = 0, noLocal = 0, purgedSkipped = false;
+  if (Array.isArray(d.docBlobs)) { const n = d.docBlobs.length; d.docBlobs = d.docBlobs.filter(b => !(b && bad.has(b.id))); dropped = n - d.docBlobs.length; }
+  if (Array.isArray(d.docVersions)) d.docVersions = d.docVersions.filter(x => !(x && bad.has(x.id) && has.has(x.id)));
+  for (const id of bad) { if (has.has(id)) keptLocal++; else noLocal++; }
+  if (plan.settings && typeof plan.settings === 'object' && plan.settings.crm_purged !== undefined) { delete plan.settings.crm_purged; purgedSkipped = true; }
+  return { plan, dropped, keptLocal, noLocal, purgedSkipped, protectedIds: [...bad] };
+}
+// какие из защищаемых файлов есть на устройстве (сбой чтения — исключение: план без этого сведения не строится)
+async function backupLocalBlobs(ids) {
+  const out = new Set(); if (typeof getOne !== 'function') return out;
+  for (const id of ids || []) { const b = await getOne('docBlobs', id); if (b && b.data) out.add(id); }
+  return out;
+}
+async function backupSafePrepare(m) {
+  const bad = [...(m.verify && m.verify.blobBad || []), ...(m.verify && m.verify.blobMissing || [])];
+  return backupSafePlan(m.parsed, m.verify, await backupLocalBlobs(bad));
+}
+function backupSafeNote(s) {
+  if (!s) return '';
+  const p = [];
+  if (s.keptLocal) p.push('файлов документов оставлено здешних (исправных): ' + s.keptLocal);
+  if (s.noLocal) p.push('документов без файла (на устройстве его нет, в копии повреждён): ' + s.noLocal + ' — восстановлены не полностью');
+  if (s.purgedSkipped) p.push('отметки окончательного удаления из этой копии не приняты');
+  return p.length ? '; ' + p.join('; ') : '';
 }
 // v162 (пожелание аудита сборки 159, п. 7; решение пользователя 16.10.2026): копия несёт версию формата сумм и контрольные суммы — число записей
 // каждого раздела и SHA-256 содержимого каждого файла документа (_sums); при проверке файла суммы пересчитываются и расхождения называются до
@@ -6219,8 +6262,16 @@ async function backupSums(dump) {
   return { fmt: BACKUP_SUMS_FMT, counts, blobs };
 }
 async function backupVerify(parsed) {
-  const s = parsed && parsed._sums; if (!s || typeof s !== 'object') return { none: true };
-  const d = (parsed && parsed.data) || {}, out = { fmt: Number(s.fmt || 0), countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
+  // v164 (N2): «сумм нет» — только когда поля _sums нет совсем (прежние копии); поле есть, но не объект или без перечней — повреждено;
+  // формат сверяется до подсчёта: не наш (новее или неизвестный) — суммы не считаются и ok не выдаётся
+  if (!parsed || parsed._sums === undefined || parsed._sums === null) return { none: true };
+  const s = parsed._sums;
+  if (typeof s !== 'object' || Array.isArray(s)) return { invalid: true, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
+  const fmt = Number(s.fmt);
+  if (!Number.isInteger(fmt) || fmt < 1) return { invalid: true, fmt: s.fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
+  if (fmt !== BACKUP_SUMS_FMT) return { unsupported: true, fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
+  if (!s.counts || typeof s.counts !== 'object' || Array.isArray(s.counts) || !s.blobs || typeof s.blobs !== 'object' || Array.isArray(s.blobs)) return { invalid: true, fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
+  const d = (parsed && parsed.data) || {}, out = { fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
   for (const st of Object.keys(s.counts || {})) { const n = Array.isArray(d[st]) ? d[st].length : 0; if (n !== Number(s.counts[st])) out.countBad.push((PREVIEW_TITLES[st] || st) + ': ' + n + ' из ' + Number(s.counts[st])); }
   const byId = {}; for (const b of Array.isArray(d.docBlobs) ? d.docBlobs : []) if (b && b.id) byId[b.id] = b;
   for (const id of Object.keys(s.blobs || {})) { out.blobs++; const b = byId[id]; if (!b || !b.data) { out.blobMissing.push(id); continue; } if (await backupSha(b.data) !== s.blobs[id]) out.blobBad.push(id); }
@@ -6230,9 +6281,10 @@ async function backupVerify(parsed) {
 function backupVerifyText(v) {
   if (!v || v.none) return 'Контрольных сумм в копии нет (копия сделана до 16.10.2026 или прежней программой) — проверены только пароль и расшифровка.';
   if (v.error) return 'Контрольные суммы проверить не удалось (подробности в журнале ошибок) — объединять такую копию нельзя: возьмите другую копию.';
-  if (Number(v.fmt || 0) > BACKUP_SUMS_FMT) return 'Копия сделана более новой версией программы — её контрольные суммы эта версия проверить не может. Обновите программу и проверьте файл снова.';
+  if (v.unsupported || Number(v.fmt || 0) > BACKUP_SUMS_FMT) return 'Копия сделана более новой версией программы — её контрольные суммы эта версия проверить не может. Объединение и возврат к этой копии закрыты: обновите программу и проверьте файл снова.';
+  if (v.invalid) return 'Сведения о контрольных суммах в копии повреждены или неполны — проверить копию нельзя. Объединение и возврат к этой копии закрыты: возьмите другую копию.';
   if (v.ok) return 'Контрольные суммы сошлись: число записей по разделам' + (v.blobs ? ' и содержимое ' + v.blobs + ' ' + plural(v.blobs, 'файла', 'файлов', 'файлов') + ' документов' : '') + ' — как при создании копии.';
-  return 'Контрольные суммы НЕ сошлись — файл повреждён или неполон: ' + [v.countBad.length ? 'записей не хватает (' + v.countBad.join(', ') + ')' : '', v.blobMissing.length ? 'нет файлов документов: ' + v.blobMissing.length : '', v.blobBad.length ? 'изменено содержимое файлов: ' + v.blobBad.length : ''].filter(Boolean).join('; ') + (v.countBad.length ? '. Объединять такую копию нельзя: более новые записи из неё заменили бы здешние. Возьмите другую копию.' : '. Обычное объединение закрыто: повреждённый файл заменил бы исправный. Можно объединить без повреждённых файлов — остальное из копии будет принято, а файлы на этом устройстве останутся прежними.');
+  return 'Контрольные суммы НЕ сошлись — файл повреждён или неполон: ' + [v.countBad.length ? 'записей не хватает (' + v.countBad.join(', ') + ')' : '', v.blobMissing.length ? 'нет файлов документов: ' + v.blobMissing.length : '', v.blobBad.length ? 'изменено содержимое файлов: ' + v.blobBad.length : ''].filter(Boolean).join('; ') + (v.countBad.length ? '. Объединять такую копию нельзя: более новые записи из неё заменили бы здешние. Возьмите другую копию.' : '. Обычное объединение закрыто: повреждённый файл заменил бы исправный. Можно объединить без повреждённых файлов — остальное из копии будет принято, а файлы на этом устройстве останутся прежними вместе со сведениями о них; отметки окончательного удаления из такой копии не принимаются.');
 }
 let BACKUP_PENDING = null;
 // слияние из файла не сдвигает базу определения коллизий серверов (второй разбор GPT 12.10.2026, урок 117): иначе одновременная правка поля,
@@ -6336,7 +6388,7 @@ async function backupCheckFile() {
   const bigNote = file.size > BACKUP_WARN ? ` Файл большой — ${backupMb(file.size)} МБ: объединение займёт несколько минут.` : '';
   if (box) box.innerHTML = `${m.verify && !m.verify.none && !m.verify.ok ? `<div class="info-box warning" id="bk-sums" role="alert">${esc(backupVerifyText(m.verify))}</div>` : ''}<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}${m.verify && (m.verify.none || m.verify.ok || m.verify.error) ? ' ' + esc(backupVerifyText(m.verify)) : ''}</div>
     <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
-    <div class="form-actions">${m.block === 'all' ? '<span class="small muted">Объединение и возврат к этой копии закрыты — см. предупреждение выше.</span>' : m.block === 'blobs' ? `<button type="button" class="button primary" id="bk-apply-safe" onclick="backupApply('safe')">${icon('check')}Объединить без повреждённых файлов</button>` : m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}${typeof openFileRollback === 'function' && !m.block ? `<button type="button" class="button" id="bk-rollback" onclick="openFileRollback()">${icon('rotate-ccw')}Вернуть базу к копии…</button>` : ''}</div>
+    <div class="form-actions">${m.block === 'all' ? '<span class="small muted">Объединение и возврат к этой копии закрыты — см. предупреждение выше.</span>' : m.block === 'blobs' ? `${m.safe ? `<p class="small" id="bk-safe-plan">Без повреждённых файлов добавится записей: ${m.safe.added}, обновится: ${m.safe.updated}${esc(backupSafeNote(m.safe))}.</p>` : ''}<button type="button" class="button primary" id="bk-apply-safe" onclick="backupApply('safe')">${icon('check')}Объединить без повреждённых файлов</button>` : m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}${typeof openFileRollback === 'function' && !m.block ? `<button type="button" class="button" id="bk-rollback" onclick="openFileRollback()">${icon('rotate-ccw')}Вернуть базу к копии…</button>` : ''}</div>
     ${typeof openFileRollback === 'function' && !m.block ? '<p class="small muted">«Объединить» добавляет и обновляет: более новые записи из копии заменят здешние. «Вернуть базу к копии…» покажет, что изменилось после копии, и вернёт выбранное к её состоянию — в том числе правки, сделанные позже.</p>' : ''}`;
   return m;
 }
@@ -6344,21 +6396,24 @@ async function backupApply(mode) {
   const m = BACKUP_PENDING; if (!m || !m.parsed) return null;
   // v163 (аудит сборки 162, R2): ограничение проверки сумм — и здесь, а не только видом кнопки: копия с несошедшимися суммами обычным путём не
   // применяется; режим 'safe' — только когда не сошлись одни файлы документов, и они из слияния исключаются
-  const blk = m.block || backupBlockOf(m.verify);
+  // v164 (N2): решение — заново по проверке, а не только сохранённое в предпросмотре (и более строгое из двух)
+  const b0 = backupBlockOf(m.verify), blk = b0 === 'all' || m.block === 'all' ? 'all' : (b0 || m.block || '');
   if (blk === 'all' || (blk === 'blobs' && mode !== 'safe')) { fErr('Контрольные суммы копии не сошлись — обычное объединение закрыто. ' + backupVerifyText(m.verify)); return null; }
-  if (blk === 'blobs' && !m.dropped) m.dropped = backupDropBadBlobs(m.parsed, m.verify) || -1;
+  // v164 (N3): план «без повреждённых файлов» строится на копии; исходный разбор не меняется — повтор после сбоя начинается с того же плана
+  let safe = null;
+  if (blk === 'blobs') { try { safe = await backupSafePrepare(m); } catch (e) { logErr('backup:safe', e); fErr('Не удалось проверить файлы документов на устройстве — объединение не выполнено: ' + String((e && e.message) || e).slice(0, 100)); return null; } }
   // разбор GPT 05.10.2026 (3), п. 4: загрузка из файла — та же очередь, что обмен с сервером: одновременно два слияния не идут
   if (typeof NEXT_SYNC === 'object' && NEXT_SYNC.busy) { fErr('Идёт обмен с сервером — дождитесь его окончания и нажмите ещё раз'); return null; }
   const b = document.getElementById('bk-apply'); if (b) { if (b.disabled) return null; b.disabled = true; }
   if (typeof NEXT_SYNC === 'object') { NEXT_SYNC.busy = true; if (typeof syncStatusRender === 'function') syncStatusRender(); }
   try {
-    const r = await mergeIncoming(m.parsed, false, backupMergeOpts());
+    const r = await mergeIncoming(safe ? JSON.parse(JSON.stringify(safe.plan)) : m.parsed, false, backupMergeOpts());
     // записанное из файла должно дойти до серверов: записи слияния ревизию не двигают — отметка «есть что отправить» каждому серверу
     if ((r.added || r.updated || r.settingsChanged || r.purgedMerged) && typeof srvFwdMark === 'function') srvFwdMark(-1);
     if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
     BACKUP_PENDING = null;
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('backup:refresh', e); }
-    toast('Из файла: добавлено ' + r.added + ', обновлено ' + r.updated + (m.dropped > 0 ? '; повреждённых файлов документов не принято: ' + m.dropped : ''));
+    toast('Из файла: добавлено ' + r.added + ', обновлено ' + r.updated + (safe ? backupSafeNote(safe) : ''), !!(safe && safe.noLocal));
     closeSheet(); if (UI.ready) nav(UI.screen);
     return r;
   } catch (e) { logErr('backup:apply', e); fErr('Загрузка не выполнена: ' + String((e && e.message) || e).slice(0, 100)); if (b) b.disabled = false; return null; }
@@ -7690,7 +7745,7 @@ async function crmMonNormalizeRows(rows,source){
   const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const crmNumber=String(crmMonField(raw,['crmNumber','crm_number'])).trim();const evCourt=String(crmMonField(raw,['court','суд'])).trim();/* v253: суд страницы */
     /* v238: порядок привязки — 1) УИД дела (если у дела он записан), 2) номер дела CRM от коллектора, 3) номер в суде (единственное совпадение; при нескольких — предпочесть дело с номером CRM, иначе неоднозначно).
        Если у события есть УИД, а дело по номеру имеет другой УИД — конфликт: ссылка в деле ведёт на чужое дело, не привязываем. */
-    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,ambiguous,uidConflict,raw:raw.raw||rawText,hash,caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:(type==='caseflow'&&match)?'flow':'new',receivedAt:Date.now()});}return out;
+    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,ambiguous,uidConflict,...(m.idConflict?{idConflict:true,conflictWith:m.conflictWith}:{}),raw:raw.raw||rawText,hash,caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:(type==='caseflow'&&match)?'flow':'new',receivedAt:Date.now()});}return out;
 }
 // v163 (аудит сборки 162, R4): по УИД бралось первое дело из списка — при двух делах с одним УИД (импорт, объединение, отдельные карточки
 // по одному спору) событие привязывалось к случайному по порядку массива, даже когда номер CRM в событии указывал на другое. Теперь
@@ -7698,21 +7753,26 @@ async function crmMonNormalizeRows(rows,source){
 // и сроки по нему не ставятся. Повтор номера CRM у двух дел — тоже неоднозначность, а не первое найденное
 function crmMonBind(cases,e){
   const nz=crmMonNorm,uidE=nz(e.caseUid),numE=nz(e.crmNumber),noE=nz(e.courtNo);
-  const one=(list)=>list.length===1?{match:list[0],ambiguous:false,uidConflict:false}:null;
+  // v164 (аудит сборки 163, N4): кандидаты собираются по КАЖДОМУ признаку события (УИД, номер CRM, номер в суде), привязка — пересечение
+  // наборов: признаки согласованы и ведут к одному делу — привязка; к нескольким — «несколько дел»; к разным делам — конфликт признаков
+  // (idConflict, без привязки и автоматических последствий: по данным не понять, что ошибочно — УИД, номер CRM или номер в суде).
+  // Признак, которого нет ни в одном деле (новый номер инстанции), — не конфликт: он просто не участвует. Дело с другим непустым УИД
+  // по номеру не подходит (как раньше — uidConflict). Порядок дел на ответ не влияет
+  const res=(match,ambiguous,uidConflict,idConflict,withIds)=>({match:match||null,ambiguous:!!ambiguous,uidConflict:!!uidConflict,idConflict:!!idConflict,conflictWith:withIds||[]});
+  const okUid=c=>!(uidE&&nz(c.caseUid)&&nz(c.caseUid)!==uidE);
   const noOf=c=>[c.courtNo,c.number,c.courtNoApp,c.courtNoCass].some(v=>v&&nz(v)===noE);
-  if(uidE){const byUid=cases.filter(c=>nz(c.caseUid)===uidE);
-    if(byUid.length===1)return one(byUid);
-    if(byUid.length>1){const r=(numE&&one(byUid.filter(c=>nz(c.number)===numE)))||(noE&&one(byUid.filter(noOf)));return r||{match:null,ambiguous:true,uidConflict:false};}}
-  const crmList=numE?cases.filter(c=>nz(c.number)===numE):[];
-  if(crmList.length>1){const fit=crmList.filter(c=>!(uidE&&nz(c.caseUid)&&nz(c.caseUid)!==uidE));const r=noE&&one(fit.filter(noOf));return r||(fit.length===1?one(fit):{match:null,ambiguous:fit.length>1,uidConflict:!fit.length});}
-  const byCrm=crmList[0]||null;
-  if(byCrm){if(uidE&&nz(byCrm.caseUid)&&nz(byCrm.caseUid)!==uidE)return{match:null,ambiguous:false,uidConflict:true};return{match:byCrm,ambiguous:false,uidConflict:false};}
-  if(!noE)return{match:null,ambiguous:false,uidConflict:false};
-  const byNo=cases.filter(c=>[c.courtNo,c.number,c.courtNoApp,c.courtNoCass].some(v=>v&&nz(v)===noE));
-  const fit=byNo.filter(c=>!(uidE&&nz(c.caseUid)&&nz(c.caseUid)!==uidE));/* дела с другим УИД не подходят */
-  if(fit.length===1)return{match:fit[0],ambiguous:false,uidConflict:false};
-  if(fit.length>1)return{match:null,ambiguous:true,uidConflict:false};
-  return{match:null,ambiguous:false,uidConflict:byNo.length>0&&!!uidE};
+  const sets=[];let otherUid=false;
+  if(uidE)sets.push(cases.filter(c=>nz(c.caseUid)===uidE));
+  for(const [given,test] of [[numE,c=>nz(c.number)===numE],[noE,noOf]]){if(!given)continue;const raw=cases.filter(test),fit=raw.filter(okUid);if(raw.length&&!fit.length)otherUid=true;sets.push(fit);}
+  const known=sets.filter(l=>l.length);
+  // номер ведёт к делу с другим УИД — противоречие: без привязки (раньше при единственном совпадении УИД номер не сверялся)
+  if(otherUid)return res(null,false,true,known.length>0,known.length?[...new Set(known.flat().map(c=>c.number||c.id))].sort():[]);
+  if(!known.length)return res(null,false,false,false);
+  let cand=known[0];for(const l of known.slice(1))cand=cand.filter(c=>l.includes(c));
+  if(cand.length===1)return res(cand[0],false,false,false);
+  if(cand.length>1)return res(null,true,false,false);
+  const ids=[...new Set(known.flat().map(c=>c.number||c.id))].sort();
+  return res(null,false,true,true,ids);
 }
 // ── снимок пользователя 04.10.2026: одно событие суда — одна запись ──
 // Событие приходит двумя путями: в ответе коллектора на «Собрать сейчас» (источник «Коллектор судов») и при чтении событий с личного
@@ -7947,7 +8007,7 @@ async function crmMonUndoHearing(hid) {
 async function crmMonBindOrphans() {
   const evs = await getAll('monitorEvents'), cases = await getAll('cases'); let n = 0;
   for (const e of evs) {
-    if (e._deleted || e.caseId || e.status === 'ignored' || e.uidConflict) continue;
+    if (e._deleted || e.caseId || e.status === 'ignored' || e.uidConflict || e.idConflict) continue;
     if (!e.caseUid && !e.crmNumber && !e.courtNo) continue;
     const m = crmMonBind(cases, { caseUid: e.caseUid, crmNumber: e.crmNumber, courtNo: e.courtNo });
     if (!m.match) continue;
@@ -8251,7 +8311,7 @@ function caseStageCourt(c) {
     secretary: (c && c.secretary) || '', secretaryPhone: (c && c.secretaryPhone) || '', cabinet: (c && c.cabinet) || '' };
 }
 // v163 (аудит сборки 162, R4): неоднозначное событие без привязки (несколько дел с одним УИД или номером) не подходит ни одному делу
-function crmFlowMatches(c,e){if(!c||!e)return false;if(e.caseId)return e.caseId===c.id;if(e.ambiguous)return false;const nz=crmMonNorm;if(e.caseUid&&nz(c.caseUid))return nz(e.caseUid)===nz(c.caseUid);/* v238: УИД решает, если он есть у обоих */if(e.uidConflict)return false;if(e.crmNumber)return nz(e.crmNumber)===nz(c.number);if(e.ambiguous)return false;if(e.caseUid&&nz(c.caseUid)&&nz(e.caseUid)===nz(c.caseUid))return true;const no=nz(e.courtNo);if(!no)return false;return [c.number,c.courtNo,c.courtNoApp,c.courtNoCass].some(v=>nz(v)&&nz(v)===no);}
+function crmFlowMatches(c,e){if(!c||!e)return false;if(e.caseId)return e.caseId===c.id;if(e.ambiguous||e.idConflict)return false;const nz=crmMonNorm;if(e.caseUid&&nz(c.caseUid))return nz(e.caseUid)===nz(c.caseUid);/* v238: УИД решает, если он есть у обоих */if(e.uidConflict)return false;if(e.crmNumber)return nz(e.crmNumber)===nz(c.number);if(e.ambiguous)return false;if(e.caseUid&&nz(c.caseUid)&&nz(e.caseUid)===nz(c.caseUid))return true;const no=nz(e.courtNo);if(!no)return false;return [c.number,c.courtNo,c.courtNoApp,c.courtNoCass].some(v=>nz(v)&&nz(v)===no);}
 function crmFlowParts(e){let res='',base='',st='';{const j=crmMonRawObj(e);res=String(j.result||j['результат']||j.resolution||'').trim();base=String(j.basis||j['основание']||'').trim();st=String(j.st||'').trim();}return{res,base,st};}
 function crmCaseFlowMissing(c, monAll, caseHearings) {
   const have = new Set((caseHearings || []).filter(h => h.status !== 'Отменено').map(h => h.date + '|' + ((h.time || '').slice(0, 5))));
@@ -19152,7 +19212,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
 <p>В приложении для компьютера (версия 1.4 и новее) копия, снимок с сервера, файл обмена, документ из шаблона, «Скачать для Word» и таблицы CSV сохраняются окном «Сохранить как» — в выбранную папку (облака, флешки, дела); документ для правки после сохранения сразу открывается в программе для таких файлов (обычно Word). Файл письма (PDF, документ, изображение) открывается программой просмотра.</p>
 <p>Настройки → «Печать и выгрузка» (или «Отчёты» → «Печать и выгрузка»): выписка поступлений для кассовой книги, реестры дел, заседаний, ордеров и доверенностей — в окне печати можно «Сохранить как PDF»; таблицы CSV для Excel по разделам.</p>
-<p>Удалённое попадает в «Корзину» (Настройки) — оттуда его можно вернуть. Удалённое из корзины окончательно запоминается в реестре удалений, и он уходит на остальные устройства: старая копия с другого устройства такую запись не вернёт. У реестра есть пределы — 180 дней и 3000 последних удалений: копия старше или устройство, долго не участвовавшее в обмене, может вернуть давно удалённые записи. Такое устройство перед работой получает базу с сервера, а при объединении старой копии просмотрите в предпросмотре, что добавится.</p>` },
+<p>Удалённое попадает в «Корзину» (Настройки) — оттуда его можно вернуть. Удалённое из корзины окончательно запоминается в реестре удалений, и он уходит на остальные устройства: старая копия с другого устройства такую запись не вернёт. У реестра есть пределы — 180 дней и 3000 последних удалений: копия старше или устройство, долго не участвовавшее в обмене, может вернуть давно удалённые записи. Обычное получение с сервера такие записи на этом устройстве не удалит: обмен объединяет базы, а отсутствие записи на сервере не означает её удаления. Если устройство не участвовало в обмене дольше 180 дней: выключите на нём автообмен, сохраните с него копию базы в файл (там могут быть неотправленные правки), откройте программу на устройстве с чистой базой (другой браузер или профиль) и получите базу с сервера, проверьте её, а нужные правки из сохранённой копии перенесите вручную или через «Вернуть базу к копии…» выборочно; только после этого включайте обмен. При объединении старой копии просмотрите в предпросмотре, что добавится.</p>` },
   { id: 'licence', title: 'Лицензия и соглашение', html: `
 <p>Программа предоставляется по лицензионному соглашению (публичная оферта); соглашение принимается при первом запуске. Пропуск проверяется на устройстве; на «Сегодня» — напоминание о продлении за 30, 7 и 1 день.</p>
 <p>Устройства пропуска: при вводе пропуска программа регистрирует это устройство на сервере лицензий автора (уходят только пропуск, отпечаток и название устройства, версия программы) и раз в сутки проверяет, действует ли пропуск. «Лицензия» → «Устройства» — список устройств с датами и «Отвязать»: место освобождается для нового устройства. Прежняя программа на этом же устройстве считается тем же устройством. Без связи ничего не меняется; деморежим включается только по ответу сервера — пропуск отозван или для устройства нет места.</p>
@@ -19380,7 +19440,7 @@ function monSet(k, v) { const p = monPrefs(); p[k] = v; localStorage.setItem(MON
 function monitorModel(events, cases, p) {
   const all = (typeof monEvUnique === 'function' ? monEvUnique(events || []) : (events || []).filter(e => e && !e._deleted)).sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
   const counts = { all: all.length }; ['new', 'applied', 'ignored', 'flow'].forEach(s => { counts[s] = all.filter(e => e.status === s).length; });
-  const rows = all.filter(e => p.f === 'all' || e.status === p.f).map(e => ({ e, type: MON_TYPE_LABEL[e.eventType] || e.eventType || '', status: MON_STATUS_META[e.status] || [e.status || '', ''], bound: e.caseNum || '', problem: e.uidConflict ? 'УИД события не совпадает с УИД дела' : e.ambiguous ? 'подходит несколько дел — выберите вручную' : (!e.caseId && e.status === 'new' ? 'дело не найдено' : '') }));
+  const rows = all.filter(e => p.f === 'all' || e.status === p.f).map(e => ({ e, type: MON_TYPE_LABEL[e.eventType] || e.eventType || '', status: MON_STATUS_META[e.status] || [e.status || '', ''], bound: e.caseNum || '', problem: e.idConflict ? 'признаки события указывают на разные дела' + (e.conflictWith && e.conflictWith.length ? ' (' + e.conflictWith.join(', ') + ')' : '') + ' — выберите вручную' : e.uidConflict ? 'УИД события не совпадает с УИД дела' : e.ambiguous ? 'подходит несколько дел — выберите вручную' : (!e.caseId && e.status === 'new' ? 'дело не найдено' : '') }));
   const offers = typeof crmFlowActOffers === 'function' ? crmFlowActOffers(cases || [], all) : [];
   const last = all.reduce((m, e) => Math.max(m, e.receivedAt || 0), 0);
   return { rows, counts, offers, last };
@@ -19652,7 +19712,7 @@ async function openMonitorEventSheet(id, mode) {
   const sideNow = cmp ? (e.cmpSideManual === 'none' ? 'не установлена (ваш выбор)' : e.cmpSideManual ? e.cmpSideManual + ' (ваш выбор)' : e.cmpSide ? e.cmpSide : e.cmpApplied ? 'не установлена' : '') : '';
   const cmpSideRow = cmp ? row('Сторона жалобы', sideNow) + row('Почему так', cmpWhy) : '';
   const cmpSideBtns = cmp && c ? `<div class="section-label">Сторона жалобы</div><div class="form-actions">${btn('Наша жалоба', `monCmpSide('${jsq(e.id)}', 'Наша жалоба')`, 'small-btn' + (e.cmpSideManual === 'Наша жалоба' ? ' primary' : ''), 'shield-check')}${btn('Жалоба оппонента', `monCmpSide('${jsq(e.id)}', 'Жалоба оппонента')`, 'small-btn' + (e.cmpSideManual === 'Жалоба оппонента' ? ' primary' : ''), 'users-round')}${btn('Не установлена', `monCmpSide('${jsq(e.id)}', 'none')`, 'small-btn' + (e.cmpSideManual === 'none' ? ' primary' : ''), 'circle-help')}${e.cmpSideManual ? btn('По данным дела', `monCmpSide('${jsq(e.id)}', '')`, 'small-btn', 'rotate-ccw') : ''}${btn('Разобрать заново', `monCmpReapply('${jsq(e.id)}')`, 'small-btn', 'refresh-cw')}</div>` : '';
-  const body = `<div class="task-badges">${badge(st[0], st[1])}${badge(MON_TYPE_LABEL[e.eventType] || e.eventType || 'событие')}${e.uidConflict ? badge('конфликт УИД', 'bad') : ''}${e.ambiguous ? badge('несколько дел', 'bad') : ''}${e.autoApplied ? badge('применено автоматически', 'good') : ''}</div>
+  const body = `<div class="task-badges">${badge(st[0], st[1])}${badge(MON_TYPE_LABEL[e.eventType] || e.eventType || 'событие')}${e.idConflict ? badge('признаки — разных дел', 'bad') : e.uidConflict ? badge('конфликт УИД', 'bad') : ''}${e.ambiguous ? badge('несколько дел', 'bad') : ''}${e.autoApplied ? badge('применено автоматически', 'good') : ''}</div>
     <div class="list-rows">${row(cmp ? 'Дата поступления жалобы' : 'Дата', e.date ? fmtDate(e.date) + (bits && bits.time ? ' ' + bits.time : '') : '')}${row('Суд', e.court)}${row('№ в суде', e.courtNo)}${row('УИД', e.caseUid)}${row('Источник', e.source)}${cmp ? cmpRows + cmpSideRow : row('Инстанция', parts.st) + row('Результат', parts.res) + row('Основание', parts.base)}${bits && bits.room ? row('Зал', bits.room) : ''}${row('Получено', e.receivedAt ? new Date(e.receivedAt).toLocaleString('ru-RU') : '')}
       ${c ? `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(c.id)}')"><span class="muted">Дело</span><span>${esc([c.number, c.client].filter(Boolean).join(' · '))}</span></button>` : ''}</div>
     ${cmpDlRow}
@@ -19689,7 +19749,7 @@ async function monCmpReapply(id, quiet) {
 }
 async function monEventReopen(id) { await nav(UI.screen); openMonitorEventSheet(id); }
 async function monCaseFromSheet(e) { const id = fv('mon-case') || e.caseId; const c = id ? await getOne('cases', id) : null; if (!c) toast('Сначала выберите дело', true); return c; }
-async function monEventBind(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; e.caseId = c.id; e.caseNum = c.number; e.uidConflict = false; e.ambiguous = false; if (e.status === 'new' && e.eventType === 'caseflow') e.status = 'flow'; e.reviewedAt = Date.now(); await put('monitorEvents', e); toast('Событие привязано к делу ' + c.number); monEventReopen(id); }
+async function monEventBind(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; e.caseId = c.id; e.caseNum = c.number; e.uidConflict = false; e.ambiguous = false; e.idConflict = false; if (e.status === 'new' && e.eventType === 'caseflow') e.status = 'flow'; e.reviewedAt = Date.now(); await put('monitorEvents', e); toast('Событие привязано к делу ' + c.number); monEventReopen(id); }
 async function monEventHearing(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; await crmCaseFlowAdd(id, c.id); }
 async function monEventAct(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; if (!e.caseId || e.caseId !== c.id) { e.caseId = c.id; e.caseNum = c.number; await put('monitorEvents', e); } await crmFlowActApply(id); }
 async function monEventDeadline(id) { const e = await getOne('monitorEvents', id); if (!e) return; const c = await monCaseFromSheet(e); if (!c) return; openDeadlineForm(c.id, '', { baseEv: e.title || '', baseDate: e.date || '', src: 'Мониторинг: ' + (e.source || ''), title: crmDlAppealMatch(e.title) ? 'Апелляционная жалоба' : '', kind: 'procedural', monitorEventId: e.eventType !== 'caseflow' ? e.id : '' }); }
