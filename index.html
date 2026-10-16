@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="16.10.2026 17:15 · 6e6ce07+">
+<meta name="build" content="16.10.2026 18:20 · 5fb17a9+">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -4039,14 +4039,18 @@ function nextSrvError(j) {
 const nextSrvConfigured = () => !!(SRV.url && SRV.secret && SRVDB.pass);
 // 16.10.2026 (урок 164): расшифровка базы с сервера. Пароль не подошёл, а на этом устройстве есть пароль из /next/ (основной адрес после
 // перехода; nextSecretsFromNext — next/migrate.js) — пробуем его; подошёл — запоминаем как пароль шифрования (его же увидит прежняя программа
-// в /old/: база на сервере зашифрована им). Не подошёл — прежняя ошибка, ничего не меняется
-async function nextSrvDecrypt(data) {
+// в /old/: база на сервере зашифрована им). Не подошёл — прежняя ошибка, ничего не меняется.
+// 17.10.2026 (аудит переноса, M4): запоминать подошедший пароль — только при расшифровке ТЕКУЩЕЙ базы сервера (opts.persist, по умолчанию да).
+// Исторический снимок мог быть зашифрован прежним паролем (до смены): его подбор нужен только для чтения и рабочий пароль не меняет
+async function nextSrvDecrypt(data, opts) {
+  const persist = !(opts && opts.persist === false);
   try { return await decryptDump(data, SRVDB.pass); }
   catch (e) {
     if (nextDecryptWhy(e) !== 'decrypt' || typeof nextSecretsFromNext !== 'function') throw e;
     const s = await nextSecretsFromNext(), p = s && s.map && s.map.crm_sync_pass;
     if (!p || p === SRVDB.pass) throw e;
     let dump; try { dump = await decryptDump(data, p); } catch (e2) { throw e; }
+    if (!persist) { toast('Снимок открыт паролем из новой версии (/next/) на этом устройстве; рабочий пароль шифрования не изменён'); return dump; }
     localStorage.setItem('crm_sync_pass', p); if (typeof bumpSecrets === 'function') bumpSecrets('crm_sync_pass');
     toast('Пароль шифрования взят из новой версии (/next/) на этом устройстве — база на сервере открылась');
     return dump;
@@ -6211,7 +6215,7 @@ function backupBlockOf(v) {
 // Реестр окончательных удалений из такой копии не применяется вовсе: отметка удаления из неё удалила бы здешний исправный файл.
 // localHas — набор защищаемых id, файлы которых есть на устройстве. Чистая функция для тестов
 function backupSafePlan(parsed, v, localHas) {
-  const plan = JSON.parse(JSON.stringify(parsed || {})), bad = new Set([...(v && v.blobBad || []), ...(v && v.blobMissing || [])]);
+  const plan = JSON.parse(JSON.stringify(parsed || {})), bad = new Set([...(v && v.blobBad || []), ...(v && v.blobMissing || []), ...(v && v.blobUnlisted || [])]);
   const d = plan.data || {}, has = localHas || new Set(); let dropped = 0, keptLocal = 0, noLocal = 0, purgedSkipped = false;
   if (Array.isArray(d.docBlobs)) { const n = d.docBlobs.length; d.docBlobs = d.docBlobs.filter(b => !(b && bad.has(b.id))); dropped = n - d.docBlobs.length; }
   if (Array.isArray(d.docVersions)) d.docVersions = d.docVersions.filter(x => !(x && bad.has(x.id) && has.has(x.id)));
@@ -6226,7 +6230,7 @@ async function backupLocalBlobs(ids) {
   return out;
 }
 async function backupSafePrepare(m) {
-  const bad = [...(m.verify && m.verify.blobBad || []), ...(m.verify && m.verify.blobMissing || [])];
+  const bad = [...(m.verify && m.verify.blobBad || []), ...(m.verify && m.verify.blobMissing || []), ...(m.verify && m.verify.blobUnlisted || [])];
   return backupSafePlan(m.parsed, m.verify, await backupLocalBlobs(bad));
 }
 function backupSafeNote(s) {
@@ -6260,20 +6264,30 @@ async function backupVerify(parsed) {
   if (!Number.isInteger(fmt) || fmt < 1) return { invalid: true, fmt: s.fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
   if (fmt !== BACKUP_SUMS_FMT) return { unsupported: true, fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
   if (!s.counts || typeof s.counts !== 'object' || Array.isArray(s.counts) || !s.blobs || typeof s.blobs !== 'object' || Array.isArray(s.blobs)) return { invalid: true, fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
-  const d = (parsed && parsed.data) || {}, out = { fmt, countBad: [], blobBad: [], blobMissing: [], blobs: 0 };
+  const d = (parsed && parsed.data) || {}, out = { fmt, countBad: [], blobBad: [], blobMissing: [], blobUnlisted: [], blobs: 0 };
   for (const st of Object.keys(s.counts || {})) { const n = Array.isArray(d[st]) ? d[st].length : 0; if (n !== Number(s.counts[st])) out.countBad.push((PREVIEW_TITLES[st] || st) + ': ' + n + ' из ' + Number(s.counts[st])); }
+  // 17.10.2026 (аудит переноса, M7): проверка — по ПОЛНОМУ перечню. backupSums перечисляет каждый раздел-массив и каждый файл с содержимым;
+  // раздел с записями, которого нет в сведениях, — копия неполна или дополнена после создания (как недостача записей, закрывает всё);
+  // файл документа без суммы проверить нельзя — он защищается так же, как повреждённый, и «сошлись» не говорится
+  for (const st of Object.keys(d)) if (Array.isArray(d[st]) && d[st].length && !Object.prototype.hasOwnProperty.call(s.counts, st)) out.countBad.push((PREVIEW_TITLES[st] || st) + ': ' + d[st].length + ', в сведениях копии раздела нет');
   const byId = {}; for (const b of Array.isArray(d.docBlobs) ? d.docBlobs : []) if (b && b.id) byId[b.id] = b;
   for (const id of Object.keys(s.blobs || {})) { out.blobs++; const b = byId[id]; if (!b || !b.data) { out.blobMissing.push(id); continue; } if (await backupSha(b.data) !== s.blobs[id]) out.blobBad.push(id); }
-  out.ok = !out.countBad.length && !out.blobBad.length && !out.blobMissing.length;
+  for (const id of Object.keys(byId)) if (byId[id].data && !Object.prototype.hasOwnProperty.call(s.blobs, id)) out.blobUnlisted.push(id);
+  out.ok = !out.countBad.length && !out.blobBad.length && !out.blobMissing.length && !out.blobUnlisted.length;
   return out;
 }
-function backupVerifyText(v) {
+// files — статус полноты из самой копии (_files): суммы подтверждают целость, но не полноту документов (M7) — неполная копия так и называется
+function backupVerifyText(v, files) {
   if (!v || v.none) return 'Контрольных сумм в копии нет (копия сделана до 16.10.2026 или прежней программой) — проверены только пароль и расшифровка.';
   if (v.error) return 'Контрольные суммы проверить не удалось (подробности в журнале ошибок) — объединять такую копию нельзя: возьмите другую копию.';
   if (v.unsupported || Number(v.fmt || 0) > BACKUP_SUMS_FMT) return 'Копия сделана более новой версией программы — её контрольные суммы эта версия проверить не может. Объединение и возврат к этой копии закрыты: обновите программу и проверьте файл снова.';
   if (v.invalid) return 'Сведения о контрольных суммах в копии повреждены или неполны — проверить копию нельзя. Объединение и возврат к этой копии закрыты: возьмите другую копию.';
-  if (v.ok) return 'Контрольные суммы сошлись: число записей по разделам' + (v.blobs ? ' и содержимое ' + v.blobs + ' ' + plural(v.blobs, 'файла', 'файлов', 'файлов') + ' документов' : '') + ' — как при создании копии.';
-  return 'Контрольные суммы НЕ сошлись — файл повреждён или неполон: ' + [v.countBad.length ? 'записей не хватает (' + v.countBad.join(', ') + ')' : '', v.blobMissing.length ? 'нет файлов документов: ' + v.blobMissing.length : '', v.blobBad.length ? 'изменено содержимое файлов: ' + v.blobBad.length : ''].filter(Boolean).join('; ') + (v.countBad.length ? '. Объединять такую копию нельзя: более новые записи из неё заменили бы здешние. Возьмите другую копию.' : '. Обычное объединение закрыто: повреждённый файл заменил бы исправный. Можно объединить без повреждённых файлов — остальное из копии будет принято, а файлы на этом устройстве останутся прежними вместе со сведениями о них; отметки окончательного удаления из такой копии не принимаются.');
+  if (v.ok) {
+    const base = 'Контрольные суммы сошлись: число записей по разделам' + (v.blobs ? ' и содержимое ' + v.blobs + ' ' + plural(v.blobs, 'файла', 'файлов', 'файлов') + ' документов' : '') + ' — как при создании копии.';
+    if (files && files.state && files.state !== 'full') return base + ' Это подтверждает целость файла, но не полноту: ' + (files.state === 'nofiles' ? 'файлов документов в копии нет' : files.state === 'partial' ? 'части файлов документов в копии нет' : 'полнота по файлам документов при создании копии не проверена') + ' — полной копией документов она не является.';
+    return base;
+  }
+  return 'Контрольные суммы НЕ сошлись — файл повреждён или неполон: ' + [v.countBad.length ? 'записей не хватает или раздел не учтён (' + v.countBad.join(', ') + ')' : '', v.blobMissing.length ? 'нет файлов документов: ' + v.blobMissing.length : '', v.blobBad.length ? 'изменено содержимое файлов: ' + v.blobBad.length : '', (v.blobUnlisted || []).length ? 'файлов без контрольной суммы: ' + v.blobUnlisted.length : ''].filter(Boolean).join('; ') + (v.countBad.length ? '. Объединять такую копию нельзя: более новые записи из неё заменили бы здешние. Возьмите другую копию.' : '. Обычное объединение закрыто: повреждённый файл заменил бы исправный. Можно объединить без повреждённых файлов — остальное из копии будет принято, а файлы на этом устройстве останутся прежними вместе со сведениями о них; отметки окончательного удаления из такой копии не принимаются.');
 }
 let BACKUP_PENDING = null;
 // слияние из файла не сдвигает базу определения коллизий серверов (второй разбор GPT 12.10.2026, урок 117): иначе одновременная правка поля,
@@ -6375,7 +6389,7 @@ async function backupCheckFile() {
   // разбор GPT 06.10.2026, п. 6: статус полноты из самой копии и предупреждение о большом файле
   const filesNote = m.files && m.files.text ? ' ' + m.files.text.charAt(0).toUpperCase() + m.files.text.slice(1) + '.' : (m.files === null ? ' Полнота копии по файлам документов не записана (копия прежней программы или старого выпуска).' : '');
   const bigNote = file.size > BACKUP_WARN ? ` Файл большой — ${backupMb(file.size)} МБ: объединение займёт несколько минут.` : '';
-  if (box) box.innerHTML = `${m.verify && !m.verify.none && !m.verify.ok ? `<div class="info-box warning" id="bk-sums" role="alert">${esc(backupVerifyText(m.verify))}</div>` : ''}<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}${m.verify && (m.verify.none || m.verify.ok || m.verify.error) ? ' ' + esc(backupVerifyText(m.verify)) : ''}</div>
+  if (box) box.innerHTML = `${m.verify && !m.verify.none && !m.verify.ok ? `<div class="info-box warning" id="bk-sums" role="alert">${esc(backupVerifyText(m.verify))}</div>` : ''}<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}${m.verify && (m.verify.none || m.verify.ok || m.verify.error) ? ' ' + esc(backupVerifyText(m.verify, m.files)) : ''}</div>
     <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
     <div class="form-actions">${m.block === 'all' ? '<span class="small muted">Объединение и возврат к этой копии закрыты — см. предупреждение выше.</span>' : m.block === 'blobs' ? `${m.safe ? `<p class="small" id="bk-safe-plan">Без повреждённых файлов добавится записей: ${m.safe.added}, обновится: ${m.safe.updated}${esc(backupSafeNote(m.safe))}.</p>` : ''}<button type="button" class="button primary" id="bk-apply-safe" onclick="backupApply('safe')">${icon('check')}Объединить без повреждённых файлов</button>` : m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}${typeof openFileRollback === 'function' && !m.block ? `<button type="button" class="button" id="bk-rollback" onclick="openFileRollback()">${icon('rotate-ccw')}Вернуть базу к копии…</button>` : ''}</div>
     ${typeof openFileRollback === 'function' && !m.block ? '<p class="small muted">«Объединить» добавляет и обновляет: более новые записи из копии заменят здешние. «Вернуть базу к копии…» покажет, что изменилось после копии, и вернёт выбранное к её состоянию — в том числе правки, сделанные позже.</p>' : ''}`;
@@ -6593,7 +6607,7 @@ async function openSnapRollback(ver) {
   const g = await nextDbGet(ver);
   if (!g || !g.ok) { toast('Снимок не получен: ' + nextSrvError(g), true); return null; }
   if (!g.exists || !g.data) { toast('Такого снимка на сервере уже нет', true); return null; }
-  let dump; try { dump = typeof nextSrvDecrypt === 'function' ? await nextSrvDecrypt(g.data) : await decryptDump(g.data, SRVDB.pass); } catch (e) { toast('Снимок не открыт: ' + nextSrvError({ error: nextDecryptWhy(e) }), true); return null; }
+  let dump; try { dump = typeof nextSrvDecrypt === 'function' ? await nextSrvDecrypt(g.data, { persist: false }) : await decryptDump(g.data, SRVDB.pass); } catch (e) { toast('Снимок не открыт: ' + nextSrvError({ error: nextDecryptWhy(e) }), true); return null; }
   const checked = validateBackup(dump); if (!checked.ok) { toast('Снимок не прочитан: ' + checked.error, true); return null; }
   return openSnapRbSheet('server', Number(ver) || Number(g.ver) || 0, checked.parsed.data);
 }
