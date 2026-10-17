@@ -24,6 +24,7 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.24: ссылка рассмотрения дела несёт pid — события этой ссылки с proceedingId, ключ с |p:<id> (аудит 17.10.2026, рассмотрения дела).
 //  v3.23: raw.keyVer 2 у события complaint — поколение ключа, чтобы программа отличала новую запись от прежней на сервере (аудит сборки 158, R1).
 //  v3.22: вид жалобы входит в ключ события complaint — апелляционная и частная жалобы одного лица в один день не сливаются (аудит сборки 157, A3).
 //  v3.21: жалобы в дайджесте Telegram без имён — новые и изменившиеся (слепок хранит состояние жалобы), раздел «Жалобы за 3 дня» (15.10.2026).
@@ -83,7 +84,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.23';
+const COLLECTOR_VER = '3.24';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -802,7 +803,7 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
     if (viaSd) { // v3.5: КАД через СУДиДЕЛО
       try {
         const r = await sdCollectLink(sd, c, l, cfg, logf, sdCache);
-        for (const e of r.events) byId.set(e.externalId, e);
+        for (const e of r.events) { pidMark(e, l.pid); byId.set(e.externalId, e); }
         if (r.created) stats.kadCreated++; else if (!r.missing) { stats.kadViaSudodelo++; stats.pages++; stats.flowRows += r.flow || 0; logf(`✓ ${c.number} (${l.stage}, КАД через СУДиДЕЛО): заседаний ${r.hearings || 0}, движение ${r.flow || 0}`); }
       } catch (e) { stats.failed++; stats.errors.push({ number: c.number, stage: l.stage, err: errText(e) }); logf(`✗ ${c.number} (${l.stage}, СУДиДЕЛО): ${errText(e)}`); }
       return;
@@ -812,11 +813,11 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
     const apply = (page, flow, cardP, uidOnPage, via, cmpP) => { // v3.13: общий хвост — события из разобранной карточки; v3.20: cmpP — жалобы
       stats.flowRows += flow.length;
       const ctx = { number: c.number, uid: uidOnPage, courtNo: l.courtNo || c.courtNo, stage: l.stage, url: l.url, sinceDays, judge: page.judge || cardP.judge || '', court: cardP.court || '' };
-      for (const e of buildEvents(page, ctx)) byId.set(e.externalId, e);
-      for (const e of buildFlowEvents(flow, ctx)) byId.set(e.externalId, e);
-      const cardEv = buildCardEvent(cardP, ctx); if (cardEv) byId.set(cardEv.externalId, cardEv); // v3.7
+      for (const e of buildEvents(page, ctx)) { pidMark(e, l.pid); byId.set(e.externalId, e); }
+      for (const e of buildFlowEvents(flow, ctx)) { pidMark(e, l.pid); byId.set(e.externalId, e); }
+      const cardEv = buildCardEvent(cardP, ctx); if (cardEv) { pidMark(cardEv, l.pid); byId.set(cardEv.externalId, cardEv); } // v3.7
       // v3.20: жалобы — событиями complaint
-      const cmpEv = buildComplaintEvents(cmpP || [], ctx); for (const e of cmpEv) byId.set(e.externalId, e); stats.complaints = (stats.complaints || 0) + cmpEv.length;
+      const cmpEv = buildComplaintEvents(cmpP || [], ctx); for (const e of cmpEv) { pidMark(e, l.pid); byId.set(e.externalId, e); } stats.complaints = (stats.complaints || 0) + cmpEv.length;
       const empty = !page.hearings.length && !page.acts.length && !flow.length && !cmpEv.length;
       if (empty) { stats.unparsed++; logf(`· ${c.number} (${l.stage}${via ? ', ' + via : ''}): таблицы не распознаны — откройте страницу глазами`); }
       else logf(`✓ ${c.number} (${l.stage}${via ? ', ' + via : ''}): заседаний ${page.hearings.length}, актов ${page.acts.length}, движение ${flow.length}${cmpEv.length ? ', жалоб ' + cmpEv.length : ''}${uidOnPage ? ', УИД ✓' : ''}`);
@@ -1175,6 +1176,11 @@ function runTests() {
   t('v3.22: изменение состояния жалобы ключ не меняет', buildComplaintEvents([{ ...fc320[0], noMotion: '2026-07-20', fixDue: '2026-08-01', result: 'Возвращена' }], { number: 'Д-61/2026', uid: '', courtNo: '2-67/2026', stage: 'Первая инстанция', url: 'https://x' })[0].externalId === fev320[0].externalId);
   t('v3.22: вид в ключе — без регистра и лишних пробелов; без вида — ключ 3.21', cmpKindKey({ kind: ' Частная  ЖАЛОБА ' }) === '|частная жалоба' && cmpKindKey({ kind: '' }) === '' && buildComplaintEvents([{ ...cmp320[0], kind: '' }], { number: 'Д-61/2026', uid: '33RS0011-01-2025-004499-82', courtNo: '8Г-31317/2026', stage: 'Кассация', url: 'https://x' })[0].externalId === cev[0].externalId);
   t('v3.23 (аудит 158, R1): поколение ключа в raw события жалобы', JSON.parse(two322[0].raw).keyVer === 2 && JSON.parse(cev[0].raw).keyVer === 2 && CMP_KEY_VER === 2);
+  t('v3.24: pid ссылки сохраняется в перечне; событие с pid — proceedingId и ключ с |p:, без pid — без изменений', (() => {
+    const sl = sanitizeLinksPack({ format: 'crm-advokat-links', cases: [{ number: 'Д-1', links: [{ url: 'https://x', stage: 'Апелляция', pid: 'pr-1' }, { url: 'https://y' }] }] });
+    const a = pidMark({ externalId: 'flow:U:1' }, 'pr-1'), b = pidMark({ externalId: 'flow:U:1' }, '');
+    return sl.cases[0].links[0].pid === 'pr-1' && sl.cases[0].links[1].pid === '' && a.proceedingId === 'pr-1' && a.externalId === 'flow:U:1|p:pr-1' && b.externalId === 'flow:U:1' && !('proceedingId' in b);
+  })());
   console.log(`коллектор: ${pass}/${pass + fail}`);
   process.exit(fail ? 1 : 0);
 }
@@ -1216,6 +1222,12 @@ async function s3put(key, body, iam) {
   if (!r.ok) throw new Error('бакет: HTTP ' + r.status + ' при записи ' + key);
 }
 
+// v3.24: событие ссылки рассмотрения дела — с его id (программа относит событие к этому рассмотрению); ключ — с id, чтобы события двух
+// рассмотрений одного дела (один УИД, один номер в программе) не сливались. Без pid событие не меняется (ключи 3.23).
+function pidMark(e, pid) {
+  const p = String(pid || '').trim(); if (!p || !e) return e;
+  e.proceedingId = p; e.externalId = String(e.externalId) + '|p:' + p; return e;
+}
 // В облако уходят только реквизиты дел и ссылки — ФИО и любые лишние поля отсекаются
 function sanitizeLinksPack(pack) {
   if (!pack || pack.format !== 'crm-advokat-links' || !Array.isArray(pack.cases)) return null;
@@ -1226,7 +1238,7 @@ function sanitizeLinksPack(pack) {
       number: String(c.number || ''), uid: String(c.uid || ''), stage: String(c.stage || ''),
       courtNo: String(c.courtNo || ''), courtNoApp: String(c.courtNoApp || ''), courtNoCass: String(c.courtNoCass || ''),
       links: (Array.isArray(c.links) ? c.links : []).map(l => ({
-        url: String(l.url || ''), stage: String(l.stage || ''), courtNo: String(l.courtNo || '') }))
+        url: String(l.url || ''), stage: String(l.stage || ''), courtNo: String(l.courtNo || ''), pid: String(l.pid || '').slice(0, 80) }))
     })).filter(c => c.links.length)
   };
 }
