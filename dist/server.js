@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v193: событие суда сохраняет proceedingId (id рассмотрения дела от коллектора 3.24+) и сравнивается с ним (аудит сборки 169, А1)
 //  v192: аудит 14.10.2026 — пределы форм по адресу платформы, ответы в пределах функции, код не в журнал, напоминания до 4096 знаков
 //  v191: icalget — закрытая ссылка календаря Google или Apple: события окна дат для «Быстрых записей» программы (этап 6 плана по ЮрТопосу)
 //  v190: «Задать вопрос» — публичная страница ?ask=<страница> и приём вопросов без секрета; askpub/askget/askack для программы
@@ -159,7 +160,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 192,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 193,
       ready: readiness()
     });
   }
@@ -179,7 +180,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 192, cal: true, ask: true, ical: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 193, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -597,7 +598,8 @@ async function dbGet() {
 // ════════════════════════════════════════════════════════════
 function eventsKey() { return 'events-' + storeId() + '.json'; }
 const EV_MAX = 5000, EV_MAX_AGE_DAYS = 400;
-const EV_FIELDS = ['externalId', 'title', 'date', 'eventType', 'courtNo', 'caseUid', 'judge', 'source', 'raw', 'crmNumber', 'court']; // v173: crmNumber; v175: court — суд страницы (коллектор v3.11)
+// v193: proceedingId — id рассмотрения дела, с чьей ссылки собрано событие (коллектор 3.24+)
+const EV_FIELDS = ['externalId', 'title', 'date', 'eventType', 'courtNo', 'caseUid', 'judge', 'source', 'raw', 'crmNumber', 'court', 'proceedingId']; // v173: crmNumber; v175: court — суд страницы (коллектор v3.11)
 
 function evNormalize(e) { // только известные поля, строки, разумной длины
   if (!e || typeof e !== 'object') return null;
@@ -605,12 +607,15 @@ function evNormalize(e) { // только известные поля, стро�
   // v192: карточка суда (JSON в raw) — до 16 000 знаков: обрезанный JSON не применялся
   for (const f of EV_FIELDS) { const v = e[f]; if (v !== undefined && v !== null) { const t = String(v); out[f] = t.slice(0, f === 'raw' ? (/^\s*\{/.test(t) ? 16000 : 4000) : 400); } }
   if (!out.externalId || !out.date) return null;
+  // v193: id рассмотрения — только вид id программы; чужое значение отбрасывается, событие принимается без него
+  if (out.proceedingId !== undefined && !/^[A-Za-z0-9_-]{1,80}$/.test(out.proceedingId)) delete out.proceedingId;
   out.eventType = out.eventType || 'notice';
   out.source = out.source || 'Коллектор судов';
   return out;
 }
 const evId = e => (e.source || '') + '|' + e.externalId;
-const evSig = e => [e.title, e.date, e.eventType, e.courtNo, e.caseUid, e.judge, e.raw].map(x => x || '').join('\u0001');
+// v193: id рассмотрения входит в сравнение — повтор события с добавленным id обновляет запись
+const evSig = e => [e.title, e.date, e.eventType, e.courtNo, e.caseUid, e.judge, e.raw, e.proceedingId].map(x => x || '').join('\u0001');
 
 async function eventsLoad() {
   if (!process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) {

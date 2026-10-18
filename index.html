@@ -8,8 +8,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="17.10.2026 19:33 · 0c00399">
-<meta name="build-no" content="169">
+<meta name="build" content="18.10.2026 06:28 · a0a3097+">
+<meta name="build-no" content="170">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -1356,6 +1356,28 @@ function recLabel(store, rec) {
 const CASE_MERGE_FIELDS = { link: 'link', linkApp: 'linkApp', linkCass: 'linkCass', status: 'status', stage: 'stage', ipStatus: 'ipStatus', nextAction: 'nextAction', nextActionDue: 'nextActionDue',
   i1DecisionDate: 'i1DecisionDate', decisionDate: 'i1DecisionDate', i1DecisionFullDate: 'i1DecisionFullDate', apDecisionDate: 'apDecisionDate', csDecisionDate: 'csDecisionDate', koapDate: 'koapDate', crimVerdictDate: 'crimVerdictDate',
   i1AcceptedDate: 'i1AcceptedDate', i1NoMotionDate: 'i1NoMotionDate', i1FixDueDate: 'i1FixDueDate', i1PublishedDate: 'i1PublishedDate', courtCategory: 'courtCategory' };
+// v170 (аудит сборки 169, А5): слияние текущих рассмотрений по инстанциям. Одна сторона: запись есть — остаётся, если её рассмотрение не
+// ушло в историю на другой стороне (тогда другое устройство его архивировало). Обе с одним id — более поздняя правка (u). Обе с разными
+// id: тот, что уже в истории, уступает; иначе — два независимых «Новых рассмотрения» одной инстанции: текущим остаётся одно (поздняя
+// правка, при равенстве — меньший id; одинаково на всех устройствах), второе НЕ выбрасывается — становится параллельным с пометкой
+// conflictOf (на «Сегодня» — «Объединить» или «Оставить оба»), его id и связи сохраняются.
+function mergeProcCurrent(a, b, list, tombs) {
+  a = a && typeof a === 'object' ? a : {}; b = b && typeof b === 'object' ? b : {};
+  const inList = id => (Array.isArray(list) ? list : []).some(p => p && p.id === id && !(tombs && Number(tombs[id] || 0) > Number(p.createdAt || 0)));
+  const archived = id => (Array.isArray(list) ? list : []).some(p => p && p.id === id && p.status === 'archived');
+  const pc = {}, extra = [];
+  for (const s of new Set(Object.keys(a).concat(Object.keys(b)))) {
+    const x = a[s] || null, y = b[s] || null;
+    if (!x || !y) { const z = x || y; if (z && !(z.id && archived(z.id))) pc[s] = z; continue; }
+    if (!x.id || !y.id || x.id === y.id) { pc[s] = Number(y.u || 0) > Number(x.u || 0) ? y : x; continue; }
+    if (archived(x.id) && !archived(y.id)) { pc[s] = y; continue; }
+    if (archived(y.id) && !archived(x.id)) { pc[s] = x; continue; }
+    const ux = Number(x.u || 0), uy = Number(y.u || 0), win = ux !== uy ? (ux > uy ? x : y) : (String(x.id) < String(y.id) ? x : y), lose = win === x ? y : x;
+    pc[s] = win;
+    if (!inList(lose.id) && !(tombs && tombs[lose.id])) { const t = Number(lose.u || 0) || 1; extra.push({ id: lose.id, slot: s, status: 'active', fields: Object.assign({}, lose.set || {}), basis: lose.basis || '', cancelled: lose.cancelled || '', after: lose.after || '', startedAt: lose.startedAt || '', from: lose.from || '', op: lose.op || '', conflictOf: win.id, createdAt: t, updatedAt: t }); }
+  }
+  return { pc, extra };
+}
 function mergeCaseRecords(cur, rec, base, events) {
   const newer = (rec._upd || 0) >= (cur._upd || 0) ? rec : cur, older = newer === rec ? cur : rec;
   const m = JSON.parse(JSON.stringify(newer));
@@ -1380,6 +1402,9 @@ function mergeCaseRecords(cur, rec, base, events) {
   if (Array.isArray(newer.proceedings) || Array.isArray(older.proceedings)) m.proceedings = mergeItemLists(newer.proceedings, older.proceedings, 1, 0, m._delItems && m._delItems.proceedings);
   // v258: остальные поля — по меткам изменения (_ch), если они есть у обеих версий
   if (newer._ch && older._ch) { const chN = newer._ch, chO = older._ch; for (const k of Object.keys(older)) { if (k.startsWith('_') || k === 'id' || last[CASE_MERGE_FIELDS[k] || k] || ['deadlines', 'participants', 'history', 'ipReceipts', 'proceedings'].includes(k)) continue; if ((chO[k] || 0) > (chN[k] || 0)) m[k] = older[k]; } m._ch = Object.assign({}, chO, chN); }
+  // v170 (аудит сборки 169, А5): текущие рассмотрения — по инстанциям, а не одним объектом (иначе новое рассмотрение одного устройства
+  // пропадало целиком вместе со своим id)
+  if (newer.procCurrent || older.procCurrent) { const r = mergeProcCurrent(newer.procCurrent, older.procCurrent, m.proceedings, m._delItems && m._delItems.proceedings); m.procCurrent = r.pc; if (r.extra.length) m.proceedings = (Array.isArray(m.proceedings) ? m.proceedings : []).concat(r.extra); }
   m._upd = Math.max(newer._upd || 0, older._upd || 0) + 1; // объединённая версия новее обеих — разойдётся на оба устройства
   return m;
 }
@@ -3539,7 +3564,8 @@ function caseStageEvidence(c, hearings) {
   if (!c) return null;
   const same = (a, b) => { const x = stageCourtNorm(a), y = stageCourtNorm(b); return !!x && !!y && (x.includes(y) || y.includes(x)); };
   // v168: заседания прежних рассмотрений (proceedingId, ui/proceedings.js) — история, стадию они не показывают
-  const mine = (hearings || []).filter(h => h && !h._deleted && !h.proceedingId && h.status !== 'Отменено' && (h.caseId ? h.caseId === c.id : (!!h.caseNum && h.caseNum === c.number)));
+  // v170 (аудит сборки 169, А6): заседание с id ТЕКУЩЕГО рассмотрения — своё (новые заседания несут id и текущего)
+  const mine = (hearings || []).filter(h => h && !h._deleted && !(typeof procIsForeign === 'function' ? procIsForeign(c, h.proceedingId) : !!h.proceedingId) && h.status !== 'Отменено' && (h.caseId ? h.caseId === c.id : (!!h.caseNum && h.caseNum === c.number)));
   // снимок 04.10.2026: заседание апелляции пришло с отметкой первой инстанции (ссылка стояла в поле первой инстанции) — инстанция видна и по
   // названию суда: кассационный суд — кассация; апелляционный, областной, краевой суд и суд республики или города федерального значения при деле
   // районного, городского суда или мирового судьи — апелляция
@@ -7770,11 +7796,20 @@ function crmMonNorm(v){return String(v||'').toLowerCase().replace(/[\s–—-]+/
 async function crmMonHash(text){const b=new TextEncoder().encode(String(text||'')),h=await crypto.subtle.digest('SHA-256',b);return Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');}
 function crmMonIsoDate(v){const s=String(v||'').trim();let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return `${m[1]}-${m[2]}-${m[3]}`;m=s.match(/(\d{1,2})[.\/]([0-1]?\d)[.\/](\d{4})/);return m?`${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`:'';}
 function crmMonField(o,names){for(const n of names){if(o?.[n]!==undefined&&o[n]!==null)return o[n];}return'';}
+// v170 (аудит сборки 169, А1, А2): id рассмотрения, с чьей ссылки собрано событие (srcPid), — ИСТОЧНИК, а не владелец: proceedingId
+// события — решение программы или пользователя (procEventOwner, procEventAssign). Берётся из поля коллектора (сервер 193 его сохраняет),
+// при его отсутствии — из ключа события «…|p:<id>» (сервер 192 поле вырезал, ключ оставлял); чужой вид значения отбрасывается.
+// Принимается только после проверки, что такое рассмотрение есть в деле и той же инстанции (procEventOwner).
+function crmMonSrcPid(raw,externalId){
+  const ok=v=>{const s=String(v||'').trim();return /^[A-Za-z0-9_-]{1,80}$/.test(s)?s:'';};
+  const own=raw&&typeof raw==='object'?ok(raw.proceedingId):'';if(own)return own;
+  const m=/\|p:([A-Za-z0-9_-]{1,80})$/.exec(String(externalId||''));return m?m[1]:'';
+}
 async function crmMonNormalizeRows(rows,source){
   const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const crmNumber=String(crmMonField(raw,['crmNumber','crm_number'])).trim();const evCourt=String(crmMonField(raw,['court','суд'])).trim();/* v253: суд страницы */
     /* v238: порядок привязки — 1) УИД дела (если у дела он записан), 2) номер дела CRM от коллектора, 3) номер в суде (единственное совпадение; при нескольких — предпочесть дело с номером CRM, иначе неоднозначно).
        Если у события есть УИД, а дело по номеру имеет другой УИД — конфликт: ссылка в деле ведёт на чужое дело, не привязываем. */
-    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,ambiguous,uidConflict,...(m.idConflict?{idConflict:true,conflictWith:m.conflictWith}:{}),raw:raw.raw||rawText,hash,...(raw&&typeof raw==='object'&&raw.proceedingId?{proceedingId:String(raw.proceedingId).slice(0,80)}:{}),caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:(type==='caseflow'&&match)?'flow':'new',receivedAt:Date.now()});}return out;
+    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,ambiguous,uidConflict,...(m.idConflict?{idConflict:true,conflictWith:m.conflictWith}:{}),raw:raw.raw||rawText,hash,...(crmMonSrcPid(raw,externalId)?{srcPid:crmMonSrcPid(raw,externalId)}:{}),caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:(type==='caseflow'&&match)?'flow':'new',receivedAt:Date.now()});}return out;
 }
 // v163 (аудит сборки 162, R4): по УИД бралось первое дело из списка — при двух делах с одним УИД (импорт, объединение, отдельные карточки
 // по одному спору) событие привязывалось к случайному по порядку массива, даже когда номер CRM в событии указывал на другое. Теперь
@@ -7862,7 +7897,7 @@ async function monEvDedupe() {
 }
 // 09.10.2026: то же заседание (ключ без текста, monEvKey), но описание другое — обновляется текст записи, дубль не создаётся; применённое
 // событие снова становится новым: сайт мог дописать результат («Заседание отложено») — автоприменение перенесёт его в заседание (пропуск пользователя autoSkip держится)
-async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>(x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId).map(x=>[x.externalId,x])),hearByKey=new Map(live.filter(x=>x.eventType==='hearing'&&x.externalId).map(x=>[monEvKey(x),x])),added=[],again=[];let updated=0;for(const x of rows){if(!hashes.has(x.hash)&&x.eventType==='hearing'&&x.externalId&&hearByKey.has(monEvKey(x))){const prevH=hearByKey.get(monEvKey(x));if(prevH.title!==x.title&&!(monHearRes(prevH)&&!monHearRes(x))){prevH.title=x.title;prevH.raw=x.raw;prevH.hash=x.hash;prevH.receivedAt=Date.now();if(prevH.status==='applied'&&!prevH.autoSkip)prevH.status='new';await put('monitorEvents',prevH);hashes.add(x.hash);updated++;}continue;}/* v158 (аудит сборки 157, A3): жалоба с новым ключом коллектора 3.22 (в ключе — вид жалобы) узнаётся среди прежних записей по делу, дате, инстанции, подавшему и виду; запись переводится на новый ключ (legacyExt — прежний, по нему находятся сроки), при том же содержимом — только переименование */if(x.eventType==='complaint'&&x.externalId&&!flowByExt.has(x.externalId)){/* v159 (аудит сборки 158, R1): запись под прежним ключом того же события (сервер хранит оба поколения) — устаревшая, пропускается без обратного переноса ключа и содержимого */if(crmComplaintStaleKey(live,x)){hashes.add(x.hash);keys.add(monEvKey(x));continue;}const lg=crmComplaintLegacyMatch(live,x);if(lg){/* поколение ключа (raw.keyVer, коллектор 3.23): меньшее — устаревшая запись, её ключ запоминается как прежний, содержимое не применяется; равное или без отметки — пришедшая запись новее (сервер отдаёт записи в порядке появления) */const kvX=Number(crmMonRawObj(x).keyVer||0),kvL=Number(crmMonRawObj(lg).keyVer||0);if(kvX<kvL){crmComplaintAddLegacy(lg,x.externalId);await put('monitorEvents',lg);hashes.add(x.hash);keys.add(monEvKey(x));continue;}const oldExt=lg.externalId;flowByExt.delete(oldExt);lg.externalId=x.externalId;crmComplaintAddLegacy(lg,oldExt);flowByExt.set(x.externalId,lg);if(String(lg.raw||'')===String(x.raw||'')){lg.hash=x.hash;await put('monitorEvents',lg);hashes.add(x.hash);keys.add(monEvKey(lg));updated++;continue;}}}/* v156 (урок 133): та же жалоба с тем же заголовком, но иным содержимым (дата возврата у коллектора 3.20 в заголовок не попадала) — обновление, не дубль */if(hashes.has(x.hash)||keys.has(monEvKey(x))){const sameCmp=x.eventType==='complaint'&&x.externalId&&flowByExt.has(x.externalId)&&String(flowByExt.get(x.externalId).raw||'')!==String(x.raw||'');if(!sameCmp){if(x.eventType==='casecard'&&x.caseId)again.push(x);continue;}}const prev=(x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new'&&prev.eventType==='caseflow')prev.status='flow';}/* 15.10.2026: та же жалоба с новым состоянием (без движения, срок, результат) — снова применяется к делу и снова видна на «Сегодня»; «не применять» держится */if(x.eventType==='complaint'){delete prev.cmpApplied;if(prev.status==='applied')prev.status='new';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if((x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId)flowByExt.set(x.externalId,x);if(x.eventType==='hearing'&&x.externalId)hearByKey.set(monEvKey(x),x);/* v159 (R1): жалоба, записанная в этой же пачке, участвует в сопоставлении ключей следующих строк пачки */if(x.eventType==='complaint')live.push(x);added.push(x);}
+async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw('monitorEvents'),live=old.filter(x=>!x._deleted),hashes=new Set(live.map(x=>x.hash)),keys=new Set(live.map(monEvKey)),flowByExt=new Map(live.filter(x=>(x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId).map(x=>[x.externalId,x])),hearByKey=new Map(live.filter(x=>x.eventType==='hearing'&&x.externalId).map(x=>[monEvKey(x),x])),byHash=new Map(live.map(x=>[x.hash,x])),byKey=new Map(live.map(x=>[monEvKey(x),x])),added=[],again=[];let updated=0;for(const x of rows){/* v170 (аудит сборки 169, А1): повторная доставка того же события с id источника (сервер 193 его больше не вырезает) — id переносится в записанное событие, хотя текст и дата те же; владельца (proceedingId) это не меняет */if(x.srcPid){const st0=byHash.get(x.hash)||byKey.get(monEvKey(x))||((x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId?flowByExt.get(x.externalId):null);if(st0&&st0.srcPid!==x.srcPid){st0.srcPid=x.srcPid;await put('monitorEvents',st0);updated++;}}if(!hashes.has(x.hash)&&x.eventType==='hearing'&&x.externalId&&hearByKey.has(monEvKey(x))){const prevH=hearByKey.get(monEvKey(x));if(prevH.title!==x.title&&!(monHearRes(prevH)&&!monHearRes(x))){prevH.title=x.title;prevH.raw=x.raw;prevH.hash=x.hash;prevH.receivedAt=Date.now();if(prevH.status==='applied'&&!prevH.autoSkip)prevH.status='new';await put('monitorEvents',prevH);hashes.add(x.hash);updated++;}continue;}/* v158 (аудит сборки 157, A3): жалоба с новым ключом коллектора 3.22 (в ключе — вид жалобы) узнаётся среди прежних записей по делу, дате, инстанции, подавшему и виду; запись переводится на новый ключ (legacyExt — прежний, по нему находятся сроки), при том же содержимом — только переименование */if(x.eventType==='complaint'&&x.externalId&&!flowByExt.has(x.externalId)){/* v159 (аудит сборки 158, R1): запись под прежним ключом того же события (сервер хранит оба поколения) — устаревшая, пропускается без обратного переноса ключа и содержимого */if(crmComplaintStaleKey(live,x)){hashes.add(x.hash);keys.add(monEvKey(x));continue;}const lg=crmComplaintLegacyMatch(live,x);if(lg){/* поколение ключа (raw.keyVer, коллектор 3.23): меньшее — устаревшая запись, её ключ запоминается как прежний, содержимое не применяется; равное или без отметки — пришедшая запись новее (сервер отдаёт записи в порядке появления) */const kvX=Number(crmMonRawObj(x).keyVer||0),kvL=Number(crmMonRawObj(lg).keyVer||0);if(kvX<kvL){crmComplaintAddLegacy(lg,x.externalId);await put('monitorEvents',lg);hashes.add(x.hash);keys.add(monEvKey(x));continue;}const oldExt=lg.externalId;flowByExt.delete(oldExt);lg.externalId=x.externalId;crmComplaintAddLegacy(lg,oldExt);flowByExt.set(x.externalId,lg);if(String(lg.raw||'')===String(x.raw||'')){lg.hash=x.hash;await put('monitorEvents',lg);hashes.add(x.hash);keys.add(monEvKey(lg));updated++;continue;}}}/* v156 (урок 133): та же жалоба с тем же заголовком, но иным содержимым (дата возврата у коллектора 3.20 в заголовок не попадала) — обновление, не дубль */if(hashes.has(x.hash)||keys.has(monEvKey(x))){const sameCmp=x.eventType==='complaint'&&x.externalId&&flowByExt.has(x.externalId)&&String(flowByExt.get(x.externalId).raw||'')!==String(x.raw||'');if(!sameCmp){if(x.eventType==='casecard'&&x.caseId)again.push(x);continue;}}const prev=(x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId?flowByExt.get(x.externalId):null;if(prev){/* v190: то же событие движения — сервер дополнил результат/основание; обновляем запись, дубль не создаём */prev.title=x.title;prev.date=x.date||prev.date;prev.raw=x.raw;prev.hash=x.hash;prev.receivedAt=Date.now();if(!prev.caseId&&x.caseId){prev.caseId=x.caseId;prev.caseNum=x.caseNum;if(prev.status==='new'&&prev.eventType==='caseflow')prev.status='flow';}/* 15.10.2026: та же жалоба с новым состоянием (без движения, срок, результат) — снова применяется к делу и снова видна на «Сегодня»; «не применять» держится */if(x.eventType==='complaint'){delete prev.cmpApplied;if(prev.status==='applied')prev.status='new';}await put('monitorEvents',prev);hashes.add(x.hash);keys.add(monEvKey(prev));updated++;continue;}await put('monitorEvents',x);hashes.add(x.hash);keys.add(monEvKey(x));if((x.eventType==='caseflow'||x.eventType==='complaint')&&x.externalId)flowByExt.set(x.externalId,x);if(x.eventType==='hearing'&&x.externalId)hearByKey.set(monEvKey(x),x);/* v159 (R1): жалоба, записанная в этой же пачке, участвует в сопоставлении ключей следующих строк пачки */if(x.eventType==='complaint')live.push(x);added.push(x);}
   // 04.10.2026: дубли, записанные до исправления или пришедшие обменом, удаляются
   await monEvDedupe();
   { /* v238: УИД с сайта суда запоминается в деле при первой привязке по номеру — дальше привязка идёт по УИД */
@@ -7879,7 +7914,14 @@ async function crmMonPersist(rows,opts){opts=opts||{};const old=await getAllRaw(
     if(again.length){const liveNow=(await getAllRaw('monitorEvents')).filter(e=>!e._deleted&&e.eventType==='casecard');for(const x of again){const ev=liveNow.find(e=>monEvKey(e)===monEvKey(x));if(!ev||ev.status==='ignored')continue;const changed=String(ev.raw||'')!==String(x.raw||'');if(!changed&&!opts.cardAgain)continue;ev.raw=x.raw;ev.receivedAt=Date.now();ev.caseId=x.caseId;ev.caseNum=x.caseNum;if(changed)updated++;cards.push(ev);}}
     if(cards.length){const cs=await getAll('cases');for(const x of cards){const c=cs.find(y=>y.id===x.caseId);if(!c)continue;let card=null,cardSt='';{const j=crmMonRawObj(x);card=j.card||null;cardSt=String(j.st||'');}if(!card)continue;
     // 10.10.2026: инстанция карточки (raw.st от коллектора и окна КАД) — поля апелляции и кассации, а не всегда первой инстанции
-    const res=crmCaseApplyCard(c,card,cardSt==='Апелляция'?'App':(cardSt==='Кассация'||cardSt==='Надзор')?'Cass':'');if(res.done.length){addCaseHistoryEvent(c,'courtCard','',res.done.join('; '),'monitor');await put('cases',c);await crmCaseLogByNum(c.number,'flow','С сайта суда: '+res.done.join('; '));}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
+    // v170 (аудит сборки 169, А3.1): карточка — через владельца события (procEventOwner) по СВЕЖЕЙ записи дела в той же транзакции:
+    // карточка прежнего или параллельного рассмотрения заполняет только его пустые реквизиты (суд, номер, судья), поля текущего не трогает;
+    // неоднозначная — «Требует привязки» без изменений
+    const sfx=cardSt==='Апелляция'?'App':(cardSt==='Кассация'||cardSt==='Надзор')?'Cass':'',cSlot=sfx==='App'?'appeal':sfx==='Cass'?'cass':'first';let res={done:[]},own={kind:'current',id:''};
+    const rec=await crmRecUpdate('cases',c.id,rc=>{own=crmMonOwner(rc,x,cSlot);if(own.kind==='ask')return false;res=own.kind==='current'?crmCaseApplyCard(rc,card,sfx):{done:typeof procCardToProceeding==='function'?procCardToProceeding(rc,own.id,card,Date.now()):[]};if(!res.done.length)return false;addCaseHistoryEvent(rc,'courtCard','',res.done.join('; '),'monitor');});
+    if(own.kind==='ask'){if(!x.procAsk)x.procAsk=Date.now();await put('monitorEvents',x);continue;}
+    if(rec&&res.done.length)await crmCaseLogByNum(c.number,'flow','С сайта суда'+(own.kind!=='current'&&typeof procLabelOf==='function'?' («'+procLabelOf(rec,own.id)+'»)':'')+': '+res.done.join('; '));
+    if(own.kind!=='current'){x.proceedingId=own.id;delete x.procAsk;}x.status='applied';x.appliedAction='card';x.appliedAt=Date.now();await put('monitorEvents',x);}}
   }
   const okAny=added.length||updated;if(!opts.quiet)toast(okAny?`Добавлено событий: ${added.length}${updated?`, обновлено: ${updated}`:''}`:'Новых событий нет — дубликаты пропущены',!okAny);if(okAny&&crmMonAutoOn()){try{await crmMonAutoApply(null);}catch(e){console.warn('auto-apply',e);}}if(!opts.quiet){openMonitorCenter();renderDashboard();}}
 const crmMonAutoOn = () => localStorage.getItem('crm_mon_auto') !== '0';
@@ -7896,7 +7938,13 @@ function crmMonCourtFor(c, stage, e) { // v253: e — событие; если �
   if (!c[f[0]] && evCourt) { c[f[0]] = evCourt; c._courtFilled = f[0]; }
   return { court: c[f[0]] || evCourt, judge: c[f[1]] || '' };
 }
-const RE_ROOM_TEXT = /^(судебн\S*\s+)?зал|^каб(инет|\.)?\b|^кабинет|^помещени/i;
+// v170 (аудит сборки 169, А6.2): суд и судья заседания по владельцу события: прежнее или параллельное рассмотрение — из его сведений (суд
+// страницы — запасной), поле суда текущего не заполняется; текущее — как раньше (crmMonCourtFor)
+function crmMonCourtOwn(c, e, own) {
+  if (own && own.kind !== 'current' && own.p && typeof procView === 'function' && typeof procSlotDef === 'function') { const v = procView(own.p.fields || {}, procSlotDef(own.p.slot)); return { court: v.court || (e && e.court ? String(e.court) : ''), judge: v.judge || '' }; }
+  return crmMonCourtFor(c, crmMonStageOf(e), e);
+}
+const RE_ROOM_TEXT =/^(судебн\S*\s+)?зал|^каб(инет|\.)?\b|^кабинет|^помещени/i;
 const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен|вынесен\S* (определени|постановлени)|определени\S* о (подготовке|назначении|принятии|возбуждении|оставлении|возврат)|назначени\S* дела к/i; // v249
 const crmMonEventHead = e => String(e && e.title || '').replace(/\([^)]*\)/g, ' ').split(/\s\d{2}\.\d{2}\.\d{4}|\s—\s|:\s+/)[0].trim();
 const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(crmMonEventHead(e));
@@ -7957,7 +8005,9 @@ async function crmMonAutoApply(rows) {
       if (own.kind === 'ask') { if (!e.procAsk) { e.procAsk = Date.now(); await put('monitorEvents', e); } continue; }
       const pidOf = own.kind === 'current' ? '' : own.id;
       const b = crmMonHearingBits(e), list = byCase(c.id).filter(h => h.status !== 'Отменено' && (pidOf ? h.proceedingId === pidOf : (!h.proceedingId || h.proceedingId === own.id)));
-      const scE = crmMonCourtFor(c, crmMonStageOf(e), e), sameDay = list.filter(x => x.date === e.date); // v294: сначала точное совпадение по времени и суду
+      // v170 (аудит сборки 169, А6.2): суд и судья — рассмотрения-владельца (прежнее — из его сведений, затем со страницы), не текущих полей
+      const courtOf = () => crmMonCourtOwn(c, e, own);
+      const scE = courtOf(), sameDay = list.filter(x => x.date === e.date); // v294: сначала точное совпадение по времени и суду
       const sameCourt = sameDay.filter(x => !x.court || !scE.court || crmMonNorm(x.court) === crmMonNorm(scE.court));
       const tmin = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
       const near = x => { const a = tmin(x.time), c2 = tmin(b.time); return a === null || c2 === null || Math.abs(a - c2) <= 180; }; // v299: разница больше 3 часов — другое событие
@@ -7967,7 +8017,7 @@ async function crmMonAutoApply(rows) {
         // 11.10.2026 (Д2): у проведённого заседания без времени время дописывается (выгрузка календаря КАД); заданное время проведённого не меняется
         if (b.time && b.time !== h.time && (h.status !== 'Проведено' || !h.time)) { ch.push('время ' + (h.time || '—') + ' → ' + b.time); h.time = b.time; }
         if (b.room && b.room !== h.room) { ch.push('зал ' + (h.room || '—') + ' → ' + b.room); h.room = b.room; }
-        { const sc2 = crmMonCourtFor(c, crmMonStageOf(e), e); if (sc2.court && sc2.court !== h.court) { ch.push('суд ' + (h.court || '—') + ' → ' + sc2.court); h.court = sc2.court; if (sc2.judge && !e.judge) h.judge = sc2.judge; } if (h.result && RE_ROOM_TEXT.test(h.result)) { if (!h.room) h.room = h.result.replace(/^судебн\S*\s+/i, ''); h.result = ''; ch.push('итог «' + b.result + '» — это место, перенесено в зал'); } } // v246/v253
+        { const sc2 = courtOf(); if (sc2.court && sc2.court !== h.court) { ch.push('суд ' + (h.court || '—') + ' → ' + sc2.court); h.court = sc2.court; if (sc2.judge && !e.judge) h.judge = sc2.judge; } if (h.result && RE_ROOM_TEXT.test(h.result)) { if (!h.room) h.room = h.result.replace(/^судебн\S*\s+/i, ''); h.result = ''; ch.push('итог «' + b.result + '» — это место, перенесено в зал'); } } // v246/v253
         if (e.judge && !h.judge) { ch.push('судья ' + e.judge); h.judge = e.judge; }
         if (b.result && !h.result && e.date < today) { ch.push('результат: ' + b.result); h.result = b.result; }
         // v161 (аудит сборки 160, H1): прошедшая дата — не факт проведения. «Проведено» — только при результате (с сайта или уже записанном);
@@ -7976,12 +8026,12 @@ async function crmMonAutoApply(rows) {
         if (!ch.length) { e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); e.autoApplied = true; await put('monitorEvents', e); continue; }
         how = 'дополнено по данным суда: ' + ch.join(', '); n.updated++;
       } else if (e.date >= today) {
-        const scM = crmMonCourtFor(c, crmMonStageOf(e), e); // v271: переносить можно только заседание той же инстанции (тот же суд)
+        const scM = courtOf(); // v271: переносить можно только заседание той же инстанции (тот же суд)
         const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date) && (!x.court || !scM.court || crmMonNorm(x.court) === crmMonNorm(scM.court)));
         if (free.length === 1) { h = free[0]; how = `перенесено по данным суда: ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} → ${fmtDate(e.date)}${b.time ? ' ' + b.time : ''}`; h.movedFrom = { date: h.date, time: h.time || '', room: h.room || '' }; h.date = e.date; if (b.time) h.time = b.time; if (b.room) h.room = b.room; if (e.judge) h.judge = e.judge; if (scM.court && !h.court) h.court = scM.court; if (crmMonStageOf(e) && !h.stage) h.stage = crmMonStageOf(e); n.moved++; }
-        else { const sc = crmMonCourtFor(c, crmMonStageOf(e), e); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(pidOf ? { proceedingId: pidOf } : {}) }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } // v246/v253: суд по инстанции события, при пустом — с самой страницы
+        else { const sc = courtOf(); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } // v246/v253: суд по инстанции события, при пустом — с самой страницы
       } else {
-        const sc = crmMonCourtFor(c, crmMonStageOf(e), e); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: crmMonPastStatus(b.result), result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(pidOf ? { proceedingId: pidOf } : {}) }; if (!b.result) h.autoDone = Date.now(); hearings.push(h); how = 'прошедшее заседание записано по данным суда' + (b.result ? '' : ' (результата на сайте нет — «Дата прошла», уточните итог)'); n.hearings++;
+        const sc = courtOf(); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: crmMonPastStatus(b.result), result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; if (!b.result) h.autoDone = Date.now(); hearings.push(h); how = 'прошедшее заседание записано по данным суда' + (b.result ? '' : ' (результата на сайте нет — «Дата прошла», уточните итог)'); n.hearings++;
       }
       h.monitorEventId = h.monitorEventId || e.id; h.courtSync = Date.now();
       await put('hearings', h);
@@ -8033,6 +8083,17 @@ async function crmMonAutoApply(rows) {
       // v169 (P3): жалоба прежнего рассмотрения поля и сроки текущего не меняет (сторона новой жалобы не пересчитывается); неоднозначная — «Требует привязки»
       const cmpOwn = crmMonOwner(c, e, CMP_SLOT[crmComplaintInfo(e).inst]);
       if (cmpOwn.kind === 'ask') { if (!e.procAsk) { e.procAsk = Date.now(); await put('monitorEvents', e); } continue; }
+      // v170 (аудит сборки 169, раздел 5): жалоба АКТИВНОГО параллельного рассмотрения — свои последствия: срок устранения недостатков нашей
+      // жалобы — сроком дела с id этого рассмотрения; сторона не установлена при сроке в карточке — «требуется ручное действие» на «Сегодня»,
+      // а не «применено» молча. Прежнее (архивное) рассмотрение завершено — сроки по нему не ставятся
+      if (cmpOwn.kind === 'extra') {
+        let ch = [], need = '';
+        const rec = await crmRecUpdate('cases', c.id, rc => { const r = crmComplaintExtraApply(rc, e, cmpOwn.id); ch = r.ch; need = r.need; if (!ch.length) return false; addCaseHistoryEvent(rc, 'complaint', '', ch.join('; '), 'monitor'); });
+        if (!rec && ch.length) continue;
+        if (rec) { Object.assign(c, rec); touchedCases.set(c.id, c); await crmCaseLogByNum(c.number, 'flow', 'Жалоба по данным суда («' + (typeof procLabelOf === 'function' ? procLabelOf(rec, cmpOwn.id) : cmpOwn.id) + '»): ' + ch.join('; ')); n.complaints = (n.complaints || 0) + 1; }
+        e.cmpApplied = Date.now(); e.proceedingId = cmpOwn.id; delete e.procAsk; if (need) e.cmpNeed = need; else delete e.cmpNeed; e.autoApplied = !!ch.length || e.autoApplied; await put('monitorEvents', e);
+        continue;
+      }
       if (cmpOwn.kind !== 'current') {
         if (!e.cmpApplied || e.proceedingId !== cmpOwn.id) { e.cmpApplied = Date.now(); e.proceedingId = cmpOwn.id; delete e.procAsk; await put('monitorEvents', e); await crmCaseLogByNum(c.number, 'flow', 'Жалоба по данным суда относится к «' + (typeof procLabelOf === 'function' ? procLabelOf(c, cmpOwn.id) : cmpOwn.id) + '» — поля и сроки текущего рассмотрения не меняются'); }
         continue;
@@ -8149,6 +8210,7 @@ function crmComplaintLegacyExts(e) { const out = []; if (e && e.legacyExt) out.p
 // прежних по делу, дате, инстанции, подавшему и виду из raw — иначе та же жалоба стала бы второй записью, а её сроки потерялись бы.
 // v159 (аудит сборки 158, R4): одно дело — по непустому УИД, непустому номеру в суде или одинаковой привязке к делу; два пустых
 // признака одним делом не считаются, разные привязки (caseId) сопоставление запрещают
+function crmComplaintPidSuffix(ext) { const m = /\|p:([A-Za-z0-9_-]{1,80})$/.exec(String(ext || '')); return m ? m[1] : ''; }
 function crmComplaintLegacyMatch(live, x) {
   if (!x || x.eventType !== 'complaint' || !x.externalId) return null;
   const ro = crmMonRawObj(x), same = (a, b) => crmMonNorm(String(a || '')) === crmMonNorm(String(b || ''));
@@ -8157,6 +8219,11 @@ function crmComplaintLegacyMatch(live, x) {
     if (x.caseId && p.caseId && x.caseId !== p.caseId) continue;
     const sameUid = !!x.caseUid && p.caseUid === x.caseUid, sameNo = !!crmMonNorm(x.courtNo) && crmMonNorm(p.courtNo) === crmMonNorm(x.courtNo), sameCase = !!x.caseId && p.caseId === x.caseId;
     if (!(sameUid || sameNo || sameCase)) continue;
+    // v170 (аудит сборки 169, А4): жалобы разных рассмотрений не сливаются — суффикс ключа «|p:<id>» (ссылка параллельного рассмотрения)
+    // у старой и новой записи должен совпадать, известные id источника и владельца — тоже; ключ «прежнего поколения» — это тот же ключ без
+    // вида жалобы, а не ключ другого рассмотрения
+    if (crmComplaintPidSuffix(p.externalId) !== crmComplaintPidSuffix(x.externalId)) continue;
+    { const pp = p.srcPid || p.proceedingId || '', xp = x.srcPid || x.proceedingId || ''; if (pp && xp && pp !== xp) continue; }
     const rp = crmMonRawObj(p);
     if (same(rp.inst, ro.inst) && same(rp.by, ro.by) && same(rp.kind, ro.kind)) return p;
   }
@@ -8272,6 +8339,26 @@ function crmComplaintSideChanged(c, e, i, f, prevSide, who, events, priv) {
 // v159 (аудит сборки 158): events — события мониторинга дела (для R3: другие жалобы той же инстанции); сторона, выбранная пользователем
 // в карточке события (e.cmpSideManual), важнее вычисленной (R5); частная жалоба полей инстанции не заполняет (R3); расхождение даты срока
 // устранения с подтверждённым сроком — пометка srcCheck, а не молчание и не замена (R2)
+// v170 (аудит сборки 169, раздел 5): жалоба активного параллельного рассмотрения (частная жалоба и т. п.). Поля дела не меняются (они —
+// текущего основного рассмотрения); срок устранения недостатков НАШЕЙ жалобы — сроком дела с proceedingId и ключом «p:<id>|cmp:fix:<ключ>»
+// (правила сроков текущего его не видят). Ответ { ch, need }: need — почему контроля нет и нужно действие пользователя
+function crmComplaintExtraApply(c, e, procId) {
+  const i = crmComplaintInfo(e), ch = []; if (!e.date) return { ch, need: '' };
+  const who = (e.cmpSideManual === 'Наша жалоба' || e.cmpSideManual === 'Жалоба оппонента') ? e.cmpSideManual : (e.cmpSideManual === 'none' ? '' : crmComplaintWho(c, i.by));
+  e.cmpSide = who;
+  if (!i.fixDue || i.back) return { ch, need: '' };
+  if (who === 'Жалоба оппонента') return { ch, need: '' };
+  if (who !== 'Наша жалоба') return { ch, need: 'жалоба оставлена без движения (устранить до ' + fmtDate(i.fixDue) + '), а сторона не установлена — срок не создан; выберите сторону в листе события' };
+  c.deadlines = Array.isArray(c.deadlines) ? c.deadlines : [];
+  const key = 'p:' + procId + '|cmp:fix:' + (e.externalId || e.id), ex = c.deadlines.find(d => d && d.autoKey === key);
+  const lab = typeof procLabelOf === 'function' ? procLabelOf(c, procId) : '';
+  if (!ex) {
+    c.deadlines.push({ id: uid('СР'), title: 'Устранить недостатки ' + (i.kindLabel ? i.kindLabel.toLowerCase() : 'жалобы') + (lab ? ' — ' + lab : '') + ' (оставлена без движения)', date: i.fixDue, note: 'срок из карточки дела на сайте суда (параллельное рассмотрение) — проверьте по определению и подтвердите', done: false, kind: 'procedural',
+      baseEv: 'Жалоба оставлена без движения' + (i.by ? ' (' + i.by + ')' : ''), baseDate: e.date, norm: 'ст. 323, 333 ГПК РФ; ст. 263, 272 АПК РФ (сверить по КонсультантПлюс)', calcDate: i.fixDue, src: 'Судебный акт', autoKey: key, proceedingId: procId, confirmedAt: '', confirmedDate: '' });
+    c.deadlines.sort((a, b) => (a.date || '').localeCompare(b.date || '')); ch.push('срок устранения недостатков жалобы — до ' + fmtDate(i.fixDue));
+  } else if (!ex.confirmedAt && !ex.done && ex.date !== i.fixDue) { ex.date = i.fixDue; ex.calcDate = i.fixDue; ch.push('срок устранения недостатков жалобы — до ' + fmtDate(i.fixDue)); }
+  return { ch, need: '' };
+}
 function crmComplaintApply(c, e, events) {
   const i = crmComplaintInfo(e), f = CMP_FIELDS[i.inst]; if (!f || !e.date) return [];
   const ch = [], priv = crmComplaintIsPrivate(i), instName = i.inst === 'Надзор' ? 'надзор' : i.inst.toLowerCase();
@@ -8392,12 +8479,18 @@ function crmCaseFlowMissing(c, monAll, caseHearings) {
 async function crmCaseFlowAdd(eventId, caseId) { // v271: внести заседание из события — всегда новое, без эвристики переноса и фильтров статусов
   const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
   const c = (await getAll('cases')).find(x => x.id === (caseId || e.caseId)); if (!c) { toast('Дело не найдено', true); return; }
-  const b = crmMonHearingBits(e), st = crmMonStageOf(e), sc = crmMonCourtFor(c, st, e);
-  const exists = (await getAll('hearings')).some(h => (h.caseId === c.id || h.caseNum === c.number) && h.date === e.date && (h.time || '') === (b.time || '') && h.status !== 'Отменено');
+  const b = crmMonHearingBits(e), st = crmMonStageOf(e);
+  // v170 (аудит сборки 169, А6.1): рассмотрение-владелец — тот же разбор, что автоприменение; неоднозначное — выбор в листе события
+  const own = crmMonOwner(c, e, typeof PROC_STAGE_SLOT === 'object' ? PROC_STAGE_SLOT[st] : '');
+  if (own.kind === 'ask') { if (!e.procAsk) { e.procAsk = Date.now(); await put('monitorEvents', e); } toast('Не определить, к какому рассмотрению относится заседание — выберите рассмотрение в листе события', true); if (typeof openMonitorEventSheet === 'function') openMonitorEventSheet(e.id); return; }
+  const sc = crmMonCourtOwn(c, e, own); if (own.kind !== 'current') delete c._courtFilled;
+  // дубль — в том же рассмотрении (заседание прежнего с той же датой и временем — не дубль текущего)
+  const sameProc = h => own.kind === 'current' ? (!h.proceedingId || h.proceedingId === own.id) : h.proceedingId === own.id;
+  const exists = (await getAll('hearings')).some(h => (h.caseId === c.id || h.caseNum === c.number) && h.date === e.date && (h.time || '') === (b.time || '') && h.status !== 'Отменено' && sameProc(h));
   if (exists) { toast('Такое заседание уже есть в списке'); openCaseSheet(c.id); return; }
   const past = e.date < todayISO();
   const h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time || '', room: b.room || '', court: sc.court || '', judge: e.judge || sc.judge || '', stage: st || '',
-    status: past ? crmMonPastStatus(b.result) : 'Назначено', result: past ? (b.result || '') : '', ...(past && !b.result ? { autoDone: Date.now() } : {}), note: e.title || '', monitorEventId: e.id, courtSync: Date.now(), createdAt: Date.now() };
+    status: past ? crmMonPastStatus(b.result) : 'Назначено', result: past ? (b.result || '') : '', ...(past && !b.result ? { autoDone: Date.now() } : {}), note: e.title || '', monitorEventId: e.id, courtSync: Date.now(), createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) };
   await put('hearings', h);
   if (c._courtFilled) { const f0 = c._courtFilled; const cf = (await getAll('cases')).find(x => x.id === c.id); if (cf && !cf[f0]) { cf[f0] = c[f0]; addCaseHistoryEvent(cf, f0, '', c[f0], 'monitor'); await put('cases', cf); } }
   e.eventType = 'hearing'; e.status = 'applied'; e.appliedAction = 'hearing'; e.appliedRecordId = h.id; e.appliedAt = Date.now(); delete e.autoSkip; e.caseId = c.id; e.caseNum = c.number; await put('monitorEvents', e);
@@ -8521,21 +8614,29 @@ function crmFlowActOffers(cases, events) {
     }
     if (own.kind === 'ask') { out.push({ e, c, act, field: f[0], label: f[1], current: '', ask: own.cands || [] }); continue; }
     if (c[f[0]] === e.date) continue;
-    out.push({ e, c, act, field: f[0], label: f[1], current: c[f[0]] || '' });
+    // v170 (А3.2): id текущего рассмотрения, которому адресовано предложение, — запись сверит его внутри транзакции
+    out.push({ e, c, act, field: f[0], label: f[1], current: c[f[0]] || '', curId: own.id || '' });
   }
   return out;
 }
 // procKey — рассмотрение, выбранное пользователем для неоднозначного акта (id текущего или прежнего)
-async function crmFlowActApply(eventId, procKey) {
+// v170 (аудит сборки 169, А3.2): expect — id рассмотрения, которому адресовал предложение показанный экран; владелец пересчитывается
+// внутри транзакции по свежей записи дела — новое рассмотрение, созданное между показом (или чтением) и записью, акт не получит
+async function crmFlowActApply(eventId, procKey, expect) {
   const e = (await getAll('monitorEvents')).find(x => x.id === eventId); if (!e) return;
   if (procKey) { e.proceedingId = procKey; delete e.procAsk; }
   const cases = await getAll('cases');
   const o = crmFlowActOffers(cases, [e])[0]; if (!o) { toast('Предложение устарело', true); if (typeof crmFlowActRender === 'function') crmFlowActRender(); return; }
   if (o.ask) { toast('Выберите, к какому рассмотрению относится акт', true); return; }
-  let msgs = [], r = '', fail = '';
+  const want = o.procId || o.curId || '', staleMsg = 'Рассмотрения дела изменились после показа предложения (другая вкладка или устройство) — акт не записан. Проверьте, к какому рассмотрению он относится, и подтвердите снова';
+  if (expect && want && expect !== want) { toast(staleMsg, true); if (typeof crmFlowActRender === 'function') crmFlowActRender(); return; }
+  let msgs = [], r = '', fail = '', procTo = '';
   // v169: запись — к свежей записи дела одной транзакцией с журналом (recUpdate)
   const rec = await crmRecUpdate('cases', o.c.id, c => {
-    if (o.procId) { r = typeof procActToProceeding === 'function' ? procActToProceeding(c, o.procId, o.field, e.date, o.label, Date.now()) : ''; if (r !== 'set') { fail = r === 'other' ? 'в прежнем рассмотрении уже записана другая дата' : 'рассмотрение не найдено'; return false; } return undefined; }
+    // то же рассмотрение могло за это время уйти в историю (его id остаётся прежним) — тогда дата пишется в его сведения, а не в поля нового
+    procTo = o.procId || '';
+    if (want && typeof procEventOwner === 'function') { const own2 = crmMonOwner(c, e, FLOW_ACT_SLOT[o.act]); if (own2.id !== want) { fail = staleMsg; return false; } if (own2.kind !== 'current') procTo = own2.id; }
+    if (procTo) { r = typeof procActToProceeding === 'function' ? procActToProceeding(c, procTo, o.field, e.date, o.label, Date.now()) : ''; if (r !== 'set') { fail = r === 'other' ? 'в прежнем рассмотрении уже записана другая дата' : 'рассмотрение не найдено'; return false; } return undefined; }
     const prev = JSON.parse(JSON.stringify(c));
     c[o.field] = e.date;
     if (o.act === 'noMotion' && !c.i1FixDueDate) c.i1FixDueDate = crmFixDueFrom(e); // v234
@@ -8544,8 +8645,8 @@ async function crmFlowActApply(eventId, procKey) {
     if (msgs.length) addCaseHistoryEvent(c, 'deadline', '', msgs.join(' | '), 'monitor');
   });
   if (!rec) { toast('Не записано: ' + (fail || 'дело не найдено'), true); return; }
-  e.actApplied = Date.now(); if (o.procId) e.proceedingId = o.procId; await put('monitorEvents', e);
-  toast(`${o.label}: ${fmtDate(e.date)} записана в ${o.procId ? '«' + o.procLabel + '»' : rec.number}${msgs.length ? '. ' + msgs.join(' | ') + ' — проверьте и подтвердите' : ''}`);
+  e.actApplied = Date.now(); if (procTo) e.proceedingId = procTo; await put('monitorEvents', e);
+  toast(`${o.label}: ${fmtDate(e.date)} записана в ${procTo ? '«' + (typeof procLabelOf === 'function' ? procLabelOf(rec, procTo) : o.procLabel) + '»' : rec.number}${msgs.length ? '. ' + msgs.join(' | ') + ' — проверьте и подтвердите' : ''}`);
   if (typeof renderDashboard === 'function') renderDashboard(); if (typeof renderCases === 'function') renderCases(); if (typeof navBadgeRefresh === 'function') navBadgeRefresh();
 }
 async function crmFlowActSkip(eventId) {
@@ -8634,13 +8735,15 @@ async function crmCollectorPack() {
   const pl = c => typeof procCollectorLinks === 'function' ? procCollectorLinks(c) : [];
   const cases = all.filter(c => !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено' && (c.link || c.linkApp || c.linkCass || pl(c).length));
   if (!cases.length) { toast('Нет незавершённых дел со ссылками на сайт суда', true); return null; }
+  // v170 (аудит сборки 169, А2): ссылки ТЕКУЩИХ рассмотрений — с id рассмотрения (cpid); коллектор 3.25 возвращает его в событиях
+  const cp = (c, s) => typeof procCurrentId === 'function' ? procCurrentId(c, s) : '';
   const rows = cases.map(c => ({
     number: c.number || '', uid: c.caseUid || '', stage: c.stage || '',
     courtNo: c.courtNo || '', courtNoApp: c.courtNoApp || '', courtNoCass: c.courtNoCass || '',
     links: [
-      c.link    ? { stage: 'Первая инстанция', courtNo: c.courtNo    || '', url: c.link }    : null,
-      c.linkApp ? { stage: 'Апелляция',        courtNo: c.courtNoApp || '', url: c.linkApp } : null,
-      c.linkCass? { stage: 'Кассация',         courtNo: c.courtNoCass|| '', url: c.linkCass }: null
+      c.link    ? { stage: 'Первая инстанция', courtNo: c.courtNo    || '', url: c.link, cpid: cp(c, 'first') }    : null,
+      c.linkApp ? { stage: 'Апелляция',        courtNo: c.courtNoApp || '', url: c.linkApp, cpid: cp(c, 'appeal') } : null,
+      c.linkCass? { stage: 'Кассация',         courtNo: c.courtNoCass|| '', url: c.linkCass, cpid: cp(c, 'cass') }: null
     ].filter(Boolean).concat(pl(c))
   }));
   return { format: 'crm-advokat-links', version: 1, exportedAt: new Date().toISOString(), cases: rows };
@@ -8755,13 +8858,15 @@ async function monLinksPackQuiet(url) {
   // v169 (выпуск В рассмотрений): ссылки параллельных рассмотрений — с id рассмотрения (pid; ui/proceedings.js, procCollectorLinks)
   const pl = c => typeof procCollectorLinks === 'function' ? procCollectorLinks(c) : [];
   const cases = all.filter(c => c && !c._deleted && !c.archived && c.status !== 'Завершено' && c.stage !== 'Завершено' && (c.link || c.linkApp || c.linkCass || pl(c).length));
+  // v170 (аудит сборки 169, А2): ссылки текущих рассмотрений — с id рассмотрения (cpid, коллектор 3.25); новый id — новый отпечаток, перечень уходит
+  const cp = (c, s) => typeof procCurrentId === 'function' ? procCurrentId(c, s) : '';
   const rows = cases.map(c => ({
     number: c.number || '', uid: c.caseUid || '', stage: c.stage || '',
     courtNo: c.courtNo || '', courtNoApp: c.courtNoApp || '', courtNoCass: c.courtNoCass || '',
     links: [
-      c.link ? { stage: 'Первая инстанция', courtNo: c.courtNo || '', url: c.link } : null,
-      c.linkApp ? { stage: 'Апелляция', courtNo: c.courtNoApp || '', url: c.linkApp } : null,
-      c.linkCass ? { stage: 'Кассация', courtNo: c.courtNoCass || '', url: c.linkCass } : null
+      c.link ? { stage: 'Первая инстанция', courtNo: c.courtNo || '', url: c.link, cpid: cp(c, 'first') } : null,
+      c.linkApp ? { stage: 'Апелляция', courtNo: c.courtNoApp || '', url: c.linkApp, cpid: cp(c, 'appeal') } : null,
+      c.linkCass ? { stage: 'Кассация', courtNo: c.courtNoCass || '', url: c.linkCass, cpid: cp(c, 'cass') } : null
     ].filter(Boolean).concat(pl(c))
   })).sort((a, b) => String(a.number).localeCompare(String(b.number)));
   const sig = await crmMonHash(JSON.stringify({ u: String(url || '').trim().replace(/\/+$/, ''), rows }));
@@ -12425,16 +12530,21 @@ function formModelHearing(v, prev) {
     result: v.status === 'Проведено' ? (v.result || '') : ((prev && prev.result) || ''), comment: v.comment || '',
     ...(hearingAttendedOf(v, prev) === undefined ? {} : { attended: hearingAttendedOf(v, prev) }),
     participation: HEARING_PARTICIPATION.includes(v.participation) ? v.participation : '', prep: String(v.prep || '').trim(), prepDays: v.prepDays === '' || v.prepDays == null ? PREP_DAYS_DEFAULT : Math.max(0, Math.min(30, Number(v.prepDays) || 0)), prepDone: String(v.prep || '').trim() === String((prev && prev.prep) || '').trim() ? ((prev && prev.prepDone) || '') : '',
-    ...formHearingProc(v, prev) } };
+    ...formHearingProc(v, prev, formCaseLink(v.caseNum, prev)) } };
 }
 // v169 (аудит «Переезд и рассмотрения дела», P7): рассмотрение заседания — выбор в форме (ui/proceedings.js, procHearingOptions); пусто —
 // текущее рассмотрение инстанции. Поле в форме не показано (у дела нет других рассмотрений) — прежнее значение не трогается.
 // Выбор другого рассмотрения — ручное решение: отметки переноса (procAuto) снимаются, «Вернуть как текущее» такое заседание не трогает
-function formHearingProc(v, prev) {
-  if (v.proc === undefined || v.proc === null) return {};
+// v170 (аудит сборки 169, А7.2): ручной выбор помечается procManual — отмена «Нового рассмотрения» его не снимает; А6: заседание перенесено в
+// другое дело — id рассмотрения прежнего дела не переносится (выбор в форме нового дела или пусто)
+function formHearingProc(v, prev, link) {
   const was = (prev && prev.proceedingId) || '';
+  if (v.proc === undefined || v.proc === null) {
+    if (was && link && link.caseId && prev.caseId && link.caseId !== prev.caseId) return { proceedingId: '', procAuto: null, procOp: '', procManual: 0 };
+    return {};
+  }
   if (String(v.proc) === was) return {};
-  return { proceedingId: String(v.proc || ''), procAuto: null, procOp: '' };
+  return { proceedingId: String(v.proc || ''), procAuto: null, procOp: '', procManual: v.proc ? 1 : 0 };
 }
 
 // ── дело ──
@@ -12670,9 +12780,12 @@ async function saveTaskForm(id) {
 
 // ── заседание ──
 // выбор рассмотрения в форме заседания — только у дела, где есть прежние или параллельные рассмотрения
-function hearingProcSelectHtml(c, val) {
+// v170 (аудит сборки 169, А6.3): новое заседание — сразу с id текущего рассмотрения инстанции дела (после следующего «Нового рассмотрения»
+// принадлежность не угадывается по дате)
+function hearingProcSelectHtml(c, val, isNew) {
   const opts = c && typeof procHearingOptions === 'function' ? procHearingOptions(c) : [];
   if (!opts.length) return '';
+  if (!val && isNew && typeof procCurrentId === 'function' && typeof procHearingSlot === 'function') { const cid = procCurrentId(c, procHearingSlot({}, c)); if (opts.some(o => o[0] === cid)) val = cid; }
   if (val && !opts.some(o => o[0] === val)) opts.push([val, 'рассмотрение удалено из дела']);
   return fSelect('hf-proc', 'Рассмотрение', val || '', opts);
 }
@@ -12685,7 +12798,7 @@ async function openHearingForm(id, presetCaseNum, presetProc) {
   const h = prev || { caseNum: presetCaseNum || '', court: pc ? pc.court : '', judge: pc ? pc.judge : '', status: 'Назначено' };
   const body = `${caseOpenBar('hf-caseNum', h.caseNum)}<div class="form-grid">
     ${fSelect('hf-caseNum', 'Дело', h.caseNum, cases.map(c => [c.number, [c.number, c.client].filter(Boolean).join(' · ')]), true)}
-    <div id="hf-proc-box" style="grid-column:1/-1">${hearingProcSelectHtml(caseOfRec(h),presetProc !== undefined && !id ? presetProc : (h.proceedingId || ''))}</div>
+    <div id="hf-proc-box" style="grid-column:1/-1">${hearingProcSelectHtml(caseOfRec(h),presetProc !== undefined && !id ? presetProc : (h.proceedingId || ''), !id)}</div>
     ${fInput('hf-date', 'Дата *', h.date, 'type="date"')}${fInput('hf-time', 'Время', h.time, 'type="time"')}
     <div class="info-box warning" id="hf-poa" role="status" style="grid-column:1/-1" hidden></div>
     ${fCombo('hf-court', 'Суд', h.court, 'courts')}${fInput('hf-room', 'Зал', h.room, 'autocomplete="off"')}
@@ -12697,7 +12810,7 @@ async function openHearingForm(id, presetCaseNum, presetProc) {
   openSheet(id ? 'Правка заседания' : 'Новое заседание', body, UI.cur ? true : undefined);
   // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
   if (prev && typeof formRecMark === 'function') formRecMark('hearings', prev);
-  { const s2 = document.getElementById('hf-caseNum'); if (s2) s2.addEventListener('change', () => { const box = document.getElementById('hf-proc-box'); if (box) box.innerHTML = hearingProcSelectHtml(CASES_BY_NUM[s2.value], ''); }); }
+  { const s2 = document.getElementById('hf-caseNum'); if (s2) s2.addEventListener('change', () => { const box = document.getElementById('hf-proc-box'); if (box) box.innerHTML = hearingProcSelectHtml(CASES_BY_NUM[s2.value], '', true); }); }
   const sel = document.getElementById('hf-caseNum'); if (sel && !id) sel.onchange = () => { const c = CASES_BY_NUM[sel.value]; if (c) { if (!fv('hf-court')) document.getElementById('hf-court').value = c.court || ''; if (!fv('hf-judge')) document.getElementById('hf-judge').value = c.judge || ''; } };
   // Е11 (13.10.2026): доверенность на дату заседания — при открытии и при смене дела, даты, статуса (screens/poa.js)
   if (typeof poaHearingFormCheck === 'function') { ['hf-caseNum', 'hf-date', 'hf-status'].forEach(k => { const el = document.getElementById(k); if (el) el.addEventListener('change', () => { poaHearingFormCheck().catch(e => logErr('poa:hearing', e)); }); }); poaHearingFormCheck().catch(e => logErr('poa:hearing', e)); }
@@ -14331,7 +14444,7 @@ function caseMoneyOpen() { const g = document.getElementById('cm-money'); if (g)
 function caseJudgeModel(c, hearings) {
   if (c && c.judge) return { judge: c.judge, from: '', text: c.judge };
   // v168: судья прежнего рассмотрения (proceedingId) текущим не подставляется
-  const hs = (hearings || []).filter(h => h && !h._deleted && !h.proceedingId && h.judge && c && (h.caseId === c.id || (c.number && h.caseNum === c.number)) && (!h.stage || h.stage === 'Первая инстанция'))
+  const hs = (hearings || []).filter(h => h && !h._deleted && !(typeof procIsForeign === 'function' ? procIsForeign(c, h.proceedingId) : !!h.proceedingId) && h.judge && c && (h.caseId === c.id || (c.number && h.caseNum === c.number)) && (!h.stage || h.stage === 'Первая инстанция'))
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
   if (!hs.length) return { judge: '', from: '', text: '' };
   const from = 'по заседанию ' + fmtDate(hs[0].date);
@@ -18984,9 +19097,38 @@ function integrityAccum(d, cases, out) {
     for (const dl of dls) if (dl.srcCheck || dl.sideCheck) out.push({ type: 'Сроки ждут вашего решения', label: t(c) + ' · ' + (dl.title || 'срок'), detail: dl.srcCheck ? 'На сайте суда иная дата — «Принять дату суда» или «Оставить мою»' : 'Сторона жалобы изменена — «Проверено — оставить срок» или «Снять срок»', open: ['integrityOpenDl', key(dl)] });
   }
   for (const h of live(d.hearings)) if (h.status === 'Проведено' && !String(h.result || '').trim() && h.monitorEventId && h.date && (!today || h.date < today)) out.push({ type: 'Проведено без результата (по данным суда)', label: 'Заседание ' + fmtDate(h.date) + (h.caseNum ? ' · ' + h.caseNum : ''), detail: 'Программа до 16.10.2026 ставила «Проведено» прошедшему заседанию без результата на сайте — укажите итог или статус «Дата прошла»', open: ['openHearingForm', h.id] });
+  if (typeof procList === 'function') integrityProc(d, cases, out);
   for (const f of live(d.finance)) {
     const del = (f._delItems && f._delItems.stages) || {}, seen = {};
     for (const s of Array.isArray(f.stages) ? f.stages : []) { if (!s || del[s.id]) continue; const k = String(s.name || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim() + '|' + Number(s.sum || 0); if (seen[k]) { out.push({ type: 'Повторяющиеся этапы счёта', label: 'Счёт · ' + (f.client || '') + ' · ' + (f.service || ''), detail: 'Этап «' + (s.name || '') + '» на ' + fmtMoney(s.sum || 0) + ' записан дважды — если это не два разных этапа (так бывало при создании счёта на двух устройствах до 15.10.2026), уберите лишний', open: ['openFinanceSheet', f.id] }); break; } seen[k] = 1; }
+  }
+}
+// v170 (аудит сборки 169, раздел 9): связи рассмотрений дела, накопленные до исправлений А1–А7, — только показ, решение за пользователем:
+// событие суда со ссылки одного рассмотрения, отнесённое к другому; ссылки на рассмотрение, которого в деле нет; жалоба с ключами разных
+// рассмотрений; два новых рассмотрения одной инстанции с разных устройств; событие параллельного рассмотрения без контроля; одинаковая дата
+// акта у прежнего и текущего рассмотрения (кандидат, не доказательство); заседания без отметки в инстанции с прежними рассмотрениями
+function integrityProc(d, cases, out) {
+  const live = a => (a || []).filter(x => x && !x._deleted), t = c => 'Дело ' + (c.number || 'без номера'), byId = {}; cases.forEach(c => { byId[c.id] = c; });
+  const known = c => new Set(PROC_SLOTS.map(s => procCurrentId(c, s.slot)).concat(procList(c).map(p => p.id)));
+  const sfx = ext => { const m = /\|p:([A-Za-z0-9_-]{1,80})$/.exec(String(ext || '')); return m ? m[1] : ''; };
+  for (const e of live(d.monitorEvents)) {
+    const c = byId[e.caseId]; if (!c) continue;
+    const src = procSrcPidOf(e), ids = known(c), lab = 'Событие ' + (e.date ? fmtDate(e.date) + ' · ' : '') + String(e.title || '').slice(0, 60);
+    if (e.proceedingId && !ids.has(e.proceedingId)) out.push({ type: 'Ссылка на рассмотрение, которого нет', label: t(c) + ' · ' + lab, detail: 'Событие отнесено к рассмотрению, которого в деле нет (удалено или не дошло обменом) — выберите рассмотрение заново', open: ['openMonitorEventSheet', e.id] });
+    else if (src && ids.has(src) && procList(c).some(p => p.id === src) && (e.proceedingId ? e.proceedingId !== src : (e.actApplied || e.cmpApplied || e.status === 'applied')))
+      out.push({ type: 'Событие отнесено не к своему рассмотрению', label: t(c) + ' · ' + lab, detail: 'Собрано со ссылки «' + procLabelOf(c, src) + '», а применено к ' + (e.proceedingId ? '«' + procLabelOf(c, e.proceedingId) + '»' : 'текущему рассмотрению') + ' — проверьте даты и сроки (так бывало до сервера 193)', open: ['openMonitorEventSheet', e.id] });
+    if (e.eventType === 'complaint' && typeof crmComplaintLegacyExts === 'function' && crmComplaintLegacyExts(e).some(k => sfx(k) !== sfx(e.externalId))) out.push({ type: 'Жалоба с ключами разных рассмотрений', label: t(c) + ' · ' + lab, detail: 'Запись жалобы объединила ключи разных рассмотрений (до 18.10.2026) — проверьте жалобы этого дня на сайте суда и сроки по ним', open: ['openMonitorEventSheet', e.id] });
+    if (e.cmpNeed && !e.cmpNeedSeen) out.push({ type: 'Контроль по параллельному рассмотрению не создан', label: t(c) + ' · ' + lab, detail: e.cmpNeed, open: ['openMonitorEventSheet', e.id] });
+  }
+  for (const h of live(d.hearings)) { const c = byId[h.caseId] || cases.find(x => h.caseNum && x.number === h.caseNum); if (c && h.proceedingId && !known(c).has(h.proceedingId)) out.push({ type: 'Ссылка на рассмотрение, которого нет', label: 'Заседание ' + fmtDate(h.date) + ' · ' + (c.number || ''), detail: 'Заседание отнесено к рассмотрению, которого в деле нет — выберите рассмотрение в форме заседания', open: ['openHearingForm', h.id] }); }
+  for (const c of cases) {
+    const ids = known(c), list = procList(c);
+    for (const dl of c.deadlines || []) if (dl && dl.proceedingId && !ids.has(dl.proceedingId)) out.push({ type: 'Ссылка на рассмотрение, которого нет', label: t(c) + ' · ' + (dl.title || 'срок'), detail: 'Срок относится к рассмотрению, которого в деле нет', open: ['integrityOpenDl', c.id + '|' + (dl.id || '')] });
+    for (const p of list.filter(x => x.conflictOf && x.status !== 'archived')) out.push({ type: 'Два новых рассмотрения одной инстанции', label: t(c) + ' · ' + procLabelOf(c, p.id), detail: 'Созданы на разных устройствах — объедините или оставьте оба (строка на «Сегодня»)', open: ['openCaseSheet', c.id] });
+    for (const def of PROC_SLOTS) {
+      const cur = procView(c, def).date; if (!cur) continue;
+      for (const p of list.filter(x => x.slot === def.slot && x.status === 'archived')) if (procView(p.fields, def).date === cur) out.push({ type: 'Одна дата акта у прежнего и текущего рассмотрения', label: t(c) + ' · ' + def.title, detail: 'У «' + procLabelOf(c, p.id) + '» и текущего — ' + fmtDate(cur) + '. Возможно, дата прежнего акта записана в текущее (до 18.10.2026) — проверьте; это не обязательно ошибка', open: ['openCaseSheet', c.id] });
+    }
   }
 }
 // паспорт срока из «Проверки данных»: ключ «дело|срок»
@@ -19007,7 +19149,7 @@ async function caseLinkFixApply(store, id, caseId) {
   toast(c ? 'Запись оставлена за делом ' + (c.number || '') : 'Запись отвязана от дела'); closeSheet(); openIntegritySheet();
 }
 async function openIntegritySheet(mode) {
-  const d = {}; for (const st of ['cases', 'clients', ...INTEGRITY_STORES.map(x => x[0])]) { try { d[st] = await getAll(st); } catch (e) { logErr('integrity:' + st, e); d[st] = []; } }
+  const d = {}; for (const st of ['cases', 'clients', 'monitorEvents', ...INTEGRITY_STORES.map(x => x[0])]) { try { d[st] = await getAll(st); } catch (e) { logErr('integrity:' + st, e); d[st] = []; } }
   let rows = []; try { rows = integrityModel(d); } catch (e) { logErr('integrity', e); toast('Не удалось проверить данные — подробности в журнале ошибок', true); return; }
   const types = [...new Set(rows.map(r => r.type))];
   const body = rows.length ? types.map(t => `<div class="section-label">${esc(t)} · ${rows.filter(r => r.type === t).length}</div><div class="list-rows">${rows.filter(r => r.type === t).slice(0, 50).map(r => `<button type="button" class="list-btn" onclick="${esc(r.open[0])}('${jsq(r.open[1])}')"><span>${esc(r.label)}</span><span class="muted">${esc(r.detail)}</span></button>`).join('')}${rows.filter(r => r.type === t).length > 50 ? '<p class="small muted">Показаны первые 50</p>' : ''}</div>`).join('')
@@ -19355,6 +19497,9 @@ function procCurrentId(c, slot) {
   const gen = procList(c).filter(p => p.slot === slot && p.status === 'archived').length;
   return 'pr-' + procHash(String(c && c.id || '') + '|' + slot + '|gen' + gen);
 }
+// v170 (аудит сборки 169, А6): запись (заседание, срок) относится к НЕ текущему рассмотрению — id есть и он не id текущего ни одной
+// инстанции. Пустой id и id текущего — свои (новые заседания несут id и текущего рассмотрения)
+function procIsForeign(c, pid) { if (!pid) return false; if (!c) return true; return !PROC_SLOTS.some(d => procCurrentId(c, d.slot) === pid); }
 // инстанция заседания: явная отметка, иначе по стадии дела на дату (hearingStageOf, screens/today.js); суд ВС — «Верховный Суд»
 function procHearingSlot(h, c) {
   const s = typeof hearingStageOf === 'function' ? hearingStageOf(h, c) : (h && h.stage) || (c && c.stage) || '';
@@ -19385,7 +19530,7 @@ function procModel(c, hearings) {
     if (has || pcs[def.slot]) rows.push({ key: 'cur:' + def.slot, id: procCurrentId(c, def.slot), slot: def.slot, n: ++n, kind: 'current', p: null, view: procView(c, def), cur: pcs[def.slot] || null, pending: !has });
     extra.forEach(p => rows.push({ key: p.id, id: p.id, slot: def.slot, n: ++n, kind: 'extra', p, view: procView(p.fields, def) }));
   }
-  rows.forEach(r => { r.label = procSlotDef(r.slot).title + ' №' + r.n; r.hearings = hs.filter(h => r.kind === 'current' ? (!h.proceedingId || h.proceedingId === r.id) && procHearingSlotNow(h, c) === r.slot : h.proceedingId === r.id); });
+  rows.forEach(r => { r.label = procSlotDef(r.slot).title + ' №' + r.n; r.hearings = hs.filter(h => r.kind === 'current' ? h.proceedingId === r.id || (!h.proceedingId && procHearingSlotNow(h, c) === r.slot) : h.proceedingId === r.id); });
   return rows;
 }
 function procLabelOf(c, id) { const r = procModel(c, []).find(x => x.id === id); return r ? r.label + (r.kind === 'archived' ? ' (прежнее)' : r.kind === 'extra' ? ' (параллельное)' : '') : ''; }
@@ -19397,7 +19542,9 @@ function procNewDefaults(c, want) {
   const target = PROC_TARGETS.includes(want) ? want : PROC_TARGETS[Math.min(Math.max(hi - 1, 0), 2)], hd = PROC_SLOTS[hi], v = procView(c, hd), tv = procView(c, procSlotDef(target));
   const actOf = (d, vv) => [d.act.charAt(0).toUpperCase() + d.act.slice(1), vv.date ? 'от ' + (typeof fmtDate === 'function' ? fmtDate(vv.date) : vv.date) : '', vv.no ? '(дело № ' + vv.no + ')' : ''].filter(Boolean).join(' ');
   // v169 (аудит, 6.3): отменённый акт и акт об отмене — разные поля: основание возврата — акт вышестоящей инстанции, отменён — акт целевой
-  return { target, basis: actOf(hd, v) + (v.result ? ' — ' + v.result : ''), cancelled: hd.slot !== target && tv.date ? actOf(procSlotDef(target), tv) : '', court: tv.court };
+  // v170 (А2): процессуальная граница начала нового рассмотрения — дата акта об отмене (вышестоящей инстанции); событие «направлено на
+  // новое рассмотрение» уточняет её в openProcNew
+  return { target, basis: actOf(hd, v) + (v.result ? ' — ' + v.result : ''), cancelled: hd.slot !== target && tv.date ? actOf(procSlotDef(target), tv) : '', court: tv.court, from: hd.slot !== target ? procLastActDate(c, hd) : '' };
 }
 // что уйдёт в историю при новом рассмотрении в инстанции target: она сама и инстанции выше, где есть сведения (или текущее без реквизитов);
 // skip — инстанции выше целевой, которые пользователь оставил текущими (предпросмотр, п. 8.1 аудита). Параллельные — никогда.
@@ -19443,6 +19590,8 @@ function procHearingTag(h, x, op) {
 // снимается, только если его значение не меняли (v168 хранил одни имена полей — procFill: тогда сверка со значением прежнего рассмотрения)
 function procHearingUntag(h, id, p) {
   if (!h || h.proceedingId !== id) return null;
+  // v170 (аудит сборки 169, А7.2): отнесено к рассмотрению вручную (форма заседания) или не программой при переносе — не снимается
+  if (h.procManual || !(h.procAuto || Array.isArray(h.procFill))) return null;
   const def = procSlotDef(p && p.slot), view = def ? procView(p.fields || {}, def) : {}, kept = [];
   const auto = h.procAuto || Object.fromEntries((Array.isArray(h.procFill) ? h.procFill : []).map(k => [k, k === 'stage' ? (def ? def.stage : '') : view[k] || '']));
   for (const [k, v] of Object.entries(auto)) { if (String(h[k] || '') === String(v || '')) delete h[k]; else kept.push(k); }
@@ -19463,13 +19612,19 @@ function procArchiveApply(c, target, input, now, today, hearings) {
       const t = slotOf || target; return { repeat: true, archived: [], renamed: 0, tagged: [], id: procCurrentId(c, t), label: (procModel(c, []).find(r => r.kind === 'current' && r.slot === t) || {}).label || procSlotDef(t).title };
     }
   }
+  // v170 (аудит сборки 169, А8): форма помнит текущие рассмотрения на момент открытия (expect: инстанция → id); другая вкладка или
+  // устройство их уже сменили — устаревшее намерение к новому состоянию не применяется (operationId защищает повтор ОДНОЙ команды)
+  if (input.expect && typeof input.expect === 'object') {
+    const moved = Object.keys(input.expect).filter(s => procSlotDef(s) && input.expect[s] && input.expect[s] !== procCurrentId(c, s));
+    if (moved.length) { const rows = procModel(c, []); return { stale: true, error: 'Пока форма была открыта, рассмотрения дела изменились (другая вкладка или устройство): сейчас текущие — ' + moved.map(s => (rows.find(r => r.kind === 'current' && r.slot === s) || { label: procSlotDef(s).title }).label).join(', ') + '. Новое рассмотрение, возможно, уже создано — закройте форму и посмотрите раздел «Рассмотрения дела»; если нужен ещё один цикл — откройте форму заново' }; }
+  }
   const defs = procArchiveSlots(c, target, input.skip);
   if (!defs.length) return { error: 'В деле нет сведений о прежнем рассмотрении в этой инстанции и выше — новое рассмотрение не нужно: заполните инстанцию в форме дела («Изменить»)' };
   const cBefore = JSON.parse(JSON.stringify(c)), before = procModel(c, []), list = Array.isArray(c.proceedings) ? c.proceedings.slice() : [], archived = []; let renamed = 0;
   for (const def of defs) {
     const data = procSlotData(c, def), id = procCurrentId(c, def.slot), cur = (c.procCurrent || {})[def.slot] || null;
     const row = before.find(r => r.kind === 'current' && r.slot === def.slot);
-    if (!list.some(p => p && p.id === id)) list.push({ id, slot: def.slot, status: 'archived', fields: data, basis: cur ? cur.basis || '' : '', cancelled: cur ? cur.cancelled || '' : '', after: cur ? cur.after || '' : '', startedAt: cur ? cur.startedAt || '' : '',
+    if (!list.some(p => p && p.id === id)) list.push({ id, slot: def.slot, status: 'archived', fields: data, basis: cur ? cur.basis || '' : '', cancelled: cur ? cur.cancelled || '' : '', after: cur ? cur.after || '' : '', startedAt: cur ? cur.startedAt || '' : '', from: cur ? cur.from || '' : '',
       archivedAt: today, endWhy: input.basis || '', endCancelled: def.slot === target ? (input.cancelled || '') : '', op: input.op || '', createdAt: Math.max(now, procTomb(c, id) + 1), updatedAt: Math.max(now, procTomb(c, id) + 1) });
     archived.push({ id, slot: def.slot, label: row ? row.label : def.title, view: procView(data, def) });
     for (const k of procSlotKeys(c, def)) { const v = c[k]; if (procEmpty(v)) continue; if (procJournaled(k)) procEv(c, k, String(v), '', 'proceeding'); c[k] = ''; }
@@ -19480,7 +19635,12 @@ function procArchiveApply(c, target, input, now, today, hearings) {
   for (const [k, v] of [[td.court, input.court], [td.no, input.courtNo], [td.judge, input.judge], [td.link, input.link]]) if (k && v) { if (procJournaled(k)) procEv(c, k, String(c[k] || ''), String(v), 'proceeding'); c[k] = String(v); set[k] = String(v); }
   const pc = Object.assign({}, c.procCurrent || {}); for (const d of defs) delete pc[d.slot];
   const prevT = archived.find(a => a.slot === target) || archived[0];
-  pc[target] = { id: newId, op: input.op || '', basis: input.basis || '', cancelled: input.cancelled || '', after: prevT ? prevT.id : '', startedAt: today, set, remandEvent: input.remandEvent || '' };
+  // v170: from — процессуальная граница начала (событие «направлено на новое рассмотрение» или акт об отмене; А2), u — метка правки для
+  // слияния по инстанциям (А5), prevStage/prevStatus — для отмены операции целиком (А7.3)
+  // поле не передано (вызов без формы) — дата акта вышестоящей инстанции, ушедшего в историю этой же операцией; очищено в форме — неизвестна
+  let autoFrom = ''; for (const a of archived) if (a.slot !== target) { const d0 = procLastActDate(cBefore, procSlotDef(a.slot)); if (d0 > autoFrom) autoFrom = d0; }
+  const fromD = /^\d{4}-\d{2}-\d{2}$/.test(String(input.from || '')) ? String(input.from) : (input.from === undefined ? autoFrom : '');
+  pc[target] = { id: newId, op: input.op || '', basis: input.basis || '', cancelled: input.cancelled || '', after: prevT ? prevT.id : '', startedAt: today, from: fromD, set, remandEvent: input.remandEvent || '', u: now, prevStage: c.stage || '', prevStatus: c.status || '' };
   c.procCurrent = pc; c.proceedings = list;
   if ((c.stage || '') !== td.stage) { procEv(c, 'stage', c.stage || '', td.stage, 'proceeding'); c.stage = td.stage; }
   if (c.status === 'Завершено') { procEv(c, 'status', 'Завершено', 'В работе', 'proceeding'); c.status = 'В работе'; c.closedAt = ''; }
@@ -19493,30 +19653,52 @@ function procArchiveApply(c, target, input, now, today, hearings) {
 }
 // «Вернуть как текущее» — отмена ошибочного «Нового рассмотрения»: только пока поля инстанции те же, что поставило действие (иначе новое
 // рассмотрение уже ведётся — вернуть прежнее поверх него значит затереть новые сведения). hearings — свежие записи (та же транзакция).
-function procUndoApply(c, id, now, hearings) {
+// v170 (аудит сборки 169, А7): отменяется ОПЕРАЦИЯ целиком — все прежние рассмотрения, ушедшие в историю одним «Новым рассмотрением»
+// (одинаковый op: апелляция и кассация вместе), стадия и статус дела, если с тех пор их не меняли. Отказ, если у нового рассмотрения уже есть
+// свои заседания, события суда или сроки (busy — найденные вне транзакции события суда: { events }), если в инстанциях уже ведётся новое
+// и если вернуть нужно не последнее прежнее. Заседания, отнесённые вручную, не трогаются (procHearingUntag).
+function procUndoApply(c, id, now, hearings, busy) {
   const p = procList(c).find(x => x.id === id);
   if (!p || p.status !== 'archived') return { error: 'Прежнее рассмотрение не найдено' };
-  const def = procSlotDef(p.slot), cur = (c.procCurrent || {})[p.slot] || null, data = procSlotData(c, def), set = cur && cur.set || {};
-  const last = procModel(c, []).filter(r => r.kind === 'archived' && r.slot === p.slot).pop();
-  if (!last || last.id !== id) return { error: 'Вернуть как текущее можно только последнее прежнее рассмотрение инстанции «' + def.title + '» — более позднее уже есть в истории' };
-  if (Object.keys(data).some(k => String(data[k]) !== String(set[k] || '')) || (cur && cur.after && cur.after !== id))
-    return { error: 'В инстанции «' + def.title + '» уже ведётся новое рассмотрение (после его создания заполнены суд, номер, ссылка или даты) — вернуть прежнее поверх него нельзя. Если новое создано по ошибке, очистите эти поля в форме дела и повторите' };
-  // заседания нового рассмотрения, отмеченные его id (форма заседания, P7), при возврате остаются за новым — вернуть нельзя без решения
-  const curId = cur ? procCurrentId(c, p.slot) : '';
-  if (curId && Array.isArray(hearings) && hearings.some(h => h && !h._deleted && h.proceedingId === curId)) return { error: 'У нового рассмотрения уже есть свои заседания — вернуть прежнее поверх него нельзя' };
-  const label = procLabelOf(c, id);
-  for (const k of Object.keys(data)) { if (procJournaled(k)) procEv(c, k, String(c[k]), '', 'proceeding'); c[k] = ''; }
-  for (const [k, v] of Object.entries(p.fields || {})) { if (procJournaled(k)) procEv(c, k, '', String(v), 'proceeding'); c[k] = v; }
-  const pre = 'p:' + id + '|';
-  for (const d of (Array.isArray(c.deadlines) ? c.deadlines : [])) if (d && d.autoKey && d.autoKey.indexOf(pre) === 0) { d.autoKey = d.autoKey.slice(pre.length); delete d.proceedingId; d.updatedAt = now; }
-  c.proceedings = (c.proceedings || []).filter(x => x && x.id !== id);
-  c._delItems = Object.assign({}, c._delItems || {}); c._delItems.proceedings = Object.assign({}, c._delItems.proceedings || {}, { [id]: procStampAfter(p, now) });
-  // текущим снова становится прежнее рассмотрение — с ЕГО id (P1)
-  const pc = Object.assign({}, c.procCurrent || {}); pc[p.slot] = { id, op: '', basis: p.basis || '', cancelled: p.cancelled || '', after: p.after || '', startedAt: p.startedAt || '', set: {} }; c.procCurrent = pc;
+  const pcs = c.procCurrent || {}, rows = procModel(c, []);
+  const group = p.op ? procList(c).filter(x => x.status === 'archived' && x.op === p.op) : [p];
+  const tSlot = PROC_SLOTS.find(d => group.some(q => q.slot === d.slot)).slot, tCur = pcs[tSlot] || null;
+  for (const q of group) {
+    const def = procSlotDef(q.slot), cur = pcs[q.slot] || null, data = procSlotData(c, def), set = cur && cur.set || {};
+    const last = rows.filter(r => r.kind === 'archived' && r.slot === q.slot).pop();
+    if (!last || last.id !== q.id) return { error: 'Вернуть как текущее можно только последнее прежнее рассмотрение инстанции «' + def.title + '» — более позднее уже есть в истории' };
+    // в инстанции нового рассмотрения — запись этой операции (или её нет: вышестоящая, ушедшая в историю без своего нового); в остальных — ничего нового
+    const mineNew = q.slot === tSlot ? (!cur || ((!p.op || cur.op === p.op) && (!cur.after || cur.after === q.id))) : !cur;
+    if (!mineNew || Object.keys(data).some(k => String(data[k]) !== String(set[k] || '')))
+      return { error: 'В инстанции «' + def.title + '» уже ведётся новое рассмотрение (после его создания заполнены суд, номер, ссылка или даты) — вернуть прежнее поверх него нельзя. Если новое создано по ошибке, очистите эти поля в форме дела и повторите' };
+  }
+  // связи нового рассмотрения (его id): заседания, события суда, сроки — остаются за ним; вернуть нельзя без решения
+  const curId = tCur ? procCurrentId(c, tSlot) : '';
+  if (curId) {
+    if (Array.isArray(hearings) && hearings.some(h => h && !h._deleted && h.proceedingId === curId)) return { error: 'У нового рассмотрения уже есть свои заседания — вернуть прежнее поверх него нельзя' };
+    if (busy && Number(busy.events || 0) > 0) return { error: 'К новому рассмотрению уже отнесены события суда (' + busy.events + ') — вернуть прежнее поверх него нельзя' };
+    if ((c.deadlines || []).some(d => d && d.proceedingId === curId)) return { error: 'У нового рассмотрения уже есть свои сроки — вернуть прежнее поверх него нельзя' };
+  }
+  const label = procLabelOf(c, id), labels = group.map(q => procLabelOf(c, q.id));
   const untagged = [], kept = [];
-  if (Array.isArray(hearings)) for (const h of hearings) { const k = procHearingUntag(h, id, p); if (k) { untagged.push(h.id); if (k.length) kept.push({ id: h.id, fields: k }); } }
-  procEv(c, 'proceeding', '', 'Возвращено как текущее: ' + label + (kept.length ? '. Заседаний с правками после переноса: ' + kept.length + ' — их суд, судья и стадия оставлены как есть' : ''), 'card');
-  return { label, untagged, kept };
+  for (const q of PROC_SLOTS.map(d => group.find(x => x.slot === d.slot)).filter(Boolean)) {
+    const def = procSlotDef(q.slot), data = procSlotData(c, def);
+    for (const k of Object.keys(data)) { if (procJournaled(k)) procEv(c, k, String(c[k]), '', 'proceeding'); c[k] = ''; }
+    for (const [k, v] of Object.entries(q.fields || {})) { if (procJournaled(k)) procEv(c, k, '', String(v), 'proceeding'); c[k] = v; }
+    const pre = 'p:' + q.id + '|';
+    for (const d of (Array.isArray(c.deadlines) ? c.deadlines : [])) if (d && d.autoKey && d.autoKey.indexOf(pre) === 0) { d.autoKey = d.autoKey.slice(pre.length); delete d.proceedingId; d.updatedAt = now; }
+    c.proceedings = (c.proceedings || []).filter(x => x && x.id !== q.id);
+    c._delItems = Object.assign({}, c._delItems || {}); c._delItems.proceedings = Object.assign({}, c._delItems.proceedings || {}, { [q.id]: procStampAfter(q, now) });
+    // текущим снова становится прежнее рассмотрение — с ЕГО id (P1)
+    const pc = Object.assign({}, c.procCurrent || {}); pc[q.slot] = { id: q.id, op: '', basis: q.basis || '', cancelled: q.cancelled || '', after: q.after || '', startedAt: q.startedAt || '', from: q.from || '', set: {}, u: now }; c.procCurrent = pc;
+    if (Array.isArray(hearings)) for (const h of hearings) { const k = procHearingUntag(h, q.id, q); if (k) { untagged.push(h.id); if (k.length) kept.push({ id: h.id, fields: k }); } }
+  }
+  // стадия и статус — как до операции, если с тех пор их не меняли
+  const td = procSlotDef(tSlot);
+  if (tCur && tCur.prevStage !== undefined && (c.stage || '') === td.stage && tCur.prevStage !== td.stage) { procEv(c, 'stage', c.stage || '', tCur.prevStage, 'proceeding'); c.stage = tCur.prevStage; }
+  if (tCur && tCur.prevStatus === 'Завершено' && c.status === 'В работе') { procEv(c, 'status', 'В работе', 'Завершено', 'proceeding'); c.status = 'Завершено'; }
+  procEv(c, 'proceeding', '', 'Возвращено как текущее: ' + labels.join(', ') + (kept.length ? '. Заседаний с правками после переноса: ' + kept.length + ' — их суд, судья и стадия оставлены как есть' : ''), 'card');
+  return { label: labels.join(', ') || label, untagged, kept };
 }
 // v168 (оставлено для совместимости): план снятия отметки — заседания с этим рассмотрением
 function procUntagPlan(id, hearings) {
@@ -19568,19 +19750,55 @@ function procActToProceeding(c, id, field, date, title, now) {
   procEv(c, 'proceeding', '', (title || 'Дата акта') + ' ' + (typeof fmtDate === 'function' ? fmtDate(date) : date) + ' — записана в «' + procLabelOf(c, id) + '» по данным суда', 'monitor');
   return 'set';
 }
+// v170 (аудит сборки 169, А3.1): карточка суда прежнего или параллельного рассмотрения — только в его собственные сведения и только в
+// пустые поля (суд, номер, судья; дата и результат — при итоговом результате); поля текущего и сроки не трогаются. Ответ — список записанного
+function procCardToProceeding(c, id, card, now) {
+  const list = Array.isArray(c.proceedings) ? c.proceedings.slice() : [], i = list.findIndex(p => p && p.id === id);
+  if (i < 0 || !procList(c).some(p => p.id === id) || !card) return [];
+  const p = Object.assign({}, list[i]), def = procSlotDef(p.slot), f = Object.assign({}, p.fields || {}), done = [];
+  const set = (k, v, lab) => { if (!k || !v || !procEmpty(f[k])) return; f[k] = String(v); done.push(lab + ': ' + v); };
+  set(def.court, card.court, 'суд'); set(def.no, card.number, 'номер дела в суде'); set(def.judge, card.judge, 'судья');
+  if (card.result && typeof crmResultMap === 'function') {
+    const mapped = crmResultMap(card.result, p.slot === 'appeal' ? 'ap' : p.slot === 'cass' ? 'cs' : 'i1');
+    if (mapped) { set(def.result[0], mapped, 'результат');
+      const dec = /^\d{4}-\d{2}-\d{2}$/.test(String(card.decided || '')) ? card.decided : '';
+      if (dec && !['Рассматривается', 'Жалоба возвращена', 'Оставлена без рассмотрения'].includes(mapped)) set(def.date[0], dec, 'дата акта'); }
+  }
+  if (!done.length) return [];
+  p.fields = f; p.updatedAt = procStampAfter(list[i], now); list[i] = p; c.proceedings = list;
+  const lab = procLabelOf(c, id);
+  return done.map(t => t + ' — в «' + lab + '»');
+}
 // v169 (P3, аудит 9.2): к какому рассмотрению относится событие суда (акт, жалоба, заседание). Порядок признаков: proceedingId события
 // (коллектор 3.24, выбор пользователя) → номер дела в суде (событие несёт номер своей страницы) → дата: событие раньше начала текущего
 // рассмотрения относится к прежнему, чей период его покрывает. Ничего из этого не решает — 'ask' («Требует привязки», без изменений).
 // Ответ: { kind: 'current' | 'archived' | 'extra' | 'ask', id, p, cands: [{ id, label }] }
+// v170 (аудит сборки 169, А2): 1) proceedingId события — решение (пользователь, прежний разбор); 2) srcPid — id рассмотрения, с чьей ссылки
+// собрано событие (коллектор 3.25 — и у текущих ссылок), принимается, только если это рассмотрение ЭТОГО дела и ЭТОЙ инстанции (жалоба на
+// странице первой инстанции относится к апелляции — id страницы её не решает); 3) номер дела: совпал у нескольких рассмотрений — 'ask', не
+// «текущее по умолчанию»; 4) в инстанции есть параллельное рассмотрение, а событие его не назвало — 'ask'; 5) дата — по ПРОЦЕССУАЛЬНОЙ границе
+// (from: дата события «направлено на новое рассмотрение» или акта об отмене), а дата создания строки в программе (startedAt) — только верхняя
+// граница начала: событие между последним актом прежнего рассмотрения и созданием нового — 'ask'.
+function procSrcPidOf(e) { if (!e) return ''; if (e.srcPid) return String(e.srcPid); const m = /\|p:([A-Za-z0-9_-]{1,80})$/.exec(String(e.externalId || '')); return m ? m[1] : ''; }
+// последняя дата актов рассмотрения (по полям дат его инстанции)
+function procLastActDate(src, def) { let m = ''; for (const k of (def.date || [])) { const v = String((src || {})[k] || ''); if (/^\d{4}-\d{2}-\d{2}/.test(v) && v.slice(0, 10) > m) m = v.slice(0, 10); } return m; }
 function procEventOwner(c, e, slot, date) {
   const def = procSlotDef(slot); if (!def || !c) return { kind: 'current', id: '' };
   const curId = procCurrentId(c, slot), all = procList(c).filter(p => p.slot === slot), pc = (c.procCurrent || {})[slot] || null;
   const mk = p => ({ kind: p.status === 'archived' ? 'archived' : 'extra', id: p.id, p });
   const cands = () => [{ id: curId, label: (procModel(c, []).find(r => r.kind === 'current' && r.slot === slot) || { label: def.title }).label + ' (текущее)' }].concat(all.map(p => ({ id: p.id, label: procLabelOf(c, p.id) })));
+  const ask = why => ({ kind: 'ask', why, cands: cands() });
   if (e && e.proceedingId) {
     if (e.proceedingId === curId) return { kind: 'current', id: curId };
     const p = procList(c).find(x => x.id === e.proceedingId); if (p) return mk(p);
-    return { kind: 'ask', why: 'рассмотрение, указанное в событии, в деле не найдено', cands: cands() };
+    // id текущего рассмотрения другой инстанции (выбор пользователя по другой инстанции) — не для этой; иначе — неизвестный id
+    return ask('рассмотрение, указанное в событии, в деле не найдено');
+  }
+  const src = procSrcPidOf(e);
+  if (src) {
+    if (src === curId) return { kind: 'current', id: curId };
+    const p = all.find(x => x.id === src); if (p) return mk(p);
+    // id другой инстанции или неизвестный — не доказательство, решают остальные признаки
   }
   if (!all.length) return { kind: 'current', id: curId };
   const no = procNormNo(e && e.courtNo);
@@ -19588,15 +19806,23 @@ function procEventOwner(c, e, slot, date) {
     const curHit = procNormNo(procView(c, def).no) === no, hits = all.filter(p => procNormNo(procView(p.fields, def).no) === no);
     if (curHit && !hits.length) return { kind: 'current', id: curId };
     if (!curHit && hits.length === 1) return mk(hits[0]);
+    if ((curHit ? 1 : 0) + hits.length > 1) return ask('номер дела в суде совпадает у нескольких рассмотрений');
   }
-  // по дате — только между текущим и прежними этой инстанции (параллельное узнаётся по id или номеру)
+  if (all.some(p => p.status !== 'archived')) return ask('в инстанции есть параллельное рассмотрение, а событие не называет своё');
   const arch = all.filter(p => p.status === 'archived').sort((a, b) => String(a.archivedAt || '').localeCompare(String(b.archivedAt || '')) || Number(a.createdAt || 0) - Number(b.createdAt || 0));
   if (!arch.length) return { kind: 'current', id: curId };
-  const boundary = (pc && pc.startedAt) || arch[arch.length - 1].archivedAt || '';
-  if (!boundary || !date) return { kind: 'ask', why: 'нет даты, чтобы отнести событие к рассмотрению', cands: cands() };
-  if (date >= boundary) return { kind: 'current', id: curId };
-  const owner = arch.filter(p => !p.startedAt || p.startedAt <= date).pop() || arch[0];
-  return mk(owner);
+  if (!date) return ask('нет даты, чтобы отнести событие к рассмотрению');
+  // периоды по порядку: прежние, затем текущее; у каждого, кроме первого, — процессуальная граница начала (from) или дата создания строки
+  const per = arch.map(p => ({ own: mk(p), from: p.from || '', started: p.startedAt || '', last: procLastActDate(p.fields, def) }));
+  per.push({ own: { kind: 'current', id: curId }, from: (pc && pc.from) || '', started: (pc && pc.startedAt) || arch[arch.length - 1].archivedAt || '', last: '' });
+  for (let i = per.length - 1; i >= 1; i--) {
+    const q = per[i];
+    if (q.from) { if (date >= q.from) return q.own; continue; }
+    if (q.started && date >= q.started) return q.own;
+    // раньше создания строки, но позже последнего акта предыдущего рассмотрения (или его дат нет) — по дате не решить
+    if (!per[i - 1].last || date > per[i - 1].last) return ask('дата события — между последним актом прежнего рассмотрения и созданием нового в программе');
+  }
+  return per[0].own;
 }
 // предложение по событию суда «направлено на новое рассмотрение» и события, требующие привязки к рассмотрению, — для «Сегодня»
 const PROC_REMAND_RE = /(направ\S*|передан\S*)\s+(дел\S*\s+)?на\s+новое\s+(рассмотрение|судебное разбирательство)/i;
@@ -19633,7 +19859,58 @@ function procTodayItems(events, cases, today) {
     out.push({ key: 'procask:' + e.id, kind: 'procask', pr: 1, date: e.date || today, caseId: c.id, title: 'Событие суда: к какому рассмотрению относится?', sub: [c.number || '', e.title || ''].filter(Boolean).join(' · '),
       when: e.date ? fmtDate(e.date) : 'С сайта суда', badges: [['Требует привязки', 'warn']], open: `openMonitorEventSheet('${jsq(e.id)}')`, act: { fn: `openMonitorEventSheet('${jsq(e.id)}')`, label: 'Выбрать рассмотрение', icon: 'arrow-right' } });
   }
+  // v170 (раздел 5 аудита): событие параллельного рассмотрения получено, а контроль не поставлен — нужно действие пользователя
+  for (const e of events || []) {
+    if (!e || e._deleted || !e.cmpNeed || e.cmpNeedSeen || !e.caseId || e.status === 'ignored') continue;
+    const c = (cases || []).find(x => x && x.id === e.caseId); if (!c) continue;
+    out.push({ key: 'cmpneed:' + e.id, kind: 'cmpneed', pr: 1, date: e.date || today, caseId: c.id, title: 'Событие получено, срок не создан — требуется ваше действие', sub: [c.number || '', e.cmpNeed].filter(Boolean).join(' · '),
+      when: e.date ? fmtDate(e.date) : 'С сайта суда', badges: [['Параллельное рассмотрение', 'warn']], open: `openMonitorEventSheet('${jsq(e.id)}')`, act: { fn: `openMonitorEventSheet('${jsq(e.id)}')`, label: 'Открыть событие', icon: 'arrow-right' }, dismiss: `procNeedDismiss('${jsq(e.id)}')`, dismissLabel: 'Разобрано — скрыть' });
+  }
+  // v170 (аудит сборки 169, А5): два устройства независимо создали новое рассмотрение одной инстанции — оба сохранены, решение за пользователем
+  for (const c of cases || []) {
+    if (!c || c._deleted) continue;
+    for (const p of procList(c).filter(x => x.conflictOf && x.status !== 'archived')) {
+      out.push({ key: 'procconf:' + c.id + ':' + p.id, kind: 'procconf', pr: 1, date: today, caseId: c.id, title: 'Дело ' + (c.number || '') + ': два новых рассмотрения одной инстанции', sub: 'Созданы на разных устройствах: «' + procLabelOf(c, p.conflictOf) + '» (текущее) и «' + procLabelOf(c, p.id) + '». Если это одно рассмотрение — объедините; если разные — оставьте оба',
+        when: 'После обмена', badges: [['Проверить', 'warn']], open: `openCaseSheet('${jsq(c.id)}')`, act: { fn: `procConflictMerge('${jsq(c.id)}', '${jsq(p.id)}')`, label: 'Это одно — объединить', icon: 'check' }, dismiss: `procConflictKeep('${jsq(c.id)}', '${jsq(p.id)}')`, dismissLabel: 'Разные — оставить оба' });
+    }
+  }
   return out;
+}
+async function procNeedDismiss(eventId) {
+  const e = await getOne('monitorEvents', eventId); if (!e) return;
+  e.cmpNeedSeen = Date.now(); try { await put('monitorEvents', e); } catch (x) { logErr('proc:need', x); toast('Не удалось записать отметку', true); return; }
+  toast('Отмечено'); nav(UI.screen || 'today');
+}
+// объединение рассмотрения-двойника с текущим: заседания, сроки — на id текущего, двойник удаляется (надгробие); реквизиты двойника — в пустые
+// поля текущего. Одна транзакция дела и заседаний; события суда — после неё
+function procConflictMergeApply(c, id, now, hearings) {
+  const p = procList(c).find(x => x.id === id); if (!p || !p.conflictOf) return { error: 'Двойник рассмотрения не найден — возможно, уже объединён' };
+  const def = procSlotDef(p.slot), target = p.conflictOf;
+  if (procCurrentId(c, p.slot) !== target) return { error: 'Текущее рассмотрение инстанции сменилось — откройте раздел «Рассмотрения дела» и решите вручную' };
+  const filled = [];
+  for (const [k, v] of Object.entries(p.fields || {})) if (!procEmpty(v) && procEmpty(c[k])) { if (procJournaled(k)) procEv(c, k, '', String(v), 'proceeding'); c[k] = v; filled.push(k); }
+  let dl = 0; for (const d of (c.deadlines || [])) if (d && d.proceedingId === id) { d.proceedingId = target; if (d.autoKey && d.autoKey.indexOf('p:' + id + '|') === 0) d.autoKey = 'p:' + target + '|' + d.autoKey.slice(('p:' + id + '|').length); d.updatedAt = now; dl++; }
+  const moved = []; for (const h of (hearings || [])) if (h && h.proceedingId === id) { h.proceedingId = target; moved.push(h.id); }
+  const label = procLabelOf(c, id);
+  c.proceedings = (c.proceedings || []).filter(x => x && x.id !== id);
+  c._delItems = Object.assign({}, c._delItems || {}); c._delItems.proceedings = Object.assign({}, c._delItems.proceedings || {}, { [id]: procStampAfter(p, now) });
+  procEv(c, 'proceeding', '', 'Объединено с текущим: ' + label + ' (создано на другом устройстве)' + (moved.length ? '; заседаний: ' + moved.length : '') + (dl ? '; сроков: ' + dl : ''), 'card');
+  return { label, moved, target, dl, filled };
+}
+async function procConflictMerge(caseId, procId) {
+  let res = null;
+  try { res = await procTxRun(caseId, (rec, hs) => procConflictMergeApply(rec, procId, Date.now(), hs)); } catch (e) { logErr('proc:conf', e); toast((e && e.message) || 'Не удалось сохранить — ничего не записано', true); return; }
+  if (!res || res.error) { toast(res ? res.error : 'Дело не найдено', true); return; }
+  // события суда двойника — на текущее
+  try { for (const e of await getAllRaw('monitorEvents')) if (e && !e._deleted && e.caseId === caseId && e.proceedingId === procId) { e.proceedingId = res.target; await put('monitorEvents', e); } } catch (e) { logErr('proc:conf-ev', e); }
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast('Рассмотрения объединены'); nav(UI.screen || 'today');
+}
+async function procConflictKeep(caseId, procId) {
+  try { await recUpdate('cases', caseId, rec => { const list = Array.isArray(rec.proceedings) ? rec.proceedings.slice() : [], i = list.findIndex(p => p && p.id === procId); if (i < 0 || !list[i].conflictOf) return false; const p = Object.assign({}, list[i]); delete p.conflictOf; p.updatedAt = procStampAfter(list[i], Date.now()); list[i] = p; rec.proceedings = list; procEv(rec, 'proceeding', '', 'Оставлены оба рассмотрения: ' + procLabelOf(rec, procId) + ' — параллельное', 'card'); }); }
+  catch (e) { logErr('proc:keep', e); toast((e && e.message) || 'Не удалось сохранить', true); return; }
+  if (typeof refreshCasesCache === 'function') await refreshCasesCache();
+  toast('Оставлены оба рассмотрения'); nav(UI.screen || 'today');
 }
 async function procRemandDismiss(eventId) {
   const e = await getOne('monitorEvents', eventId); if (!e) return;
@@ -19667,7 +19944,8 @@ function procCollectorLinks(c) {
 function procHearingOptions(c) {
   if (!c) return [];
   const rows = procModel(c, []); if (!rows.some(r => r.kind !== 'current')) return [];
-  return [['', 'Текущее (по инстанции заседания)']].concat(rows.filter(r => r.kind !== 'current').map(r => [r.id, r.label + (r.kind === 'archived' ? ' (прежнее)' : ' (параллельное)')]));
+  // v170 (А6.3): и текущие рассмотрения — своим id; пустой выбор остаётся для прежних заседаний без отметки
+  return [['', 'Текущее (по инстанции заседания)']].concat(rows.map(r => [r.id, r.label + (r.kind === 'archived' ? ' (прежнее)' : r.kind === 'extra' ? ' (параллельное)' : ' (текущее)')]));
 }
 
 // ── запись: одна транзакция cases + hearings + caseEvents (P9) ──
@@ -19739,15 +20017,19 @@ async function openProcNew(caseId, remandEventId) {
   const ro = ev && typeof crmMonRawObj === 'function' ? crmMonRawObj(ev) : {};
   const dfl = procNewDefaults(c, ev ? procRemandTarget(String(ev.title || '') + ' ' + String(ro.result || '')) : ''); if (!dfl) { toast('В деле нет сведений об инстанциях — заполните их в форме дела', true); return; }
   if (ev && ev.title) dfl.basis = ev.title + (ev.date ? ' (' + fmtDate(ev.date) + ')' : '');
+  if (ev && ev.date) dfl.from = ev.date;
   const opts = PROC_TARGETS.map(s => [s, procSlotDef(s).title]);
   // v169 (P1): номер операции — один на открытие листа; повторное «Создать» той же операции ничего не создаёт
   UI.procNewCase = caseId; UI.procNewOp = 'op-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); UI.procNewRemand = remandEventId || '';
+  // v170 (А8): текущие рассмотрения на момент открытия — сохранение сверит их со свежей записью
+  UI.procNewExpect = Object.fromEntries(PROC_SLOTS.map(d => [d.slot, procCurrentId(c, d.slot)]));
   const body = `<p class="small muted">Прежнее рассмотрение этой инстанции перейдёт в историю дела вместе со ссылками, номерами, датами и сроками от его актов — ничего не удаляется. Поля инстанции в деле освободятся для нового рассмотрения; ручные сроки не меняются. Реквизиты нового можно не знать — строка появится сразу.</p>
     <div class="form-grid">
     ${fSelect('pn-target', 'Новое рассмотрение — в инстанции *', dfl.target, opts)}
     ${wide(fInput('pn-cancelled', 'Какой акт отменён', dfl.cancelled, 'autocomplete="off" placeholder="Апелляционное определение от … (если известно)"'))}
     ${wide(fInput('pn-basis', 'Каким актом (основание возврата)', dfl.basis, 'autocomplete="off" placeholder="Кассационное определение от … — направлено на новое рассмотрение"'))}
     ${fInput('pn-court', 'Суд', dfl.court, 'autocomplete="off" oninput="this.dataset.touched=1"', typeof refList === 'function' ? refList('courts') : null)}${fInput('pn-no', '№ дела в новом рассмотрении', '', 'autocomplete="off" placeholder="если уже известен"')}
+    ${fInput('pn-from', 'Дело направлено на новое рассмотрение (дата)', dfl.from || '', 'type="date"')}
     ${fInput('pn-judge', 'Судья (докладчик)', '', 'autocomplete="off"')}${wide(fInput('pn-link', 'Ссылка на дело (новое рассмотрение)', '', 'type="url" inputmode="url" autocomplete="off" placeholder="https://…  — можно добавить позже в форме дела"'))}
     </div>
     <div class="section-label">Уйдёт в историю</div><div id="pn-preview">${procPreviewHtml(c, dfl.target, [])}</div>
@@ -19764,7 +20046,7 @@ async function procNewPreview(caseId, retarget) {
 }
 async function saveProcNew(caseId) {
   const input = { target: fv('pn-target'), basis: fv('pn-basis'), cancelled: fv('pn-cancelled'), court: fv('pn-court'), courtNo: fv('pn-no'), judge: fv('pn-judge'), link: fv('pn-link'),
-    skip: procNewSkip(), op: UI.procNewOp || '', remandEvent: UI.procNewRemand || '' };
+    skip: procNewSkip(), op: UI.procNewOp || '', remandEvent: UI.procNewRemand || '', from: fv('pn-from'), expect: UI.procNewExpect || null };
   if (input.link && !safeExternalUrl(input.link)) { fErr('Ссылка на дело должна начинаться с https:// (скопируйте её из адресной строки сайта суда)'); return; }
   let res = null;
   try { res = await procTxRun(caseId, (rec, hs) => procArchiveApply(rec, input.target, input, Date.now(), todayISO(), hs)); }
@@ -19841,11 +20123,15 @@ async function procRemove(caseId, procId) {
   toast('Рассмотрение удалено: ' + res.label); await openCaseSheet(caseId);
 }
 function procUndoAsk(caseId, procId) {
-  openSheet('Вернуть как текущее?', `<p>Прежнее рассмотрение снова станет текущим: его суд, номер, ссылка и даты вернутся в поля дела, сроки от его актов — под контроль правил сроков. Подходит, если «Новое рассмотрение» создано по ошибке и сведения нового ещё не вносились. Суд, судья и стадия, которые программа дописала заседаниям при переносе, снимаются; исправленное вами после переноса остаётся.</p><div class="form-actions"><button type="button" class="button primary" id="proc-undo-go" onclick="procUndo('${jsq(caseId)}', '${jsq(procId)}')">${icon('rotate-ccw')}Вернуть</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
+  openSheet('Вернуть как текущее?', `<p>Отменяется всё действие «Новое рассмотрение»: прежние рассмотрения, ушедшие тогда в историю (и вышестоящих инстанций), снова станут текущими — их суд, номер, ссылка и даты вернутся в поля дела, сроки от их актов — под контроль правил сроков; стадия дела — прежняя, если её с тех пор не меняли. Подходит, если новое рассмотрение создано по ошибке и у него ещё нет своих сведений, заседаний, событий суда и сроков. Суд, судья и стадия, которые программа дописала заседаниям при переносе, снимаются; исправленное вами и заседания, отнесённые вручную, остаются.</p><div class="form-actions"><button type="button" class="button primary" id="proc-undo-go" onclick="procUndo('${jsq(caseId)}', '${jsq(procId)}')">${icon('rotate-ccw')}Вернуть</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
 }
 async function procUndo(caseId, procId) {
   let res = null;
-  try { res = await procTxRun(caseId, (rec, hs) => procUndoApply(rec, procId, Date.now(), hs)); } catch (e) { logErr('proc:undo', e); toast((e && e.message) || 'Не удалось сохранить — ничего не записано', true); return; }
+  // v170 (А7.1): события суда, уже отнесённые к новому рассмотрению (или собранные с его ссылки), — до транзакции дела (другое хранилище)
+  let busy = { events: 0 };
+  try { const c0 = await getOne('cases', caseId), p0 = c0 ? procList(c0).find(x => x.id === procId) : null; if (p0) { const grp = p0.op ? procList(c0).filter(x => x.status === 'archived' && x.op === p0.op) : [p0], ts = PROC_SLOTS.find(d => grp.some(q => q.slot === d.slot)).slot, cid = (c0.procCurrent || {})[ts] ? procCurrentId(c0, ts) : ''; if (cid) busy.events = (await getAllRaw('monitorEvents')).filter(e => e && !e._deleted && e.caseId === caseId && (e.proceedingId === cid || procSrcPidOf(e) === cid)).length; } }
+  catch (e) { logErr('proc:undo-read', e); toast('Не удалось прочитать события суда — возврат не выполнен', true); return; }
+  try { res = await procTxRun(caseId, (rec, hs) => procUndoApply(rec, procId, Date.now(), hs, busy)); } catch (e) { logErr('proc:undo', e); toast((e && e.message) || 'Не удалось сохранить — ничего не записано', true); return; }
   if (!res || res.error) { toast(res ? res.error : 'Дело не найдено', true); return; }
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
   toast('Снова текущее: ' + res.label + (res.kept.length ? ' · у заседаний (' + res.kept.length + ') оставлены ваши правки суда, судьи или стадии' : '')); await openCaseSheet(caseId);
@@ -19880,7 +20166,7 @@ const HELP_SECTIONS = [
   { id: 'cases', title: 'Дела, сроки, стадии', html: `
 <p>«Дела» — список с фильтрами и поиском, таблица (на компьютере можно выбрать столбцы) и доска по стадиям. Поиск и фильтр сохраняются, пока вы смотрите карточки.</p>
 <p><b>Карточка дела</b>: сверху доверитель, суд и судья, ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Сайты судов», «Папка документов», «Связаться с доверителем». «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам.</p>
-<p><b>Рассмотрения дела</b> (группа в карточке дела): каждое рассмотрение — своя строка с судом, номером, ссылкой, заседаниями и сроками; рассмотрений в одной инстанции может быть сколько угодно. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение (кассация — в апелляцию, апелляция или кассация — в первую инстанцию), нажмите «Новое рассмотрение после отмены» (если суд прислал такое событие, на «Сегодня» появится строка «Дело направлено на новое рассмотрение» с этой же кнопкой): выберите инстанцию, впишите, какой акт отменён и каким актом, новый номер и ссылку (их можно не знать — строка «ожидаются реквизиты» появится сразу, сведения добавляются позже в форме дела). Прежнее рассмотрение этой инстанции перейдёт в историю; рассмотрения выше — по отметкам в предпросмотре (снятая отметка оставляет рассмотрение текущим), параллельные не меняются. В историю они уходят как «Апелляция №1», «Кассация №1» и т. д. — со ссылками, номерами, датами, заседаниями и сроками от их актов; ничего не удаляется, ручные сроки не меняются, а поля инстанции в форме дела освобождаются для нового рассмотрения (новое — «Апелляция №2»). Сроки от актов прежних рассмотрений больше не пересчитываются, заседания прежних рассмотрений не поднимают стадию дела; старые ссылки остаются в «Сайтах судов». Ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее» в строке прежнего — пока в инстанции не внесены сведения нового. «Добавить рассмотрение» — параллельное рассмотрение (например, частная жалоба): его ссылка уходит коллектору вместе с остальными, заседание к нему относится выбором «Рассмотрение» в форме заседания (или кнопкой «Заседание этого рассмотрения»). События сайтов судов (акты, жалобы, заседания) программа относит к рассмотрению по номеру дела в суде и дате: акт прежнего рассмотрения, пришедший с опозданием, записывается в прежнее, а не в поля нового; если отнести нельзя — строка «Требует привязки» на «Сегодня», ничего не меняется, пока вы не выберете рассмотрение. Прежние рассмотрения на сайтах судов не опрашиваются. Создание нового рассмотрения и «Вернуть как текущее» записывают дело, сроки и заседания одной операцией: при сбое не записывается ничего, повторное нажатие не создаёт второе рассмотрение. Ограничения: сроки и жалобы вручную к рассмотрению не относятся (только автоматически), судебные акты отдельным списком не ведутся.</p>
+<p><b>Рассмотрения дела</b> (группа в карточке дела): каждое рассмотрение — своя строка с судом, номером, ссылкой, заседаниями и сроками; рассмотрений в одной инстанции может быть сколько угодно. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение (кассация — в апелляцию, апелляция или кассация — в первую инстанцию), нажмите «Новое рассмотрение после отмены» (если суд прислал такое событие, на «Сегодня» появится строка «Дело направлено на новое рассмотрение» с этой же кнопкой): выберите инстанцию, впишите, какой акт отменён и каким актом, новый номер и ссылку (их можно не знать — строка «ожидаются реквизиты» появится сразу, сведения добавляются позже в форме дела). Прежнее рассмотрение этой инстанции перейдёт в историю; рассмотрения выше — по отметкам в предпросмотре (снятая отметка оставляет рассмотрение текущим), параллельные не меняются. В историю они уходят как «Апелляция №1», «Кассация №1» и т. д. — со ссылками, номерами, датами, заседаниями и сроками от их актов; ничего не удаляется, ручные сроки не меняются, а поля инстанции в форме дела освобождаются для нового рассмотрения (новое — «Апелляция №2»). Сроки от актов прежних рассмотрений больше не пересчитываются, заседания прежних рассмотрений не поднимают стадию дела; старые ссылки остаются в «Сайтах судов». Ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее» в строке прежнего — пока в инстанции не внесены сведения нового. «Добавить рассмотрение» — параллельное рассмотрение (например, частная жалоба): его ссылка уходит коллектору вместе с остальными, заседание к нему относится выбором «Рассмотрение» в форме заседания (или кнопкой «Заседание этого рассмотрения»). События сайтов судов (акты, жалобы, заседания) программа относит к рассмотрению по отметке ссылки, с которой событие собрано (каждая ссылка — и текущая, и параллельная — уходит коллектору с номером своего рассмотрения), затем по номеру дела в суде и дате: акт прежнего рассмотрения, пришедший с опозданием, записывается в прежнее, а не в поля нового; карточка суда прежнего рассмотрения дополняет только его сведения. Дата — по дате, с которой дело направлено на новое рассмотрение (поле в листе «Новое рассмотрение после отмены»), а не по дню, когда вы создали строку в программе. Если номер совпадает у нескольких рассмотрений, в инстанции есть параллельное рассмотрение или дата не решает — строка «Требует привязки» на «Сегодня», ничего не меняется, пока вы не выберете рассмотрение. Жалоба параллельного рассмотрения, оставленная без движения, даёт свой срок устранения недостатков; если сторона жалобы не установлена — строка «Событие получено, срок не создан». Если два устройства независимо создали новое рассмотрение одной инстанции, после обмена сохраняются оба, а на «Сегодня» — выбор «Это одно — объединить» или «Разные — оставить оба». Форма «Новое рассмотрение», открытая до того, как рассмотрения изменились (другая вкладка или устройство), ничего не создаст — откройте её заново. Новое заседание сразу получает отметку своего рассмотрения (в форме — поле «Рассмотрение»); выбор, сделанный вами, «Вернуть как текущее» не снимает. Прежние рассмотрения на сайтах судов не опрашиваются. Создание нового рассмотрения и «Вернуть как текущее» записывают дело, сроки и заседания одной операцией: при сбое не записывается ничего, повторное нажатие не создаёт второе рассмотрение. Ограничения: сроки и жалобы вручную к рассмотрению не относятся (только автоматически), судебные акты отдельным списком не ведутся.</p>
 <p><b>Типовые задачи</b> (кнопка рядом с «Задача») создают одним нажатием набор задач для вида дела — например, для арбитражного: претензия, иск, отзыв, судебные расходы. Сроки считаются от даты принятия дела (её можно сменить в листе) и примерные — поправьте их в задаче. Задачи, которые уже есть в деле, не отмечены — дублей не будет. Наборы правятся в «Настройки» → «Типовые задачи» и общие с прежней программой.</p>
 <p><b>Сводка</b> — дело одним листом для печати или PDF: «Досье» (служебное: сведения, движение дела, заседания, сроки, задачи, ордера, участники, расходы, счета, заметки) и «Отчёт доверителю» (без внутренних заметок, гонорара, задач, ордеров и контактов участников). «Скачать для Word» — тот же документ файлом, чтобы поправить текст перед отправкой.</p>
 <p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
@@ -20493,7 +20779,7 @@ SCREENS.monitoring = async function () {
   // 12.10.2026: неудачная отправка списка дел коллектору видна на экране, а не только в журнале ошибок (урок 96)
   const lsSt = typeof monLinksStatus === 'function' && col.url && col.secret ? monLinksStatus() : null;
   const linksBad = lsSt && lsSt.bad ? `<div class="info-box warning" id="mon-links-bad" role="alert"><b>${esc(lsSt.title)}</b><div class="small" style="margin-top:4px">${esc(lsSt.reason)}</div><div style="margin-top:4px">${esc(lsSt.tail)}</div><div class="form-actions" style="margin:8px 0 0">${btn('Отправить список дел', 'monLinksSendNow()', 'primary', 'arrow-right')}</div></div>` : '';
-  const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.ask ? ' · к какому рассмотрению относится — выберите' : o.procId ? ' · прежнее рассмотрение: ' + esc(o.procLabel) + (o.current ? ', там сейчас ' + esc(fmtDate(o.current)) : '') : o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done">${o.ask ? o.ask.map(x => `<button type="button" class="button small-btn" onclick="monOfferApply('${jsq(o.e.id)}', '${jsq(x.id)}')">${esc(x.label)}</button>`).join('') : `<button type="button" class="button small-btn primary" onclick="monOfferApply('${jsq(o.e.id)}')">${icon('check', 'icon-sm')}Записать${o.procId ? ' в прежнее' : ''}</button>`}<button type="button" class="button small-btn" onclick="monOfferSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
+  const offers = m.offers.length ? `<section class="panel"><div class="panel-title"><h2>Даты актов с сайта суда ${badge(String(m.offers.length), 'accent')}</h2></div>${m.offers.map(o => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(o.c.id)}')"><span class="task-title">${esc(o.c.number)} · ${esc(o.label)}: ${esc(fmtDate(o.e.date))}</span><span class="task-sub">${esc(o.e.title)}${o.ask ? ' · к какому рассмотрению относится — выберите' : o.procId ? ' · прежнее рассмотрение: ' + esc(o.procLabel) + (o.current ? ', там сейчас ' + esc(fmtDate(o.current)) : '') : o.current ? ' · в деле сейчас ' + esc(fmtDate(o.current)) : ' · поле в деле пустое'}</span></button><div class="imp-done">${o.ask ? o.ask.map(x => `<button type="button" class="button small-btn" onclick="monOfferApply('${jsq(o.e.id)}', '${jsq(x.id)}')">${esc(x.label)}</button>`).join('') : `<button type="button" class="button small-btn primary" onclick="monOfferApply('${jsq(o.e.id)}', '', '${jsq(o.procId || o.curId || '')}')">${icon('check', 'icon-sm')}Записать${o.procId ? ' в прежнее' : ''}</button>`}<button type="button" class="button small-btn" onclick="monOfferSkip('${jsq(o.e.id)}')">Пропустить</button></div></div>`).join('')}</section>` : '';
   const rows = m.rows.map(r => `<button type="button" class="list-btn mail-row" onclick="openMonitorEventSheet('${jsq(r.e.id)}')"><span><span class="task-title">${esc(r.e.title || 'Событие')}</span><span class="task-sub">${esc([r.type, r.e.date ? fmtDate(r.e.date) : '', r.e.court, r.e.courtNo ? '№ ' + r.e.courtNo : '', r.bound ? 'дело ' + r.bound : '', r.problem].filter(Boolean).join(' · '))}</span></span><span class="mail-right">${badge(r.status[0], r.status[1])}${r.problem && r.e.status === 'new' ? badge('нужен разбор', 'bad') : ''}</span></button>`).join('');
   // 09.10.2026: одна кнопка «Обновить с сайтов судов» — сбор в облаке по всем делам, получение, применение (sync/monauto.js);
   // «Получить события» — только то, что уже лежит на сервере (быстро, сайты судов не трогаются); состояние автоматики — подзаголовком
@@ -20575,7 +20861,7 @@ async function monEventDeadline(id) { const e = await getOne('monitorEvents', id
 async function monEventIgnore(id) { const e = await getOne('monitorEvents', id); if (!e) return; if (e.status === 'applied') { toast('Применённое событие нельзя пометить пропущенным', true); return; } e.status = 'ignored'; e.reviewedAt = Date.now(); await put('monitorEvents', e); toast('Событие оставлено без применения'); monEventReopen(id); }
 async function monEventRestore(id) { const e = await getOne('monitorEvents', id); if (!e) return; e.status = e.caseId && e.eventType === 'caseflow' ? 'flow' : 'new'; delete e.autoSkip; await put('monitorEvents', e); toast('Событие снова в разборе'); monEventReopen(id); }
 // предложения дат актов: после записи или пропуска экран перерисовывается (в v312 это делал прежний интерфейс)
-async function monOfferApply(id, procKey) { await crmFlowActApply(id, procKey); await refreshCasesCache(); nav(UI.screen); }
+async function monOfferApply(id, procKey, expect) { await crmFlowActApply(id, procKey, expect);await refreshCasesCache(); nav(UI.screen); }
 async function monOfferSkip(id) { await crmFlowActSkip(id); nav(UI.screen); }
 // отмена применения заседания: подтверждение листом (вместо системного confirm v312), затем crmMonUndoHearing
 async function monEventUndoAsk(hid) {
