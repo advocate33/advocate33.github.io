@@ -8,8 +8,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="19.10.2026 09:27 · 693c1bc+">
-<meta name="build-no" content="174">
+<meta name="build" content="19.10.2026 11:13 · e497a20+">
+<meta name="build-no" content="175">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -4204,6 +4204,8 @@ async function srvdbMergeSnapshot(snapshot, silent, slot) {
     // записанное с этого сервера должно дойти до другого: записи слияния ревизию не двигают (putRaw), поэтому — отметка (sync/srv2.js)
     if (typeof srvFwdMark === 'function') srvFwdMark(slot || 0);
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('pull:refresh', e); }
+    // 19.10.2026: заседания-двойники, созданные по одному событию суда на разных устройствах, сводятся сразу после слияния (sync/heardup.js)
+    try { if (typeof hearingDedupe === 'function') await hearingDedupe(); } catch (e) { logErr('pull:heardup', e); }
     // открытый лист или форма в боковой панели не закрываются фоновым обновлением (nav закрывает панель); экран обновится при следующем переходе
     if (UI.ready && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav(UI.screen);
   }
@@ -6525,6 +6527,8 @@ async function backupApply(mode) {
     if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
     BACKUP_PENDING = null;
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('backup:refresh', e); }
+    // 19.10.2026: заседания-двойники после слияния сводятся (sync/heardup.js)
+    try { if (typeof hearingDedupe === 'function') await hearingDedupe(); } catch (e) { logErr('backup:heardup', e); }
     toast('Из файла: добавлено ' + r.added + ', обновлено ' + r.updated + (safe ? backupSafeNote(safe) : ''), !!(safe && safe.noLocal));
     closeSheet(); if (UI.ready) nav(UI.screen);
     return r;
@@ -6929,6 +6933,8 @@ async function fsyncMergeDump(dump) {
     if (typeof srvFwdMark === 'function') srvFwdMark('fs');
     if (typeof srvdbTouch === 'function') srvdbTouch();
     try { await loadRefs(); await refreshCasesCache(); } catch (e) { logErr('fsync:refresh', e); }
+    // 19.10.2026: заседания-двойники после слияния сводятся (sync/heardup.js)
+    try { if (typeof hearingDedupe === 'function') await hearingDedupe(); } catch (e) { logErr('fsync:heardup', e); }
     if (typeof UI === 'object' && UI.ready && !(typeof sheetIsOpen === 'function' && sheetIsOpen())) nav(UI.screen);
   }
   return r;
@@ -8044,10 +8050,18 @@ function crmMonOwner(c, e, slot) { return slot && typeof procEventOwner === 'fun
 async function crmMonAutoApply(rows) {
   const today = todayISO();
   if (!rows) { try { await crmMonRestoreHearings(); } catch (e) { if (typeof logErr === "function") logErr("", e); } try { await crmMonBindOrphans(); } catch (e) { if (typeof logErr === "function") logErr("", e); } } // v265: вернуть заседания из движения и привязать события без дела
+  // 19.10.2026: заседания-двойники (одно событие применено на разных устройствах до обмена) сводятся до разбора новых событий (sync/heardup.js)
+  if (!rows && typeof hearingDedupe === 'function') { try { await hearingDedupe(); } catch (e) { if (typeof logErr === "function") logErr("monitor:heardup", e); } }
   const all = await getAll('monitorEvents');
   const cand = (rows || all).filter(e => !e._deleted && e.caseId && e.status !== 'applied' && e.status !== 'ignored' && !e.autoSkip);
   if (!cand.length) return { hearings: 0, moved: 0, updated: 0, acts: 0 };
-  const cases = await getAll('cases'), hearings = await getAll('hearings');
+  const cases = await getAll('cases'), hearingsRaw = typeof getAllRaw === 'function' ? await getAllRaw('hearings') : await getAll('hearings'), hearings = hearingsRaw.filter(h => h && !h._deleted);
+  // 19.10.2026: id нового заседания по событию — из дела, даты, времени и рассмотрения (одинаков на всех устройствах, sync/heardup.js);
+  // занятый id (в том числе записью в корзине) не переписывается — берётся с суффиксом
+  const takenIds = new Set(hearingsRaw.map(h => h && h.id).filter(Boolean));
+  const newHearId = (cid, date, time, pid) => typeof hearingIdFor === 'function' ? hearingIdFree(hearingIdFor(cid, date, time, pid), takenIds) : uid('ЗС');
+  // живое заседание с тем же вычисленным id (пришло обменом с другого устройства, а сверка по суду его не узнала) — дополняется, а не дублируется
+  const hearSame = (cid, date, time, pid) => { if (typeof hearingIdFor !== 'function') return null; const id = hearingIdFor(cid, date, time, pid); return hearings.find(x => x.id === id && x.status !== 'Отменено' && x.date === date) || null; };
   const byCase = id => hearings.filter(h => h.caseId === id || (!h.caseId && h.caseNum && cases.find(c => c.id === id)?.number === h.caseNum)); // v299: номер не перебивает чужой caseId
   const courtDates = {}; all.forEach(e => { if (e.eventType === 'hearing' && e.caseId && e.date >= today) (courtDates[e.caseId] = courtDates[e.caseId] || new Set()).add(e.date); });
   const n = { hearings: 0, moved: 0, updated: 0, acts: 0 };
@@ -8089,9 +8103,12 @@ async function crmMonAutoApply(rows) {
         const scM = courtOf(); // v271: переносить можно только заседание той же инстанции (тот же суд)
         const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date) && (!x.court || !scM.court || crmMonNorm(x.court) === crmMonNorm(scM.court)));
         if (free.length === 1) { h = free[0]; how = `перенесено по данным суда: ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} → ${fmtDate(e.date)}${b.time ? ' ' + b.time : ''}`; h.movedFrom = { date: h.date, time: h.time || '', room: h.room || '' }; h.date = e.date; if (b.time) h.time = b.time; if (b.room) h.room = b.room; if (e.judge) h.judge = e.judge; if (scM.court && !h.court) h.court = scM.court; if (crmMonStageOf(e) && !h.stage) h.stage = crmMonStageOf(e); n.moved++; }
-        else { const sc = courtOf(); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } // v246/v253: суд по инстанции события, при пустом — с самой страницы
+        else { const sc = courtOf(), same = hearSame(c.id, e.date, b.time, own.id); if (same) { h = same; const ch = []; if (b.room && !h.room) { h.room = b.room; ch.push('зал ' + b.room); } if (e.judge && !h.judge) { h.judge = e.judge; ch.push('судья ' + e.judge); } if (sc.court && !h.court) { h.court = sc.court; ch.push('суд ' + sc.court); } how = 'та же запись с другого устройства' + (ch.length ? ' — дополнено: ' + ch.join(', ') : ''); n.updated++; }
+          else { h = { id: newHearId(c.id, e.date, b.time, own.id), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } } // v246/v253: суд по инстанции события, при пустом — с самой страницы
       } else {
-        const sc = courtOf(); h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: crmMonPastStatus(b.result), result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; if (!b.result) h.autoDone = Date.now(); hearings.push(h); how = 'прошедшее заседание записано по данным суда' + (b.result ? '' : ' (результата на сайте нет — «Дата прошла», уточните итог)'); n.hearings++;
+        const sc = courtOf(), same = hearSame(c.id, e.date, b.time, own.id);
+        if (same) { h = same; const ch = []; if (b.room && !h.room) { h.room = b.room; ch.push('зал ' + b.room); } if (b.result && !h.result) { h.result = b.result; ch.push('результат: ' + b.result); } if (h.status !== 'Проведено' && h.status !== 'Отменено') { const st = crmMonPastStatus(h.result); if (st !== h.status) { h.status = st; ch.push('статус: ' + st.toLowerCase()); if (st === 'Дата прошла' && !h.autoDone) h.autoDone = Date.now(); } } how = 'та же запись с другого устройства' + (ch.length ? ' — дополнено: ' + ch.join(', ') : ''); n.updated++; }
+        else { h = { id: newHearId(c.id, e.date, b.time, own.id), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: crmMonPastStatus(b.result), result: b.result, note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; if (!b.result) h.autoDone = Date.now(); hearings.push(h); how = 'прошедшее заседание записано по данным суда' + (b.result ? '' : ' (результата на сайте нет — «Дата прошла», уточните итог)'); n.hearings++; }
       }
       h.monitorEventId = h.monitorEventId || e.id; h.courtSync = Date.now();
       await put('hearings', h);
@@ -8586,7 +8603,9 @@ async function crmCaseFlowAdd(eventId, caseId) { // v271: внести засе�
   const exists = (await getAll('hearings')).some(h => (h.caseId === c.id || h.caseNum === c.number) && h.date === e.date && (h.time || '') === (b.time || '') && h.status !== 'Отменено' && sameProc(h));
   if (exists) { toast('Такое заседание уже есть в списке'); openCaseSheet(c.id); return; }
   const past = e.date < todayISO();
-  const h = { id: uid('ЗС'), caseId: c.id, caseNum: c.number, date: e.date, time: b.time || '', room: b.room || '', court: sc.court || '', judge: e.judge || sc.judge || '', stage: st || '',
+  // 19.10.2026: id — из дела, даты, времени и рассмотрения (sync/heardup.js), занятый id не переписывается
+  const hid = typeof hearingIdFor === 'function' ? hearingIdFree(hearingIdFor(c.id, e.date, b.time, own.id), new Set((typeof getAllRaw === 'function' ? await getAllRaw('hearings') : await getAll('hearings')).map(x => x && x.id))) : uid('ЗС');
+  const h = { id: hid, caseId: c.id, caseNum: c.number, date: e.date, time: b.time || '', room: b.room || '', court: sc.court || '', judge: e.judge || sc.judge || '', stage: st || '',
     status: past ? crmMonPastStatus(b.result) : 'Назначено', result: past ? (b.result || '') : '', ...(past && !b.result ? { autoDone: Date.now() } : {}), note: e.title || '', monitorEventId: e.id, courtSync: Date.now(), createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) };
   await put('hearings', h);
   if (c._courtFilled) { const f0 = c._courtFilled; const cf = (await getAll('cases')).find(x => x.id === c.id); if (cf && !cf[f0]) { cf[f0] = c[f0]; addCaseHistoryEvent(cf, f0, '', c[f0], 'monitor'); await put('cases', cf); } }
@@ -9126,6 +9145,108 @@ function monPullStatusText() {
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { const p = monPullMaybe('при возврате'); if (p && p.catch) p.catch(e => logErr('monitor:autopull', e)); } });
   window.addEventListener('online', () => { const p = monPullMaybe('сеть появилась'); if (p && p.catch) p.catch(e => logErr('monitor:autopull', e)); });
+}
+
+// ▼▼▼ sync/heardup.js
+// ═══ sync/heardup.js — заседания-двойники (19.10.2026, снимок пользователя: одно заседание трижды в «Далее по плану») ═══
+// Причина: заседание по событию суда создавалось на каждом устройстве со своим случайным id (uid), события приходят с сервера на все
+// устройства, и после обмена базой у дела оказывалось столько копий заседания, сколько устройств успели применить событие до обмена
+// (у событий суда дубли сводятся по ключу monEvKey — у заседаний такого не было; урок 82, урок 167: id, который должны одинаково вычислить
+// два устройства без обмена, — из неизменных признаков).
+// Две меры: 1) id заседания, созданного по событию суда, — из дела, даты, времени и рассмотрения (hearingIdFor): устройства создают одну и ту же
+// запись, слияние сводит её по id; 2) уже накопленные двойники (hearingDupPlan): записи одного дела, рассмотрения, даты и времени — остаётся
+// одна (наименьший id — на всех устройствах выбор одинаков, урок 82), пустые поля дополняются из остальных, отметки событий переносятся
+// (урок 171). Само объединяется только то, что создала программа и с тех пор не правили (урок 170: без доказательства — решение
+// пользователя): остальное — строка в «Проверке данных» с листом «Заседания-двойники» и кнопкой «Оставить одно».
+const HEARDUP_FIELDS = ['room', 'court', 'judge', 'stage', 'result', 'note', 'participation', 'prep', 'prepDone', 'attended', 'afterAt', 'monitorEventId', 'movedFrom'];
+// свёртка FNV-1a (32 бита) строки — в base36; одинакова на всех устройствах
+function heardupHash(s) { let h = 0x811c9dc5; s = String(s || ''); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(36); }
+// id заседания, создаваемого по событию суда: одно и то же у всех устройств для одного дела, рассмотрения, даты и времени
+function hearingIdFor(caseId, date, time, pid) { return 'ЗС-' + heardupHash([caseId || '', date || '', String(time || '').slice(0, 5), pid || ''].join('|')); }
+// свободный id: занятый (в том числе записью в корзине — иначе запись без версии перепишет её) получает числовой суффикс; порядок у устройств одинаков
+function hearingIdFree(base, taken) { let id = base, n = 1; while (taken.has(id)) id = base + '-' + (++n); taken.add(id); return id; }
+function heardupTime(t) { return String(t || '').slice(0, 5); }
+// ключ двойника: дело (внутренняя связь, иначе номер), рассмотрение, дата, время
+function hearingDupKey(h, caseIdOf) { const cid = h.caseId || (caseIdOf ? caseIdOf(h.caseNum) : '') || (h.caseNum ? 'n:' + h.caseNum : ''); return [cid, h.proceedingId || '', h.date || '', heardupTime(h.time)].join('|'); }
+// запись трогал пользователь: заполнено то, что пишет только человек, или правка позже последней записи программой (courtSync) — такую копию
+// программа сама не удаляет (отметка «Дата прошла» при запуске — тоже программа: autoDone)
+function hearingUserTouched(h) {
+  if (!h.monitorEventId) return true;
+  if (['result', 'prep', 'participation'].some(f => String(h[f] || '').trim())) return true;
+  if (h.attended || h.afterAt || h.prepDone) return true;
+  if (h.status === 'Проведено' || h.status === 'Отменено') return true;
+  const upd = Number(h._upd || 0), sync = Number(h.courtSync || h.createdAt || 0);
+  if (upd && sync && upd > sync + 60000 && !(h.autoDone && h.status === 'Дата прошла')) return true;
+  return false;
+}
+// план объединения: группы из двух и более живых заседаний с одним ключом; keep — копия с наименьшим id, дополненная пустыми полями из остальных;
+// auto — все копии, кроме оставляемой, создала программа и с тех пор не правили
+function hearingDupPlan(hearings, cases) {
+  const byNum = new Map(); (cases || []).forEach(c => { if (c && !c._deleted && c.number && !byNum.has(c.number)) byNum.set(c.number, c.id); });
+  const caseIdOf = num => byNum.get(num) || '';
+  const groups = new Map();
+  for (const h of hearings || []) { if (!h || h._deleted || !h.id || !h.date || h.status === 'Отменено') continue; const k = hearingDupKey(h, caseIdOf); if (!k.split('|')[0]) continue; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(h); }
+  const plan = [];
+  for (const [key, g] of groups) {
+    if (g.length < 2) continue;
+    g.sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
+    const keep = { ...g[0] }, drop = g.slice(1), fill = [];
+    for (const f of HEARDUP_FIELDS) { if (keep[f] !== undefined && keep[f] !== '' && keep[f] !== null && keep[f] !== false) continue; const src = drop.find(x => x[f] !== undefined && x[f] !== '' && x[f] !== null && x[f] !== false); if (src) { keep[f] = src[f]; fill.push(f); } }
+    // статус: проведённое с результатом важнее «Назначено» и «Дата прошла»; «Дата прошла» важнее «Назначено»
+    const rank = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1;
+    const best = g.reduce((m, x) => (rank(x.status) > rank(m.status) ? x : m), g[0]);
+    if (best.status && best.status !== keep.status) { keep.status = best.status; fill.push('status'); if (best.status === 'Проведено') delete keep.autoDone; }
+    if (!keep.caseId) { const src = g.find(x => x.caseId); if (src) { keep.caseId = src.caseId; fill.push('caseId'); } }
+    keep.mergedIds = [...new Set([...(keep.mergedIds || []), ...drop.map(x => x.id)])];
+    plan.push({ key, keep, drop, fill, auto: drop.every(x => !hearingUserTouched(x)), caseNum: keep.caseNum || g.find(x => x.caseNum)?.caseNum || '', date: keep.date, time: heardupTime(keep.time) });
+  }
+  return plan;
+}
+// применить одну группу: оставляемая запись дописывается, остальные — в корзину (надгробие уходит обменом на другие устройства),
+// события суда, применённые к удалённым копиям, переводятся на оставленную (урок 171: дубль переносит все отметки)
+async function hearingDupApply(p, events) {
+  const ev = events || await getAll('monitorEvents');
+  await put('hearings', p.keep);
+  for (const x of p.drop) await del('hearings', x.id);
+  const dropIds = new Set(p.drop.map(x => x.id));
+  for (const e of ev) { if (e && !e._deleted && dropIds.has(e.appliedRecordId)) { e.appliedRecordId = p.keep.id; await put('monitorEvents', e); } }
+  if (typeof crmCaseLogByNum === 'function' && p.caseNum) { try { await crmCaseLogByNum(p.caseNum, 'hearing_upd', `Заседание ${fmtDate(p.date)}${p.time ? ' ' + p.time : ''}: объединены ${p.drop.length + 1} одинаковые записи (появились при применении события суда на разных устройствах) — оставлена одна`); } catch (e) { logErr('heardup:log', e); } }
+}
+// автоматическое объединение (запуск, автоприменение событий, после обмена): только группы auto; ответ — сколько записей убрано и сколько
+// групп ждут решения пользователя («Проверка данных»)
+async function hearingDedupe() {
+  let hearings, cases, events;
+  try { hearings = await getAllRaw('hearings'); cases = await getAllRaw('cases'); events = await getAllRaw('monitorEvents'); } catch (e) { logErr('heardup:read', e); return { n: 0, manual: 0 }; }
+  const plan = hearingDupPlan(hearings, cases); let n = 0, manual = 0;
+  for (const p of plan) {
+    if (!p.auto) { manual++; continue; }
+    try { await hearingDupApply(p, events); n += p.drop.length; } catch (e) { logErr('heardup:apply', e); }
+  }
+  if (n && typeof icsTouch === 'function') { try { icsTouch(); } catch (e) { /* штатно: ленты может не быть */ } }
+  return { n, manual };
+}
+// строки «Проверки данных»: группы, которые программа сама не объединяет (копию правили или заполняли вручную)
+function integrityHearingDups(d, out) {
+  for (const p of hearingDupPlan(d.hearings, d.cases)) {
+    if (p.auto) continue;
+    out.push({ type: 'Заседания-двойники', label: 'Заседание ' + fmtDate(p.date) + (p.time ? ' ' + p.time : '') + (p.caseNum ? ' · ' + p.caseNum : ''), detail: 'Записей: ' + (p.drop.length + 1) + '. Одно и то же заседание, записанное по событию суда на разных устройствах; в какой-то из копий есть ваши правки — программа сама не объединяет. Откройте и решите', open: ['hearingDupOpen', p.key] });
+  }
+}
+// лист группы: копии списком и «Оставить одно» — оставляется копия с наименьшим id, пустые поля дополняются из остальных
+async function hearingDupOpen(key) {
+  const hearings = await getAll('hearings'), cases = await getAll('cases');
+  const p = hearingDupPlan(hearings, cases).find(x => x.key === key); if (!p) { toast('Двойников у этого заседания уже нет'); return; }
+  const all = [p.keep, ...p.drop];
+  const row = (h, i) => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span><b>${i === 0 ? 'Останется' : 'Уйдёт в корзину'}</b> · ${esc(h.status || 'Назначено')}${h.room ? ' · зал ' + esc(h.room) : ''}${h.result ? '<br>' + esc('итог: ' + h.result) : ''}${h.prep ? '<br>' + esc('подготовить: ' + h.prep) : ''}${h.participation ? '<br>' + esc(h.participation) : ''}<br><span class="small muted">${esc(h.court || '')}${h.judge ? ' · ' + esc(h.judge) : ''}${h.monitorEventId ? ' · по данным суда' : ' · внесено вручную'}</span></span>${icon('chevron-right')}</button>`;
+  openSheet('Заседания-двойники · ' + fmtDate(p.date) + (p.time ? ' ' + p.time : ''), `<p class="small muted">${esc(p.caseNum ? 'Дело ' + p.caseNum + '. ' : '')}Одно заседание записано ${all.length} раз: так бывает, когда событие суда применяется на нескольких устройствах до обмена базой. «Оставить одно» оставит первую запись, допишет в неё то, чего в ней нет (зал, итог, подготовку, участие — из остальных), остальные уйдут в корзину, события суда перейдут на оставленную. Поля, заполненные в обеих копиях по-разному, остаются как в первой — проверьте её после объединения.</p>
+    <div class="list-rows">${all.map(row).join('')}</div>
+    <div class="form-actions" style="margin-top:8px"><button type="button" class="button primary" id="heardup-merge" onclick="hearingDupMerge('${jsq(key)}')">${icon('check', 'icon-sm')}Оставить одно (${all.length} → 1)</button></div>`, sheetIsOpen() ? true : undefined);
+}
+async function hearingDupMerge(key) {
+  const hearings = await getAll('hearings'), cases = await getAll('cases');
+  const p = hearingDupPlan(hearings, cases).find(x => x.key === key); if (!p) { toast('Двойников у этого заседания уже нет'); return; }
+  try { await hearingDupApply(p); } catch (e) { logErr('heardup:merge', e); toast('Не удалось объединить: ' + ((e && e.message) || e), true); return; }
+  toast('Оставлена одна запись, в корзину: ' + p.drop.length); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
 }
 
 // ▼▼▼ sync/kadproto.js
@@ -14332,7 +14453,8 @@ function todayModel(d, now, hidden) {
   hearings.forEach(h => { if (planned(h) && inWin(h.date)) { const c = caseOf(h); later.push({ id: h.id, type: 'hearing', date: h.date, time: h.time || '', title: 'Заседание · ' + (caseTitle(c, h.caseNum) || 'дело не указано'), client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', sub: [hearingCourtOf(h, c), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · ') }); } });
   meetings.forEach(m => { if (m && inWin(m.date)) later.push({ id: m.id, type: 'meeting', date: m.date, time: m.time || '', title: 'Встреча · ' + (m.with || 'без участника'), sub: m.place || '' }); });
   tasks.forEach(t => { if (t && !t.done && inWin(t.due)) later.push({ id: t.id, type: 'task', date: t.due, time: t.time || '', title: t.title || 'Задача', sub: caseTitle(caseOf(t), t.caseNum) }); });
-  cases.filter(activeCase).forEach(c => (c.deadlines || []).forEach(dl => { if (dl && !dl.done && inWin(dl.date)) later.push({ id: c.id, type: 'deadline', date: dl.date, time: '', title: 'Срок · ' + (dl.title || 'срок'), sub: caseTitle(c) }); }));
+  // 19.10.2026: у срока — его id (dlId) для «Выполнено» прямо в строке
+  cases.filter(activeCase).forEach(c => (c.deadlines || []).forEach(dl => { if (dl && !dl.done && inWin(dl.date)) later.push({ id: c.id, type: 'deadline', date: dl.date, time: '', title: 'Срок · ' + (dl.title || 'срок'), sub: caseTitle(c), caseId: c.id, dlId: dl.id || '', dlTitle: dl.title || '' }); }));
   later.sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')));
   const nextItems = later.slice(0, TODAY_NEXT_MAX).map(x => ({ ...x, when: todayDayLabel(x.date, today) }));
   // телефон: вместо списка на 14 дней — строка «Завтра: N событий» и ближайшая дата, если завтра пусто
@@ -14379,8 +14501,14 @@ function todayWorkModel(cases, today) {
 // действия прямо в строке плана дня (замечание пользователя: из заседания — сразу в дело)
 const TODAY_PHONE_MAX = 3; // строк «Требует внимания» на телефоне до кнопки «Показать все»
 function todayImpAll() { const p = document.querySelector('.t-important'); if (p) p.classList.add('all'); }
-function todayRowActions(x) {
-  const b = [];
+// 19.10.2026 (замечание пользователя: «неудобно ставить пометку выполнено на вкладке Сегодня»): у задачи и срока в «Плане дня» и «Далее по плану»
+// — «Выполнено» прямо в строке и смахивание вправо (ui/swipe.js); mode 'next' — только «Выполнено» (в «Далее по плану» без «Открыть дело»)
+function todayDoneAttrs(x) { const a = todayDoneArgs(x); return a ? ` data-swipe-fn="todayDoneRec" data-swipe-args="${esc(JSON.stringify(a))}" data-swipe-label="Выполнено"` : ''; }
+function todayDoneArgs(x) { if (x.type === 'task' && x.id) return ['task', x.id]; if (x.type === 'deadline' && x.caseId && (x.dlId || x.dlTitle)) return ['deadline', x.caseId, x.dlId || '', x.dlTitle || '']; return null; }
+function todayRowActions(x, mode) {
+  const b = [], a = todayDoneArgs(x);
+  if (a) b.push(`<button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDoneRec(${a.map(v => `'${jsq(v)}'`).join(', ')})">${icon('check', 'icon-sm')}Выполнено</button>`);
+  if (mode === 'next') return b.length ? `<div class="agenda-actions">${b.join('')}</div>` : '';
   if (x.caseId) b.push(`<button type="button" class="button small-btn" onclick="openCaseSheet('${jsq(x.caseId)}')">${icon('briefcase-business', 'icon-sm')}Открыть дело</button>`);
   if (x.type === 'hearing' && x.status !== 'Проведено') b.push(`<button type="button" class="button small-btn" onclick="openAfterHearing('${jsq(x.id)}')">${icon('gavel', 'icon-sm')}Итог заседания</button>`);
   return b.length ? `<div class="agenda-actions">${b.join('')}</div>` : '';
@@ -14452,9 +14580,10 @@ SCREENS.today = async function () {
   // заседание на телефоне: «Заседание · доверитель» (номер — на компьютере), судья по инстанции, суд · зал, предмет; ближайшее — с полоской и меткой
   const hTitle = x => x.type === 'hearing' && x.client ? `Заседание · <span class="l-long">${esc(x.number ? x.number + ' · ' : '')}</span>${esc(x.client)}` : esc(x.title);
   const hLines = x => x.type !== 'hearing' ? '' : (x.judge ? `<span class="agenda-judge">Судья: ${esc(x.judge)}</span>` : x.near ? `<span class="agenda-judge muted">Судья не указан</span>` : '') + (x.subject ? `<span class="agenda-sub">${esc(x.subject)}</span>` : '');
-  const agenda = (rows, act) => rows.map(x => `<button type="button" class="agenda-row${act && todayRowActions(x) ? ' has-act' : ''}${x.near ? ' near' : ''}" onclick="todayOpen('${x.type}', '${jsq(x.id || '')}')"><span class="agenda-time">${esc(x.time || ({ task: 'задача', deadline: 'срок' }[x.type] || '—'))}${x.near ? '<span class="agenda-near">' + esc(x.nearIn || 'Ближайшее') + '</span>' : ''}</span>
-      <span class="agenda-stripe ${x.type}${x.status === 'Проведено' ? ' done' : ''}"><span class="agenda-title">${hTitle(x)}</span>${hLines(x)}${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.prep ? badge(x.prep, 'warn') : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : 'accent') : ''}</span></button>${act ? todayRowActions(x) : ''}`).join('');
-  const byDay = rows => { let out = '', cur = ''; for (const x of rows) { if (x.date !== cur) { cur = x.date; out += `<div class="day-mark">${esc(x.when)}${x.when === 'Завтра' ? ' · ' + esc(parseLocalDate(x.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })) : ''}</div>`; } out += agenda([x]); } return out; };
+  const agenda = (rows, act) => rows.map(x => `<button type="button" class="agenda-row${act && todayRowActions(x, act) ? ' has-act' : ''}${x.near ? ' near' : ''}"${act ? todayDoneAttrs(x) : ''} onclick="todayOpen('${x.type}', '${jsq(x.id || '')}')"><span class="agenda-time">${esc(x.time || ({ task: 'задача', deadline: 'срок' }[x.type] || '—'))}${x.near ? '<span class="agenda-near">' + esc(x.nearIn || 'Ближайшее') + '</span>' : ''}</span>
+      <span class="agenda-stripe ${x.type}${x.status === 'Проведено' ? ' done' : ''}"><span class="agenda-title">${hTitle(x)}</span>${hLines(x)}${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.prep ? badge(x.prep, 'warn') : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : 'accent') : ''}</span></button>${act ? todayRowActions(x, act) : ''}`).join('');
+  // «Далее по плану»: у задач и сроков — «Выполнено» и смахивание (mode 'next'), у заседаний и встреч кнопок нет
+  const byDay = rows => { let out = '', cur = ''; for (const x of rows) { if (x.date !== cur) { cur = x.date; out += `<div class="day-mark">${esc(x.when)}${x.when === 'Завтра' ? ' · ' + esc(parseLocalDate(x.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })) : ''}</div>`; } out += agenda([x], 'next'); } return out; };
   const schedule = panel('t-schedule', 'schedule', 'План дня', m.schedule.length, '', m.schedule.length ? agenda(m.schedule, true) : emptyState('calendar-check', 'Заседаний, встреч и задач со временем сегодня нет', 'Ближайшие события — в календаре.'));
   // телефон: строка «Завтра: N событий →» вместо блока «Далее по плану» (вариант Б)
   const tomorrow = `<p class="t-tomorrow"><button type="button" class="text-button" onclick="nav('calendar')">${m.tomorrowCount ? 'Завтра: ' + m.tomorrowCount + ' ' + plural(m.tomorrowCount, 'событие', 'события', 'событий') : m.nextDate ? 'Завтра свободно · ближайшее ' + esc(fmtDate(m.nextDate)) : 'На две недели вперёд пусто'}${icon('arrow-right', 'icon-sm')}</button></p>`;
@@ -14512,6 +14641,24 @@ async function todayDone(key) {
       h.prepDone = todayISO(); await put('hearings', h); toast('Подготовка к заседанию отмечена выполненной');
     }
   } catch (e) { logErr('today:done', e); toast('Не удалось сохранить отметку — подробности в журнале ошибок', true); return; }
+  nav('today');
+}
+// 19.10.2026: «Выполнено» у задачи или срока из «Плана дня» и «Далее по плану» — по записи, а не по строке модели (строка могла устареть);
+// запись правится свежая (recUpdate, урок 161), задача — также из формы «Правка задачи» остаётся прежней
+async function todayDoneRec(type, id, dlId, dlTitle) {
+  const upd = typeof recUpdate === 'function' ? recUpdate : async (store, rid, fn) => { const r = await getOne(store, rid); if (!r || fn(r) === false) return null; await put(store, r); return r; };
+  try {
+    if (type === 'task') {
+      const r = await upd('tasks', id, t => { if (t.done) return false; t.done = true; t.doneAt = todayISO(); });
+      if (!r) { toast('Задача уже выполнена или не найдена'); nav('today'); return; }
+      toast('Задача выполнена');
+    } else if (type === 'deadline') {
+      let found = false, was = false;
+      const r = await upd('cases', id, c => { const dl = (c.deadlines || []).find(v => v && ((dlId && v.id === dlId) || (!dlId && dlTitle && v.title === dlTitle))); if (!dl) return false; found = true; if (dl.done) { was = true; return false; } dl.done = true; dl.doneAt = todayISO(); if (typeof dlManual === 'function') dlManual(dl); });
+      if (!r) { toast(was ? 'Срок уже отмечен выполненным' : found ? 'Не удалось записать' : 'Срок не найден', !was && !found); nav('today'); return; }
+      toast('Срок отмечен выполненным');
+    } else return;
+  } catch (e) { logErr('today:doneRec', e); toast('Не удалось сохранить отметку — подробности в журнале ошибок', true); return; }
   nav('today');
 }
 // v312 (pastNoResultDismissAll): всем прошедшим заседаниям со статусом «Дата прошла» или «Назначено» — «Проведено» без результата
@@ -19379,6 +19526,8 @@ function integrityAccum(d, cases, out) {
   }
   for (const h of live(d.hearings)) if (h.status === 'Проведено' && !String(h.result || '').trim() && h.monitorEventId && h.date && (!today || h.date < today)) out.push({ type: 'Проведено без результата (по данным суда)', label: 'Заседание ' + fmtDate(h.date) + (h.caseNum ? ' · ' + h.caseNum : ''), detail: 'Программа до 16.10.2026 ставила «Проведено» прошедшему заседанию без результата на сайте — укажите итог или статус «Дата прошла»', open: ['openHearingForm', h.id] });
   if (typeof procList === 'function') integrityProc(d, cases, out);
+  // 19.10.2026: заседания-двойники с ручными правками — только показ и лист «Оставить одно» (sync/heardup.js)
+  if (typeof integrityHearingDups === 'function') integrityHearingDups(d, out);
   for (const f of live(d.finance)) {
     const del = (f._delItems && f._delItems.stages) || {}, seen = {};
     for (const s of Array.isArray(f.stages) ? f.stages : []) { if (!s || del[s.id]) continue; const k = String(s.name || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim() + '|' + Number(s.sum || 0); if (seen[k]) { out.push({ type: 'Повторяющиеся этапы счёта', label: 'Счёт · ' + (f.client || '') + ' · ' + (f.service || ''), detail: 'Этап «' + (s.name || '') + '» на ' + fmtMoney(s.sum || 0) + ' записан дважды — если это не два разных этапа (так бывало при создании счёта на двух устройствах до 15.10.2026), уберите лишний', open: ['openFinanceSheet', f.id] }); break; } seen[k] = 1; }
@@ -19448,7 +19597,7 @@ async function openIntegritySheet(mode) {
   const fixBtn = nFix ? `<div class="info-box" id="integ-proc-fix-box">Событий, отнесённых не к своему рассмотрению при однозначном признаке (ссылка, с которой событие собрано): ${nFix}. Программа перенесёт каждое тем же расчётом, что и кнопка в карточке события. Не трогает: событие, рассмотрение которого выбрали вы; заседание, которое вы отнесли в форме заседания; расхождение «событие — заседание»; дату акта, про которую не доказано, что её записало это событие, — такие записи будут в списке «Не исправлено» с причиной. Проверка повторяется по свежим данным в момент записи.<div class="form-actions" style="margin-top:6px"><button type="button" class="button small-btn primary" id="integ-proc-fix" onclick="integrityProcFix()">${icon('check', 'icon-sm')}Исправить однозначные связи (${nFix})</button></div></div>` : '';
   const body = fixBtn + (rows.length ? types.map(t => `<div class="section-label">${esc(t)} · ${rows.filter(r => r.type === t).length}</div><div class="list-rows">${rows.filter(r => r.type === t).slice(0, 50).map(r => `<button type="button" class="list-btn" onclick="${esc(r.open[0])}('${jsq(r.open[1])}')"><span>${esc(r.label)}</span><span class="muted">${esc(r.detail)}</span></button>`).join('')}${rows.filter(r => r.type === t).length > 50 ? '<p class="small muted">Показаны первые 50</p>' : ''}</div>`).join('')
     : `<div class="status-line good" role="status">${icon('check')}<span>Неточностей не найдено</span></div>`);
-  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты, а также то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта. Проверка ничего не меняет сама — откройте запись и поправьте (однозначные связи событий с рассмотрениями — кнопкой «Исправить однозначные связи»); у записи, привязанной к двум делам, выберите верное дело; дубли доверителей объединяются, повторяющемуся номеру дела даётся новый.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
+  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты, а также то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта, заседания-двойники с вашими правками (одинаковые без правок программа объединяет сама). Проверка ничего не меняет сама — откройте запись и поправьте (однозначные связи событий с рассмотрениями — кнопкой «Исправить однозначные связи»); у записи, привязанной к двум делам, выберите верное дело; дубли доверителей объединяются, повторяющемуся номеру дела даётся новый.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
 }
 
 // ▼▼▼ ui/parties.js
@@ -20769,7 +20918,7 @@ const HELP_SECTIONS = [
 <p>«Суды и мониторинг» → строка «Кто звонил?» (или «Справочники» → «Суды и судьи»): введите номер, с которого звонили, — в любом написании, с +7, 8, скобками или только последние цифры (от четырёх), — программа найдёт суд, секретаря или помощника судьи с этим номером. Там же поиск по названию суда, городу, судье, секретарю и помощнику. В карточке суда — телефоны с кнопкой «Позвонить», «Сайт суда», «Маршрут» (карта по адресу), ваши дела в этом суде, ближайшие заседания и судьи. Суды Владимирской области (районные и городские, областной, арбитражные суды области, апелляционный и кассационный) уже есть в программе: адреса, телефоны и сайты переписаны с официальных сайтов судов 13.10.2026 — перед звонком или поездкой сверьте; «Записать данные с сайта суда в карточку» переносит их в вашу карточку, дальше её можно править. Если в вашей карточке суда что-то заполнено, показывается ваше. Верхняя строка поиска программы тоже находит доверителя, суд и судью по номеру телефона.</p>` },
   { id: 'today', title: '«Сегодня» и быстрые записи', html: `
 <p>«Сегодня» показывает, что требует внимания: просроченные и ближайшие сроки, задачи, заседания без результата, подготовку к заседаниям, истекающие доверенности, события с сайтов судов. У каждой строки — действие («Выполнено», «Итог заседания») и «×»: строка скрывается на неделю. Процессуальный срок, скрытый заранее, возвращается в день срока.</p>
-<p>«План дня» — заседания, встречи и задачи со временем. «Сделать сегодня» — задачи на сегодня без времени.</p>
+<p>«План дня» — заседания, встречи и задачи со временем. «Сделать сегодня» — задачи на сегодня без времени. У задачи и срока в «Плане дня», «Сделать сегодня», «Требует внимания» и «Далее по плану» — кнопка «Выполнено» прямо в строке; на телефоне строку можно смахнуть вправо — то же действие (за порогом подпись «Выполнено» становится зелёной).</p>
 <p><b>Наложение по времени.</b> Форма заседания и встречи при сохранении предупреждает «Время занято»: в одном суде между заседаниями нужно не менее 30 минут, в разных судах — время на дорогу (задаётся в карточке суда, по умолчанию час до каждого суда), между встречей и заседанием — 30 минут и дорога до суда, между встречами — большая из длительностей. Повторное «Сохранить» записывает всё равно. Записи, пришедшие не через форму (с сайта суда, из карточки КАД, с другого устройства, из онлайн-записи), «Сегодня» проверяет само на 60 дней вперёд и показывает строку «Наложение по времени»; «Не ошибка» убирает её, пока не изменится время одной из записей.</p>
 <h3>Быстрая запись</h3>
 <p>«Создать» → «Быстрая запись» (или раздел «Быстрые записи»): одна фраза, как в блокноте. Программа предложит, что это:</p>
@@ -20817,7 +20966,7 @@ const HELP_SECTIONS = [
 <p>Деньги по делу — группа «Деньги: счета, расходы, деньги доверителя» в карточке дела, там три разных вещи. <b>Счёт</b> — гонорар по соглашению: что начислено доверителю и что оплачено («Выставить счёт» в группе; оплата — в карточке счёта или на экране «Финансы»). Аванс, оплата отдельного действия и окончательный расчёт — это платежи по одному счёту: при любой схеме (аванс и остаток после решения, оплата каждого действия, вся сумма в конце) выставьте счёт на гонорар по соглашению и записывайте каждое поступление как платёж; долг по счёту — то, что доверитель ещё должен. Отчёты «Получено» и «Доход» считают именно оплаты счетов — по дате платежа. <b>Этапы работ</b> в карточке счёта («Добавить этап»: название, сумма, «Выполнен») показывают, какая часть оплаченного отработана: «не отработано» — оплачено сверх выполненных этапов, такой аванс при расторжении соглашения возвращается; счета с неотработанным авансом — фильтр «Не отработано» на экране «Финансы», итог — в отчёте «Финансы» → «Неотработанные авансы». У абонентской платы «Счёт за следующий месяц» переносит этапы шаблоном — названия и суммы, не выполненные: новый месяц начинается с нуля отработанного. <b>Деньги доверителя на расходы</b> — суммы, которые доверитель передаёт вперёд на госпошлину, экспертизу и подобное: «Внести», а по мере трат — «Списать» (за что — в назначении); остаток по делу виден там же, списание больше остатка программа записывает только после второго нажатия «Сохранить»; в отчёты эти деньги не входят — это не гонорар. <b>Расход</b> — ваши затраты по делу («Записать расход»), с отметкой «к возмещению». Все операции денег по делу видны в ленте дела по фильтру «Деньги»; остатки денег доверителей по всем делам — «Финансы» → «Деньги на расходы». Операции, внесённые в прежней программе как «депозит», видны здесь как деньги на расходы; если вы записывали туда аванс гонорара — выставьте счёт и отметьте его оплату, а операцию удалите.</p>
 <p>Участники дела (третьи лица, представители, противная сторона): карточка дела → «Суд, стороны, инстанции» → «Изменить участников». У каждого — роль, ИНН (кнопка «По ИНН» заполняет адрес), телефон, почта, заметка. Участник, которого вы убрали, не вернётся ни при обмене с другими устройствами, ни с сайта суда.</p>
 <p>Конфликт интересов: при сохранении дела, доверителя и участников программа ищет то же имя в других делах — доверитель, который проходит у вас противной стороной или третьим лицом, и наоборот (подп. 10 п. 1 ст. 9, п. 1 ст. 11 Кодекса профессиональной этики адвоката). Совпадение имени или фамилии — только предупреждение: если конфликта нет, нажмите «Сохранить» ещё раз.</p>
-<p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер.</p>
+<p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер. Заседания-двойники (одно заседание, записанное по событию суда на нескольких устройствах до обмена базой, — до 19.10.2026 у каждого устройства получалась своя запись) программа сводит сама при запуске и после обмена, если копии не правили; копии с вашими правками показывает здесь строкой «Заседания-двойники» с листом «Оставить одно».</p>
 <p>Жест: строку «Выполнено» в «Задачах и сроках» и на «Сегодня» можно смахнуть пальцем вправо — задача или срок отмечаются выполненными; у прошедшего заседания смахивание открывает «Итог заседания». Кнопки в строке работают как раньше.</p>
 <p>Настройки: строка «Найти настройку» вверху — введите слово (например, «PIN», «Telegram», «ордер»), останутся только подходящие пункты.</p>
 <p>Журнал ордеров: «Настройки» → «Журнал ордеров» или карточка дела → «Суд, стороны, инстанции» → «Выписать ордер». Номер предлагается следующим за последним в журнале — сверьте его с бланком из книжки; повтор номера программа показывает и записывает только после второго нажатия. Номер ордера, вписанный в форму дела (вкладка «Соглашение»), попадает в журнал сам, один раз. Реестр ордеров для печати — кнопка в журнале.</p>
@@ -21590,6 +21739,8 @@ const NEXT_BOOT = {
     try { await hearingsAutoDone(); } catch (e) { logErr('next:hearings-auto', e); }
     // 04.10.2026: дубли событий суда (одно событие, пришедшее двумя путями) удаляются (sync/monitor.js)
     try { if (typeof monEvDedupe === 'function') await monEvDedupe(); } catch (e) { logErr('next:mon-dedupe', e); }
+    // 19.10.2026: заседания-двойники (одно событие суда применено на разных устройствах) — сводятся при запуске (sync/heardup.js)
+    try { if (typeof hearingDedupe === 'function') await hearingDedupe(); } catch (e) { logErr('next:heardup', e); }
     syncStatusRender(); // этап 1г: состояние синхронизации в шапке — после запуска слоя данных (секреты уже прочитаны)
     UI.ready = true; await nav('today');
     window.NEXT_READY = await this.report();
