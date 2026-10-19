@@ -24,6 +24,7 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.26: «Подготовка дела к рассмотрению» (КоАП, движение дела) — не заседание; беседа и собеседование — заседания (19.10.2026).
 //  v3.25: ссылка текущего рассмотрения несёт cpid — событие с proceedingId без смены ключа (аудит сборки 169, А2).
 //  v3.24: ссылка рассмотрения дела несёт pid — события этой ссылки с proceedingId, ключ с |p:<id> (аудит 17.10.2026, рассмотрения дела).
 //  v3.23: raw.keyVer 2 у события complaint — поколение ключа, чтобы программа отличала новую запись от прежней на сервере (аудит сборки 158, R1).
@@ -85,7 +86,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.25';
+const COLLECTOR_VER = '3.26';
 // Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
 // самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
 // по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
@@ -170,6 +171,9 @@ const RE_TIME = /\b([01]?\d|2[0-3]):([0-5]\d)\b/;
 const RE_HEARING = /заседани|слушани|беседа|подготовк|рассмотрени/i;
 // v3.8: строки движения, которые НЕ заседания, даже если в них есть дата и время: принятие иска к производству, регистрация, передача судье, оформление, сдача в отдел, направление копий, возврат из инстанции
 const RE_NOT_HEARING = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен|вынесен\S* (определени|постановлени)|определени\S* о (подготовке|назначении|принятии|возбуждении|оставлении|возврат)|назначени\S* дела к/i; // v3.10: «Вынесено определение о подготовке/назначении дела…» — акт судьи, не заседание; собеседование (подготовка дела) остаётся заседанием
+// v3.26: подготовка дела или материалов к рассмотрению (к судебному разбирательству) — действие судьи, не заседание; беседа — заседание
+const RE_PREP_NOT_HEARING = /подготовк\S* (?:дела |материал\S* )?к (?:рассмотрени|судебн)/i;
+function isHearingLabel(t) { const x = String(t || ''); return RE_HEARING.test(x) && !RE_NOT_HEARING.test(x) && !(RE_PREP_NOT_HEARING.test(x) && !/бесед/i.test(x)); }
 const RE_ACT_KIND = /решени|постановлени|определени|приговор|судебн\w*\s+акт/i;
 const RE_ACT_PUB = /опубликован|размещен|изготовлен/i;
 const RE_UID = /\b\d{2}[A-Z]{2}\d{4}-\d{2}-\d{4}-\d{6}-\d{2}\b/; // 77RS0031-01-2026-004567-89
@@ -415,7 +419,7 @@ function parseCasePage(html) {
     const date = dm[1];
     const label = (cells[0] || '').slice(0, 120);
     const tm = joined.match(RE_TIME);
-    if (RE_HEARING.test(label) && !RE_NOT_HEARING.test(label)) { // v3.8: «Решение вопроса о принятии иска…» и подобное — не заседание
+    if (isHearingLabel(label)) { // v3.8: «Решение вопроса о принятии иска…» и подобное — не заседание
       const iDate = cells.findIndex(x => RE_DATE.test(x));
       let room = '', result = '';
       for (const cell of cells.slice(iDate + 1)) {
@@ -1187,6 +1191,10 @@ function runTests() {
     const sl = sanitizeLinksPack({ format: 'crm-advokat-links', cases: [{ number: 'Д-1', links: [{ url: 'https://x', stage: 'Апелляция', cpid: 'pr-cur' }] }] });
     return a.proceedingId === 'pr-cur' && a.externalId === 'flow:U:1' && b.proceedingId === 'pr-par' && b.externalId === 'flow:U:1|p:pr-par' && sl.cases[0].links[0].cpid === 'pr-cur';
   })());
+  t('v3.26: «Подготовка дела к рассмотрению» с результатом «Назначено судебное заседание» — не заседание; собеседование и заседание — заседания', (() => {
+    const P = '<table><tr><td>Подготовка дела к рассмотрению</td><td>30.09.2026</td><td>10:18</td><td></td><td>Назначено судебное заседание</td></tr><tr><td>Судебное заседание</td><td>14.10.2026</td><td>09:30</td><td>3</td><td></td></tr><tr><td>Подготовка дела (собеседование)</td><td>01.10.2026</td><td>10:00</td><td></td><td></td></tr><tr><td>Подготовка материалов к судебному разбирательству</td><td>02.10.2026</td><td>11:00</td><td></td><td></td></tr></table>';
+    return parseCasePage(P).hearings.map(h => h.date).join() === '14.10.2026,01.10.2026' && !isHearingLabel('Подготовка дела к рассмотрению') && isHearingLabel('Подготовка дела (собеседование)') && isHearingLabel('Беседа');
+  })());
   console.log(`коллектор: ${pass}/${pass + fail}`);
   process.exit(fail ? 1 : 0);
 }
@@ -1408,7 +1416,7 @@ function aaToPage(j) {
     const e = kv(ev); const title = norm(e['наименование события'] || ''), date = (e['дата'] || '').match(RE_DATE); if (!title || !date) continue;
     const time = ((e['время'] || '').match(RE_TIME) || [])[0] || '', room = (e['зал судебного заседания'] || '').replace(/^зал\s*№?\s*/i, '').trim(), result = norm(e['результат события'] || ''), basis = norm(e['основание для выбранного результата события'] || '');
     flow.push({ title, date: date[1], time, result, basis });
-    if (RE_HEARING.test(title) && !RE_NOT_HEARING.test(title)) page.hearings.push({ date: date[1], time, room, label: title, result });
+    if (isHearingLabel(title)) page.hearings.push({ date: date[1], time, room, label: title, result });
   }
   const RE_NO = /(?:[АA]\d{2}|\d{1,2}[а-яёa-z]{0,2})[-–]\d{1,7}\/\d{4}/i;
   const card = { parties: [], uid: a['уникальный идентификатор дела'] || '', judge: a['судья'] || '', court: norm(j.court_title || ''), registered: '', category: a['категория дела'] || '' };

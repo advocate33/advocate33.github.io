@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="19.10.2026 16:53 · 5356b99+">
-<meta name="build-no" content="176">
+<meta name="build" content="19.10.2026 20:28 · 89bc8f3+">
+<meta name="build-no" content="177">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -1316,6 +1316,11 @@ function fieldStamps(obj, prev, ts) {
     const bare = d => { const o = Object.assign({}, d); delete o._u; return JSON.stringify(o); };
     for (const d of obj.deadlines) { if (!d || d.id == null) continue; const pd = pm.get(d.id); if (!pd || bare(pd) !== bare(d)) d._u = ts; else if (pd._u) d._u = pd._u; else delete d._u; }
   }
+  // v177 (аудит сборки 176, N4; урок 175): у каждого элемента рассмотрения (прежнего, параллельного) — метка правки КАЖДОГО поля: fields —
+  // fieldsCh, состояние и связи (status, basis, cancelled, after, from, conflictOf…) — metaCh. Слияние (mergeProceeding) выбирает значение
+  // по полю, а не элемент целиком по updatedAt: судья, исправленный на одном устройстве, и дата акта, записанная мониторингом на другом,
+  // сохраняются обе. Метку ставит любой путь записи дела (форма, procTxRun, мониторинг, recUpdate) — здесь, по сравнению с прежней записью.
+  if (obj && Array.isArray(obj.proceedings)) procFieldStamps(obj.proceedings, prev && Array.isArray(prev.proceedings) ? prev.proceedings : [], ts);
   const ch = Object.assign({}, prev && prev._ch || {});
   const keys = new Set([...Object.keys(obj), ...Object.keys(prev || {})]);
   for (const k of keys) {
@@ -1326,12 +1331,74 @@ function fieldStamps(obj, prev, ts) {
   obj._ch = ch;
   return obj;
 }
+// служебные свойства элемента рассмотрения, у которых своей метки нет
+const PROC_EL_SKIP = ['id', 'fields', 'fieldsCh', 'fieldsBy', 'metaCh', 'updatedAt', 'createdAt'];
+const procElJ = v => JSON.stringify(v === undefined ? null : v);
+// метки полей элементов рассмотрений: изменённое, добавленное и очищенное поле — ts; неизменённое без метки — метка прежней версии элемента
+// (замораживается: иначе оно выглядело бы правленым при каждом слиянии); новый элемент — ts всем полям без метки. Значение поля изменено,
+// а отметка происхождения fieldsBy осталась прежней — запись не того события (правка вручную): отметка снимается (урок 170)
+function procFieldStamps(list, prevList, ts) {
+  const pm = new Map((prevList || []).filter(p => p && p.id != null).map(p => [p.id, p]));
+  for (const el of list) {
+    if (!el || el.id == null || typeof el !== 'object') continue;
+    const pe = pm.get(el.id), base = pe ? Number(pe.updatedAt || pe.createdAt || 0) : 0;
+    const f = el.fields && typeof el.fields === 'object' ? el.fields : {}, pf = pe && pe.fields && typeof pe.fields === 'object' ? pe.fields : {};
+    const fc = Object.assign({}, pe && pe.fieldsCh || {}, el.fieldsCh || {}), by = Object.assign({}, el.fieldsBy || {}), pby = pe && pe.fieldsBy || {};
+    for (const k of new Set(Object.keys(f).concat(Object.keys(pf)))) {
+      if (!pe) { if (fc[k] === undefined) fc[k] = ts; continue; }
+      if (procElJ(f[k]) !== procElJ(pf[k])) { const given = el.fieldsCh && pe.fieldsCh && Number(el.fieldsCh[k] || 0) > Number(pe.fieldsCh[k] || 0); if (!given) fc[k] = ts; if (by[k] !== undefined && procElJ(by[k]) === procElJ(pby[k])) delete by[k]; }
+      else if (fc[k] === undefined) fc[k] = base;
+    }
+    el.fieldsCh = fc; if (Object.keys(by).length) el.fieldsBy = by; else delete el.fieldsBy;
+    const mc = Object.assign({}, pe && pe.metaCh || {}, el.metaCh || {});
+    for (const k of new Set(Object.keys(el).concat(pe ? Object.keys(pe) : []))) {
+      if (PROC_EL_SKIP.includes(k) || k.startsWith('_')) continue;
+      if (!pe) { if (mc[k] === undefined) mc[k] = ts; continue; }
+      if (procElJ(el[k]) !== procElJ(pe[k])) mc[k] = ts; else if (mc[k] === undefined) mc[k] = base;
+    }
+    el.metaCh = mc;
+  }
+  return list;
+}
+// v177 (N4): слияние двух версий одного рассмотрения по полям. Метка поля — fieldsCh/metaCh; у элемента прежней сборки без меток — его
+// updatedAt, если поле в нём есть, иначе 0. Отсутствующее поле с меткой — явное очищение (побеждает, если позже). Равные метки при разных
+// значениях — значение версии с поздним updatedAt, при равенстве — меньшее по записи (одинаково на всех устройствах и в любом порядке
+// доставки). fieldsBy поля — из версии, чьё значение победило. Две ручные правки одного поля — побеждает поздняя (конфликт не показывается)
+function mergeProceeding(x, y) {
+  if (!x || !y) return x || y;
+  if (procElJ(x) === procElJ(y)) return x;
+  const ux = Number(x.updatedAt || x.createdAt || 0), uy = Number(y.updatedAt || y.createdAt || 0);
+  const pickT = (a, b, ta, tb, va, vb) => { if (ta !== tb) return ta > tb ? a : b; if (ux !== uy) return ux > uy ? x : y; return procElJ(va) <= procElJ(vb) ? a : b; };
+  const out = {}, fx = x.fields || {}, fy = y.fields || {}, cx = x.fieldsCh || {}, cy = y.fieldsCh || {}, bx = x.fieldsBy || {}, by = y.fieldsBy || {};
+  const t = (fl, c, u, k) => c[k] !== undefined ? Number(c[k] || 0) : (fl[k] !== undefined ? u : 0);
+  const fields = {}, fc = {}, fb = {};
+  for (const k of new Set(Object.keys(fx).concat(Object.keys(fy), Object.keys(cx), Object.keys(cy)))) {
+    const tx = t(fx, cx, ux, k), ty = t(fy, cy, uy, k), w = pickT(x, y, tx, ty, fx[k], fy[k]), src = w === x ? fx : fy;
+    if (src[k] !== undefined) fields[k] = JSON.parse(JSON.stringify(src[k]));
+    fc[k] = Math.max(tx, ty);
+    const b = (w === x ? bx : by)[k]; if (b !== undefined && src[k] !== undefined) fb[k] = b;
+  }
+  const mx = x.metaCh || {}, my = y.metaCh || {}, mc = {};
+  for (const k of new Set(Object.keys(x).concat(Object.keys(y)))) {
+    if (PROC_EL_SKIP.includes(k) || k.startsWith('_')) continue;
+    const tx = mx[k] !== undefined ? Number(mx[k] || 0) : (x[k] !== undefined ? ux : 0), ty = my[k] !== undefined ? Number(my[k] || 0) : (y[k] !== undefined ? uy : 0);
+    const w = pickT(x, y, tx, ty, x[k], y[k]);
+    if (w[k] !== undefined) out[k] = JSON.parse(JSON.stringify(w[k]));
+    mc[k] = Math.max(tx, ty);
+  }
+  for (const k of Object.keys(mx).concat(Object.keys(my))) if (mc[k] === undefined) mc[k] = Math.max(Number(mx[k] || 0), Number(my[k] || 0));
+  out.id = x.id; out.fields = fields; out.fieldsCh = fc; if (Object.keys(fb).length) out.fieldsBy = fb; out.metaCh = mc;
+  out.createdAt = Math.min(Number(x.createdAt || ux), Number(y.createdAt || uy)) || Number(x.createdAt || y.createdAt || 0);
+  out.updatedAt = Math.max(ux, uy);
+  return out;
+}
 // слияние двух версий записи: основа — более новая; каждое поле — из той версии, где оно менялось позже (по _ch); без меток — из более новой
 // v294: списки записей с id (платежи и т.п.) сливаются по элементам, а не целиком; удалённые элементы — в _delItems[поле][id] = время
 const itemListKey = (a) => Array.isArray(a) && a.length > 0 && a.every(x => x && typeof x === 'object' && x.id != null);
-function mergeItemLists(a, b, tsA, tsB, dels) {
+function mergeItemLists(a, b, tsA, tsB, dels, mergeEl) {
   const out = [], seen = new Set();
-  const pick = (x, y) => { const ux = Number(x.updatedAt || x.createdAt || 0), uy = Number(y.updatedAt || y.createdAt || 0); if (ux !== uy) return ux > uy ? x : y; return tsA >= tsB ? x : y; }; // v299: сначала метка самого элемента, потом метка списка
+  // v177 (N4): элементы с одним id — функцией слияния по полям, если она передана (рассмотрения дела — mergeProceeding)
+  const pick = mergeEl ? (x, y) => mergeEl(x, y) : (x, y) => { const ux = Number(x.updatedAt || x.createdAt || 0), uy = Number(y.updatedAt || y.createdAt || 0); if (ux !== uy) return ux > uy ? x : y; return tsA >= tsB ? x : y; }; // v299: сначала метка самого элемента, потом метка списка
   const mapB = new Map((Array.isArray(b) ? b : []).map(x => [x.id, x]));
   (Array.isArray(a) ? a : []).forEach(x => { const y = mapB.get(x.id); out.push(y ? pick(x, y) : x); seen.add(x.id); });
   (Array.isArray(b) ? b : []).forEach(y => { if (!seen.has(y.id)) out.push(y); });
@@ -1439,7 +1506,7 @@ function mergeCaseRecords(cur, rec, base, events) {
   // v168 (17.10.2026, рассмотрения дела, ui/proceedings.js): надгробия элементов — по максимуму с обеих сторон; рассмотрения — по элементам
   // с их меткой updatedAt (новое рассмотрение одного устройства и параллельное другого живут оба; удалённое не возвращается)
   if (newer._delItems || older._delItems) { const dl = {}; for (const src of [older._delItems, newer._delItems]) if (src) for (const f of Object.keys(src)) { dl[f] = dl[f] || {}; for (const id of Object.keys(src[f] || {})) dl[f][id] = Math.max(Number(dl[f][id] || 0), Number(src[f][id] || 0)); } m._delItems = dl; }
-  if (Array.isArray(newer.proceedings) || Array.isArray(older.proceedings)) m.proceedings = mergeItemLists(newer.proceedings, older.proceedings, 1, 0, m._delItems && m._delItems.proceedings);
+  if (Array.isArray(newer.proceedings) || Array.isArray(older.proceedings)) m.proceedings = mergeItemLists(newer.proceedings, older.proceedings, 1, 0, m._delItems && m._delItems.proceedings, mergeProceeding);
   // v258: остальные поля — по меткам изменения (_ch), если они есть у обеих версий
   if (newer._ch && older._ch) { const chN = newer._ch, chO = older._ch; for (const k of Object.keys(older)) { if (k.startsWith('_') || k === 'id' || last[CASE_MERGE_FIELDS[k] || k] || ['deadlines', 'participants', 'history', 'ipReceipts', 'proceedings'].includes(k)) continue; if ((chO[k] || 0) > (chN[k] || 0)) m[k] = older[k]; } m._ch = Object.assign({}, chO, chN); }
   // v170 (аудит сборки 169, А5): текущие рассмотрения — по инстанциям, а не одним объектом (иначе новое рассмотрение одного устройства
@@ -8023,7 +8090,19 @@ function crmMonCourtOwn(c, e, own) {
 const RE_ROOM_TEXT =/^(судебн\S*\s+)?зал|^каб(инет|\.)?\b|^кабинет|^помещени/i;
 const RE_NOT_HEARING_CRM = /принят\S* к производству|принятии (иска|заявления|жалобы)|о принятии|регистрац|передач\S* (материалов|дела)|дело оформлен|сдан\S* в отдел|направлен\S* (копи|дела|в )|возвращен\S* (из|в )|поступлени|вручен|изготовлен|вынесен\S* (определени|постановлени)|определени\S* о (подготовке|назначении|принятии|возбуждении|оставлении|возврат)|назначени\S* дела к/i; // v249
 const crmMonEventHead = e => String(e && e.title || '').replace(/\([^)]*\)/g, ' ').split(/\s\d{2}\.\d{2}\.\d{4}|\s—\s|:\s+/)[0].trim();
-const crmMonIsFakeHearing = e => RE_NOT_HEARING_CRM.test(crmMonEventHead(e));
+// 19.10.2026 (снимок пользователя 22:04, дело по КоАП): строка движения «Подготовка дела к рассмотрению» (действие судьи, ст. 29.1 КоАП) с
+// результатом «Назначено судебное заседание» становилась «проведённым заседанием» — признак заседания «подготовк» в коллекторе брал и её.
+// Подготовка дела к рассмотрению / к судебному разбирательству — не заседание; беседа и собеседование (явка сторон, ст. 150 ГПК) — заседание.
+const RE_PREP_NOT_HEARING = /подготовк\S* (?:дела |материал\S* )?к (?:рассмотрени|судебн)/i;
+// подпись строки движения из текста события коллектора («… \n<подпись> | <дата> | …»); у будущих заседаний заголовок — «Судебное заседание …»,
+// подпись с сайта — только в raw
+function crmMonRowLabel(e) { const raw = String(e && e.raw || ''); if (/^\s*[{[]/.test(raw)) return ''; const last = raw.split('\n').pop() || ''; return last.includes(' | ') ? last.split(' | ')[0].trim() : ''; }
+function crmMonIsFakeHearing(e) {
+  const head = crmMonEventHead(e), lab = crmMonRowLabel(e);
+  if (RE_NOT_HEARING_CRM.test(head) || (lab && RE_NOT_HEARING_CRM.test(lab))) return true;
+  const prep = [head, lab].some(x => x && RE_PREP_NOT_HEARING.test(x));
+  return prep && !/бесед/i.test(String(e && e.title || '') + ' ' + lab);
+}
 async function crmMonRestoreHearings() {
   const evs = await getAll('monitorEvents'); let n = 0;
   for (const e of evs) {
@@ -9074,6 +9153,27 @@ const MON_REFRESH_LOG = 'crm_mon_refresh_log';
 const monRefreshLast = () => lsJSON(MON_REFRESH_LOG, null);
 function monRefreshStep(log, name, o) { log.steps[name] = Object.assign({ at: Date.now() }, o); try { localStorage.setItem(MON_REFRESH_LOG, JSON.stringify(log)); } catch (e) { logErr('monitor:refresh-log', e); } }
 const MON_STEP_LABEL = { links: 'отправка списка дел', collect: 'сбор сайтов судов', pull: 'получение событий с сервера', apply: 'применение к базе' };
+// v177 (аудит сборки 176, N6; урок 175): общий итог обновления — ОДНОЙ функцией для сообщения, строки состояния и диагностики, по всем
+// обязательным шагам (отправка списка, сбор, получение, применение): 'ok' — все выполнены (сбор, пропущенный потому что коллектор не
+// настроен, — «пропущено по настройке», не ошибка); 'partial' — получение удалось, но не удалась отправка списка, сбор или часть применения;
+// 'fail' — события не получены или обновление прервалось. Раньше неудачная отправка списка и сбои применения не влияли на итог «Обновлено»
+function monRefreshOutcome(l) {
+  const st0 = (l && l.steps) || {}, notes = [];
+  // журнал прежних сборок (до v177) писал пропущенный сбор как ok:false с текстом «коллектор не настроен — пропущено» — это тоже пропуск
+  const st = Object.assign({}, st0); if (st0.collect && !st0.collect.skip && /не настроен — пропущено/.test(String(st0.collect.text || ''))) st.collect = Object.assign({}, st0.collect, { skip: true });
+  if (st.error && !st.error.ok) return { level: 'fail', head: 'Обновление не выполнено: ' + String(st.error.text || 'сбой'), notes };
+  if (st.pull && !st.pull.ok) return { level: 'fail', head: 'Обновление не выполнено: события не получены — ' + String(st.pull.text || 'нет ответа') + (st.collect && !st.collect.ok && !st.collect.skip ? '; свежий сбор тоже не выполнен' : ''), notes };
+  if (!st.pull) return { level: 'fail', head: 'Обновление не завершено' + (st.collect && !st.collect.ok ? ': сбор не выполнен — ' + String(st.collect.text || '') : ''), notes };
+  const linksBad = st.links && !st.links.ok, collectBad = st.collect && !st.collect.ok && !st.collect.skip, applyFailed = Number((st.apply && st.apply.failed) || 0) || (st.apply && !st.apply.ok ? 1 : 0);
+  if (linksBad) notes.push(collectBad ? 'новый список дел не передан' : 'новый список дел не передан, сбор выполнен по прежнему');
+  if (applyFailed) notes.push('не применено событий: ' + applyFailed + ' — откройте «Суды и мониторинг», программа повторит их при следующем получении');
+  if (st.collect && st.collect.skip) notes.push('сбор сайтов пропущен — коллектор не настроен');
+  const bad = linksBad || collectBad || applyFailed, rest = notes.filter(n => !/пропущен/.test(n));
+  // неудачный сбор — прежние слова (v173): свежий сбор не выполнен, получены сохранённые события; остальное — после них
+  const head = collectBad ? 'Свежий сбор не выполнен: ' + String(st.collect.text || 'сбой') + '. Сохранённые события с сервера получены' + (rest.length ? '; ' + rest.join('; ') : '')
+    : bad ? 'Обновлено частично: ' + rest.join('; ') : 'Обновлено';
+  return { level: bad ? 'partial' : 'ok', head, notes };
+}
 async function monRefreshAll() {
   if (MON_AUTO.refreshing) { toast('Обновление уже идёт — дождитесь окончания'); return null; }
   const cfg = crmCollectorSrvCfg(), out = { collected: null, pulled: null };
@@ -9098,7 +9198,7 @@ async function monRefreshAll() {
       else { out.collected = r.j; if (typeof monCollectorHintRender === 'function') monCollectorHintRender(r.j); const ok = !!r.j.ok; if (!ok) collectFail = String(r.j.error || r.j.stateText || 'сбор завершился с ошибкой'); monRefreshStep(log, 'collect', { ok, ms: t0() - s, http: r.http || 0, ver: r.j.collectorVer || '', text: ok ? 'событий ' + (r.j.events ?? 0) + ', новых ' + (r.j.added ?? 0) + (r.j.state ? ', состояние ' + r.j.state : '') : collectFail }); }
       if (collectFail) { toast('Свежий сбор не выполнен: ' + collectFail, true); monRefreshState('Свежий сбор не выполнен: ' + collectFail + '. Получаю сохранённые события с сервера…'); }
     } else {
-      monRefreshStep(log, 'collect', { ok: false, ms: 0, text: 'коллектор не настроен — пропущено' });
+      monRefreshStep(log, 'collect', { ok: true, skip: true, ms: 0, text: 'коллектор не настроен — пропущено' });
       toast('Коллектор в облаке не настроен — заберу только то, что уже есть на сервере');
     }
     if (!collectFail) monRefreshState('Получаю события с личного сервера…');
@@ -9107,10 +9207,12 @@ async function monRefreshAll() {
     if (!p.ok) { toast('События не получены: ' + p.error, true); monRefreshState((collectFail ? 'Свежий сбор не выполнен: ' + collectFail + '. ' : '') + 'События не получены: ' + p.error); return out; }
     const n = monAppliedCount(p.applied), col = out.collected && out.collected.ok ? `сайты судов: событий ${out.collected.events ?? 0}, новых ${out.collected.added ?? 0}; ` : '';
     const applyText = p.applied ? 'заседаний ' + (p.applied.hearings + p.applied.moved + p.applied.updated) + ', дат актов ' + p.applied.acts + (p.applied.complaints ? ', жалоб ' + p.applied.complaints : '') + (p.applied.failed ? ', сбоев ' + p.applied.failed : '') : 'нечего применять';
-    monRefreshStep(log, 'apply', { ok: !(p.applied && p.applied.failed), ms: 0, text: applyText });
+    monRefreshStep(log, 'apply', { ok: !(p.applied && p.applied.failed), failed: (p.applied && p.applied.failed) || 0, ms: 0, text: applyText });
     const msg = col + (p.added ? `в программу пришло новых: ${p.added}` : 'новых событий в программе нет') + (n ? ` · применено: заседаний ${p.applied.hearings + p.applied.moved + p.applied.updated}, дат актов ${p.applied.acts}` : '');
-    if (collectFail) { toast('Свежий сбор не выполнен: ' + collectFail + '. Сохранённые события с сервера получены: ' + msg, true); monRefreshState('Свежий сбор не выполнен (' + collectFail + '); сохранённые события с сервера получены — ' + msg); }
-    else { toast('Обновлено. ' + msg.charAt(0).toUpperCase() + msg.slice(1)); monRefreshState(''); }
+    // v177 (N6): итог — по всем шагам (monRefreshOutcome); при частичном — строка состояния остаётся на экране
+    const oc = monRefreshOutcome(log);
+    if (oc.level === 'ok') { toast('Обновлено. ' + msg.charAt(0).toUpperCase() + msg.slice(1)); monRefreshState(''); }
+    else { toast(oc.head + '. ' + msg.charAt(0).toUpperCase() + msg.slice(1), true); monRefreshState(oc.head + ' — ' + msg); }
     if (typeof UI === 'object' && UI.ready) nav(UI.screen);
     return out;
   } catch (e) { logErr('monitor:refresh', e); monRefreshStep(log, 'error', { ok: false, ms: 0, text: String((e && e.message) || e).slice(0, 200) }); toast('Обновление не выполнено: ' + String((e && e.message) || e).slice(0, 100), true); monRefreshState('Обновление не выполнено: ' + String((e && e.message) || e).slice(0, 100)); return out; }
@@ -9120,9 +9222,10 @@ async function monRefreshAll() {
 function monRefreshStatus() {
   const l = monRefreshLast(); if (!l || !l.steps) return { text: '', bad: false };
   const fmt = t => new Date(t).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-  const parts = ['links', 'collect', 'pull', 'apply', 'error'].filter(k => l.steps[k]).map(k => { const s = l.steps[k]; return (MON_STEP_LABEL[k] || 'сбой') + ': ' + (s.ok ? '' : 'НЕ ВЫПОЛНЕНО — ') + String(s.text || '').replace(/[.\s]+$/, ''); });
-  const bad = ['collect', 'pull', 'apply', 'error'].some(k => l.steps[k] && !l.steps[k].ok);
-  return { text: 'Последнее обновление ' + fmt(l.at) + ' · ' + parts.join(' · '), bad, at: l.at };
+  const parts = ['links', 'collect', 'pull', 'apply', 'error'].filter(k => l.steps[k]).map(k => { const s = l.steps[k]; return (MON_STEP_LABEL[k] || 'сбой') + ': ' + (s.skip ? 'пропущено — ' : s.ok ? '' : 'НЕ ВЫПОЛНЕНО — ') + String(s.text || '').replace(/[.\s]+$/, ''); });
+  // v177 (N6): «плохо» — по общему итогу всех шагов, включая отправку списка и сбои применения
+  const oc = monRefreshOutcome(l), bad = oc.level !== 'ok';
+  return { text: 'Последнее обновление ' + fmt(l.at) + (bad ? ' · ' + oc.head : '') + ' · ' + parts.join(' · '), bad, level: oc.level, at: l.at };
 }
 // текст диагностики для поддержки: номер сборки, время, итог каждого шага с кодом ответа и длительностью, версия коллектора из ответа —
 // без адресов функций, кодов, названий дел и имён
@@ -9132,7 +9235,8 @@ function monRefreshDiag() {
   if (!l || !l.steps) { lines.push('«Обновить с сайтов судов» ещё не нажималось'); }
   else {
     lines.push('Запуск: ' + fmt(l.at));
-    for (const k of ['links', 'collect', 'pull', 'apply', 'error']) { const s = l.steps[k]; if (!s) continue; lines.push((MON_STEP_LABEL[k] || 'сбой') + ': ' + (s.ok ? 'выполнено' : 'не выполнено') + '; ' + String(s.text || '') + (s.http ? '; HTTP ' + s.http : '') + (s.ver ? '; коллектор ' + s.ver : '') + (s.ms ? '; ' + Math.round(s.ms / 1000) + ' с' : '') + (s.at ? '; ' + fmt(s.at) : '')); }
+    lines.push('Итог: ' + monRefreshOutcome(l).head);
+    for (const k of ['links', 'collect', 'pull', 'apply', 'error']) { const s = l.steps[k]; if (!s) continue; lines.push((MON_STEP_LABEL[k] || 'сбой') + ': ' + (s.skip ? 'пропущено по настройке' : s.ok ? 'выполнено' : 'не выполнено') + '; ' + String(s.text || '') + (s.http ? '; HTTP ' + s.http : '') + (s.ver ? '; коллектор ' + s.ver : '') + (s.ms ? '; ' + Math.round(s.ms / 1000) + ' с' : '') + (s.at ? '; ' + fmt(s.at) : '')); }
   }
   const pe = monPullLastErr(), le = lsJSON(MON_LINKS_ERR, null);
   lines.push('Последнее удачное получение событий: ' + (monPullLastAt() ? fmt(monPullLastAt()) : 'не было') + (pe ? '; последняя ошибка получения ' + fmt(pe.at) + ': ' + pe.msg : ''));
@@ -9165,11 +9269,18 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
 // (у событий суда дубли сводятся по ключу monEvKey — у заседаний такого не было; урок 82, урок 167: id, который должны одинаково вычислить
 // два устройства без обмена, — из неизменных признаков).
 // Две меры: 1) id заседания, созданного по событию суда, — из дела, даты, времени и рассмотрения (hearingIdFor): устройства создают одну и ту же
-// запись, слияние сводит её по id; 2) уже накопленные двойники (hearingDupPlan): записи одного дела, рассмотрения, даты и времени — остаётся
-// одна (наименьший id — на всех устройствах выбор одинаков, урок 82), пустые поля дополняются из остальных, отметки событий переносятся
-// (урок 171). Само объединяется только то, что создала программа и с тех пор не правили (урок 170: без доказательства — решение
-// пользователя): остальное — строка в «Проверке данных» с листом «Заседания-двойники» и кнопкой «Оставить одно».
-const HEARDUP_FIELDS = ['room', 'court', 'judge', 'stage', 'result', 'note', 'participation', 'prep', 'prepDone', 'attended', 'afterAt', 'monitorEventId', 'movedFrom'];
+// запись, слияние сводит её по id; 2) уже накопленные двойники (hearingDupPlan).
+// v177 (аудит сборки 176, N1–N3; урок 175): сама программа объединяет ТОЛЬКО копии, одинаковые во всех значимых полях (HEARDUP_SIG: дело,
+// рассмотрение, дата, время, суд, судья, зал, статус, итог, комментарий, подготовка, участие…) — объединение таких копий ничего не теряет, и это
+// проверяется по содержимому, а не по времени правки (в v175 «не правили» определялось по _upd > courtSync + 60 с и с исключением для «Дата
+// прошла» — правка в первую минуту или после отметки уходила в корзину). Остальное — «Проверка данных» → лист с выбором по каждому полю,
+// которое у копий различается. Копии с разными судами или инстанциями — не двойники (N2). Объединение — одна транзакция (hearings, события
+// суда, журнал дела): план перечитывается внутри неё, изменившаяся после предпросмотра копия — отказ и новый план (N3).
+const HEARDUP_FIELDS = ['room', 'court', 'judge', 'stage', 'result', 'note', 'comment', 'participation', 'prep', 'prepDays', 'prepDone', 'attended', 'afterAt', 'monitorEventId', 'movedFrom'];
+// значимые поля: содержимое записи для пользователя; совпадение всех у всех копий — объединение без потерь
+const HEARDUP_SIG = ['caseId', 'caseNum', 'proceedingId', 'date', 'time', 'room', 'court', 'judge', 'stage', 'status', 'result', 'note', 'comment', 'participation', 'prep', 'prepDays', 'prepDone', 'attended', 'afterAt', 'movedFrom', 'procManual'];
+// поля, у которых при ручном объединении различающиеся значения выбираются
+const HEARDUP_CHOICE = [['court', 'Суд'], ['judge', 'Судья'], ['room', 'Зал'], ['stage', 'Инстанция'], ['status', 'Статус'], ['result', 'Итог'], ['comment', 'Комментарий'], ['note', 'Описание'], ['prep', 'Подготовить'], ['prepDays', 'Напомнить за, дней'], ['participation', 'Моё участие'], ['proceedingId', 'Рассмотрение']];
 // свёртка FNV-1a (32 бита) строки — в base36; одинакова на всех устройствах
 function heardupHash(s) { let h = 0x811c9dc5; s = String(s || ''); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(36); }
 // id заседания, создаваемого по событию суда: одно и то же у всех устройств для одного дела, рассмотрения, даты и времени
@@ -9177,87 +9288,211 @@ function hearingIdFor(caseId, date, time, pid) { return 'ЗС-' + heardupHash([c
 // свободный id: занятый (в том числе записью в корзине — иначе запись без версии перепишет её) получает числовой суффикс; порядок у устройств одинаков
 function hearingIdFree(base, taken) { let id = base, n = 1; while (taken.has(id)) id = base + '-' + (++n); taken.add(id); return id; }
 function heardupTime(t) { return String(t || '').slice(0, 5); }
+// значение поля для сравнения: пустое (нет, '', null, false) — одно и то же; «напомнить за» без значения — значение по умолчанию формы
+function heardupVal(h, f) {
+  let v = h ? h[f] : undefined;
+  if (f === 'time') v = heardupTime(v);
+  if (f === 'prepDays' && (v === undefined || v === null || v === '')) v = typeof PREP_DAYS_DEFAULT === 'number' ? PREP_DAYS_DEFAULT : '';
+  if (f === 'procManual' && !v) v = '';
+  if (v === undefined || v === null || v === false || v === '') return '';
+  return typeof v === 'object' ? JSON.stringify(v) : String(v).trim();
+}
+const heardupNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, ' ').trim();
 // ключ двойника: дело (внутренняя связь, иначе номер), рассмотрение, дата, время
 function hearingDupKey(h, caseIdOf) { const cid = h.caseId || (caseIdOf ? caseIdOf(h.caseNum) : '') || (h.caseNum ? 'n:' + h.caseNum : ''); return [cid, h.proceedingId || '', h.date || '', heardupTime(h.time)].join('|'); }
-// запись трогал пользователь: заполнено то, что пишет только человек, или правка позже последней записи программой (courtSync) — такую копию
-// программа сама не удаляет (отметка «Дата прошла» при запуске — тоже программа: autoDone)
-function hearingUserTouched(h) {
-  if (!h.monitorEventId) return true;
-  if (['result', 'prep', 'participation'].some(f => String(h[f] || '').trim())) return true;
-  if (h.attended || h.afterAt || h.prepDone) return true;
-  if (h.status === 'Проведено' || h.status === 'Отменено') return true;
-  const upd = Number(h._upd || 0), sync = Number(h.courtSync || h.createdAt || 0);
-  if (upd && sync && upd > sync + 60000 && !(h.autoDone && h.status === 'Дата прошла')) return true;
-  return false;
-}
+// копии одинаковы во всех значимых полях (служебные метки, id, отметка события и время записи не в счёт)
+function hearingDupSame(g) { return g.every(h => HEARDUP_SIG.every(f => heardupVal(h, f) === heardupVal(g[0], f))); }
+// v177 (N1): прежнее имя — для совместимости вызовов; теперь «трогали» = копия отличается от другой копии содержимым
+function hearingUserTouched(h, other) { return other ? !hearingDupSame([h, other]) : !h.monitorEventId; }
+// подпись плана: id и версии всех копий группы — изменение любой копии после предпросмотра меняет подпись (N3)
+function hearingDupSig(g) { return g.map(h => String(h.id) + ':' + Number(h._upd || 0)).sort().join(','); }
 // план объединения: группы из двух и более живых заседаний с одним ключом; keep — копия с наименьшим id, дополненная пустыми полями из остальных;
-// auto — все копии, кроме оставляемой, создала программа и с тех пор не правили
+// conflicts — поля с разными непустыми значениями (выбор пользователя); auto — копии одинаковы, все созданы по событию суда, одно дело, время известно
 function hearingDupPlan(hearings, cases) {
-  const byNum = new Map(); (cases || []).forEach(c => { if (c && !c._deleted && c.number && !byNum.has(c.number)) byNum.set(c.number, c.id); });
-  const caseIdOf = num => byNum.get(num) || '';
+  // v177 (N2): номер дела — только однозначный (два дела с одним номером — связь по номеру не строится)
+  const byNum = new Map(), dupNum = new Set(); (cases || []).forEach(c => { if (!c || c._deleted || !c.number) return; if (byNum.has(c.number) && byNum.get(c.number) !== c.id) dupNum.add(c.number); else byNum.set(c.number, c.id); });
+  const caseIdOf = num => (dupNum.has(num) ? '' : byNum.get(num)) || '';
   const groups = new Map();
   for (const h of hearings || []) { if (!h || h._deleted || !h.id || !h.date || h.status === 'Отменено') continue; const k = hearingDupKey(h, caseIdOf); if (!k.split('|')[0]) continue; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(h); }
   const plan = [];
   for (const [key, g] of groups) {
     if (g.length < 2) continue;
+    // v177 (N2): разные суды или инстанции у копий — это разные заседания (одна дата и пустое время ещё не совпадение)
+    const differ = f => new Set(g.map(h => heardupNorm(h[f])).filter(Boolean)).size > 1;
+    if (differ('court') || differ('stage')) continue;
     g.sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
     const keep = { ...g[0] }, drop = g.slice(1), fill = [];
-    for (const f of HEARDUP_FIELDS) { if (keep[f] !== undefined && keep[f] !== '' && keep[f] !== null && keep[f] !== false) continue; const src = drop.find(x => x[f] !== undefined && x[f] !== '' && x[f] !== null && x[f] !== false); if (src) { keep[f] = src[f]; fill.push(f); } }
-    // статус: проведённое с результатом важнее «Назначено» и «Дата прошла»; «Дата прошла» важнее «Назначено»
-    const rank = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1;
-    const best = g.reduce((m, x) => (rank(x.status) > rank(m.status) ? x : m), g[0]);
-    if (best.status && best.status !== keep.status) { keep.status = best.status; fill.push('status'); if (best.status === 'Проведено') delete keep.autoDone; }
+    for (const f of HEARDUP_FIELDS) { if (heardupVal(keep, f) !== '') continue; const src = drop.find(x => heardupVal(x, f) !== ''); if (src) { keep[f] = src[f]; fill.push(f); } }
+    const conflicts = [], rankS = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1;
+    // первым вариантом (выбран по умолчанию) — значение записи 1; у статуса — «Проведено», затем «Дата прошла»
+    for (const [f, label] of HEARDUP_CHOICE) { const vals = []; g.forEach((h, i) => { const v = heardupVal(h, f); if (v !== '' && !vals.some(x => x.v === v)) vals.push({ v, i }); }); if (f === 'status') vals.sort((a, b) => rankS(b.v) - rankS(a.v)); if (vals.length > 1) conflicts.push({ f, label, opts: vals }); }
+    // статус без выбора: проведённое с результатом важнее «Назначено» и «Дата прошла»; «Дата прошла» важнее «Назначено»
+    if (!conflicts.some(c => c.f === 'status')) { const rank = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1; const best = g.reduce((m, x) => (rank(x.status) > rank(m.status) ? x : m), g[0]); if (best.status && best.status !== keep.status) { keep.status = best.status; fill.push('status'); } }
     if (!keep.caseId) { const src = g.find(x => x.caseId); if (src) { keep.caseId = src.caseId; fill.push('caseId'); } }
     keep.mergedIds = [...new Set([...(keep.mergedIds || []), ...drop.map(x => x.id)])];
-    plan.push({ key, keep, drop, fill, auto: drop.every(x => !hearingUserTouched(x)), caseNum: keep.caseNum || g.find(x => x.caseNum)?.caseNum || '', date: keep.date, time: heardupTime(keep.time) });
+    const cid = g[0].caseId, auto = !!cid && g.every(h => h.caseId === cid && h.monitorEventId) && !!heardupTime(g[0].time) && hearingDupSame(g);
+    plan.push({ key, keep, drop, copies: g.map(h => ({ ...h })), fill, conflicts, auto, sig: hearingDupSig(g), caseId: cid || '', caseNum: keep.caseNum || g.find(x => x.caseNum)?.caseNum || '', date: keep.date, time: heardupTime(keep.time) });
   }
   return plan;
 }
-// применить одну группу: оставляемая запись дописывается, остальные — в корзину (надгробие уходит обменом на другие устройства),
-// события суда, применённые к удалённым копиям, переводятся на оставленную (урок 171: дубль переносит все отметки)
-async function hearingDupApply(p, events) {
-  const ev = events || await getAll('monitorEvents');
-  await put('hearings', p.keep);
-  for (const x of p.drop) await del('hearings', x.id);
-  const dropIds = new Set(p.drop.map(x => x.id));
-  for (const e of ev) { if (e && !e._deleted && dropIds.has(e.appliedRecordId)) { e.appliedRecordId = p.keep.id; await put('monitorEvents', e); } }
-  if (typeof crmCaseLogByNum === 'function' && p.caseNum) { try { await crmCaseLogByNum(p.caseNum, 'hearing_upd', `Заседание ${fmtDate(p.date)}${p.time ? ' ' + p.time : ''}: объединены ${p.drop.length + 1} одинаковые записи (появились при применении события суда на разных устройствах) — оставлена одна`); } catch (e) { logErr('heardup:log', e); } }
+// оставляемая запись с выбором пользователя по различающимся полям: choices = { поле: номер копии (0 — первая) }
+function hearingDupKeep(p, choices) {
+  const all = p.copies || [p.keep, ...p.drop], k = { ...p.keep };
+  for (const c of p.conflicts || []) { const i = choices && choices[c.f] !== undefined ? Number(choices[c.f]) : c.opts[0].i; const src = all[i] || all[0]; if (src[c.f] === undefined) delete k[c.f]; else k[c.f] = src[c.f]; }
+  if (k.status === 'Проведено') delete k.autoDone;
+  return k;
 }
-// автоматическое объединение (запуск, автоприменение событий, после обмена): только группы auto; ответ — сколько записей убрано и сколько
-// групп ждут решения пользователя («Проверка данных»)
+// ── одна транзакция: hearings, события суда, дела (только чтение — журнал), журнал дела ──
+// fn(hearings, events, cases) — синхронная правка копий свежих записей; ответ { error } — ничего не пишется. Пишутся только изменённые записи
+// (сравнение с прочитанными) и события журнала дела, собранные addCaseHistoryEvent внутри fn. Сбой любой записи — откат всего.
+function heardupTx(fn) {
+  return new Promise((res, rej) => {
+    let done = false, out = null; const fin = (ok, v) => { if (done) return; done = true; if (ok) res(v); else rej(v); };
+    let t; try { t = db.transaction(['hearings', 'monitorEvents', 'cases', 'caseEvents'], 'readwrite'); } catch (e) { fin(false, new Error('Не удалось сохранить: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
+    const hs = t.objectStore('hearings'), ms = t.objectStore('monitorEvents'), cs = t.objectStore('cases');
+    const abort = () => { try { t.abort(); } catch (e) { /* штатно: транзакция уже завершается */ } };
+    const failRead = q => () => { fin(false, new Error('Не удалось прочитать данные (' + ((q.error && q.error.message) || 'ошибка чтения') + ')')); abort(); };
+    const qH = hs.getAll(); qH.onerror = failRead(qH);
+    qH.onsuccess = () => { const qE = ms.getAll(); qE.onerror = failRead(qE); qE.onsuccess = () => { const qC = cs.getAll(); qC.onerror = failRead(qC); qC.onsuccess = () => body(qH.result || [], qE.result || [], qC.result || []); }; };
+    const body = (hRaw, eRaw, cRaw) => {
+      const clone = x => JSON.parse(JSON.stringify(x)), H = hRaw.map(clone), E = eRaw.map(clone), C = cRaw.map(clone);
+      const batch = typeof CASE_EVENTS_BATCH === 'object' && CASE_EVENTS_BATCH ? CASE_EVENTS_BATCH : null, keepB = batch ? batch.list : null;
+      if (batch) batch.list = [];
+      let r, evs = [];
+      try { r = fn(H, E, C); } catch (e) { if (batch) batch.list = keepB; fin(false, e); abort(); return; }
+      if (batch) { evs = batch.list || []; batch.list = keepB; }
+      if (!r || r.error) { out = r || { error: 'Не записано' }; abort(); return; }
+      const ls = k => { try { return Number(localStorage.getItem(k) || 0); } catch (e) { return 0; } };
+      let stamp = Math.max(Date.now(), Math.min(ls('crm_last_write_stamp'), Date.now() + 86400000) + 1);
+      const dev = () => { try { return typeof deviceId === 'function' ? deviceId() : ''; } catch (e) { return ''; } };
+      const write = (store, list, orig) => { const om = new Map(orig.filter(x => x && x.id != null).map(x => [x.id, x])); for (const x of list) { if (!x || x.id == null) continue; const o = om.get(x.id); if (o && JSON.stringify(o) === JSON.stringify(x)) continue; x._upd = Math.max(stamp++, Number((o && o._upd) || 0) + 1); stamp = Math.max(stamp, x._upd + 1); x._device = dev(); try { if (typeof fieldStamps === 'function') fieldStamps(x, o || null, x._upd); } catch (e) { logErr('heardup:stamps', e); } store.put(x); } };
+      write(hs, H, hRaw); write(ms, E, eRaw);
+      if (evs.length) { const es = t.objectStore('caseEvents'); for (const ev of evs) { ev._upd = stamp++; ev._device = dev(); es.put(ev); } }
+      try { localStorage.setItem('crm_last_write_stamp', String(stamp - 1)); } catch (e) { logErr('heardup:stamp', e); }
+      out = r;
+    };
+    t.oncomplete = () => { if (typeof cloudTouch === 'function') cloudTouch(); fin(true, out); };
+    t.onerror = () => { if (out && out.error) { fin(true, out); return; } if (typeof storageWriteError === 'function') storageWriteError(t.error); fin(false, new Error('Не удалось сохранить: ' + ((t.error && t.error.message) || 'ошибка хранилища') + ' — ничего не записано')); };
+    t.onabort = () => { if (out && out.error) fin(true, out); else fin(false, new Error('Не удалось сохранить: транзакция прервана — ничего не записано (заседания и события остались как были)')); };
+  });
+}
+// применить одну группу внутри транзакции по свежим записям: план перечитан; подпись иная — отказ с новым планом; auto — копии всё ещё одинаковы
+function hearingDupApplyIn(H, E, C, key, sig, choices, mustAuto) {
+  const p = hearingDupPlan(H.filter(h => h && !h._deleted), C).find(x => x.key === key);
+  if (!p) return { error: 'gone', text: 'Двойников у этого заседания уже нет' };
+  if (sig && p.sig !== sig) return { error: 'changed', text: 'Копии заседания изменились после того, как вы открыли лист — проверьте новый план', plan: p };
+  if (mustAuto && !p.auto) return { error: 'changed', text: 'Копии больше не одинаковы — объединение только вручную' };
+  const keep = hearingDupKeep(p, choices), now = Date.now(), dropIds = new Set(p.drop.map(x => x.id));
+  const iK = H.findIndex(h => h && h.id === keep.id); if (iK < 0) return { error: 'gone', text: 'Запись не найдена' }; H[iK] = keep;
+  for (const h of H) if (h && dropIds.has(h.id)) { h._deleted = true; h._deletedAt = now; h.mergedInto = keep.id; }
+  let moved = 0; for (const e of E) if (e && !e._deleted && dropIds.has(e.appliedRecordId)) { e.appliedRecordId = keep.id; moved++; }
+  const c = C.find(x => x && !x._deleted && (keep.caseId ? x.id === keep.caseId : x.number === p.caseNum));
+  if (c && typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, 'hearing_upd', '', `Заседание ${fmtDate(p.date)}${p.time ? ' ' + p.time : ''}: объединены ${p.drop.length + 1} одинаковые записи — оставлена одна, остальные в корзине`, 'auto');
+  return { ok: true, n: p.drop.length, moved, keepId: keep.id };
+}
+// автоматическое объединение (запуск, автоприменение событий, после обмена): только группы auto (копии одинаковы); ответ — сколько записей
+// убрано и сколько групп ждут решения пользователя («Проверка данных»)
 async function hearingDedupe() {
-  let hearings, cases, events;
-  try { hearings = await getAllRaw('hearings'); cases = await getAllRaw('cases'); events = await getAllRaw('monitorEvents'); } catch (e) { logErr('heardup:read', e); return { n: 0, manual: 0 }; }
+  let hearings, cases;
+  try { hearings = await getAllRaw('hearings'); cases = await getAllRaw('cases'); } catch (e) { logErr('heardup:read', e); return { n: 0, manual: 0 }; }
   const plan = hearingDupPlan(hearings, cases); let n = 0, manual = 0;
   for (const p of plan) {
     if (!p.auto) { manual++; continue; }
-    try { await hearingDupApply(p, events); n += p.drop.length; } catch (e) { logErr('heardup:apply', e); }
+    try { const r = await heardupTx((H, E, C) => hearingDupApplyIn(H, E, C, p.key, p.sig, null, true)); if (r && r.ok) n += r.n; else if (r && r.error === 'changed') manual++; } catch (e) { logErr('heardup:apply', e); }
   }
   if (n && typeof icsTouch === 'function') { try { icsTouch(); } catch (e) { /* штатно: ленты может не быть */ } }
   return { n, manual };
 }
-// строки «Проверки данных»: группы, которые программа сама не объединяет (копию правили или заполняли вручную)
+// строки «Проверки данных»: группы, которые программа сама не объединяет (копии различаются)
 function integrityHearingDups(d, out) {
   for (const p of hearingDupPlan(d.hearings, d.cases)) {
     if (p.auto) continue;
-    out.push({ type: 'Заседания-двойники', label: 'Заседание ' + fmtDate(p.date) + (p.time ? ' ' + p.time : '') + (p.caseNum ? ' · ' + p.caseNum : ''), detail: 'Записей: ' + (p.drop.length + 1) + '. Одно и то же заседание, записанное по событию суда на разных устройствах; в какой-то из копий есть ваши правки — программа сама не объединяет. Откройте и решите', open: ['hearingDupOpen', p.key] });
+    out.push({ type: 'Заседания-двойники', label: 'Заседание ' + fmtDate(p.date) + (p.time ? ' ' + p.time : '') + (p.caseNum ? ' · ' + p.caseNum : ''), detail: 'Записей: ' + (p.drop.length + 1) + (p.conflicts.length ? '. Различаются: ' + p.conflicts.map(c => c.label.toLowerCase()).join(', ') + ' — выберите, что оставить' : '. Похоже на одно заседание, записанное несколько раз — проверьте и решите'), open: ['hearingDupOpen', p.key] });
+  }
+  // v177 (аудит сборки 176, шаг 6): последствия прежних объединений — событие ссылается на заседание в корзине; в удалённой копии есть сведения,
+  // которых нет в оставленной. Только показ: восстановление и перепривязка — решение пользователя
+  const raw = d.hearingsRaw || [], byId = new Map(raw.filter(h => h && h.id).map(h => [h.id, h]));
+  for (const e of (d.monitorEvents || []).filter(x => x && !x._deleted && x.appliedRecordId)) {
+    const h = byId.get(e.appliedRecordId); if (!h || !h._deleted) continue;
+    const to = (d.hearings || []).filter(x => x && !x._deleted && (x.mergedIds || []).includes(h.id));
+    out.push({ type: 'Событие суда ссылается на удалённое заседание', label: 'Заседание ' + fmtDate(h.date) + (h.caseNum ? ' · ' + h.caseNum : ''), detail: to.length === 1 ? 'Запись объединена с другой — событие можно перевести на оставленную' : 'Заседание, к которому применено событие, в корзине' + (to.length > 1 ? ' (кандидатов несколько — выберите сами)' : ''), open: ['hearingOrphanOpen', e.id] });
+  }
+  for (const k of (d.hearings || []).filter(x => x && !x._deleted && Array.isArray(x.mergedIds) && x.mergedIds.length)) {
+    for (const id of k.mergedIds) { const h = byId.get(id); if (!h || !h._deleted) continue; const lost = HEARDUP_CHOICE.filter(([f]) => heardupVal(h, f) !== '' && heardupVal(h, f) !== heardupVal(k, f)).map(([, l]) => l.toLowerCase()); if (!lost.length) continue;
+      out.push({ type: 'Сведения в удалённой копии заседания', label: 'Заседание ' + fmtDate(k.date) + (k.caseNum ? ' · ' + k.caseNum : ''), detail: 'После объединения в копии в корзине осталось то, чего нет в оставленной: ' + lost.join(', ') + '. Откройте и перенесите нужное', open: ['hearingMergedOpen', k.id + '|' + id] }); }
   }
 }
-// лист группы: копии списком и «Оставить одно» — оставляется копия с наименьшим id, пустые поля дополняются из остальных
+// лист группы: копии списком; поля, которые различаются, — выбор (по умолчанию — первая запись); «Оставить одно» — по выбору
 async function hearingDupOpen(key) {
   const hearings = await getAll('hearings'), cases = await getAll('cases');
   const p = hearingDupPlan(hearings, cases).find(x => x.key === key); if (!p) { toast('Двойников у этого заседания уже нет'); return; }
-  const all = [p.keep, ...p.drop];
-  const row = (h, i) => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span><b>${i === 0 ? 'Останется' : 'Уйдёт в корзину'}</b> · ${esc(h.status || 'Назначено')}${h.room ? ' · зал ' + esc(h.room) : ''}${h.result ? '<br>' + esc('итог: ' + h.result) : ''}${h.prep ? '<br>' + esc('подготовить: ' + h.prep) : ''}${h.participation ? '<br>' + esc(h.participation) : ''}<br><span class="small muted">${esc(h.court || '')}${h.judge ? ' · ' + esc(h.judge) : ''}${h.monitorEventId ? ' · по данным суда' : ' · внесено вручную'}</span></span>${icon('chevron-right')}</button>`;
-  openSheet('Заседания-двойники · ' + fmtDate(p.date) + (p.time ? ' ' + p.time : ''), `<p class="small muted">${esc(p.caseNum ? 'Дело ' + p.caseNum + '. ' : '')}Одно заседание записано ${all.length} раз: так бывает, когда событие суда применяется на нескольких устройствах до обмена базой. «Оставить одно» оставит первую запись, допишет в неё то, чего в ней нет (зал, итог, подготовку, участие — из остальных), остальные уйдут в корзину, события суда перейдут на оставленную. Поля, заполненные в обеих копиях по-разному, остаются как в первой — проверьте её после объединения.</p>
-    <div class="list-rows">${all.map(row).join('')}</div>
-    <div class="form-actions" style="margin-top:8px"><button type="button" class="button primary" id="heardup-merge" onclick="hearingDupMerge('${jsq(key)}')">${icon('check', 'icon-sm')}Оставить одно (${all.length} → 1)</button></div>`, sheetIsOpen() ? true : undefined);
+  const all = p.copies || [p.keep, ...p.drop];
+  const row = (h, i) => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span><b>Запись ${i + 1}</b> · ${i ? 'уйдёт в корзину' : 'останется'} · ${esc(h.status || 'Назначено')}${h.room ? ' · зал ' + esc(h.room) : ''}${h.result ? '<br>' + esc('итог: ' + h.result) : ''}${h.comment ? '<br>' + esc('комментарий: ' + h.comment) : ''}${h.prep ? '<br>' + esc('подготовить: ' + h.prep) : ''}${h.participation ? '<br>' + esc(h.participation) : ''}<br><span class="small muted">${esc(h.court || '')}${h.judge ? ' · ' + esc(h.judge) : ''}${h.monitorEventId ? ' · по данным суда' : ' · внесено вручную'}</span></span>${icon('chevron-right')}</button>`;
+  const show = (f, v) => { if (f === 'proceedingId' && typeof procLabelOf === 'function') { const c = cases.find(x => x.id === p.caseId); return c ? procLabelOf(c, v) : v; } return v; };
+  const choice = p.conflicts.map(c => `<fieldset class="heardup-choice" data-f="${esc(c.f)}" style="border:1px solid var(--line);border-radius:var(--r-md);padding:8px 10px;margin:8px 0"><legend class="small muted">${esc(c.label)}</legend>${c.opts.map((o, j) => `<label style="display:flex;gap:8px;align-items:flex-start;min-height:44px"><input type="radio" name="hd-${esc(c.f)}" value="${o.i}"${j === 0 ? ' checked' : ''}><span>${esc(show(c.f, o.v))} <span class="small muted">(запись ${o.i + 1})</span></span></label>`).join('')}</fieldset>`).join('');
+  openSheet('Заседания-двойники · ' + fmtDate(p.date) + (p.time ? ' ' + p.time : ''), `<p class="small muted">${esc(p.caseNum ? 'Дело ' + p.caseNum + '. ' : '')}Одно заседание записано ${all.length} раза — так бывает, когда событие суда применяется на нескольких устройствах до обмена базой. «Оставить одно» оставит запись 1, допишет в неё то, чего в ней нет, из остальных, остальные уйдут в корзину (восстановить можно оттуда), события суда перейдут на оставленную.${p.conflicts.length ? ' Где записи различаются — выберите значение ниже.' : ''}</p>
+    <div class="list-rows">${all.map(row).join('')}</div>${choice}
+    <div class="form-actions" style="margin-top:8px"><button type="button" class="button primary" id="heardup-merge" data-sig="${esc(p.sig)}" onclick="hearingDupMerge('${jsq(key)}')">${icon('check', 'icon-sm')}Оставить одно (${all.length} → 1)</button></div>`, sheetIsOpen() ? true : undefined);
 }
 async function hearingDupMerge(key) {
-  const hearings = await getAll('hearings'), cases = await getAll('cases');
-  const p = hearingDupPlan(hearings, cases).find(x => x.key === key); if (!p) { toast('Двойников у этого заседания уже нет'); return; }
-  try { await hearingDupApply(p); } catch (e) { logErr('heardup:merge', e); toast('Не удалось объединить: ' + ((e && e.message) || e), true); return; }
-  toast('Оставлена одна запись, в корзину: ' + p.drop.length); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
+  const doc = typeof document !== 'undefined' ? document : null, b = doc ? doc.getElementById('heardup-merge') : null, sig = b ? b.dataset.sig : '', choices = {};
+  if (doc) doc.querySelectorAll('#sheetContent .heardup-choice').forEach(fs => { const r = fs.querySelector('input[type=radio]:checked'); if (r) choices[fs.dataset.f] = r.value; });
+  let r; try { r = await heardupTx((H, E, C) => hearingDupApplyIn(H, E, C, key, sig, choices, false)); } catch (e) { logErr('heardup:merge', e); toast('Не удалось объединить: ' + ((e && e.message) || e), true); return; }
+  if (!r || r.error) { toast((r && r.text) || 'Не объединено', true); if (r && r.error === 'changed') hearingDupOpen(key); return; }
+  toast('Оставлена одна запись, в корзину: ' + r.n); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
+}
+// событие суда ссылается на заседание в корзине: перевести на оставленную копию (одна) или открыть заседание из корзины
+async function hearingOrphanOpen(evId) {
+  const ev = (await getAll('monitorEvents')).find(x => x.id === evId); if (!ev) { toast('Событие не найдено'); return; }
+  const to = (await getAll('hearings')).filter(x => (x.mergedIds || []).includes(ev.appliedRecordId));
+  openSheet('Событие суда и удалённое заседание', `<p>${esc(ev.title || '')}</p><p class="small muted">Событие применено к заседанию, которое сейчас в корзине. ${to.length === 1 ? 'Эта запись была объединена с заседанием ' + esc(fmtDate(to[0].date) + (to[0].time ? ' ' + to[0].time : '')) + ' — событие можно перевести на него.' : 'Оставленная копия не определена однозначно — восстановите заседание из корзины или привяжите событие заново в «Суды и мониторинг».'}</p>
+    <div class="form-actions">${to.length === 1 ? `<button type="button" class="button primary" id="heardup-orphan-fix" onclick="hearingOrphanFix('${jsq(evId)}', '${jsq(to[0].id)}')">${icon('check', 'icon-sm')}Перевести на оставленное</button>` : ''}<button type="button" class="button" onclick="closeSheet(); nav('trash')">${icon('trash-2', 'icon-sm')}Открыть корзину</button></div>`, sheetIsOpen() ? true : undefined);
+}
+async function hearingOrphanFix(evId, keepId) {
+  let r; try { r = await heardupTx((H, E) => { const e = E.find(x => x && x.id === evId && !x._deleted), k = H.find(x => x && x.id === keepId && !x._deleted); if (!e || !k || !(k.mergedIds || []).includes(e.appliedRecordId)) return { error: 'changed', text: 'Связь уже изменилась — откройте «Проверку данных» заново' }; e.appliedRecordId = keepId; return { ok: true }; }); } catch (e) { logErr('heardup:orphan', e); toast('Не удалось: ' + ((e && e.message) || e), true); return; }
+  if (!r || r.error) { toast((r && r.text) || 'Не изменено', true); return; }
+  toast('Событие переведено на оставленное заседание'); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
+}
+// сведения удалённой копии: показать и перенести выбранные поля в оставленную (одна транзакция; поле, изменённое с тех пор, — отказ)
+async function hearingMergedOpen(pair) {
+  const [keepId, dropId] = String(pair).split('|'), raw = await getAllRaw('hearings');
+  const k = raw.find(x => x.id === keepId && !x._deleted), h = raw.find(x => x.id === dropId); if (!k || !h) { toast('Записи не найдены'); return; }
+  const fs = HEARDUP_CHOICE.filter(([f]) => heardupVal(h, f) !== '' && heardupVal(h, f) !== heardupVal(k, f));
+  openSheet('Сведения в удалённой копии', `<p class="small muted">Заседание ${esc(fmtDate(k.date) + (k.time ? ' ' + k.time : ''))}${k.caseNum ? ' · ' + esc(k.caseNum) : ''}. Отметьте, что перенести из копии в корзине в оставленную запись.</p>
+    ${fs.map(([f, l]) => `<label style="display:flex;gap:8px;align-items:flex-start;min-height:44px"><input type="checkbox" class="heardup-take" value="${esc(f)}"><span><b>${esc(l)}</b>: ${esc(heardupVal(h, f))}<br><span class="small muted">сейчас: ${esc(heardupVal(k, f) || '—')}</span></span></label>`).join('')}
+    <div class="form-actions"><button type="button" class="button primary" id="heardup-take" data-upd="${esc(String(k._upd || 0))}" onclick="hearingMergedTake('${jsq(keepId)}', '${jsq(dropId)}')">${icon('check', 'icon-sm')}Перенести отмеченное</button></div>`, sheetIsOpen() ? true : undefined);
+}
+async function hearingMergedTake(keepId, dropId) {
+  const fs = [...document.querySelectorAll('#sheetContent .heardup-take:checked')].map(x => x.value), b = document.getElementById('heardup-take'), upd = b ? Number(b.dataset.upd || 0) : 0;
+  if (!fs.length) { toast('Ничего не отмечено'); return; }
+  let r; try { r = await heardupTx(H => { const k = H.find(x => x && x.id === keepId && !x._deleted), h = H.find(x => x && x.id === dropId); if (!k || !h) return { error: 'gone', text: 'Записи не найдены' }; if (Number(k._upd || 0) !== upd) return { error: 'changed', text: 'Оставленная запись изменилась — откройте лист заново' }; for (const f of fs) k[f] = h[f]; if (k.status === 'Проведено') delete k.autoDone; return { ok: true }; }); } catch (e) { logErr('heardup:take', e); toast('Не удалось: ' + ((e && e.message) || e), true); return; }
+  if (!r || r.error) { toast((r && r.text) || 'Не изменено', true); return; }
+  toast('Перенесено: ' + fs.length); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
+}
+// ── 19.10.2026 (снимок пользователя 22:04): заседания, созданные из строк движения дела («Подготовка дела к рассмотрению» и т. п.) ──
+// Новые такие события больше не становятся заседаниями (crmMonIsFakeHearing, коллектор 3.26). Уже созданные — в «Проверке данных»: убрать в корзину
+// (событие становится строкой движения) или оставить, если это действительно заседание. Сама программа не удаляет: запись могли править.
+function hearingFakeList(hearings, events) {
+  const ev = new Map((events || []).filter(e => e && e.id).map(e => [e.id, e]));
+  return (hearings || []).filter(h => h && !h._deleted && !h.notFake && h.monitorEventId && ev.has(h.monitorEventId) && typeof crmMonIsFakeHearing === 'function' && crmMonIsFakeHearing(ev.get(h.monitorEventId))).map(h => ({ h, e: ev.get(h.monitorEventId) }));
+}
+function integrityHearingFake(d, out) {
+  for (const x of hearingFakeList(d.hearings, d.monitorEvents)) out.push({ type: 'Заседание из строки движения дела', label: 'Заседание ' + fmtDate(x.h.date) + (x.h.time ? ' ' + x.h.time : '') + (x.h.caseNum ? ' · ' + x.h.caseNum : ''), detail: '«' + (typeof crmMonEventHead === 'function' ? crmMonEventHead(x.e) : x.e.title) + '» — это действие суда, не заседание. Уберите запись или оставьте, если заседание было', open: ['hearingFakeOpen', x.h.id] });
+}
+async function hearingFakeOpen(id) {
+  const h = (await getAll('hearings')).find(x => x.id === id), e = h && (await getAll('monitorEvents')).find(x => x.id === h.monitorEventId); if (!h || !e) { toast('Запись не найдена'); return; }
+  openSheet('Заседание из строки движения дела', `<p>Запись «Заседание ${esc(fmtDate(h.date) + (h.time ? ' ' + h.time : ''))}» создана по строке движения дела на сайте суда: <b>${esc(e.title || '')}</b>.</p><p class="small muted">Подготовка дела к рассмотрению, передача судье, принятие к производству — действия суда, а не заседания (в строке «Назначено судебное заседание» — это результат действия: заседание назначено на другую дату). Событие останется в ленте дела строкой движения; запись уйдёт в корзину, восстановить можно оттуда.</p>${h.comment || h.prep || h.participation ? '<p class="small">В записи есть ваши сведения: ' + esc([h.comment && 'комментарий', h.prep && 'подготовка', h.participation && 'участие'].filter(Boolean).join(', ')) + ' — проверьте перед удалением.</p>' : ''}
+    <div class="form-actions"><button type="button" class="button primary" id="hearing-fake-drop" data-upd="${esc(String(h._upd || 0))}" onclick="hearingFakeDrop('${jsq(id)}')">${icon('trash-2', 'icon-sm')}Убрать запись</button><button type="button" class="button" id="hearing-fake-keep" onclick="hearingFakeKeep('${jsq(id)}')">Это заседание — оставить</button></div>`, sheetIsOpen() ? true : undefined);
+}
+async function hearingFakeDrop(id) {
+  const b = typeof document !== 'undefined' ? document.getElementById('hearing-fake-drop') : null, upd = b ? Number(b.dataset.upd || 0) : 0;
+  let r; try { r = await heardupTx((H, E, C) => { const h = H.find(x => x && x.id === id && !x._deleted); if (!h) return { error: 'gone', text: 'Запись уже удалена' }; if (upd && Number(h._upd || 0) !== upd) return { error: 'changed', text: 'Запись изменилась — откройте лист заново' }; const e = E.find(x => x && x.id === h.monitorEventId); h._deleted = true; h._deletedAt = Date.now(); if (e) { e.eventType = 'caseflow'; e.status = 'flow'; if (e.appliedRecordId === h.id) delete e.appliedRecordId; } const c = C.find(x => x && !x._deleted && (h.caseId ? x.id === h.caseId : x.number === h.caseNum)); if (c && typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, 'hearing_upd', '', 'Заседание ' + fmtDate(h.date) + ' убрано: это строка движения дела («' + (e ? crmMonEventHead(e) : '') + '»), а не заседание', 'auto'); return { ok: true }; }); } catch (e) { logErr('hearing:fake', e); toast('Не удалось: ' + ((e && e.message) || e), true); return; }
+  if (!r || r.error) { toast((r && r.text) || 'Не изменено', true); return; }
+  toast('Запись убрана в корзину, событие — в ленте дела'); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
+}
+async function hearingFakeKeep(id) {
+  try { await recUpdate('hearings', id, h => { h.notFake = 1; }); } catch (e) { logErr('hearing:fake-keep', e); toast('Не удалось: ' + ((e && e.message) || e), true); return; }
+  toast('Оставлено'); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
 }
 
 // ▼▼▼ sync/kadproto.js
@@ -12675,7 +12910,8 @@ function fSelect(id, label, val, opts, allowEmpty) { return `<label class="field
 // поле на всю ширину формы; и у полей с дополнительным классом (строка с поиском — «field combo»), очередь 03.10.2026
 function wide(html) { return html.replace(/class="field(?=[ "])/, 'class="field wide'); }
 function fText(id, label, val, rows) { return `<label class="field wide"><span>${esc(label)}</span><textarea id="${id}" rows="${rows || 3}">${esc(val || '')}</textarea></label>`; }
-function fv(id) { const el = document.getElementById(id); return el ? String(el.value || '').trim() : ''; }
+// v177 (N5): поле выбора дела, в строке которого ещё набирают, — сначала разрешается (одно совпадение выбирается; неоднозначное — прежний выбор)
+function fv(id) { const el = document.getElementById(id); if (el && el.type === 'hidden' && typeof casePickResolve === 'function' && document.getElementById(id + '-txt')) casePickResolve(id); return el ? String(el.value || '').trim() : ''; }
 function fErr(msg) { const box = document.getElementById('form-error'); if (box) { box.textContent = msg; box.hidden = !msg; } if (msg) { if (typeof guardSaveFailed === 'function') guardSaveFailed(); toast(msg, true); } }
 // delFn — при правке: кнопка «Удалить» (этап 2б) открывает подтверждение, сама ничего не удаляет
 // деморежим (04.10.2026): у формы новой записи — строка «можно создать ещё N из 5» (ui/license.js, demoHintSlot)
@@ -13380,28 +13616,58 @@ function casePickClose(id) { const m = casePickMenu(id); if (m) { m.hidden = tru
 function casePickSet(id, k, silent) {
   const hid = document.getElementById(id), txt = document.getElementById(id + '-txt'); if (!hid) return false;
   const key = String(k == null ? '' : k), it = (CASE_PICK[id] || []).find(x => x.k === key);
-  hid.value = it ? it.k : ''; if (txt) txt.value = it ? it.label : ''; CASE_PICK_AT[id] = Date.now();
+  hid.value = it ? it.k : ''; if (txt) { txt.value = it ? it.label : ''; delete txt.dataset.dirty; } CASE_PICK_AT[id] = Date.now();
   if (!silent) hid.dispatchEvent(new Event('change', { bubbles: true }));
   return !!it || !key;
 }
-// уход из строки: пусто — дело снято; совпадает с выбранным — ничего; одно совпадение по введённому — выбирается; иначе возврат к выбранному
+// v177 (аудит сборки 176, N5; урок 175): ввод больше НЕ снимает выбранное дело — строка помечается «набирается» (dataset.dirty), а выбор
+// завершается синхронно: при уходе из строки, по Enter и перед сохранением (обработчик нажатия кнопок формы в фазе перехвата) — раньше
+// сохранение, нажатое в первые 350 мс после ввода, читало уже очищенное скрытое поле и записывало заседание без дела (воспроизведено
+// аудитом). Разрешение: строка пуста — дело снято (явное действие); совпадает с выбранным — ничего; одно совпадение — выбирается; иначе
+// (ни одного или несколько) — неоднозначно: прежний выбор остаётся, сохранение останавливается словами «Выберите дело из списка».
+function casePickResolve(id) {
+  const hid = document.getElementById(id), txt = document.getElementById(id + '-txt'); if (!hid || !txt) return 'ok';
+  if (!txt.dataset.dirty) return 'ok';
+  const q = String(txt.value || '').trim(), cur = (CASE_PICK[id] || []).find(x => x.k === hid.value);
+  if (!q) { delete txt.dataset.dirty; if (hid.value) casePickSet(id, ''); return 'ok'; }
+  if (cur && comboNorm(cur.label) === comboNorm(q)) { delete txt.dataset.dirty; return 'ok'; }
+  const hits = casePickFilter(CASE_PICK[id] || [], q, 2);
+  if (hits.length === 1) { delete txt.dataset.dirty; casePickSet(id, hits[0].k); return 'ok'; }
+  return 'ambiguous';
+}
+// вернуть строку к выбранному делу (неоднозначный ввод при уходе из строки)
+function casePickRevert(id) {
+  const hid = document.getElementById(id), txt = document.getElementById(id + '-txt'); if (!hid || !txt) return;
+  const cur = (CASE_PICK[id] || []).find(x => x.k === hid.value); txt.value = cur ? cur.label : hid.value; delete txt.dataset.dirty;
+}
+// уход из строки: разрешение; неоднозначно — возврат к выбранному делу (или к пустой строке)
 function casePickBlur(txt) {
   const id = txt.dataset.pick, hid = document.getElementById(id); if (!hid) return;
-  if (Date.now() - (CASE_PICK_AT[id] || 0) < 300) return;
-  const q = String(txt.value || '').trim(), cur = (CASE_PICK[id] || []).find(x => x.k === hid.value);
-  if (!q) { if (hid.value) casePickSet(id, ''); return; }
-  if (cur && comboNorm(cur.label) === comboNorm(q)) return;
-  const hits = casePickFilter(CASE_PICK[id] || [], q, 2);
-  if (hits.length === 1) casePickSet(id, hits[0].k);
-  else if (cur) txt.value = cur.label;
-  else if (hid.value) { txt.value = hid.value; }
-  else txt.value = '';
+  if (Date.now() - (CASE_PICK_AT[id] || 0) < 300 && !txt.dataset.dirty) return;
+  if (casePickResolve(id) === 'ambiguous') casePickRevert(id);
+}
+// перед сохранением: все строки выбора дела в контейнере, которые ещё набираются, разрешаются; первая неоднозначная — ответ (её id)
+function casePickResolveAll(root) {
+  for (const txt of (root || document).querySelectorAll('input[data-pick]')) { if (casePickResolve(txt.dataset.pick) === 'ambiguous') return txt.dataset.pick; }
+  return '';
 }
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
   document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { delete t.dataset.pickedId; comboRender(t); } });
   document.addEventListener('focusin', e => { const t = e.target; if (t && t.matches && t.matches('input[data-combo]')) { comboCloseAll(t); comboRender(t); } });
-  // v174: строка выбора дела — ввод снимает значение (без change: событие уйдёт при выборе или при уходе из строки), список обновляется
-  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-pick]')) { const hid = document.getElementById(t.dataset.pick); if (hid && hid.value) hid.value = ''; casePickRender(t); } });
+  // v177 (N5): строка выбора дела — ввод помечает строку «набирается», выбранное дело остаётся до разрешения (casePickResolve)
+  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-pick]')) { t.dataset.dirty = '1'; casePickRender(t); } });
+  // v177 (N5): кнопка сохранения формы — сначала завершить выбор дела; неоднозначный ввод останавливает сохранение (фаза перехвата —
+  // раньше обработчика кнопки). Кнопки внутри самого поля выбора и строки списков не трогаются
+  document.addEventListener('click', e => {
+    const b = e.target && e.target.closest && e.target.closest('button'); if (!b || b.closest('.case-pick') || b.closest('.combo-list')) return;
+    const box = b.closest('.modal-content') || b.closest('dialog') || b.closest('.side') || document; if (!box.querySelector || !box.querySelector('input[data-pick][data-dirty]')) return;
+    const bad = casePickResolveAll(box); if (!bad) return;
+    const saving = b.closest('.save-bar') || b.classList.contains('primary');
+    if (!saving) { casePickRevert(bad); casePickResolveAll(box); return; }
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (typeof toast === 'function') toast('Выберите дело из списка — по введённому найдено несколько дел или ни одного', true);
+    const txt = document.getElementById(bad + '-txt'); if (txt) { casePickRender(txt); try { txt.focus(); } catch (er) { /* штатно: элемент мог исчезнуть */ } }
+  }, true);
   document.addEventListener('focusin', e => { const t = e.target; if (t && t.matches && t.matches('input[data-pick]')) { comboCloseAll(null); casePickRender(t); } });
   document.addEventListener('focusout', e => { const t = e.target; if (!(t && t.matches && t.matches('input[data-pick]'))) return; const r = e.relatedTarget; if (r && r.closest && r.closest('.case-pick') === t.closest('.case-pick')) return; setTimeout(() => { if (document.activeElement !== t) { casePickBlur(t); casePickClose(t.dataset.pick); } }, 350); });
   document.addEventListener('keydown', e => {
@@ -13409,7 +13675,8 @@ if (typeof document !== 'undefined' && typeof document.addEventListener === 'fun
     const m = casePickMenu(t.dataset.pick);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); if (!m || m.hidden) { casePickRender(t); return; } const items = [...m.querySelectorAll('.combo-item')]; if (!items.length) return; const cur = items.findIndex(x => x.classList.contains('active')); let i = cur + (e.key === 'ArrowDown' ? 1 : -1); if (i < 0) i = items.length - 1; if (i >= items.length) i = 0; items.forEach(x => x.classList.remove('active')); items[i].classList.add('active'); items[i].scrollIntoView({ block: 'nearest' }); }
     else if (e.key === 'Escape' && m && !m.hidden) { e.preventDefault(); casePickClose(t.dataset.pick); }
-    else if (e.key === 'Enter' && m && !m.hidden) { e.preventDefault(); const a = m.querySelector('.combo-item.active') || m.querySelector('.combo-item'); if (a) casePickSet(t.dataset.pick, a.dataset.k); casePickClose(t.dataset.pick); }
+    else if (e.key === 'Enter' && m && !m.hidden) { e.preventDefault(); const a = m.querySelector('.combo-item.active') || (t.dataset.dirty && casePickFilter(CASE_PICK[t.dataset.pick] || [], t.value, 2).length > 1 ? null : m.querySelector('.combo-item')); if (a) { casePickSet(t.dataset.pick, a.dataset.k); casePickClose(t.dataset.pick); } else if (typeof toast === 'function') toast('Найдено несколько дел — выберите из списка'); }
+    else if (e.key === 'Enter') { if (casePickResolve(t.dataset.pick) === 'ambiguous') { e.preventDefault(); casePickRender(t); } }
   });
   document.addEventListener('click', e => {
     const t = e.target, item = t.closest && t.closest('.combo-item');
@@ -19539,6 +19806,8 @@ function integrityAccum(d, cases, out) {
   if (typeof procList === 'function') integrityProc(d, cases, out);
   // 19.10.2026: заседания-двойники с ручными правками — только показ и лист «Оставить одно» (sync/heardup.js)
   if (typeof integrityHearingDups === 'function') integrityHearingDups(d, out);
+  // v177: заседания, созданные из строк движения дела («Подготовка дела к рассмотрению…») — убрать или оставить
+  if (typeof integrityHearingFake === 'function') integrityHearingFake(d, out);
   for (const f of live(d.finance)) {
     const del = (f._delItems && f._delItems.stages) || {}, seen = {};
     for (const s of Array.isArray(f.stages) ? f.stages : []) { if (!s || del[s.id]) continue; const k = String(s.name || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim() + '|' + Number(s.sum || 0); if (seen[k]) { out.push({ type: 'Повторяющиеся этапы счёта', label: 'Счёт · ' + (f.client || '') + ' · ' + (f.service || ''), detail: 'Этап «' + (s.name || '') + '» на ' + fmtMoney(s.sum || 0) + ' записан дважды — если это не два разных этапа (так бывало при создании счёта на двух устройствах до 15.10.2026), уберите лишний', open: ['openFinanceSheet', f.id] }); break; } seen[k] = 1; }
@@ -19602,13 +19871,15 @@ async function caseLinkFixApply(store, id, caseId) {
 }
 async function openIntegritySheet(mode) {
   const d = {}; for (const st of ['cases', 'clients', 'monitorEvents', ...INTEGRITY_STORES.map(x => x[0])]) { try { d[st] = await getAll(st); } catch (e) { logErr('integrity:' + st, e); d[st] = []; } }
+  // v177: заседания вместе с корзиной — для строк о последствиях прежних объединений двойников (sync/heardup.js)
+  try { d.hearingsRaw = await getAllRaw('hearings'); } catch (e) { logErr('integrity:hearingsRaw', e); d.hearingsRaw = []; }
   let rows = []; try { rows = integrityModel(d); } catch (e) { logErr('integrity', e); toast('Не удалось проверить данные — подробности в журнале ошибок', true); return; }
   const types = [...new Set(rows.map(r => r.type))], nFix = rows.filter(r => r.fix === 'proc').length;
   // v171: однозначные связи рассмотрений — исправление по кнопке; что именно изменено — в листе итога и в журнале дела (было → стало, причина)
   const fixBtn = nFix ? `<div class="info-box" id="integ-proc-fix-box">Событий, отнесённых не к своему рассмотрению при однозначном признаке (ссылка, с которой событие собрано): ${nFix}. Программа перенесёт каждое тем же расчётом, что и кнопка в карточке события. Не трогает: событие, рассмотрение которого выбрали вы; заседание, которое вы отнесли в форме заседания; расхождение «событие — заседание»; дату акта, про которую не доказано, что её записало это событие, — такие записи будут в списке «Не исправлено» с причиной. Проверка повторяется по свежим данным в момент записи.<div class="form-actions" style="margin-top:6px"><button type="button" class="button small-btn primary" id="integ-proc-fix" onclick="integrityProcFix()">${icon('check', 'icon-sm')}Исправить однозначные связи (${nFix})</button></div></div>` : '';
   const body = fixBtn + (rows.length ? types.map(t => `<div class="section-label">${esc(t)} · ${rows.filter(r => r.type === t).length}</div><div class="list-rows">${rows.filter(r => r.type === t).slice(0, 50).map(r => `<button type="button" class="list-btn" onclick="${esc(r.open[0])}('${jsq(r.open[1])}')"><span>${esc(r.label)}</span><span class="muted">${esc(r.detail)}</span></button>`).join('')}${rows.filter(r => r.type === t).length > 50 ? '<p class="small muted">Показаны первые 50</p>' : ''}</div>`).join('')
     : `<div class="status-line good" role="status">${icon('check')}<span>Неточностей не найдено</span></div>`);
-  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты, а также то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта, заседания-двойники с вашими правками (одинаковые без правок программа объединяет сама). Проверка ничего не меняет сама — откройте запись и поправьте (однозначные связи событий с рассмотрениями — кнопкой «Исправить однозначные связи»); у записи, привязанной к двум делам, выберите верное дело; дубли доверителей объединяются, повторяющемуся номеру дела даётся новый.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
+  openSheet('Проверка данных', `<p class="small muted">Поиск записей без связей и неточностей: дубли доверителей, дела без доверителя, ссылки на удалённые дела, записи, привязанные к двум делам, переплаты, сроки и заседания без даты, а также то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта, заседания-двойники, которые различаются (полностью одинаковые программа объединяет сама), заседания, созданные из строк движения дела. Проверка ничего не меняет сама — откройте запись и поправьте (однозначные связи событий с рассмотрениями — кнопкой «Исправить однозначные связи»); у записи, привязанной к двум делам, выберите верное дело; дубли доверителей объединяются, повторяющемуся номеру дела даётся новый.</p>${body}`, mode || (sheetIsOpen() ? true : undefined));
 }
 
 // ▼▼▼ ui/parties.js
