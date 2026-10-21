@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="21.10.2026 14:08 · 2b608b3+">
-<meta name="build-no" content="183">
+<meta name="build" content="21.10.2026 15:15 · bd21df5+">
+<meta name="build-no" content="184">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -19424,6 +19424,12 @@ async function envPrint(id) {
 // Свои шаблоны — хранилище templates в формате прежней программы ({ id, title, body }; поля createdAt и updatedAt прежняя при правке не
 // сохраняет). Встроенные шаблоны, сохранённые копией, прежняя программа покажет текстом со знаками разметки.
 // Чистые функции (tplDeclineFIO, tplRoleCase, tplNumWords, tplRubWords, tplFieldsModel, tplRender, tplHtmlToOoxml) — next_72_doctpl.js.
+// 21.10.2026 (разбор ЮрТопоса по исходникам, п. 5 — их tpl_*): язык шаблонов расширен — условия {{#если Поле}} … {{#иначе}} … {{/если}}
+// (сравнения =, !=, >, <, «не»), повторы {{#каждый расходы}} … {{сумма}} … {{/каждый}} по спискам дела (расходы, платежи, заседания, работы),
+// фильтры через двоеточие ({{СуммаИска:прописью}}, {{Дата:словами}}, {{Дата:плюс_дней 10}}, {{ДатаРешения:дней_до}}, {{Суд:верхний}},
+// {{Доверитель:кратко}}, {{Госпошлина:число}}), проверка шаблона перед сохранением (tplLint: незакрытые блоки, незнакомые фильтры, списки
+// и поля) и прежние версии своего шаблона (поле history записи, до 10; «Вернуть» подставляет текст в форму). Чистые функции: tplExpand,
+// tplLint, tplApplyFilter — next_118_v184.js.
 
 const TPL_PROFILE_KEY = 'crm_lawyer_profile';
 // реквизиты адвоката — общие для устройств (уходят с настройками); ключ дописывается здесь, только в новой версии
@@ -19732,16 +19738,49 @@ function tplFieldsModel(d) {
       return { html: `<table class="tpl-sign"><tbody><tr><td><b>Доверитель</b><br>${x.html}</td><td><b>Адвокат</b><br>${y.html}</td></tr></tbody></table>`, miss: x.miss.concat(y.miss) };
     },
   };
-  return { P, T, g, kind: TPL_KIND_CODE[c.kind] || '' };
+  // списки для повторов {{#каждый …}}: поля — по-русски, строчными (tplExpand подставляет их внутри блока)
+  const pays = []; fin.forEach(f => (Array.isArray(f.payments) ? f.payments : []).forEach(p => pays.push({ 'сумма': tplRub(p.sum), 'сумма_число': String(Number(p.sum) || 0), 'дата': tplDate(String(p.at || p.date || '').slice(0, 10)), 'примечание': p.note || '', 'способ': { cash: 'наличные', bank: 'безналичный расчёт', card: 'карта / СБП' }[p.method] || '', 'счёт': f.service || '' })));
+  pays.sort((a, b) => a['дата'].split('.').reverse().join('').localeCompare(b['дата'].split('.').reverse().join('')));
+  const hear = live(d.hear).slice().sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  const L = {
+    'расходы': exps.map(e => ({ 'категория': e.category || '', 'сумма': tplRub(e.amount), 'сумма_число': String(Number(e.amount) || 0), 'дата': tplDate(e.date), 'примечание': e.note || '', 'возмещается': e.recoverable !== false ? 'да' : '' })),
+    'платежи': pays,
+    'заседания': hear.map(h => ({ 'дата': tplDate(h.date), 'время': h.time || '', 'суд': h.court || c.court || '', 'зал': h.room || '', 'судья': h.judge || c.judge || '', 'статус': h.status || '', 'результат': h.result || '' })),
+    'работы': time.map(t => ({ 'дата': tplDate(t.date), 'содержание': t.desc || 'Юридическая помощь по делу', 'время': tplHM(t.minutes), 'минуты': String(Number(t.minutes) || 0), 'сумма': rate ? tplRub(Math.round(rate * (Number(t.minutes) || 0) / 60)) : '' })),
+  };
+  return { P, T, L, g, kind: TPL_KIND_CODE[c.kind] || '' };
 }
 function tplMissBlock(label) { return { html: `<p class="tpl-l"><span class="tpl-miss">[УКАЗАТЬ: ${esc(label)}]</span></p>`, miss: [label] }; }
 
 // ── подстановка полей ──
-const TPL_KEY_RE = /^\s*([^:|{}]+?)\s*(?::\s*([а-яё]+))?\s*(?:\|([^{}]*))?$/i;
+// {{Поле}}, {{Поле:род}}, {{Поле:фильтр}}, {{Поле:фильтр аргумент}}, {{Поле:род:верхний}}, {{Поле|текст, если пусто}}
+const TPL_KEY_RE = /^\s*([^:|{}]+?)\s*((?::\s*[^:|{}]+?\s*)*)(?:\|([^{}]*))?$/i;
+const TPL_FILTERS = ['прописью', 'словами', 'верхний', 'нижний', 'кратко', 'число', 'плюс_дней', 'дней_до'];
+const TPL_LIST_KEYS = ['расходы', 'платежи', 'заседания', 'работы'];
+const TPL_ITEM_FIELDS = { 'расходы': ['категория', 'сумма', 'сумма_число', 'дата', 'примечание', 'возмещается'], 'платежи': ['сумма', 'сумма_число', 'дата', 'примечание', 'способ', 'счёт'], 'заседания': ['дата', 'время', 'суд', 'зал', 'судья', 'статус', 'результат'], 'работы': ['дата', 'содержание', 'время', 'минуты', 'сумма'] };
+const tplNumOf = v => { const m = /-?\d[\d\s\u00A0]*(?:[.,]\d+)?/.exec(String(v || '')); return m ? Number(m[0].replace(/[\s\u00A0]/g, '').replace(',', '.')) : NaN; };
+const tplIsoOf = v => { const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(String(v || '').trim()); return m ? m[3] + '-' + m[2] + '-' + m[1] : (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '').trim()) ? String(v).trim() : ''); };
+// фильтр над значением; today — ГГГГ-ММ-ДД (для «дней_до»)
+function tplApplyFilter(v, name, arg, today) {
+  v = String(v == null ? '' : v);
+  switch (name) {
+    case 'прописью': { const n = tplNumOf(v); return Number.isFinite(n) ? tplRubWords(n) : v; }
+    case 'число': { const n = tplNumOf(v); return Number.isFinite(n) ? tplRub(n) : v; }
+    case 'словами': { const iso = tplIsoOf(v); return iso ? tplDateWords(iso) : v; }
+    case 'верхний': return v.toUpperCase();
+    case 'нижний': return v.toLowerCase();
+    case 'кратко': return tplFioShort(v);
+    case 'плюс_дней': { const iso = tplIsoOf(v), n = parseInt(arg, 10); if (!iso || !Number.isFinite(n)) return v; const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return tplDate(localISO(d)); }
+    case 'дней_до': { const iso = tplIsoOf(v); if (!iso || !today) return v; const a = new Date(iso + 'T00:00:00'), b = new Date(String(today).slice(0, 10) + 'T00:00:00'); return String(Math.round((a - b) / 864e5)); }
+  }
+  return v;
+}
 function tplLookup(M, raw) {
   const m = TPL_KEY_RE.exec(String(raw || '')); if (!m) return { unknown: true };
-  const key = m[1].trim(), kase = (m[2] || '').toLowerCase(), def = m[3];
-  if (kase && kase !== 'им' && !(kase in TPL_CASE_IDX)) return { unknown: true };
+  const key = m[1].trim(), def = m[3];
+  const mods = (m[2] || '').split(':').map(s => s.trim()).filter(Boolean);
+  let kase = '', filters = [];
+  for (const md of mods) { const [name, ...rest] = md.split(/\s+/); const n = name.toLowerCase(); if (!kase && !filters.length && (n === 'им' || n in TPL_CASE_IDX)) kase = n; else if (TPL_FILTERS.includes(n)) filters.push([n, rest.join(' ')]); else return { unknown: true }; }
   if (!(key in M.P)) return { unknown: true };
   let v = String(M.P[key] == null ? '' : M.P[key]).trim();
   if (v && kase) {
@@ -19749,9 +19788,85 @@ function tplLookup(M, raw) {
     else if (TPL_ROLE_KEYS.has(key)) v = tplRoleCase(v, kase, M.g);
     else if (TPL_NAME_KEYS.has(key) && kase !== 'им') v = tplDeclineFIO(v, kase);
   }
+  if (v) for (const [n, arg] of filters) v = tplApplyFilter(v, n, arg, M.today || (M.P['Дата'] ? tplIsoOf(M.P['Дата']) : ''));
   if (!v && def !== undefined) return { v: def.trim(), def: true };
   return v ? { v } : { v: '', miss: TPL_LABELS[key] || key };
 }
+// условие: «Поле», «не Поле», «Поле = значение», «Поле != значение», «Поле > 1000», «Поле < 1000» (числа — из текста значения)
+// get — поиск значения внутри повтора (поля элемента главнее полей дела)
+function tplCond(cond, M, get) {
+  let s = String(cond || '').trim(), neg = false;
+  const look = key => { const g = get ? get(key) : null; return g || tplLookup(M, key); };
+  const cmp = /^(.+?)\s*(=|!=|>|<)\s*(.+)$/.exec(s);
+  if (cmp) {
+    const r = look(cmp[1]), left = r.unknown ? '' : String(r.v || ''), right = cmp[3].trim().replace(/^[«"']|[»"']$/g, '');
+    if (cmp[2] === '=') return left.toLowerCase() === right.toLowerCase();
+    if (cmp[2] === '!=') return left.toLowerCase() !== right.toLowerCase();
+    const a = tplNumOf(left), b = tplNumOf(right); if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+    return cmp[2] === '>' ? a > b : a < b;
+  }
+  if (/^(не|!)\s+/i.test(s)) { neg = true; s = s.replace(/^(не|!)\s+/i, ''); }
+  const r = look(s), v = r.unknown || r.def ? '' : String(r.v || '').trim();
+  const truth = v !== '' && !['нет', '0', 'false', 'no'].includes(v.toLowerCase());
+  return neg ? !truth : truth;
+}
+// раскрытие условий и повторов в тексте шаблона: изнутри наружу, пока блоки есть; незакрытый блок остаётся как есть (его назовёт tplLint)
+const TPL_IF_RE = /\{\{#если\s+([^{}]+?)\}\}([\s\S]*?)(?:\{\{#иначе\}\}([\s\S]*?))?\{\{\/если\}\}/i;
+const TPL_EACH_RE = /\{\{#каждый\s+([^{}]+?)\}\}([\s\S]*?)\{\{\/каждый\}\}/i;
+function tplExpand(body, M) {
+  let s = String(body || ''), guard = 0;
+  // блок на отдельных строках — строки-обёртки не оставляют пустых строк (абзацы не рвутся)
+  const trimEdge = t => t.replace(/^[ \t]*\n/, '').replace(/\n[ \t]*$/, '');
+  const innerIf = /\{\{#если\s+[^{}]+\}\}(?:(?!\{\{#если)[\s\S])*?\{\{\/если\}\}/i, innerEach = /\{\{#каждый\s+[^{}]+\}\}(?:(?!\{\{#каждый)[\s\S])*?\{\{\/каждый\}\}/i;
+  while (guard++ < 200) {
+    const me = innerEach.exec(s);
+    if (me) {
+      const m = TPL_EACH_RE.exec(me[0]); const name = m[1].trim().toLowerCase(), list = (M.L && M.L[name]) || null;
+      let out = '';
+      // повтор в одной строке — элементы подряд; блок на нескольких строках — каждый элемент с новой строки
+      const sep = /\n/.test(m[2].trim()) ? '\n' : '', tpl = sep ? trimEdge(m[2]) : m[2];
+      if (list) list.forEach((it, i) => {
+        const get = key => { const kk = String(key).trim().toLowerCase(); if (kk === '№') return { v: String(i + 1) }; return kk in it ? { v: String(it[kk]) } : null; };
+        // условия внутри элемента: {{#если примечание}}, {{примечание}}{{/если}} — по полям элемента
+        let t = tpl, g2 = 0; while (g2++ < 50) { const mi2 = innerIf.exec(t); if (!mi2) break; const q = TPL_IF_RE.exec(mi2[0]); t = t.slice(0, mi2.index) + (tplCond(q[1], M, get) ? q[2] : (q[3] || '')) + t.slice(mi2.index + mi2[0].length); }
+        out += t.replace(/\{\{\s*([а-яё_№]+)\s*(?:\|([^{}]*))?\s*\}\}/gi, (all, k, def) => { const kk = k.toLowerCase(); if (kk === '№') return String(i + 1); if (!(kk in it)) return all; const v = String(it[kk]); return v || (def !== undefined ? def.trim() : ''); }) + sep; });
+      else out = me[0].replace(/\{\{#каждый\s+[^{}]+\}\}|\{\{\/каждый\}\}/gi, '');
+      s = s.slice(0, me.index) + (list ? out.replace(/\n$/, '') : out) + s.slice(me.index + me[0].length); continue;
+    }
+    const mi = innerIf.exec(s);
+    if (mi) {
+      const m = TPL_IF_RE.exec(mi[0]); const keep = tplCond(m[1], M) ? m[2] : (m[3] || '');
+      // блок на отдельных строках: одна пустая строка от обёрток убирается
+      const whole = /^\n/.test(s.slice(mi.index + mi[0].length)) && (mi.index === 0 || /\n$/.test(s.slice(0, mi.index)));
+      s = s.slice(0, mi.index) + (whole ? trimEdge(keep) : keep) + s.slice(mi.index + mi[0].length + (whole && !trimEdge(keep) ? 1 : 0)); continue;
+    }
+    break;
+  }
+  return s;
+}
+// проверка шаблона: ошибки (незакрытые или лишние блоки) и предупреждения (незнакомые фильтры, списки, поля); known — набор известных полей
+function tplLint(body, known) {
+  const s = String(body || ''), errors = [], warnings = [];
+  const cnt = re => (s.match(re) || []).length;
+  // границы слов — пробелом (\b в JavaScript не видит кириллицу, урок 42)
+  const oi = cnt(/\{\{#если\s/gi), ci = cnt(/\{\{\/если\}\}/gi), oe = cnt(/\{\{#каждый\s/gi), ce = cnt(/\{\{\/каждый\}\}/gi), el = cnt(/\{\{#иначе\}\}/gi);
+  if (oi !== ci) errors.push('условий {{#если …}} — ' + oi + ', закрытий {{/если}} — ' + ci);
+  if (oe !== ce) errors.push('повторов {{#каждый …}} — ' + oe + ', закрытий {{/каждый}} — ' + ce);
+  if (el > oi) errors.push('{{#иначе}} без {{#если …}}');
+  const lists = [...s.matchAll(/\{\{#каждый\s+([^{}]+?)\}\}/gi)].map(m => m[1].trim().toLowerCase());
+  lists.forEach(l => { if (!TPL_LIST_KEYS.includes(l)) warnings.push('неизвестный список «' + l + '» (есть: ' + TPL_LIST_KEYS.join(', ') + ')'); });
+  const itemFields = new Set(['№']); lists.forEach(l => (TPL_ITEM_FIELDS[l] || []).forEach(f => itemFields.add(f)));
+  const seen = new Set();
+  for (const m of s.matchAll(/\{\{([^{}]*)\}\}/g)) {
+    const raw = m[1].trim(); if (!raw || raw[0] === '#' || raw[0] === '/') continue;
+    const km = TPL_KEY_RE.exec(raw); if (!km) { warnings.push('не разобрано поле «' + raw.slice(0, 40) + '»'); continue; }
+    const key = km[1].trim(), mods = (km[2] || '').split(':').map(x => x.trim()).filter(Boolean);
+    mods.forEach((md, i) => { const n = md.split(/\s+/)[0].toLowerCase(); if (!(i === 0 && (n === 'им' || n in TPL_CASE_IDX)) && !TPL_FILTERS.includes(n) && !seen.has('f:' + n)) { seen.add('f:' + n); warnings.push('неизвестный падеж или фильтр «' + n + '» (фильтры: ' + TPL_FILTERS.join(', ') + ')'); } });
+    if (known && !known.has(key) && !itemFields.has(key.toLowerCase()) && !seen.has('k:' + key)) { seen.add('k:' + key); warnings.push('незнакомое поле «' + key + '»'); }
+  }
+  return { errors, warnings, ok: !errors.length };
+}
+const tplKnownFields = () => new Set(Object.keys(TPL_LABELS).concat(['ТаблицаРасходов', 'ТаблицаРабот', 'ПодписиСторон', 'РеквизитыСторон', 'ДатаРешения', 'Доверитель:род', 'Участник:род']));
 // одна строка шаблона → разметка: значения полей, «[УКАЗАТЬ: …]» на месте пустых, незнакомые поля — как есть с отметкой
 function tplRenderLine(line, M) {
   const vals = [], miss = [], unknown = []; let empty = false, fills = 0;
@@ -19772,7 +19887,8 @@ function tplIsCaps(text) { const t = String(text || '').trim(), L = t.replace(/[
 // текст шаблона → разметка документа; miss — чего не хватает, unknown — незнакомые поля, fills — сколько полей заполнено из данных
 function tplRender(body, M) {
   const miss = [], unknown = [], out = []; let fills = 0;
-  const blocks = String(body || '').replace(/\r\n?/g, '\n').split(/\n[ \t]*\n+/);
+  // условия и повторы раскрываются до построчной отрисовки (tplExpand); строки шапки «>» и «?» внутри блоков работают как обычно
+  const blocks = tplExpand(String(body || '').replace(/\r\n?/g, '\n'), M).split(/\n[ \t]*\n+/);
   for (const blk of blocks) {
     const lines = blk.split('\n').filter(l => l.trim() !== ''); if (!lines.length) continue;
     const tm = lines.length === 1 && /^\s*\{\{\s*([^{}:|]+?)\s*\}\}\s*$/.exec(lines[0]);
@@ -19988,14 +20104,14 @@ async function tplLoadCtx(kind, id) {
   const live = a => (a || []).filter(x => x && !x._deleted);
   let lic = null; try { lic = typeof licCurrent === 'function' ? (await licCurrent()).v : null; } catch (e) { logErr('doctpl:lic', e); }
   const book = typeof bookCfg === 'function' ? (bookCfg() || {}) : {}, env = lsJSON('crm_env_from', null) || {};
-  const ctx = { kind, id, c: null, cl: null, opp: null, exps: [], fin: [], time: [], prof: tplProfileEff(tplProfileLoad(), lic, book, env), lic, today: todayISO(), owner: '' };
+  const ctx = { kind, id, c: null, cl: null, opp: null, exps: [], fin: [], time: [], hear: [], prof: tplProfileEff(tplProfileLoad(), lic, book, env), lic, today: todayISO(), owner: '' };
   if (kind === 'case') {
     const c = (await getAll('cases')).find(x => x && x.id === id); if (!c || c._deleted) return null;
     const cls = live(await getAll('clients'));
     ctx.c = c; ctx.cl = (c.clientId && cls.find(x => x.id === c.clientId)) || cls.find(x => !c.clientId && x.name === c.client) || null;
     ctx.opp = typeof caseOpponentOf === 'function' ? caseOpponentOf(c) : null; ctx.owner = c.number || '';
     const mine = x => x.caseId ? x.caseId === c.id : (!!c.number && x.caseNum === c.number);
-    for (const [k, st] of [['exps', 'expenses'], ['fin', 'finance'], ['time', 'time']]) { try { ctx[k] = live(await getAll(st)).filter(mine); } catch (e) { logErr('doctpl:' + st, e); } }
+    for (const [k, st] of [['exps', 'expenses'], ['fin', 'finance'], ['time', 'time'], ['hear', 'hearings']]) { try { ctx[k] = live(await getAll(st)).filter(mine); } catch (e) { logErr('doctpl:' + st, e); } }
   } else if (kind === 'client') {
     const cl = await getOne('clients', id); if (!cl || cl._deleted) return null;
     ctx.cl = cl; ctx.c = { client: cl.name || '', clientId: cl.id, clientRole: '' }; ctx.owner = cl.name || '';
@@ -20039,7 +20155,7 @@ async function tplResolve(ref) {
 async function openDocTplDoc(kind, id, ref, mode) {
   const ctx = await tplLoadCtx(kind, id); if (!ctx) { toast('Запись не найдена', true); return null; }
   const tpl = await tplResolve(ref); if (!tpl) { toast('Шаблон не найден', true); return null; }
-  const M = tplFieldsModel(ctx), r = tplRender(tpl.body, M);
+  const M = tplFieldsModel(ctx); M.today = ctx.today; const r = tplRender(tpl.body, M);
   // название в документах дела — как есть («Ходатайство Д-7/2026»), имя файла — без знаков, запрещённых в именах файлов
   const name = (tpl.title + (ctx.owner ? ' ' + ctx.owner : '')).replace(/\s+/g, ' ').trim().slice(0, 120) || 'Документ';
   const file = name.replace(/[\/\\:*?"<>|]+/g, '_');
@@ -20135,10 +20251,23 @@ async function openTplForm(id, fromKey) {
   const chips = TPL_FIELD_GROUPS.map(([g, keys]) => `<div class="small muted" style="margin:8px 0 4px">${esc(g)}</div><div class="chips">${keys.map(k => `<button type="button" class="chip" onclick="tplInsert('${k}')">${esc(k)}</button>`).join('')}</div>`).join('');
   openSheet(t ? 'Изменить шаблон' : 'Новый шаблон', `<div class="form-grid">${wide(fInput('tpl-title', 'Название шаблона *', title, 'autocomplete="off" placeholder="Ходатайство об отложении заседания"'))}
     ${fText('tpl-body', 'Текст шаблона *', body, 14)}</div>
-    <details class="tpl-help"><summary>Как писать шаблон</summary><p class="small">Поле — в двойных фигурных скобках: {{Доверитель}}, {{Суд}}. Падеж — через двоеточие: {{Доверитель:род}}, {{ПоложениеДоверителя:род}} (им, род, дат, вин, твор, пред). Текст на случай пустого поля — через черту: {{Город|г. ____________}}. Пустая строка — новый абзац. В начале строки: «# » — заголовок по центру, «## » — подзаголовок, «> » — строка шапки справа, «?» — строка не печатается, если поле в ней пустое. Место, которое нужно заполнить вручную, — «[УКАЗАТЬ: что]». Таблицы и подписи — отдельным абзацем: {{ТаблицаРасходов}}, {{ПодписиСторон}}.</p></details>
+    <div class="info-box" id="tpl-lint" hidden></div>
+    <div class="actions" style="margin:4px 0 8px"><button type="button" class="button small-btn" id="tpl-check" onclick="tplFormCheck()">${icon('check', 'icon-sm')}Проверить шаблон</button><button type="button" class="button small-btn" onclick="tplInsertText('{{#если СуммаИска}}\n…\n{{#иначе}}\n…\n{{/если}}')">Вставить условие</button><button type="button" class="button small-btn" onclick="tplInsertText('{{#каждый расходы}}\n{{№}}. {{категория}} — {{сумма}} ({{дата}})\n{{/каждый}}')">Вставить повтор</button></div>
+    <details class="tpl-help"><summary>Как писать шаблон</summary><p class="small">Поле — в двойных фигурных скобках: {{Доверитель}}, {{Суд}}. Падеж — через двоеточие: {{Доверитель:род}}, {{ПоложениеДоверителя:род}} (им, род, дат, вин, твор, пред). Текст на случай пустого поля — через черту: {{Город|г. ____________}}. Пустая строка — новый абзац. В начале строки: «# » — заголовок по центру, «## » — подзаголовок, «> » — строка шапки справа, «?» — строка не печатается, если поле в ней пустое. Место, которое нужно заполнить вручную, — «[УКАЗАТЬ: что]». Таблицы и подписи — отдельным абзацем: {{ТаблицаРасходов}}, {{ПодписиСторон}}.</p>
+    <p class="small"><b>Фильтры</b> — тоже через двоеточие: {{СуммаИска:прописью}} — сумма словами; {{Госпошлина:число}} — число с пробелами и «руб.»; {{ДатаРешения:словами}} — дата словами; {{Дата:плюс_дней 10}} — дата через 10 дней; {{ДатаРешения:дней_до}} — сколько дней осталось; {{Суд:верхний}} и {{Суд:нижний}} — буквы; {{Доверитель:кратко}} — фамилия с инициалами; можно вместе с падежом: {{Доверитель:род:верхний}}.</p>
+    <p class="small"><b>Условие</b>: {{#если Оппонент}} текст, если противная сторона указана {{#иначе}} иначе {{/если}}; сравнения — {{#если ВидДела = Арбитраж}}, {{#если СуммаИска > 100000}}, {{#если не Судья}}. <b>Повтор по списку</b>: {{#каждый расходы}} {{№}}. {{категория}} — {{сумма}} ({{дата}}) {{/каждый}}; списки — расходы (категория, сумма, сумма_число, дата, примечание, возмещается), платежи (сумма, дата, примечание, способ, счёт), заседания (дата, время, суд, зал, судья, статус, результат), работы (дата, содержание, время, минуты, сумма). «Проверить шаблон» находит незакрытые блоки и незнакомые поля до сохранения.</p></details>
     <div class="section-label">Поля — нажмите, чтобы вставить</div>${chips}
+    ${t && Array.isArray(t.history) && t.history.length ? `<details class="fgroup" id="tpl-hist"><summary>${icon('chevron-down', 'icon-sm')}<span>Прежние версии (${t.history.length})</span></summary><div class="list-rows">${t.history.map((h, i) => `<button type="button" class="list-btn" onclick="tplFormRestore(${i})"><span>${esc(tplDate(localISO(new Date(h.at))))} ${esc(new Date(h.at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }))}${h.title && h.title !== t.title ? ' · ' + esc(h.title) : ''}</span><span class="muted">${esc(String(h.body || '').replace(/\s+/g, ' ').slice(0, 60))}… · Вернуть</span></button>`).join('')}</div><p class="small muted">«Вернуть» подставляет текст версии в поле; нынешний текст станет прежней версией после сохранения.</p></details>` : ''}
     ${fSaveBar(`saveTplForm('${jsq(id || '')}')`, 'Сохранить шаблон', id ? `openDeleteSheet('templates','${jsq(id)}')` : '')}`, sheetIsOpen() ? true : undefined);
+  TPL_FORM_HIST = t && Array.isArray(t.history) ? t.history : null;
   if (t && typeof formRecMark === 'function') formRecMark('templates', t);
+}
+function tplInsertText(text) {
+  const ta = document.getElementById('tpl-body'); if (!ta) return;
+  const s = ta.selectionStart == null ? ta.value.length : ta.selectionStart, e = ta.selectionEnd == null ? ta.value.length : ta.selectionEnd;
+  const ins = (s > 0 && ta.value[s - 1] !== '\n' ? '\n' : '') + text + '\n';
+  ta.value = ta.value.slice(0, s) + ins + ta.value.slice(e); ta.focus(); ta.selectionStart = ta.selectionEnd = s + ins.length;
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
 }
 function tplInsert(name) {
   const ta = document.getElementById('tpl-body'); if (!ta) return;
@@ -20151,14 +20280,35 @@ function tplFormModel(v, prev, now) {
   if (!title) return { error: 'Укажите название шаблона' };
   if (!body.trim()) return { error: 'Напишите текст шаблона' };
   if (title.length > 200) return { error: 'Название — не длиннее 200 знаков' };
+  // незакрытый блок условия или повтора — отказ: такой шаблон напечатал бы служебные слова в документе
+  const lint = tplLint(body, tplKnownFields());
+  if (!lint.ok) return { error: 'В шаблоне ' + lint.errors.join('; ') + ' — закройте блок ({{/если}} или {{/каждый}}) или уберите лишний' };
   const p = prev || {};
-  return { obj: { ...p, id: p.id || uid('Ш'), title, body, createdAt: p.createdAt || now, updatedAt: now } };
+  // прежняя версия своего шаблона — в history (до 10): «Вернуть» в форме подставляет её текст
+  const history = prev && prev.body && prev.body !== body ? [{ at: prev.updatedAt || prev.createdAt || now, title: prev.title || '', body: prev.body }].concat(Array.isArray(prev.history) ? prev.history : []).slice(0, 10) : (Array.isArray(p.history) ? p.history : undefined);
+  const obj = { ...p, id: p.id || uid('Ш'), title, body, createdAt: p.createdAt || now, updatedAt: now };
+  if (history) obj.history = history; else delete obj.history;
+  return { obj, warnings: lint.warnings };
 }
+// «Проверить»: ошибки и предупреждения под полем текста, не сохраняя
+function tplFormCheck() {
+  const box = document.getElementById('tpl-lint'); if (!box) return null;
+  const r = tplLint((document.getElementById('tpl-body') || {}).value || '', tplKnownFields());
+  box.hidden = false; box.className = 'info-box' + (r.errors.length ? ' bad' : r.warnings.length ? ' warning' : '');
+  box.innerHTML = r.errors.length || r.warnings.length ? (r.errors.length ? '<b>Ошибки:</b> ' + esc(r.errors.join('; ')) + '. ' : '') + (r.warnings.length ? '<b>Проверьте:</b> ' + esc(r.warnings.join('; ')) + '.' : '') : 'Шаблон в порядке: блоки закрыты, поля и фильтры известны.';
+  return r;
+}
+// «Вернуть»: текст прежней версии — в поле формы (сохранение создаст новую версию, нынешний текст уйдёт в прежние)
+function tplFormRestore(i) {
+  const h = (TPL_FORM_HIST || [])[i]; const ta = document.getElementById('tpl-body'); if (!h || !ta) return;
+  ta.value = h.body; ta.dispatchEvent(new Event('input', { bubbles: true })); toast('Текст версии от ' + tplDate(localISO(new Date(h.at))) + ' подставлен — нажмите «Сохранить шаблон»');
+}
+let TPL_FORM_HIST = null;
 async function saveTplForm(id) {
   const prev = id ? await getOne('templates', id) : null; if (typeof formGone === 'function' && formGone(id, prev, 'Шаблон')) return;
   const r = tplFormModel({ title: fv('tpl-title'), body: (document.getElementById('tpl-body') || {}).value || '' }, prev, Date.now()); if (r.error) { fErr(r.error); return; }
   try { await put('templates', r.obj); } catch (e) { logErr('form:template', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
-  toast('Шаблон сохранён: ' + r.obj.title); closeSheet(); openTplListSheet();
+  toast('Шаблон сохранён: ' + r.obj.title + (r.warnings && r.warnings.length ? '. Проверьте: ' + r.warnings.join('; ') : ''), !!(r.warnings && r.warnings.length)); closeSheet(); openTplListSheet();
 }
 
 // ── «Реквизиты адвоката» (Настройки) ──
@@ -21646,7 +21796,7 @@ const HELP_SECTIONS = [
 <p><b>Рассмотрения дела</b> (группа в карточке дела): каждое рассмотрение — своя строка с судом, номером, ссылкой, заседаниями и сроками; рассмотрений в одной инстанции может быть сколько угодно. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение (кассация — в апелляцию, апелляция или кассация — в первую инстанцию), нажмите «Новое рассмотрение после отмены» (если суд прислал такое событие, на «Сегодня» появится строка «Дело направлено на новое рассмотрение» с этой же кнопкой): выберите инстанцию, впишите, какой акт отменён и каким актом, новый номер и ссылку (их можно не знать — строка «ожидаются реквизиты» появится сразу, сведения добавляются позже в форме дела). Прежнее рассмотрение этой инстанции перейдёт в историю; рассмотрения выше — по отметкам в предпросмотре (снятая отметка оставляет рассмотрение текущим), параллельные не меняются. В историю они уходят как «Апелляция №1», «Кассация №1» и т. д. — со ссылками, номерами, датами, заседаниями и сроками от их актов; ничего не удаляется, ручные сроки не меняются, а поля инстанции в форме дела освобождаются для нового рассмотрения (новое — «Апелляция №2»). Сроки от актов прежних рассмотрений больше не пересчитываются, заседания прежних рассмотрений не поднимают стадию дела; старые ссылки остаются в «Сайтах судов». Ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее» в строке прежнего — пока в инстанции не внесены сведения нового. «Добавить рассмотрение» — параллельное рассмотрение (например, частная жалоба): его ссылка уходит коллектору вместе с остальными, заседание к нему относится выбором «Рассмотрение» в форме заседания (или кнопкой «Заседание этого рассмотрения»). События сайтов судов (акты, жалобы, заседания) программа относит к рассмотрению по отметке ссылки, с которой событие собрано (каждая ссылка — и текущая, и параллельная — уходит коллектору с номером своего рассмотрения), затем по номеру дела в суде и дате: акт прежнего рассмотрения, пришедший с опозданием, записывается в прежнее, а не в поля нового; карточка суда прежнего рассмотрения дополняет только его сведения. Дата — по дате, с которой дело направлено на новое рассмотрение (поле в листе «Новое рассмотрение после отмены»), а не по дню, когда вы создали строку в программе. Если номер совпадает у нескольких рассмотрений, в инстанции есть параллельное рассмотрение или дата не решает — строка «Требует привязки» на «Сегодня», ничего не меняется, пока вы не выберете рассмотрение. В карточке события строка «Как определено» называет, почему событие отнесено к рассмотрению (по ссылке, с которой оно собрано, по номеру дела в суде, по дате или вашим выбором); кнопка «Отнести к другому рассмотрению» сначала показывает, что изменится (дата акта, заседание, жалоба), и записывает дело (поля и сроки), заседание, событие и журнал дела одной записью базы: при сбое не меняется ничего. Если до нажатия «Перенести» дело, событие или заседание изменились, программа покажет новый план и попросит подтвердить снова. Дата акта убирается из прежнего рассмотрения, только если доказано, что её записало именно это событие и вы её с тех пор не правили; иначе она остаётся, и это сказано; дата, которую подтверждает другое событие того же рассмотрения (та же дата на сайте), тоже остаётся. Доказательство одинаково для текущего, параллельного и прежнего рассмотрения: при «Новом рассмотрении» с датой в историю уходят отметка о том, какое событие её записало, и факт вашей правки; «Вернуть как текущее» возвращает их. Жалоба разбирается для нового рассмотрения в той же записи, даже если была «Разобрано»; отмеченная «Не применять» последствий не получает. Сроки жалобы, поставленные для прежнего или параллельного рассмотрения, остаются с пометкой «Жалоба отнесена к другому рассмотрению» — в паспорте срока «Оставить срок» или «Снять срок». Если событие отнесено к одному рассмотрению, а его заседание вы отнесли к другому, в листе переноса есть оба варианта: «как у заседания» оставляет ваш выбор в заседании и исправляет только событие, «как в событии» переносит заседание. При «Новом рассмотрении» сроки жалоб уходящей инстанции закрепляются за прежним рассмотрением вместе со сроками от актов; срок жалобы, событие которой в деле не найдено, получает пометку «ждёт решения». «Кто обжалует» считается по жалобам одного рассмотрения: жалоба оппонента в прежней апелляции не делает «Обе стороны» в новой. Если разбор неприменённого события после переноса не завершился, программа так и скажет и повторит его при следующем получении данных. Карточка суда не переносится — её сведения сверяйте в форме дела. В «Справочники → Проверка данных» события, собранные со ссылки одного рассмотрения, а применённые к другому, исправляются кнопкой «Исправить однозначные связи»; она не трогает событие, рассмотрение которого выбрали вы, заседание, которое вы отнесли в форме заседания, расхождение «событие — заседание» и дату акта с недоказанным происхождением — такие записи показываются с причиной для вашего решения. Там же — карточки суда другого рассмотрения, приложенные к текущему (до 18.10.2026).Жалоба параллельного рассмотрения, оставленная без движения, даёт свой срок устранения недостатков; если сторона жалобы не установлена — строка «Событие получено, срок не создан». Если два устройства независимо создали новое рассмотрение одной инстанции, после обмена сохраняются оба, а на «Сегодня» — выбор «Это одно — объединить» или «Разные — оставить оба». Форма «Новое рассмотрение», открытая до того, как рассмотрения изменились (другая вкладка или устройство), ничего не создаст — откройте её заново. Новое заседание сразу получает отметку своего рассмотрения (в форме — поле «Рассмотрение»); выбор, сделанный вами, «Вернуть как текущее» не снимает. Прежние рассмотрения на сайтах судов не опрашиваются. Создание нового рассмотрения и «Вернуть как текущее» записывают дело, сроки и заседания одной операцией: при сбое не записывается ничего, повторное нажатие не создаёт второе рассмотрение. Ограничения: сроки и жалобы вручную к рассмотрению не относятся (только автоматически), судебные акты отдельным списком не ведутся.</p>
 <p><b>Типовые задачи</b> (кнопка рядом с «Задача») создают одним нажатием набор задач для вида дела — например, для арбитражного: претензия, иск, отзыв, судебные расходы. Сроки считаются от даты принятия дела (её можно сменить в листе) и примерные — поправьте их в задаче. Задачи, которые уже есть в деле, не отмечены — дублей не будет. Наборы правятся в «Настройки» → «Типовые задачи» и общие с прежней программой.</p>
 <p><b>Сводка</b> — дело одним листом для печати или PDF: «Досье» (служебное: сведения, движение дела, заседания, сроки, задачи, ордера, участники, расходы, счета, заметки) и «Отчёт доверителю» (без внутренних заметок, гонорара, задач, ордеров и контактов участников). «Скачать для Word» — тот же документ файлом, чтобы поправить текст перед отправкой.</p>
-<p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
+<p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. В своих шаблонах есть фильтры ({{СуммаИска:прописью}}, {{ДатаРешения:словами}}, {{Дата:плюс_дней 10}}, {{Доверитель:кратко}}), условия ({{#если Оппонент}} … {{#иначе}} … {{/если}}) и повторы по спискам дела ({{#каждый расходы}} {{№}}. {{категория}} — {{сумма}} {{/каждый}}; списки: расходы, платежи, заседания, работы); «Проверить шаблон» в форме находит незакрытые блоки и незнакомые поля, прежние версии своего шаблона хранятся в его форме («Вернуть»). Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
 <p><b>Стадия</b> меняется нажатием на плашку в карточке. Она поднимается и сама, когда в деле появляются данные более высокой инстанции: номер или ссылка апелляции, кассации, Верховного Суда, заседание в апелляционном или кассационном суде. Если стадию вернули вручную, по тем же данным она не поднимается. Дела, где данные выше стадии, перечислены на «Сегодня» с кнопкой «Поднять».</p>
 <p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Исполненный срок показывает, чем он закрыт: «выполнен» — вашей отметкой; «истёк до записи с сайта», «исполнен подачей жалобы», «закрыт: подана апелляция», «снят: сторона жалобы изменена», «снят: жалоба возвращена» — программой (паспорт срока называет причину; если действие ещё нужно — «Вернуть в работу»). «Справочники» → «Проверка данных» перечисляет и то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта.Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё. Если дату акта из дела убрали, у зависимых сроков появляется отметка «основание удалено»; если по новым данным дела срок больше не возникает (например, изготовлено мотивированное решение — заявление о его составлении уже не нужно), отметка «правило не применяется» — такой срок программа не исполняет и не удаляет сама: снимите его с контроля или удалите. Обе проверки идут при каждом сохранении дела; сроки, оставшиеся в таком состоянии от прежних версий, «Сегодня» перечисляет в блоке «Правила сроков обновлены» — «Пересчитать» ставит им отметку. Дата акта записана поздно (с сайта суда или вручную), и срок уже прошёл — он создаётся исполненным с пометкой «срок истёк … до записи даты акта» и просроченным не показывается; если действие ещё нужно, снимите отметку в карточке срока. Подана наша жалоба (поле «Жалоба подана» с «Кто обжалует» — наша или обе стороны, или событие с сайта суда) — срок на её подачу исполнен; подана апелляционная жалоба любой стороны — сроки «если не обжалуют» (исполнительный лист, судебные расходы от решения) закрываются, как при появлении апелляционного акта.</p>
 <p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение.</p>
