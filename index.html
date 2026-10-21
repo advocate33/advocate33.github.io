@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="21.10.2026 15:15 · bd21df5+">
-<meta name="build-no" content="184">
+<meta name="build" content="21.10.2026 16:21 · 1ea4c21+">
+<meta name="build-no" content="185">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -14030,6 +14030,14 @@ function dlManual(d) { if (d && d.sideDone) delete d.sideDone; if (d && d.closed
 const DL_CLOSED = { side: 'снят: сторона жалобы изменена', late: 'истёк до записи с сайта', filed: 'исполнен подачей жалобы', closed: 'закрыт: подана апелляция', back: 'снят: жалоба возвращена', sideUser: 'снят после смены стороны жалобы', rebindUser: 'снят после переноса жалобы' };
 function dlDoneWhy(dl) { if (!dl || !dl.done) return ''; if (dl.sideDone) return 'side'; if (dl.closedWhy && DL_CLOSED[dl.closedWhy]) return dl.closedWhy; return /до записи даты акта|до получения сведений о жалобе/.test(dl.note || '') ? 'late' : ''; }
 function dlDoneLabel(dl) { const w = dlDoneWhy(dl); return w ? DL_CLOSED[w] : 'выполнен'; }
+// «фитиль» (разбор ЮрТопоса 03.10, п. 3; 21.10.2026 — везде, где срок показан строкой): доля прошедшего времени от даты основания
+// (паспорт срока) или создания до срока, 3–100; у выполненного или прошедшего срока — нет; без даты начала — нет
+function dlFuse(dl, today) {
+  if (!dl || dl.done || !dl.date) return null; const k = todayDayDiff(dl.date, today); if (k === null || k < 0) return null;
+  const start = dl.baseDate || (typeof dl.createdAt === 'number' ? localISO(new Date(dl.createdAt)) : String(dl.createdAt || '').slice(0, 10)), total = start ? todayDayDiff(dl.date, start) : null;
+  return total && total > 0 ? Math.max(3, Math.min(100, Math.round((1 - k / total) * 100))) : null;
+}
+function dlFuseHtml(fuse, hot) { return fuse == null ? '' : `<span class="fuse${hot || fuse >= 80 ? ' hot' : ''}" role="img" aria-label="Прошло ${fuse}% времени до срока"><i style="width:${fuse}%"></i></span>`; }
 function dlConfirmModel(dl, now) { return dlManual({ ...dl, confirmedAt: now, confirmedDate: dl.date }); }
 // правка срока (как saveDeadline v312): технические поля не теряются; подтверждение сохраняется, только если дата не менялась
 function dlEditModel(prev, v, now) {
@@ -14786,7 +14794,7 @@ function todayModel(d, now, hidden) {
   const imp = [];
   cases.filter(activeCase).forEach(c => (c.deadlines || []).forEach(dl => {
     if (!dl || dl.done || !dl.date) return; const k = todayDayDiff(dl.date, today); if (k === null) return;
-    const key = 'd:' + c.id + ':' + (dl.id || dl.title), base = { key, kind: 'deadline', date: dl.date, title: dl.title || 'Срок', sub: caseTitle(c), caseId: c.id, dlId: dl.id || '', dlTitle: dl.title || '' };
+    const key = 'd:' + c.id + ':' + (dl.id || dl.title), base = { key, kind: 'deadline', date: dl.date, title: dl.title || 'Срок', sub: caseTitle(c), caseId: c.id, dlId: dl.id || '', dlTitle: dl.title || '', fuse: typeof dlFuse === 'function' ? dlFuse(dl, today) : null };
     const unconfirmed = !dl.confirmedAt && !!dl.autoKey;
     if (k < 0) imp.push({ ...base, pr: 0, when: 'Просрочен ' + ago(k), overdue: true, done: true, badges: unconfirmed ? [['Срок не подтверждён', 'warn']] : [] });
     else if (k <= 2 && unconfirmed) imp.push({ ...base, pr: 1, when: todayDayLabel(dl.date, today), badges: [['Срок требует проверки', 'warn']] });
@@ -14982,7 +14990,7 @@ SCREENS.today = async function () {
   const swp = (fn, args, label) => typeof swipeAttrs === 'function' ? swipeAttrs(fn, args, label) : '';
   // 13.10.2026 (этап 5): у строки может быть своё действие (x.act: { fn, label, icon }) и своё «×» (x.dismiss — «Задача не нужна» вместо скрытия на 7 дней)
   const impRows = m.important.slice(0, TODAY_IMPORTANT_MAX).map((x, i) => `<div class="imp-row${i >= TODAY_PHONE_MAX ? ' imp-extra' : ''}"${x.done ? swp('todayDone', [x.key], 'Выполнено') : x.after ? swp('openAfterHearing', [x.hearingId], 'Итог заседания') : x.ack ? swp('todayClashAck', [x.key], 'Не ошибка') : ''}>
-      <button type="button" class="imp-main" onclick="${impOpen(x)}"><span class="task-title">${esc(x.title)}</span><span class="task-sub"><span class="task-when${x.overdue ? ' overdue' : ''}">${esc(x.when)}</span> · ${esc(x.sub)}</span>${x.badges.length ? `<span class="task-badges">${x.badges.map(b => badge(b[0], b[1])).join('')}</span>` : ''}</button>
+      <button type="button" class="imp-main" onclick="${impOpen(x)}"><span class="task-title">${esc(x.title)}</span><span class="task-sub"><span class="task-when${x.overdue ? ' overdue' : ''}">${esc(x.when)}</span> · ${esc(x.sub)}</span>${x.badges.length ? `<span class="task-badges">${x.badges.map(b => badge(b[0], b[1])).join('')}</span>` : ''}${x.fuse != null && typeof dlFuseHtml === 'function' ? dlFuseHtml(x.fuse, false) : ''}</button>
       ${x.done ? `<div class="imp-done"><button type="button" class="button small-btn" aria-label="Выполнено: ${esc(x.title)}" onclick="todayDone('${jsq(x.key)}')">${icon('check', 'icon-sm')}Выполнено</button>${x.kind === 'task' && x.overdue && x.taskId && typeof hintTaskShift === 'function' ? `<button type="button" class="button small-btn" aria-label="На завтра: ${esc(x.title)}" onclick="hintTaskShift('${jsq(x.taskId)}', 1)">${icon('arrow-right', 'icon-sm')}Завтра</button>` : ''}</div>` : x.after ? `<div class="imp-done"><button type="button" class="button small-btn" onclick="openAfterHearing('${jsq(x.hearingId)}')">${icon('gavel', 'icon-sm')}После заседания</button></div>` : x.ack ? `<div class="imp-done"><button type="button" class="button small-btn" aria-label="Не ошибка: ${esc(x.title)}" onclick="todayClashAck('${jsq(x.key)}')">${icon('check', 'icon-sm')}Не ошибка</button></div>` : x.act ? `<div class="imp-done"><button type="button" class="button small-btn" aria-label="${esc(x.act.label)}: ${esc(x.title)}" onclick="${x.act.fn}">${icon(x.act.icon || 'check', 'icon-sm')}${esc(x.act.label)}</button></div>` : ''}
       <div class="imp-x">${iconBtn(x.dismissLabel || 'Скрыть на 7 дней', x.dismiss || `todayHide('${jsq(x.key)}')`, 'x')}</div></div>`).join('');
   const more = m.important.length > TODAY_IMPORTANT_MAX ? `<p class="panel-foot">Ещё ${m.important.length - TODAY_IMPORTANT_MAX} — в разделе «Задачи и сроки»</p>` : '';
@@ -15434,7 +15442,7 @@ function caseFeedModel(c, d, journal, now) {
       extra: h.status === 'Проведено' && h.result ? String(h.result).slice(0, 160) : noRes ? 'нажмите, чтобы записать итог' : (h.prep && !h.prepDone ? 'подготовить: ' + h.prep : ''), open: noRes ? `openAfterHearing('${jsq(h.id)}')` : `openHearingForm('${jsq(h.id)}')` }); });
   (c.deadlines || []).forEach((dl, i) => { if (!dl || !dl.date) return; const k = todayDayDiff(dl.date, today); if (k === null) return;
     // «фитиль»: доля прошедшего времени от даты основания (паспорт срока) или создания до срока
-    let fuse = null; if (!dl.done && k >= 0) { const start = dl.baseDate || feedISO(dl.createdAt || ''), total = start ? todayDayDiff(dl.date, start) : null; if (total && total > 0) fuse = Math.max(3, Math.min(100, Math.round((1 - k / total) * 100))); }
+    const fuse = typeof dlFuse === 'function' ? dlFuse(dl, today) : null;
     push({ key: 'd:' + (dl.id || i), date: dl.date, time: '', group: 'court', icon: 'clock-3', title: 'Срок · ' + (dl.title || 'срок'),
       sub: dl.done ? 'выполнен' : k < 0 ? 'просрочен на ' + days(-k) : k === 0 ? 'сегодня' : 'осталось ' + days(k), state: dl.done ? 'done' : (k <= 0 ? 'bad' : k <= 3 ? 'warn' : ''), fuse,
       open: `openDeadlineSheet('${jsq(c.id)}', '${jsq(dl.id || ('i:' + i))}')` }); });
@@ -15819,8 +15827,12 @@ function courtSitesModel(c) {
   const num = String(c.courtNo || c.courtNoApp || c.courtNoCass || '').trim();
   const arb = c.kind === 'Арбитраж' || /^[АA]\d{1,3}\s*[-–—]/.test(num) || /арбитражн/i.test(String(c.court || ''));
   const quick = (arb ? ['kad', 'myarb'] : ['bsr', 'sudrf', 'ej']).map(k => ({ key: k, title: COURT_SITES[k][0], url: COURT_SITES[k][1], desc: COURT_SITES[k][2], copy: num }));
+  // 21.10.2026 (разбор ЮрТопоса, п. 10 — их court_case_link): у арбитражного дела с номером «А…» карточка в КАД открывается по номеру и без
+  // ссылки на дело; если КАД не найдёт карточку по адресу, номер уже скопирован — вставить в поиск. Ссылка первой инстанции, если есть, главнее
+  const arbNo = String(c.courtNo || '').trim();
+  const kadCard = arb && /^[АA]\d{1,3}[аa]?-\d+/.test(arbNo) && !inst.some(x => x.title === 'Первая инстанция') ? { url: 'https://kad.arbitr.ru/Card?number=' + encodeURIComponent(arbNo), no: arbNo } : null;
   quick.push({ key: 'fssp', title: COURT_SITES.fssp[0], url: COURT_SITES.fssp[1], desc: COURT_SITES.fssp[2], copy: String(c.fsspNo || '').trim() });
-  return { inst, quick, arb, num, fsspNo: String(c.fsspNo || '').trim() };
+  return { inst, quick, arb, num, kadCard, fsspNo: String(c.fsspNo || '').trim() };
 }
 // переход по быстрой ссылке: номер — в буфер обмена (вставить в поиск сайта), сайт — в новой вкладке (в приложении — в браузере)
 async function courtSiteGo(url, copy) {
@@ -15833,10 +15845,11 @@ async function openCourtSites(caseId) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
   const m = courtSitesModel(c);
   const go = (x, cls) => `<button type="button" class="list-btn site-row${cls || ''}" data-site="${esc(x.key || '')}" onclick="courtSiteGo('${jsq(x.url)}', '${jsq(x.copy || '')}')"><span>${esc(x.title)}</span><span class="muted">${esc(x.desc || '')}${x.copy ? ' · номер ' + esc(x.copy) + ' скопируется' : ''}</span></button>`;
+  const kad = m.kadCard ? `<div class="section-label">Карточка дела в КАД по номеру</div><div class="list-rows" id="cs-kadcard"><button type="button" class="list-btn site-row" data-site="kadcard" onclick="courtSiteGo('${jsq(m.kadCard.url)}', '${jsq(m.kadCard.no)}')"><span>Открыть в КАД дело ${esc(m.kadCard.no)}</span><span class="muted">по номеру, без ссылки на дело; номер скопируется — если КАД покажет поиск, вставьте его</span></button></div>` : '';
   const inst = m.inst.length ? `<div class="section-label">Дело на сайте суда</div><div class="list-rows" id="cs-inst">${m.inst.map(x => `<a class="list-btn site-row" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer"><span>${esc(x.title)}</span><span class="muted">${esc([x.court, x.no ? '№ ' + x.no : ''].filter(Boolean).join(' · ') || 'открыть')}</span></a>`).join('')}</div>`
     : `<div class="info-box" id="cs-noinst">Ссылок на дело на сайтах судов в деле нет. Вставьте ссылку на карточку дела с сайта суда в форму дела («Изменить» → вкладка инстанции → «Ссылка на дело») — тогда она откроется отсюда одним нажатием, а мониторинг будет следить за делом.</div>`;
   if (typeof sheetFreeze === 'function') sheetFreeze();
-  openSheet('Дело на сайтах судов', `${inst}
+  openSheet('Дело на сайтах судов', `${kad}${inst}
     <div class="section-label">${m.arb ? 'Арбитражное дело' : 'Суд общей юрисдикции'}</div>
     ${m.num ? '' : `<p class="small muted" id="cs-nonum">Номер дела в суде не указан — поиск на сайте придётся вести по сторонам или по номеру, когда он появится.</p>`}
     <div class="list-rows" id="cs-quick">${m.quick.filter(x => x.key !== 'fssp').map(x => go(x)).join('')}</div>
@@ -16255,7 +16268,7 @@ function tasksModel(cases, tasks, p, today) {
   (cases || []).filter(activeCase).forEach(c => (c.deadlines || []).forEach((dl, i) => {
     if (!dl || !dl.date) return;
     items.push({ kind: 'deadline', id: dl.id || 'i:' + i, caseId: c.id, date: dl.date, time: '', title: dl.title || 'Срок', sub: caseTitle(c), basis: [dl.baseEv, dl.norm ? String(dl.norm).split(' — ')[0] : ''].filter(Boolean).join(' · '),
-      unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, ruleGone: !!dl.ruleGone && !dl.done, srcCheck: !!dl.srcCheck && !dl.done, sideCheck: !!dl.sideCheck && !dl.done, rebindCheck: !!dl.rebindCheck && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '', doneLabel: dl.done && typeof dlDoneWhy === 'function' && dlDoneWhy(dl) ? dlDoneLabel(dl) : '' });
+      fuse: typeof dlFuse === 'function' ? dlFuse(dl, today) : null, unconfirmed: !!dl.autoKey && !dl.confirmedAt && !dl.done, baseGone: !!dl.baseGone && !dl.done, ruleGone: !!dl.ruleGone && !dl.done, srcCheck: !!dl.srcCheck && !dl.done, sideCheck: !!dl.sideCheck && !dl.done, rebindCheck: !!dl.rebindCheck && !dl.done, control: dl.kind === 'control', done: !!dl.done, doneAt: dl.doneAt || '', doneLabel: dl.done && typeof dlDoneWhy === 'function' && dlDoneWhy(dl) ? dlDoneLabel(dl) : '' });
   }));
   (tasks || []).forEach(t => { if (!t || t._deleted) return; const c = t.caseNum ? (cases || []).find(x => x.number === t.caseNum) : null;
     items.push({ kind: 'task', id: t.id, date: t.due || '', time: t.time || '', title: t.title || 'Задача', sub: c ? caseTitle(c) : (t.caseNum || ''), basis: '', priority: t.priority || '', done: !!t.done, doneAt: t.doneAt || '' }); });
@@ -16276,7 +16289,7 @@ SCREENS.tasks = async function () {
   // Б15 (11.10.2026): невыполненную строку можно смахнуть вправо — «Выполнено» (ui/swipe.js)
   const rows = m.rows.map(x => `<div class="agenda-row tasks-row"${!x.done && typeof swipeAttrs === 'function' ? swipeAttrs('tasksMarkDone', [x.kind, x.kind === 'deadline' ? x.caseId : x.id, x.id], 'Выполнено') : ''}><span class="agenda-time">${esc(x.date ? fmtDate(x.date).slice(0, 5) : '—')}${x.time ? `<br>${esc(x.time)}` : ''}</span>
     <button type="button" class="agenda-stripe ${x.kind}${x.done ? ' done' : ''} tasks-main" onclick="${open(x)}"><span class="agenda-title">${esc(x.title)}</span><span class="agenda-sub">${esc([x.kind === 'deadline' ? (x.control ? 'контрольный срок' : 'процессуальный срок') : 'задача' + (x.priority && x.priority !== 'Средний' ? ' · ' + x.priority.toLowerCase() + ' приоритет' : ''), x.sub, x.basis].filter(Boolean).join(' · '))}</span>
-      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.ruleGone ? badge('правило не применяется', 'bad') : x.srcCheck ? badge('на сайте суда иная дата', 'bad') : x.sideCheck ? badge('сторона жалобы изменена', 'bad') : x.rebindCheck ? badge('жалоба отнесена к другому рассмотрению', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span></button>
+      <span class="task-badges">${badge(x.when, x.k !== null && x.k < 0 && !x.done ? 'bad' : x.k === 0 && !x.done ? 'warn' : '')}${x.baseGone ? badge('основание удалено', 'bad') : x.ruleGone ? badge('правило не применяется', 'bad') : x.srcCheck ? badge('на сайте суда иная дата', 'bad') : x.sideCheck ? badge('сторона жалобы изменена', 'bad') : x.rebindCheck ? badge('жалоба отнесена к другому рассмотрению', 'bad') : x.unconfirmed ? badge('требует проверки', 'warn') : ''}</span>${x.fuse != null && typeof dlFuseHtml === 'function' ? dlFuseHtml(x.fuse, x.k !== null && x.k <= 3) : ''}</button>
     ${x.done ? '' : `<button type="button" class="icon-button tasks-done" aria-label="Выполнено" title="Выполнено" onclick="tasksMarkDone('${x.kind}', '${jsq(x.kind === 'deadline' ? x.caseId : x.id)}', '${jsq(x.id)}')">${icon('check')}</button>`}</div>`).join('');
   const notice = m.unconfirmed ? `<div class="info-box warning">Сроков, рассчитанных автоматически и ещё не подтверждённых: ${m.unconfirmed}. Откройте срок, проверьте исчисление по паспорту и нажмите «Подтвердить дату».</div>` : '';
   return pageHead('Задачи и сроки', `${m.tabCounts.deadlines} ${plural(m.tabCounts.deadlines, 'срок', 'срока', 'сроков')} · ${m.tabCounts.tasks} ${plural(m.tabCounts.tasks, 'задача', 'задачи', 'задач')}`, btn('Задача', 'openTaskForm()', 'primary', 'plus')) +
