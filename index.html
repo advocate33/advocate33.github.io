@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="21.10.2026 12:55 · b13db86+">
-<meta name="build-no" content="182">
+<meta name="build" content="21.10.2026 14:08 · 2b608b3+">
+<meta name="build-no" content="183">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -15452,6 +15452,8 @@ function caseFeedModel(c, d, journal, now) {
     // 15.10.2026 (этапы работ, screens/finance.js): выполненный этап — строкой в группе «Деньги» датой выполнения
     (typeof finStagesOf === 'function' ? finStagesOf(f) : []).filter(s => s.done).forEach(s => push({ key: 'stg:' + f.id + ':' + s.id, date: String(s.done).slice(0, 10), time: '', group: 'money', icon: 'check', title: 'Этап выполнен · ' + (s.name || 'этап') + ' · ' + fmtMoney(Number(s.sum || 0)), sub: f.service || '', state: 'done', open: `openFinanceSheet('${jsq(f.id)}')` }));
   });
+  // 21.10.2026: учёт времени — строкой в группе «Деньги» (формы правки в новой версии нет: запись из быстрой записи, удаление — через корзину)
+  (d.time || []).filter(mine).forEach(t => push({ key: 'tm:' + t.id, date: t.date || feedISO(t.createdAt || ''), time: '', group: 'money', icon: 'clock-3', title: noteHM(t.minutes) + ' · учёт времени', sub: t.desc || t.note || '', open: '' }));
   (d.expenses || []).filter(mine).forEach(e => push({ key: 'e:' + e.id, date: e.date || feedISO(e.createdAt || ''), time: '', group: 'money', icon: 'wallet', title: '− ' + fmtMoney(Number(e.amount || 0)) + ' · ' + (e.category || 'расход'), sub: e.note || e.descr || '', state: 'minus', open: `openExpenseForm('${jsq(e.id)}')` }));
   // жалоба пользователя 14.10.2026 (урок 153): операции депозита (ui/depord.js, Б2) в ленту не попадали — фильтр «Деньги» писал «записей нет»
   // при двух авансах за день. 15.10.2026 (решение пользователя, п. 5): это деньги доверителя на расходы — так и называются
@@ -15479,7 +15481,7 @@ function caseFeedSet(f) { try { sessionStorage.setItem(FEED_KEY, f); } catch (e)
 function caseFeedMore() { CASE_FEED.more = true; caseFeedRender(); }
 function caseFeedRender() { const el = document.getElementById('case-feed'); if (!el || !CASE_FEED.model) return; el.innerHTML = caseFeedHtml(CASE_FEED.model, caseFeedFilter(), CASE_FEED.more); const box = document.querySelector('#sheetContent .modal-content'); if (box && UI.cur && UI.cur.caseId === CASE_FEED.caseId) UI.cur.body = box.innerHTML; }
 async function caseFeedLoad(c) {
-  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'mail', 'finance', 'expenses', 'monitorEvents', 'deposits']) d[st] = await getAll(st);
+  const d = {}; for (const st of ['hearings', 'tasks', 'meetings', 'mail', 'finance', 'expenses', 'monitorEvents', 'deposits', 'time']) d[st] = await getAll(st);
   let journal = []; try { journal = await getCaseLinks('caseEvents', c); } catch (e) { logErr('feed:journal', e); }
   // 21.10.2026 (ui/hints.js): журнал нужен и подсказкам карточки — хранится рядом с моделью, второе чтение не делается
   CASE_FEED = { caseId: c.id, model: caseFeedModel(c, d, journal, new Date()), more: false, journal };
@@ -15488,23 +15490,44 @@ async function caseFeedLoad(c) {
 async function caseFeedReload(caseId) { const c = await getOne('cases', caseId); if (!c) return; await caseFeedLoad(c); caseFeedRender(); }
 
 // ── быстрая запись ──
+// 21.10.2026 (разбор ЮрТопоса по исходникам, п. 4 — их desk_parse): кроме даты и времени разбираются длительность («1,5 ч», «30 мин»,
+// «полчаса» → учёт времени), место («зал 12», «каб. 305» → зал заседания), деньги («15 000 ₽», «15 тыс», «15к», «−3 000» → платёж
+// или расход с категорией по словам) и явный вид в начале строки («задача: …», «расход: …», «время: …»). Правила разведения (урок 72):
+// время дня — только через двоеточие или «в 10 ч»; число без знака, валюты и денежного слова — не сумма («12 экземпляров»); «ч.» с
+// точкой — не час (это «часть статьи»). noteParse — чистая функция: текст и «сейчас» параметрами.
 const NOTE_MONTHS = { января: 1, февраля: 2, марта: 3, апреля: 4, мая: 5, июня: 6, июля: 7, августа: 8, сентября: 9, октября: 10, ноября: 11, декабря: 12 };
 const NOTE_WD = [['воскресень', 0], ['понедельник', 1], ['вторник', 2], ['сред', 3], ['четверг', 4], ['пятниц', 5], ['суббот', 6]];
-const NOTE_END = '(?=$|[\\s,.;:!?])', NOTE_PRE = '(?:^|\\s)(?:до|к|ко|в|во|на)?\\s*';
-// текст → { type: 'task' | 'note', title, due, time }; дата найдена — задача (фраза с датой из названия убирается), иначе заметка
+const NOTE_END = '(?=$|[\\s,.;:!?])', NOTE_PRE = '(?:^|\\s)(?:до|к|ко|в|во|на)?\\s*', NOTE_END_NODOT = '(?=$|[\\s,;:!?])';
+const NOTE_PREFIX = { 'задача': 'task', 'задачу': 'task', 'заседание': 'hearing', 'срок': 'deadline', 'встреча': 'meeting', 'заметка': 'note', 'запись': 'note', 'расход': 'expense', 'платёж': 'payment', 'платеж': 'payment', 'оплата': 'payment', 'время': 'time' };
+const NOTE_EXP_CATS = [[/пошлин/i, 'Госпошлина'], [/эксперт/i, 'Экспертиза'], [/почт|курьер|конверт|марк[аи]/i, 'Почтовые расходы'], [/такси|проезд|бензин|транспорт|поезд|билет|парковк/i, 'Транспортные расходы'], [/нотариус|нотариальн|копи|ксерокс|печат|распечат|заверен/i, 'Копирование и нотариус'], [/представител/i, 'Услуги представителя']];
+const NOTE_MONEY_RE = /оплат|аванс|плат[её]ж|гонорар|расход|пошлин|потрат|заплат|внес|внёс|перев[её][лд]|поступ|получен[оа]|выплат|задаток|предоплат|стоим|цена|сумм/i;
+const NOTE_EXPENSE_RE = /расход|пошлин|эксперт|такси|проезд|бензин|транспорт|поезд|билет|парковк|почт|курьер|нотариус|копи|печат|ксерокс|потрат|заплатил|оплатил[аи]? (пошлин|эксперт|нотар|почт|курьер|такси|проезд)/i;
+const NOTE_INCOME_RE = /аванс|гонорар|поступ|получен|внес|внёс|оплата от|оплатил[аи]? (доверител|клиент)|доверитель (оплатил|внёс|внес|перев)/i;
+const NOTE_EVENT_RE = /заседани|слушани|судебн|беседа|беседу|рассмотрен|предварительн|допрос|очная ставка|оглашени/i;
+const NOTE_MEETING_RE = /встреч|консультац|переговор|при[её]м(?![а-яё])|совещан/i;
+const noteCap = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+// «1 ч 30 мин», «45 мин», «2 ч»
+function noteHM(min) { min = Math.max(0, Math.round(Number(min) || 0)); const h = Math.floor(min / 60), m = min % 60; return h ? h + ' ч' + (m ? ' ' + m + ' мин' : '') : m + ' мин'; }
+// текст → { type, title, due, time, minutes, room, place, amount, category, forced }; type: note | task | time | expense | payment,
+// forced — вид из префикса («заседание:», «срок:», «встреча:» — для «Быстрых записей» и карточки)
 function noteParse(text, now) {
-  const src = String(text || '').trim(); if (!src) return { type: 'note', title: '', due: '', time: '' };
+  const src = String(text || '').trim(), empty = { type: 'note', title: '', due: '', time: '', minutes: 0, room: '', place: '', amount: 0, category: '', forced: '' };
+  if (!src) return empty;
   const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const add = n => { const d = new Date(base); d.setDate(d.getDate() + n); return localISO(d); };
+  const addM = n => { const d = new Date(base); d.setMonth(d.getMonth() + n); if (d.getDate() !== base.getDate()) d.setDate(0); return localISO(d); };
   const ymd = (y, m, dd) => { const d = new Date(y, m - 1, dd); return d.getFullYear() === y && d.getMonth() === m - 1 && d.getDate() === dd ? localISO(d) : ''; };
-  let s = ' ' + src + ' ', due = '', time = '', m;
+  let s = ' ' + src + ' ', due = '', time = '', m, forced = '', minutes = 0, room = '', place = '', amount = 0, sign = '', money = false;
   const cut = whole => { s = s.replace(whole, ' '); };
-  // время — только через двоеточие («в 10:30»): «к 12.10» — это дата, а не 12 часов 10 минут
-  if ((m = new RegExp('(?:^|\\s)(?:в|к)\\s*(\\d{1,2}):(\\d{2})' + NOTE_END, 'i').exec(s)) && +m[1] < 24 && +m[2] < 60) { time = m[1].padStart(2, '0') + ':' + m[2]; cut(m[0]); }
+  // вид записи словом в начале: «задача: …», «расход: …»
+  if ((m = /^\s*([а-яё]+)\s*[:\-–—]\s*/i.exec(s)) && NOTE_PREFIX[m[1].toLowerCase()]) { forced = NOTE_PREFIX[m[1].toLowerCase()]; cut(m[0]); s = ' ' + s; }
+  // время — только через двоеточие («в 10:30», «10:30») или «в 10 ч»: «к 12.10» — это дата
+  if ((m = new RegExp('(?:^|\\s)(?:в|к)?\\s*(\\d{1,2}):(\\d{2})' + NOTE_END, 'i').exec(s)) && +m[1] < 24 && +m[2] < 60) { time = m[1].padStart(2, '0') + ':' + m[2]; cut(m[0]); }
+  else if ((m = new RegExp('(?:^|\\s)в\\s+(\\d{1,2})\\s*ч(?:ас(?:а|ов)?)?' + NOTE_END_NODOT, 'i').exec(s)) && +m[1] >= 0 && +m[1] < 24) { time = m[1].padStart(2, '0') + ':00'; cut(m[0]); }
   if ((m = new RegExp(NOTE_PRE + 'послезавтра' + NOTE_END, 'i').exec(s))) { due = add(2); cut(m[0]); }
   else if ((m = new RegExp(NOTE_PRE + 'завтра' + NOTE_END, 'i').exec(s))) { due = add(1); cut(m[0]); }
   else if ((m = new RegExp(NOTE_PRE + 'сегодня' + NOTE_END, 'i').exec(s))) { due = add(0); cut(m[0]); }
-  else if ((m = new RegExp('(?:^|\\s)через\\s+(\\d{1,3})\\s+(день|дня|дней|неделю|недели|недель)' + NOTE_END, 'i').exec(s))) { due = add(+m[1] * (/^нед/i.test(m[2]) ? 7 : 1)); cut(m[0]); }
+  else if ((m = new RegExp('(?:^|\\s)через\\s+(\\d{1,3})\\s+(день|дня|дней|неделю|недели|недель|месяц|месяца|месяцев|мес\\.?)' + NOTE_END, 'i').exec(s))) { due = /^мес/i.test(m[2]) ? addM(+m[1]) : add(+m[1] * (/^нед/i.test(m[2]) ? 7 : 1)); cut(m[0]); }
   else if ((m = new RegExp(NOTE_PRE + '(понедельник[аи]?|вторник[аи]?|сред[ауы]|четверг[аи]?|пятниц[ауы]|суббот[ауы]|воскресень[еяю])' + NOTE_END, 'i').exec(s))) {
     const w = NOTE_WD.find(([p]) => m[1].toLowerCase().startsWith(p)); let delta = (w[1] - base.getDay() + 7) % 7; if (delta === 0) delta = 7; due = add(delta); cut(m[0]); }
   else if ((m = new RegExp(NOTE_PRE + '(\\d{1,2})\\.(\\d{1,2})(?:\\.(\\d{2}|\\d{4}))?' + NOTE_END).exec(s))) {
@@ -15515,35 +15538,86 @@ function noteParse(text, now) {
     let y = m[3] ? +m[3] : base.getFullYear(), v = ymd(y, NOTE_MONTHS[m[2].toLowerCase()], +m[1]);
     if (v && !m[3] && v < localISO(base)) v = ymd(y + 1, NOTE_MONTHS[m[2].toLowerCase()], +m[1]);
     if (v) { due = v; cut(m[0]); } }
-  if (!due) return { type: 'note', title: src, due: '', time: '' };
-  const t = s.replace(/\s{2,}/g, ' ').replace(/^[\s,.;:—–-]+|[\s,.;:—–-]+$/g, '');
-  return { type: 'task', title: t ? t.charAt(0).toUpperCase() + t.slice(1) : src, due, time };
+  // длительность: «1,5 ч», «2 часа», «30 мин», «полчаса», «час» (без числа); «ч.» с точкой — часть статьи, не час
+  if ((m = new RegExp('(?:^|\\s)(\\d+(?:[.,]\\d+)?)\\s*(ч|час|часа|часов)' + NOTE_END_NODOT, 'i').exec(s))) { minutes += Math.round(parseFloat(m[1].replace(',', '.')) * 60); cut(m[0]); }
+  if ((m = new RegExp('(?:^|\\s)(\\d+)\\s*(мин|минут[аыу]?)' + NOTE_END, 'i').exec(s))) { minutes += +m[2 - 1]; cut(m[0]); }
+  if ((m = new RegExp('(?:^|\\s)полчаса' + NOTE_END, 'i').exec(s))) { minutes += 30; cut(m[0]); }
+  else if (!minutes && (m = new RegExp('(?:^|\\s)час' + NOTE_END, 'i').exec(s))) { minutes = 60; cut(m[0]); }
+  // место: «зал 12» → зал заседания; «каб. 305», «кабинет 7», «ауд. 3» → место
+  if ((m = new RegExp('(?:^|\\s)(зал|каб\\.?|кабинет|ауд\\.?|аудитория)\\s*№?\\s*(\\d+[а-яё]?)' + NOTE_END, 'i').exec(s))) { const w = m[1].toLowerCase(); if (w === 'зал') room = m[2]; else place = (w.startsWith('каб') ? 'каб. ' : w.startsWith('ауд') ? 'ауд. ' : w + ' ') + m[2]; cut(m[0]); }
+  // деньги: знак, число с пробелами между разрядами, «тыс» / «к» / «₽» / «руб»; без знака, валюты и денежных слов число остаётся в тексте
+  const moneyWord = NOTE_MONEY_RE.test(src);
+  const amtRe = new RegExp('(?:^|[\\s(])([+\\-−–])?\\s?(\\d{1,3}(?:[ \\u00A0]\\d{3})+|\\d+)(?:[.,](\\d{1,2}))?\\s*(тыс\\.?|т\\.\\s?р\\.?|к|₽|руб[а-яё]*\\.?|р\\.)?(?=$|[\\s,.;:!?)])', 'i');
+  if ((m = amtRe.exec(s)) && (m[1] || (m[4] || '') || moneyWord) && !/[\d№/-]$/.test(s.slice(0, m.index)) && !/^[-/]/.test(s.slice(m.index + m[0].length))) {
+    let val = parseFloat(m[2].replace(/[ \u00A0]/g, '')) + (m[3] ? parseFloat('0.' + m[3]) : 0); const suf = (m[4] || '').toLowerCase();
+    if (suf && (suf.startsWith('т') || suf === 'к')) val *= 1000;
+    if (val > 0) { amount = Math.round(val * 100) / 100; sign = m[1] || ''; money = true; cut(m[0]); }
+  }
+  const title = s.replace(/\s{2,}/g, ' ').replace(/^[\s,.;:—–-]+|[\s,.;:—–-]+$/g, '');
+  let type = forced;
+  if (!type) {
+    if (minutes > 0 && !time) type = 'time';
+    else if (money) type = (sign && sign !== '+') || (NOTE_EXPENSE_RE.test(src) && !NOTE_INCOME_RE.test(src)) ? 'expense' : 'payment';
+    else type = due ? 'task' : 'note';
+  }
+  let category = '';
+  if (type === 'expense') { category = 'Иное'; for (const [re, name] of NOTE_EXP_CATS) if (re.test(src)) { category = name; break; } }
+  // заметка — полный текст; остальное — текст без разобранных частей, с заглавной буквы
+  const t = type === 'note' && !forced ? src : noteCap(title) || src;
+  return { type: ['note', 'task', 'time', 'expense', 'payment'].includes(type) ? type : (due ? 'task' : 'note'), title: t, due, time, minutes, room, place, amount, category, forced };
 }
 let CN_TYPE = null; // тип, выбранный вручную под строкой записи (иначе — предложенный программой)
 function caseQuickHtml(c) {
   return `<div class="quick-note" id="cn-box"><textarea id="cn-text" rows="1" placeholder="Что произошло или что сделать?" aria-label="Быстрая запись по делу" oninput="caseQuickHint()"></textarea><button type="button" class="button primary" id="cn-save" onclick="caseQuickSave('${jsq(c.id)}')">${icon('check')}Записать</button></div><div class="quick-hint" id="cn-hint" hidden></div>`;
 }
+// вид записи в карточке: «заседание:» или дата со словами о заседании (или зал) — заседание (форма); «встреча:» и «срок:» здесь — задача
+// (встречи и сроки — из «Быстрых записей» или кнопками карточки); иначе — что разобрано
+function caseQuickType(p, text) { if (p.forced === 'hearing') return 'hearing'; if (['meeting', 'deadline'].includes(p.forced)) return 'task'; if (p.type === 'task' && (p.room || NOTE_EVENT_RE.test(String(text || '')))) return 'hearing'; return p.type; }
+// как запишется — словами; типы под строкой: заметка, задача, заседание (форма), расход (форма), учёт времени, платёж (форма оплаты)
+function caseQuickWhat(p, type) {
+  const when = p.due ? ' на ' + parseLocalDate(p.due).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' }) + (p.time ? ' в ' + p.time : '') : '';
+  if (type === 'task') return 'задача' + (when || ' без срока');
+  if (type === 'time') return 'учёт времени: ' + noteHM(p.minutes || 0) + (p.title ? ' — ' + p.title : '');
+  if (type === 'expense') return 'расход' + (p.amount ? ' ' + fmtMoney(p.amount) : '') + (p.category ? ' · ' + p.category : '') + ' (форма с заполненными полями)';
+  if (type === 'payment') return 'оплата по счёту' + (p.amount ? ' ' + fmtMoney(p.amount) : '') + ' (форма платежа)';
+  if (type === 'hearing') return 'заседание' + when + (p.room ? ', зал ' + p.room : '') + ' (форма)';
+  return 'заметка в ленту дела';
+}
 function caseQuickHint() {
   const el = document.getElementById('cn-hint'), t = (document.getElementById('cn-text') || {}).value || ''; if (!el) return;
   if (!t.trim()) { el.hidden = true; CN_TYPE = null; return; }
-  const p = noteParse(t, new Date()), type = CN_TYPE || p.type, cid = (CASE_FEED.caseId || '');
-  const what = type === 'task' ? 'задача' + (p.due ? ' на ' + parseLocalDate(p.due).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' }) + (p.time ? ' в ' + p.time : '') : ' без срока') : 'заметка в ленту дела';
+  const p = noteParse(t, new Date()), type = CN_TYPE || caseQuickType(p, t), cid = (CASE_FEED.caseId || '');
   const chip = (k, txt) => `<button type="button" class="chip" aria-pressed="${type === k}" onclick="caseQuickAs('${k}', '${jsq(cid)}')">${esc(txt)}</button>`;
-  el.hidden = false; el.innerHTML = `<span>Запишется как: <b>${esc(what)}</b></span><span class="chips">${chip('note', 'Заметка')}${chip('task', 'Задача')}${chip('hearing', 'Заседание…')}</span>`;
+  el.hidden = false; el.innerHTML = `<span>Запишется как: <b>${esc(caseQuickWhat(p, type))}</b></span><span class="chips">${chip('note', 'Заметка')}${chip('task', 'Задача')}${chip('hearing', 'Заседание…')}${chip('expense', 'Расход…')}${chip('time', 'Время')}${chip('payment', 'Оплата…')}</span>`;
 }
 async function caseQuickAs(type, caseId) {
-  if (type !== 'hearing') { CN_TYPE = type; caseQuickHint(); return; }
-  // заседание — через форму (суд, зал, судья): дата и время из строки подставляются
+  if (type !== 'hearing' && type !== 'expense' && type !== 'payment') { CN_TYPE = type; caseQuickHint(); return; }
   const c = await getOne('cases', caseId); const p = noteParse((document.getElementById('cn-text') || {}).value || '', new Date());
   if (typeof sheetFreeze === 'function') sheetFreeze();
-  await openHearingForm('', c ? c.number : '');
-  if (p.due) { const dI = document.getElementById('hf-date'); if (dI) dI.value = p.due; } if (p.time) { const tI = document.getElementById('hf-time'); if (tI) tI.value = p.time; }
+  if (type === 'hearing') {
+    // заседание — через форму (суд, зал, судья): дата, время и зал из строки подставляются
+    await openHearingForm('', c ? c.number : '');
+    const setv = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+    setv('hf-date', p.due); setv('hf-time', p.time); setv('hf-room', p.room); return;
+  }
+  if (type === 'expense') { await openExpenseForm('', c ? c.number : '', { amount: p.amount || '', category: p.category || '', note: p.title || '', date: p.due || todayISO() }); return; }
+  await caseQuickPay(c, p);
+}
+// оплата из строки: один счёт с остатком — форма платежа с суммой; счетов нет — новый счёт; несколько — карточка «Деньги» дела
+async function caseQuickPay(c, p) {
+  if (!c) return;
+  const bills = (await getAll('finance')).filter(f => f && !f._deleted && !f.pending && (f.caseId ? f.caseId === c.id : f.caseNum === c.number) && typeof finDebtOf === 'function' && finDebtOf(f) > 0);
+  if (bills.length === 1) { await openPayForm(bills[0].id); const el = document.getElementById('py-sum'); if (el && p.amount) el.value = p.amount; return; }
+  if (!bills.length) { toast('Счёта с остатком по этому делу нет — сначала счёт'); await openFinanceForm('', c.number || ''); return; }
+  toast('Счетов с остатком несколько — выберите счёт'); if (typeof caseMoneyOpen === 'function') caseMoneyOpen();
 }
 async function caseQuickSave(caseId) {
   const ta = document.getElementById('cn-text'), text = String((ta && ta.value) || '').trim();
   if (!text) { toast('Напишите, что произошло или что сделать'); if (ta) ta.focus(); return; }
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
-  const p = noteParse(text, new Date()), type = CN_TYPE || p.type;
+  const p = noteParse(text, new Date()), type = CN_TYPE || caseQuickType(p, text);
+  // формы (заседание, расход, оплата) открываются кнопкой «Записать» так же, как чипом
+  if (type === 'hearing' || type === 'expense' || type === 'payment') { await caseQuickAs(type, caseId); return; }
   try {
     if (type === 'task') {
       const r = formModelTask({ title: p.title || text, due: p.due, time: p.time, priority: 'Средний', caseNum: c.number || '', note: p.title && p.title !== text ? text : '' }, null);
@@ -15551,6 +15625,11 @@ async function caseQuickSave(caseId) {
       if (typeof demoAllow === 'function' && !(await demoAllow('tasks'))) return;
       r.obj.caseId = c.id; await put('tasks', r.obj);
       toast('Задача записана' + (p.due ? ' на ' + fmtDate(p.due) : ' без срока'));
+    } else if (type === 'time') {
+      // учёт времени — запись хранилища time, как в прежней программе (caseNum, minutes, date, desc, billed); minutes не меньше 1
+      if (!(p.minutes > 0)) { toast('Сколько времени ушло? Напишите, например, «1,5 ч консультация» или «30 мин звонок»', true); return; }
+      await put('time', { id: uid('В'), caseNum: c.number || '', caseId: c.id, minutes: Math.max(1, Math.round(p.minutes)), date: p.due || todayISO(), desc: (p.title || '').slice(0, 300), billed: false, createdAt: Date.now() });
+      toast('Записано ' + noteHM(p.minutes) + (p.title ? ' — ' + p.title : ''));
     } else {
       await put('caseEvents', { id: uid('СБ'), caseId: c.id, caseNum: c.number || '', ts: Date.now(), field: 'note', from: '', to: text.slice(0, 2000), source: 'note' });
       toast('Заметка записана в ленту дела');
@@ -17717,7 +17796,8 @@ function openCalcLinksSheet(k) {
 // заседание и встреча — форма с заполненными полями (полей больше, разбор может ошибиться). Неразобранные хранятся как в прежней программе
 // (v184): ключ crm_inbox — массив { id, text, at }, расходится между устройствами вместе с настройками. Даты — разбор noteParse карточки дела.
 const INBOX_KEY = 'crm_inbox';
-const INBOX_TYPES = { hearing: ['Заседание', 'gavel'], deadline: ['Срок в деле', 'clock-3'], task: ['Задача', 'list-checks'], meeting: ['Встреча', 'handshake'], note: ['Заметка в ленту дела', 'notebook-pen'] };
+// 21.10.2026 (разбор ЮрТопоса, п. 4): расход (форма с суммой и категорией) и учёт времени (сразу); вид словом в начале строки — «расход: …»
+const INBOX_TYPES = { hearing: ['Заседание', 'gavel'], deadline: ['Срок в деле', 'clock-3'], task: ['Задача', 'list-checks'], meeting: ['Встреча', 'handshake'], expense: ['Расход', 'wallet'], time: ['Учёт времени', 'clock-3'], note: ['Заметка в ленту дела', 'notebook-pen'] };
 let INBOX_PENDING = null, INBOX_UNDO = null;
 function inboxItems() { const a = lsJSON(INBOX_KEY, []); return Array.isArray(a) ? a.filter(x => x && x.id && x.text) : []; }
 function inboxSave(list) { localStorage.setItem(INBOX_KEY, JSON.stringify((list || []).slice(0, 200))); if (typeof bumpSettings === 'function') bumpSettings(); }
@@ -17744,23 +17824,28 @@ const INBOX_DEADLINE_RE = new RegExp('(?:^|\\s)до\\s+(?:\\d{1,2}\\.\\d{1,2}|\\
 function inboxParse(text, now, cases) {
   const src = String(text || '').trim(), p = noteParse(src, now || new Date());
   let type = 'note';
-  if (p.due) type = /заседани|слушани|судебн/i.test(src) ? 'hearing' : INBOX_DEADLINE_RE.test(src) ? 'deadline' : /встреч|консультац|переговор|при[её]м/i.test(src) ? 'meeting' : 'task';
+  if (p.forced && INBOX_TYPES[p.forced]) type = p.forced;
+  else if (p.type === 'time' || p.type === 'expense') type = p.type;
+  else if (p.type === 'payment') type = 'note';
+  else if (p.due) type = NOTE_EVENT_RE.test(src) ? 'hearing' : INBOX_DEADLINE_RE.test(src) ? 'deadline' : NOTE_MEETING_RE.test(src) ? 'meeting' : 'task';
+  else if (p.room && NOTE_EVENT_RE.test(src)) type = 'hearing';
   const m = inboxCaseMatch(src, cases);
-  return { type, text: src, title: p.due ? p.title : src, due: p.due || '', time: p.time || '', caseId: m.case ? m.case.id : '', caseNum: m.case ? m.case.number : '', caseLabel: m.case ? [m.case.number, m.case.client].filter(Boolean).join(' · ') : '', many: m.many, needsCase: type === 'deadline' || type === 'note' };
+  const plain = type === 'note' && !p.forced;
+  return { type, text: src, title: plain ? src : (p.title || src), due: p.due || '', time: p.time || '', minutes: p.minutes || 0, room: p.room || '', place: p.place || '', amount: p.amount || 0, category: p.category || '', caseId: m.case ? m.case.id : '', caseNum: m.case ? m.case.number : '', caseLabel: m.case ? [m.case.number, m.case.client].filter(Boolean).join(' · ') : '', many: m.many, needsCase: type === 'deadline' || type === 'note' || type === 'expense' || type === 'time' };
 }
 // 13.10.2026 (этап 6 плана по ЮрТопосу, sync/calimp.js): запись из календаря несёт дату, время, название и тип события (x.cal) — их не нужно
 // угадывать по тексту; дело ищется по тексту, как у любой записи
 function inboxParseX(x, now, cases) {
   const r = inboxParse(x && x.text, now, cases), k = x && x.cal; if (!k) return r;
   const type = INBOX_TYPES[k.type] && k.type !== 'deadline' && k.type !== 'note' ? k.type : r.type;
-  return Object.assign(r, { type, due: k.due || r.due, time: k.due ? (k.time || '') : r.time, title: k.title || r.title, needsCase: type === 'deadline' || type === 'note', cal: k });
+  return Object.assign(r, { type, due: k.due || r.due, time: k.due ? (k.time || '') : r.time, title: k.title || r.title, needsCase: type === 'deadline' || type === 'note' || type === 'expense' || type === 'time', cal: k });
 }
 // подсказка — строки «что это и куда»
 function inboxSuggestHtml(r, idx) {
   const [label, ico] = INBOX_TYPES[r.type], row = (k, v) => `<div><span class="muted">${esc(k)}</span><span>${esc(v)}</span></div>`;
   const caseText = r.caseLabel || (r.many ? 'подходит несколько — выберите' : 'не найдено');
   const ok = r.needsCase && !r.caseId ? `<button type="button" class="button primary small-btn" onclick="inboxOther(${idx})">${icon('briefcase-business', 'icon-sm')}Выбрать дело</button>` : `<button type="button" class="button primary small-btn ib-ok" onclick="inboxApply(${idx})">${icon('check', 'icon-sm')}Так и есть</button>`;
-  return `<div class="ib-suggest"><div class="ib-type">${icon(ico, 'icon-sm')}<b>Похоже: ${esc(label.toLowerCase())}</b></div><div class="list-rows">${row('Дело', caseText)}${r.due ? row('Дата', fmtDate(r.due) + (r.time ? ', ' + r.time : '')) : ''}${r.type !== 'note' ? row('Что', r.title) : ''}</div>
+  return `<div class="ib-suggest"><div class="ib-type">${icon(ico, 'icon-sm')}<b>Похоже: ${esc(label.toLowerCase())}</b></div><div class="list-rows">${row('Дело', caseText)}${r.due ? row('Дата', fmtDate(r.due) + (r.time ? ', ' + r.time : '')) : ''}${r.type === 'time' ? row('Время', noteHM(r.minutes)) : ''}${r.type === 'expense' ? row('Сумма', (r.amount ? fmtMoney(r.amount) : 'не указана') + (r.category ? ' · ' + r.category : '')) : ''}${r.room ? row('Зал', r.room) : ''}${r.type !== 'note' ? row('Что', r.title) : ''}</div>
     <div class="actions" style="margin-top:8px">${ok}<button type="button" class="button small-btn" onclick="inboxOther(${idx})">Другое${icon('chevron-down', 'icon-sm')}</button></div></div>`;
 }
 // текущие записи: -1 — набираемый текст, остальное — индекс в списке неразобранных
@@ -17791,7 +17876,7 @@ function inboxRowHtml(x, i, cases, now) {
 async function inboxBody(sheet) {
   const cases = await getAll('cases'), now = new Date(); INBOX_VIEW = inboxItems().sort((a, b) => (b.at || 0) - (a.at || 0));
   const list = INBOX_VIEW.length ? `<div class="section-label">Неразобранные · ${INBOX_VIEW.length}</div><section class="panel"><div class="ib-list">${INBOX_VIEW.map((x, i) => inboxRowHtml(x, i, cases, now)).join('')}</div></section>` : (sheet ? '' : `<section class="panel">${emptyState('notebook-pen', 'Неразобранных нет', 'Записывайте на бегу — разберёте, когда будет минута. Запись открывается и кнопкой «+» с любого экрана.')}</section>`);
-  return `${inboxUndoHtml()}<div class="field wide"><label for="ib-text">Что записать?</label><textarea id="ib-text" rows="2" placeholder="заседание по Петрову 12.10 в 10:30 · до 15.10 подать апелляцию по Д-5 · позвонить Сидоровой завтра" oninput="inboxTyped()"></textarea></div>
+  return `${inboxUndoHtml()}<div class="field wide"><label for="ib-text">Что записать?</label><textarea id="ib-text" rows="2" placeholder="заседание по Петрову 12.10 в 10:30 зал 5 · до 15.10 подать апелляцию по Д-5 · 1,5 ч консультация Сидоровой · пошлина 3 000 ₽ по Д-7" oninput="inboxTyped()"></textarea></div>
     <div id="ib-suggest-box"></div><div class="actions" style="margin:0 0 12px"><button type="button" class="button small-btn" id="ib-later" onclick="inboxLater()">${icon('plus', 'icon-sm')}В неразобранные</button></div>${sheet ? '' : list}${sheet && INBOX_VIEW.length ? `<p class="small muted">Неразобранных: ${INBOX_VIEW.length} — <button type="button" class="text-button" onclick="closeSheet(); nav('inbox')">разобрать</button></p>` : ''}`;
 }
 SCREENS.inbox = async function () { return pageHead('Быстрые записи', 'Запись одной фразой — тип, дату и дело программа предложит сама', '') + `<div class="ib-screen">${await inboxBody(false)}</div>`; };
@@ -17816,7 +17901,7 @@ async function inboxApply(idx, forced) {
   const r = Object.assign(inboxParseX(x, new Date(), await getAll('cases')), forced || {});
   const c = r.caseId ? await getOne('cases', r.caseId) : null;
   if (r.needsCase && !c) { inboxOther(idx); return; }
-  if (r.type === 'hearing' || r.type === 'meeting') { await inboxOpenForm(r.type, r, x, c); return; }
+  if (r.type === 'hearing' || r.type === 'meeting' || r.type === 'expense') { await inboxOpenForm(r.type, r, x, c); return; }
   if (await inboxDirect(x, r, c)) inboxRefresh();
 }
 async function inboxDirect(x, r, c) {
@@ -17832,6 +17917,11 @@ async function inboxDirect(x, r, c) {
       c.deadlines = Array.isArray(c.deadlines) ? c.deadlines.slice() : []; c.deadlines.push(dl);
       addCaseHistoryEvent(c, 'deadline', '', 'Срок из быстрой записи: ' + dl.title + ' — ' + fmtDate(dl.date), 'inbox'); await put('cases', c);
       INBOX_UNDO = { store: 'deadline', id: dl.id, caseId: c.id, item: x, text: 'Срок записан в дело ' + c.number + ': до ' + fmtDate(dl.date) };
+    } else if (r.type === 'time') {
+      if (!(r.minutes > 0)) { toast('Сколько времени ушло? Напишите, например, «1,5 ч консультация по ' + (c.number || 'делу') + '»', true); return false; }
+      const t = { id: uid('В'), caseNum: c.number || '', caseId: c.id, minutes: Math.max(1, Math.round(r.minutes)), date: r.due || todayISO(), desc: (r.title || '').slice(0, 300), billed: false, createdAt: Date.now() };
+      await put('time', t);
+      INBOX_UNDO = { store: 'time', id: t.id, item: x, text: 'Записано ' + noteHM(t.minutes) + ' по делу ' + c.number };
     } else {
       const ev = { id: uid('СБ'), caseId: c.id, caseNum: c.number || '', ts: Date.now(), field: 'note', from: '', to: x.text.slice(0, 2000), source: 'note' };
       await put('caseEvents', ev);
@@ -17855,16 +17945,17 @@ async function inboxUndo() {
   await refreshCasesCache(); toast('Отменено — запись снова в «Неразобранных»'); inboxRefresh();
 }
 // заседание, встреча, «Другое» → обычная форма с заполненными полями; запись из «Неразобранных» уходит, когда форма сохранена
-const INBOX_FORM_FIELD = { hearings: 'hf-date', meetings: 'mf-date', tasks: 'tf-title', cases: 'dl-title' };
+const INBOX_FORM_FIELD = { hearings: 'hf-date', meetings: 'mf-date', tasks: 'tf-title', cases: 'dl-title', expenses: 'ex-amount' };
 async function inboxOpenForm(type, r, x, c) {
   const setv = (id, v) => { const el = document.getElementById(id); if (el && v != null && v !== '') { el.value = v; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); } };
-  const store = { hearing: 'hearings', meeting: 'meetings', task: 'tasks', deadline: 'cases' }[type];
+  const store = { hearing: 'hearings', meeting: 'meetings', task: 'tasks', deadline: 'cases', expense: 'expenses' }[type];
   // набранная в строке запись сначала попадает в «Неразобранные»: форму закрыли без сохранения — текст не пропал
   if (!x.id) { x = inboxAdd(x.text); const t = inboxEl('ib-text'); if (t) t.value = ''; }
   INBOX_PENDING = { id: x.id, store, since: Date.now(), ext: x.cal ? x.cal.key : '' };
   // из календаря — место события: у встречи в поле «Место», у заседания — в примечание (зал и суд проверьте)
   const place = x.cal && x.cal.place ? x.cal.place : '';
-  if (type === 'hearing') { await openHearingForm('', c ? c.number : ''); setv('hf-date', r.due); setv('hf-time', r.time); if (place) setv('hf-comment', 'Из календаря: ' + place); }
+  if (type === 'hearing') { await openHearingForm('', c ? c.number : ''); setv('hf-date', r.due); setv('hf-time', r.time); setv('hf-room', r.room); if (place) setv('hf-comment', 'Из календаря: ' + place); }
+  else if (type === 'expense') await openExpenseForm('', c ? c.number : '', { amount: r.amount || '', category: r.category || '', note: r.title || x.text, date: r.due || todayISO() });
   else if (type === 'meeting') { await openMeetingForm('', c ? c.number : ''); setv('mf-date', r.due); setv('mf-time', r.time); setv('mf-with', c ? c.client : ''); if (place) setv('mf-place', place); }
   else if (type === 'task') { await openTaskForm('', c ? c.number : ''); setv('tf-title', r.title || x.text); setv('tf-due', r.due); setv('tf-time', r.time); if (r.title && r.title !== x.text) setv('tf-note', x.text); }
   else if (type === 'deadline') await openDeadlineForm(c.id, '', { title: r.title || x.text, date: r.due });
@@ -17893,15 +17984,15 @@ async function inboxOther(idx) {
   INBOX_OTHER = { idx, x, cases: Object.fromEntries(cases.map(c => [label(c), c])) };
   const opt = (k) => `<button type="button" class="list-btn ib-opt${k === r.type ? ' ib-opt-on' : ''}" id="ib-opt-${k}" onclick="inboxOtherGo('${k}')">${icon(INBOX_TYPES[k][1])}<span>${esc(INBOX_TYPES[k][0])}</span>${k === r.type ? '<span class="muted push-right">предложено</span>' : ''}</button>`;
   openSheet('Что это?', `<p class="small muted">«${esc(x.text.slice(0, 160))}»</p><div class="form-grid">${wide(fCombo('ib-case', 'Дело', r.caseLabel, '', Object.keys(INBOX_OTHER.cases)))}</div>
-    <div class="list-rows">${['task', 'deadline', 'hearing', 'meeting', 'note'].map(opt).join('')}</div><p class="small muted">Срок и заметка записываются в дело — выберите его. Задача, заседание и встреча откроются формой с заполненными полями.</p>`, sheetIsOpen() ? true : undefined);
+    <div class="list-rows">${['task', 'deadline', 'hearing', 'meeting', 'expense', 'time', 'note'].map(opt).join('')}</div><p class="small muted">Срок, заметка, расход и учёт времени записываются в дело — выберите его. Задача, заседание, встреча и расход откроются формой с заполненными полями.</p>`, sheetIsOpen() ? true : undefined);
 }
 let INBOX_OTHER = null;
 async function inboxOtherGo(type) {
   const o = INBOX_OTHER; if (!o) return; const lab = fv('ib-case').trim(), c = lab ? o.cases[lab] : null;
   if (lab && !c) { toast('Дело «' + lab + '» не найдено — выберите из списка', true); return; }
-  if ((type === 'deadline' || type === 'note') && !c) { toast('Выберите дело — срок и заметка записываются в дело', true); const el = document.getElementById('ib-case'); if (el) el.focus(); return; }
+  if ((type === 'deadline' || type === 'note' || type === 'expense' || type === 'time') && !c) { toast('Выберите дело — срок, заметка, расход и учёт времени записываются в дело', true); const el = document.getElementById('ib-case'); if (el) el.focus(); return; }
   const r = Object.assign(inboxParseX(o.x, new Date(), []), { type, caseId: c ? c.id : '', caseNum: c ? c.number : '' });
-  if (type === 'note') { if (await inboxDirect(o.x, r, c)) { closeSheet(true); await new Promise(res => setTimeout(res, 50)); if (UI.screen === 'inbox') await nav('inbox'); } return; }
+  if (type === 'note' || type === 'time') { if (await inboxDirect(o.x, r, c)) { closeSheet(true); await new Promise(res => setTimeout(res, 50)); if (UI.screen === 'inbox') await nav('inbox'); } return; }
   if (type === 'deadline' && !r.due) r.due = todayISO();
   closeSheet(true); await new Promise(res => setTimeout(res, 50));
   await inboxOpenForm(type, r, o.x, c);
