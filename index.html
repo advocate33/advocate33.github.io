@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="22.10.2026 19:29 · 2f99544+">
-<meta name="build-no" content="189">
+<meta name="build" content="22.10.2026 19:31 · b2e2f8b+">
+<meta name="build-no" content="190">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -11933,6 +11933,21 @@ function ycAccessKind(tok) {
   if (/BEGIN PRIVATE KEY|^[A-Za-z0-9+\/=\s]{200,}$/.test(t)) return 'pem';
   return 'unknown';
 }
+// v190 (решение пользователя 22.10.2026: настройка через ИИ-помощника консоли — первой): в поле вставляют ответ помощника целиком — с пояснениями,
+// разметкой ```json``` и переносами строк внутри private_key. Из текста берётся ключ (поля id, service_account_id, private_key — в кавычках или
+// без), иначе IAM-токен «t1.…» или строка «y0_…». Ничего не нашлось — текст как есть (ycAccessKind объяснит, что не так).
+function ycAccessExtract(text) {
+  const t = String(text || '').trim(); if (!t) return '';
+  if (t.startsWith('{')) { try { const j = JSON.parse(t); if (j && j.private_key) return t; } catch (e) { /* не JSON целиком — ищем поля ниже */ } }
+  const fld = name => { const m = t.match(new RegExp('(?:^|[^A-Za-z_])["\']?' + name + '["\']?\\s*[:=]\\s*["\']?([A-Za-z0-9]{10,40})')); return m ? m[1] : ''; };
+  const id = fld('id'), sa = fld('service_account_id');
+  let pk = ''; const m = t.match(/["']?private_key["']?\s*[:=]\s*"([\s\S]*?)"\s*(?:[,}\n]|$)/);
+  if (m) pk = m[1].replace(/\\n/g, '\n').replace(/\\r/g, ''); else { const p = t.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/); if (p) pk = p[0]; }
+  if (pk && id && sa) return JSON.stringify(ycKeyFromPem(pk, id, sa));
+  if (pk) return pk;
+  const tok = t.match(/\bt1\.[A-Za-z0-9_.-]{20,}/) || t.match(/\by0_[A-Za-z0-9_-]{20,}/);
+  return tok ? tok[0] : t;
+}
 // голый ключ + идентификаторы → тот же JSON, что в скачанном файле
 function ycKeyFromPem(pem, keyId, saId) { const body = String(pem || '').replace(/PLEASE DO NOT REMOVE[^\n]*\n?/g, '').trim(); return { id: String(keyId || '').trim(), service_account_id: String(saId || '').trim(), private_key: /BEGIN PRIVATE KEY/.test(body) ? body : '-----BEGIN PRIVATE KEY-----\n' + body + '\n-----END PRIVATE KEY-----' }; }
 async function ycJwtFromKey(key, now) {
@@ -12070,18 +12085,16 @@ function openYcSetupSheet(sub) {
   if (!ycSupported()) {
     openSheet('Свой сервер в Яндекс Облаке', `${status}
       <p class="small muted">Сервер создаётся в <b>вашем</b> Яндекс Облаке — автор программы к нему доступа не имеет. Он нужен для синхронизации компьютера и телефона, мониторинга судов, ленты календаря и снимков базы.</p>
-      <div class="info-box" id="cloud-browser">Мастер, который создаёт сервер сам, работает в приложении «CRM Адвоката» для компьютера: браузер не пускает запросы к Яндекс Облаку. В этом окне — что сделать по шагам.</div>
+      <div class="info-box" id="pair-have-server">Сервер уже работает на другом вашем устройстве? Тогда создавать ничего не нужно: на том устройстве «Синхронизация» → «Подключить телефон» — появится QR-код.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary" id="cloud-pair-in" onclick="openPairInSheet('', true)">${icon('shield-check')}Подключиться по QR-коду</button></div></div>
+      <div class="info-box" id="cloud-browser">Два пути. <b>Путь А — мастер</b> (рекомендуем, проверен): работает в приложении «CRM Адвоката» для компьютера — браузер не пускает запросы к Яндекс Облаку. <b>Путь Б — пробный</b>: весь сервер создаёт ИИ-помощник консоли Облака, компьютер не нужен; пока проверяется, работает ли он.</div>
       ${need}
-      <div class="section-label">Без приложения: ИИ-помощник консоли Облака создаёт сервер сам</div>
-      <p class="small muted">В консоли console.yandex.cloud вверху есть «Чат с AI». Скопируйте запрос, вставьте в чат и подтверждайте шаги; в конце помощник покажет адрес сервера и секретный код — впишите их в «Синхронизацию» (шаг 1) вместе с паролем шифрования. Коды — секрет: очистите чат помощника после настройки.</p>
-      <div class="form-grid">${wide(fInput('cloud-bucket', 'Имя бакета для запроса (латиница, цифры, дефис)', 'crm-' + ycRand(8), 'autocomplete="off" spellcheck="false"'))}</div>
-      <div class="form-actions" style="margin:0 0 10px"><button type="button" class="button primary" id="cloud-ai-all" onclick="ycCopyPrompt('all')">${icon('files')}Скопировать запрос для ИИ-помощника</button></div>
-      <div class="section-label">Или в приложении для компьютера (мастер)</div><ol class="steps-list">
+      ${ycPathBHtml(true)}
+      <div class="section-label">Путь А. Мастер в приложении для компьютера · рекомендуем</div><ol class="steps-list">
         <li>Скачайте и установите приложение для компьютера (файл CRM_Advokata_Setup.exe). Windows может спросить, доверять ли файлу, — это установщик программы с сайта advocate33.github.io.<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APP_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать установщик</a></div></li>
         <li>В приложении: Настройки → «Свой сервер в Яндекс Облаке» → шаг 1: ключ сервисного аккаунта (инструкция и запрос для ИИ-помощника консоли — в самом мастере) → «Подключиться к Облаку».</li>
         <li>Выберите «новый каталог «crm»», оставьте предложенное имя бакета и все галочки → «Развернуть». Мастер работает 3–7 минут и пишет, что делает. В конце — «Сервер работает» и адреса.</li>
         <li>Вернитесь сюда: «Синхронизация» → шаг 1 — впишите адрес сервера и секретный код (их показывает лист «Личный сервер» в приложении) и пароль шифрования → «Сохранить и проверить связь». Должно ответить: «Связь есть: сервер версии …».</li>
-        <li>Шаг 4 «Отправить изменения на сервер» — база этого устройства уйдёт на сервер зашифрованной. Затем на телефоне — те же адрес, код и пароль.</li></ol>
+        <li>Шаг 4 «Отправить изменения на сервер» — база этого устройства уйдёт на сервер зашифрованной. Затем на компьютере «Синхронизация» → «Подключить телефон» — по QR-коду телефон подключится сам, останется ввести пароль шифрования.</li></ol>
       <p class="small muted">Если мастер остановился с ошибкой: исправьте причину (чаще всего — платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова — созданное найдётся, ничего не задвоится. Не получилось — «Журнал ошибок» → «Скопировать» и пришлите текст.</p>
       <div class="form-actions"><button type="button" class="button primary" id="cloud-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация — ввести адрес и код</button></div>`, sub);
     return;
@@ -12090,24 +12103,25 @@ function openYcSetupSheet(sub) {
   openSheet('Свой сервер в Яндекс Облаке', `${status}
     <p class="small muted">Всё создаётся в <b>вашем</b> Яндекс Облаке: личный сервер (синхронизация, лента календаря, снимки базы) и коллектор судов с таймером. Автор программы к нему доступа не имеет.</p>
     ${need}
+    <div class="info-box" id="cloud-paths">Два пути. <b>Путь А — мастер</b> (рекомендуем, проверен): ИИ-помощник консоли делает только ключ доступа, остальное — этот мастер, шаги 1–3 ниже. <b>Путь Б — пробный</b>: весь сервер создаёт ИИ-помощник консоли без мастера — внизу листа; пока проверяется, работает ли он.</div>
+    <div class="section-label" id="cloud-path-a">Путь А. Мастер · рекомендуем</div>
     <div class="section-label step-label">Шаг 1. Доступ к Облаку</div>
-    <div class="info-box">С 1 июня 2026 года Яндекс Облако не принимает новые строки «y0_…» (прежние, полученные раньше, действуют до конца своего года). Подойдёт любой из трёх вариантов — вставьте его в поле ниже.</div>
-    <details class="help-text" open><summary><b>Способ 1 — ключ сервисного аккаунта</b> (всё делается в консоли Облака, без установки программ)</summary>
+    <p class="small muted">Мастеру нужен ключ доступа к вашему Облаку. Проще всего — попросить ИИ-помощника консоли Облака (способ 1): он создаст ключ сам, вы только подтверждаете его шаги.</p>
+    <details class="help-text" open id="cloud-ai-way"><summary><b>Способ 1 — ИИ-помощник консоли Облака создаёт ключ</b> (рекомендуем)</summary>
+      ${ycAiStepsHtml('key')}</details>
+    <details class="help-text"><summary><b>Способ 2 — ключ сервисного аккаунта вручную</b> (то же самое, но кнопками консоли)</summary>
       <ol><li>Откройте <b>console.yandex.cloud</b>, войдите аккаунтом, где создано облако.</li>
       <li>Слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b> → «Создать».</li>
       <li>Вверху выберите само облако (не каталог) → вкладка «Права доступа» → «Назначить роли» → найдите <b>crm-admin</b> → роль <b>admin</b> → «Сохранить». Без этой роли мастер не сможет создать каталог и функции.</li>
       <li>Снова «Сервисные аккаунты» → <b>crm-admin</b> → «Создать новый ключ» → <b>«Создать авторизованный ключ»</b> (не API-ключ и не статический) → «Скачать файл с ключами».</li>
       <li>Откройте скачанный файл в «Блокноте», выделите всё (Ctrl+A), скопируйте (Ctrl+C) и вставьте в поле ниже. После развёртывания ключ можно удалить в консоли.</li></ol></details>
-    <details class="help-text"><summary><b>Способ 2 — IAM-токен из yc CLI</b> (если умеете работать с командной строкой)</summary>
+    <details class="help-text"><summary><b>Способ 3 — IAM-токен из yc CLI</b> (если умеете работать с командной строкой)</summary>
       <ol><li>Установите Yandex Cloud CLI (yandex.cloud/ru/docs/cli/quickstart), выполните <b>yc init</b> — вход через браузер.</li>
       <li>Выполните <b>yc iam create-token</b>, скопируйте строку «t1.…» и вставьте в поле ниже. Она действует 12 часов.</li></ol></details>
-    <details class="help-text"><summary><b>Способ 3 — прежняя строка «y0_…»</b> (только если получена до 1 июня 2026 года)</summary>
-      <p>Если у вас сохранилась такая строка, вставьте её. Новую получить нельзя: Облако её не примет.</p></details>
-    <details class="help-text"><summary><b>Способ 4 — попросить ИИ-помощника консоли Облака</b> (кнопка «Чат с AI» вверху консоли)</summary>
-      <p>Скопируйте запрос, вставьте его в чат помощника в консоли и выполните, что он попросит. В конце он покажет содержимое файла ключа — вставьте его целиком в поле ниже. <b>Закрытый ключ — секрет:</b> после развёртывания удалите ключ в консоли (сервисный аккаунт → ключи) и очистите чат помощника («Удалить сейчас»).</p>
-      <div class="form-actions" style="margin:0 0 8px"><button type="button" class="button small-btn" id="cloud-ai-key" onclick="ycCopyPrompt('key')">${icon('files', 'icon-sm')}Скопировать запрос для ИИ-помощника</button></div></details>
+    <details class="help-text"><summary><b>Способ 4 — прежняя строка «y0_…»</b> (только если получена до 1 июня 2026 года)</summary>
+      <p>С 1 июня 2026 года Яндекс Облако не принимает новые строки «y0_…»; полученные раньше действуют до конца своего года. Если у вас сохранилась такая строка, вставьте её.</p></details>
     <p class="small muted">Вставленное нужно только на время работы мастера. <b>Никому не пересылайте ключ и токены, включая автора.</b></p>
-    <div class="form-grid"><label class="field wide"><span>Ключ сервисного аккаунта (содержимое файла), IAM-токен или строка y0_</span><textarea id="cloud-oauth" rows="4" autocomplete="off" spellcheck="false" placeholder="{ &quot;id&quot;: …, &quot;service_account_id&quot;: …, &quot;private_key&quot;: … }  или  t1.…  или  y0_…"></textarea></label></div>
+    <div class="form-grid"><label class="field wide"><span>Ответ ИИ-помощника целиком, содержимое файла ключа, IAM-токен или строка y0_</span><textarea id="cloud-oauth" rows="4" autocomplete="off" spellcheck="false" placeholder="{ &quot;id&quot;: …, &quot;service_account_id&quot;: …, &quot;private_key&quot;: … }  или  t1.…  или  y0_…"></textarea></label></div>
     <div class="form-grid" id="cloud-key-ids" hidden>${fInput('cloud-key-id', 'Идентификатор ключа (id)', '', 'autocomplete="off" spellcheck="false" placeholder="aje…"')}${fInput('cloud-sa-id', 'Идентификатор сервисного аккаунта', '', 'autocomplete="off" spellcheck="false" placeholder="aje…"')}</div>
     <p class="small muted">Вставленное используется только сейчас и нигде не сохраняется.</p>
     <div class="form-actions"><button type="button" class="button primary" id="cloud-connect" onclick="ycConnect()">${icon('shield-check')}Подключиться к Облаку</button></div>
@@ -12120,22 +12134,62 @@ function openYcSetupSheet(sub) {
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
     <div class="form-actions"><button type="button" class="button primary" id="cloud-go" disabled onclick="ycRunWizard()">${icon('send')}Развернуть</button></div>
     <div id="cloud-log" aria-live="polite">${ycStepsHtml()}</div>
-    <div id="cloud-result"></div>`, sub);
+    <div id="cloud-result"></div>
+    ${ycPathBHtml(false)}`, sub);
 }
 // v179 (А6): единое описание пакета функций — по нему собирает архивы мастер (ycDeploy) и пишется запрос для ИИ-помощника
 const YC_PKG = { runtime: 'nodejs22', entry: 'index.handler',
   bridge: { name: 'crm-bridge', timeout: 300, files: [{ name: 'index.js', src: 'loader-bridge-index.js' }, { name: 'server.js', src: 'server.js' }] },
   collector: { name: 'collector-sud', timeout: 600, files: [{ name: 'index.js', src: 'loader-collector-index.js' }, { name: 'collector-sud.mjs', src: 'collector-sud.mjs' }] } };
 // готовые запросы для ИИ-помощника консоли Облака: ключ сервисного аккаунта для мастера; весь сервер без приложения (путь В)
+// v190 (решение пользователя 21:27: «реализуй и пункт А, и пункт Б — чтобы было понятно, какой пойдёт; если Б работать не будет, уберём»):
+// путь Б — один блок для браузера и приложения для компьютера. В браузере он развёрнут и имя бакета — своё поле; в приложении — свёрнут
+// под мастером (путь А), имя бакета — общее с шагом 3 мастера (поле cloud-bucket одно на лист).
+function ycPathBHtml(browser) {
+  const body = `<div class="info-box warning" id="cloud-ai-trial"><b>Путь Б — пробный.</b> Помощнику нужно взять файлы программы по ссылкам с сайта и создать из них функции. Если он ответит, что не может, или остановится с ошибкой — путь Б не подходит: используйте путь А (мастер в приложении для компьютера) и сообщите автору, на каком шаге помощник остановился. Ничего лишнего помощник не создаст, если вы подтверждаете только шаги из запроса.</div>
+      ${browser ? `<div class="form-grid">${wide(fInput('cloud-bucket', 'Имя бакета для запроса (латиница, цифры, дефис)', 'crm-' + ycRand(8), 'autocomplete="off" spellcheck="false"'))}</div>` : '<p class="small muted">Имя бакета для запроса — из поля «Имя бакета» в шаге 3 ниже.</p>'}
+      ${ycAiStepsHtml('all')}
+      <div class="form-grid">
+        <label class="field wide"><span>Ответ помощника (последнее сообщение целиком)</span><textarea id="cloud-ai-answer" rows="5" autocomplete="off" spellcheck="false" placeholder="СЕРВЕР: https://functions.yandexcloud.net/…&#10;КОД СЕРВЕРА: …"></textarea></label>
+        ${fInput('cloud-ai-pass', 'Пароль шифрования базы', '', 'type="password" autocomplete="off"')}
+      </div>
+      <p class="small muted">Пароль шифрования базы — не код сервера: его знаете только вы. Если сервер новый — придумайте пароль (не короче 12 знаков) и запишите на бумаге: он нигде не хранится и не восстанавливается.</p>
+      <div class="form-actions"><button type="button" class="button primary" id="cloud-ai-go" onclick="ycAiApply()">${icon('shield-check')}Подключить</button></div>
+      <div id="cloud-ai-res" aria-live="polite"></div>`;
+  return browser ? `<div class="section-label" id="cloud-path-b">Путь Б. ИИ-помощник создаёт весь сервер · пробно · без компьютера</div>${body}`
+    : `<details class="help-text" id="cloud-path-b"><summary><b>Путь Б — ИИ-помощник создаёт весь сервер, без мастера</b> · пробно</summary>${body}</details>`;
+}
+// v190 (решение пользователя 22.10.2026): шаги для ИИ-помощника консоли — подробно, со ссылкой на консоль и предупреждением о подтверждениях.
+// Справка Облака (console/operations/ai-assistant): кнопка помощника появляется после выбора каталога; перед каждым изменением помощник
+// показывает действие и ждёт «Подтвердить» — режима без подтверждений нет; история чатов — значок вверху окна помощника, удаление — у строки чата.
+const YC_CONSOLE = 'https://console.yandex.cloud/';
+function ycAiStepsHtml(kind) {
+  const all = kind === 'all';
+  return `<ol class="steps-list" id="cloud-ai-steps-${all ? 'all' : 'key'}">
+      <li>Нажмите «Открыть консоль Облака» — откроется console.yandex.cloud. Войдите аккаунтом Яндекса, в котором создано облако${all ? ' и подключён платёжный аккаунт' : ''}.</li>
+      <li>Вверху выберите своё облако и любой каталог (например, default). Затем нажмите кнопку ИИ-помощника — <b>«AI-ассистент»</b> (в некоторых версиях консоли — «Чат с AI»). Справа откроется окно чата.</li>
+      <li>Здесь нажмите <b>«Скопировать запрос»</b>, вставьте его в чат помощника (на компьютере — Ctrl+V, на телефоне — долгое нажатие → «Вставить») и отправьте.</li>
+      <li><b>Помощник много раз попросит подтверждение.</b> Перед каждым изменением в облаке он показывает, что собирается сделать, и ждёт кнопку <b>«Подтвердить»</b>. Это его обязательное правило — отключить его нельзя${all ? ', а шагов здесь около двадцати' : ''}. Подтверждайте шаги, где речь о ${all ? 'каталоге crm, бакете, сервисном аккаунте crm-server, функциях crm-bridge и collector-sud и таймере' : 'сервисном аккаунте crm-admin, роли admin и ключе'}. Если он предлагает другое (удалить, оплатить, изменить то, чего нет в запросе) — нажмите «Отклонить» и напишите: «Делай только то, что в запросе».</li>
+      <li>Если помощник задаёт вопрос — ответьте коротко («да», «каталог default») или вставьте запрос ещё раз. Если пишет, что не может, — скопируйте его ответ: по нему видно, какой способ выбрать.</li>
+      <li>${all ? 'В конце помощник покажет строки «СЕРВЕР», «КОД СЕРВЕРА», «КОЛЛЕКТОР», «КОД КОЛЛЕКТОРА». Выделите весь его последний ответ, скопируйте и вставьте в поле «Ответ помощника» ниже — программа сама найдёт адреса и коды.' : 'В конце помощник покажет ключ — текст в фигурных скобках { … } с полями id, service_account_id и private_key. Выделите весь его ответ, скопируйте и вставьте в поле ниже — программа сама найдёт ключ среди пояснений.'}</li>
+      <li>После настройки удалите следы: ${all ? 'в окне помощника — значок истории вверху → значок удаления у строки этого чата (в нём остались коды)' : 'ключ — консоль → «Сервисные аккаунты» → crm-admin → удалить ключ (или весь аккаунт crm-admin); чат — значок истории вверху окна помощника → значок удаления у строки этого чата'}. Мастер напомнит об этом в конце.</li></ol>
+    <div class="form-actions" style="margin:0 0 8px"><a class="button small-btn primary" id="cloud-console${all ? '-all' : ''}" href="${YC_CONSOLE}" target="_blank" rel="noopener noreferrer">${icon('landmark', 'icon-sm')}Открыть консоль Облака</a>${all ? `<button type="button" class="button small-btn" id="cloud-ai-all" onclick="ycCopyPrompt('all')">${icon('files', 'icon-sm')}Скопировать запрос</button>` : `<button type="button" class="button small-btn" id="cloud-ai-key" onclick="ycCopyPrompt('key')">${icon('files', 'icon-sm')}Скопировать запрос</button>`}</div>`;
+}
 function ycAiPrompt(kind) {
-  if (kind === 'key') return 'Создай в этом облаке сервисный аккаунт с именем crm-admin. Назначь ему на уровне облака (не каталога) роль admin. Создай для него авторизованный ключ (authorized key, не API-ключ и не статический) и покажи содержимое файла ключа целиком в формате JSON с полями id, service_account_id и private_key — я вставлю его в программу. Если для какого-то шага нужно моё подтверждение — спроси.';
+  // v190: одним планом, по-русски, без лишних вопросов; итог — одним блоком JSON (поле мастера найдёт его среди пояснений)
+  if (kind === 'key') return ['Выполни одним планом, по порядку, ничего другого не создавай и не меняй:',
+    '1. Создай в этом облаке сервисный аккаунт с именем crm-admin (если такой уже есть — используй его).',
+    '2. Назначь ему на уровне облака (не каталога) роль admin.',
+    '3. Создай для него авторизованный ключ (authorized key, не API-ключ и не статический).',
+    '4. Покажи содержимое файла ключа целиком одним блоком JSON с полями id, service_account_id и private_key — я вставлю его в программу «CRM Адвоката». Ключ больше никуда не отправляй.',
+    'Если для какого-то шага нужно моё подтверждение — спроси один раз на весь шаг.'].join('\n');
   // v179 (аудит сборки 177, А6): пакет каждой функции — те же файлы и переменные, что у мастера ycDeploy (YC_PKG): загрузчик index.js и
   // резервный код рядом (server.js / collector-sud.mjs — без него функция не запускается, когда обновления недоступны), статический ключ
   // хранилища S3_KEY_ID / S3_SECRET; существующая установка — новая версия с прежними бакетом и секретами; проверка — ответ функции, а не
   // «версия создана»
   const D = YC_DIST(), P = YC_PKG;
   const files = p => p.files.map(f => 'файл ' + f.name + ' — содержимое по адресу ' + D + '/' + f.src).join('; ');
-  return ['Помоги развернуть в этом облаке личный сервер программы «CRM Адвоката». Делай по порядку, в конце покажи итог.',
+  return ['Разверни в этом облаке личный сервер программы «CRM Адвоката». Выполни одним планом по шагам ниже, по порядку, без лишних вопросов; ничего сверх этих шагов не создавай и не удаляй. В конце покажи итог.',
     '0. Если в каталоге уже есть функция crm-bridge (или collector-sud) — НЕ создавай новую функцию, бакет и секреты: создай новую версию той же функции с теми же переменными окружения (BUCKET, SECRET, S3_KEY_ID, S3_SECRET, STORE_ID, если есть, и остальными) и с файлами из шагов 5–6. Прежние версии не удаляй.',
     '1. Создай каталог crm (если его нет).',
     '2. В каталоге crm создай бакет Object Storage с именем ' + (fv('cloud-bucket') || 'crm-' + ycRand(8)) + ' (закрытый доступ, класс STANDARD, версионирование включено).',
@@ -12145,13 +12199,45 @@ function ycAiPrompt(kind) {
     '6. Функция ' + P.collector.name + ': ' + P.runtime + ', ' + P.entry + ', таймаут ' + P.collector.timeout + ' секунд, 256 МБ, тот же сервисный аккаунт, публичный вызов. Код — ДВА файла в корне архива: ' + files(P.collector) + '. Переменные: BRIDGE_URL = ссылка для вызова функции crm-bridge; BRIDGE_SECRET = тот же SECRET; SECRET = ещё одна случайная строка из 32 знаков (покажи её); BUCKET = тот же бакет; PARALLEL = 3; UPDATE_URL = ' + D + '. Переменную NODE_TLS_REJECT_UNAUTHORIZED НЕ задавать (если она есть у прежней версии функции — убрать).',
     '7. Создай таймер-триггер collector-timer для функции collector-sud с cron-выражением «30 4,12 ? * * *» (07:30 и 15:30 по Москве), сервисный аккаунт crm-server.',
     '8. Проверь запуск: открой ссылку для вызова crm-bridge — должен прийти ответ JSON с полем "ver" (номер версии сервера), а не «Unable to import index.handler module» и не «Cannot find module». Если ошибка — проверь, что оба файла лежат в корне версии и точка входа ' + P.entry + '.',
-    '9. В конце покажи отдельными строками: ссылку для вызова crm-bridge, SECRET сервера, ссылку для вызова collector-sud, SECRET коллектора и ответ из шага 8. Если что-то не получилось — скажи, какой шаг и почему.'].join('\n');
+    // v190: строки итога с метками — их разбирает ycAiAnswerParse (поле «Ответ помощника» в программе)
+    '9. В конце покажи итог ровно четырьмя строками, без кавычек и пояснений внутри строк:\nСЕРВЕР: <ссылка для вызова crm-bridge>\nКОД СЕРВЕРА: <SECRET функции crm-bridge>\nКОЛЛЕКТОР: <ссылка для вызова collector-sud>\nКОД КОЛЛЕКТОРА: <SECRET функции collector-sud>\nПосле них — ответ из шага 8. Если что-то не получилось — скажи, какой шаг и почему, и не пиши итоговые строки.'].join('\n');
+}
+// v190 (путь Б, пробно): ответ помощника после запроса «весь сервер» → { u, s, cu, cs }. Сначала строки с метками из запроса (шаг 9), иначе —
+// по смыслу строк: ссылка функции в строке со словом «коллектор/collector» — коллектор, иначе сервер; код — строка из 16–64 латинских букв и
+// цифр в строке со словами SECRET или «код».
+function ycAiAnswerParse(text) {
+  const t = String(text || '').replace(/[`*]/g, ''), URL_RE = /https:\/\/functions\.yandexcloud\.net\/[A-Za-z0-9_-]{8,}/;
+  const lab = re => { const m = t.match(re); return m ? m[1] : ''; };
+  let u = lab(/^\s*СЕРВЕР\s*[:=—-]\s*(https:\/\/functions\.yandexcloud\.net\/[A-Za-z0-9_-]{8,})/im), s = lab(/^\s*КОД СЕРВЕРА\s*[:=—-]\s*([A-Za-z0-9_-]{16,64})\b/im);
+  let cu = lab(/^\s*КОЛЛЕКТОР\s*[:=—-]\s*(https:\/\/functions\.yandexcloud\.net\/[A-Za-z0-9_-]{8,})/im), cs = lab(/^\s*КОД КОЛЛЕКТОРА\s*[:=—-]\s*([A-Za-z0-9_-]{16,64})\b/im);
+  for (const line of t.split(/\r?\n/)) {
+    const col = /коллектор|collector/i.test(line), url = line.match(URL_RE), sec = /secret|код/i.test(line) ? (line.replace(URL_RE, '').match(/\b[A-Za-z0-9]{16,64}\b/g) || []).filter(w => /\d/.test(w) && /[A-Za-z]/.test(w)).pop() : '';
+    if (url) { if (col) { if (!cu) cu = url[0]; } else if (!u) u = url[0]; }
+    if (sec) { if (col) { if (!cs) cs = sec; } else if (!s) s = sec; }
+  }
+  return { u, s, cu: cu && cs ? cu : '', cs: cu && cs ? cs : '' };
+}
+async function ycAiApply() {
+  const box = document.getElementById('cloud-ai-res'), say = (text, bad) => { if (box) box.innerHTML = `<div class="info-box ${bad ? 'warning' : ''}" role="${bad ? 'alert' : 'status'}">${esc(text)}</div>`; };
+  const c = ycAiAnswerParse(fv('cloud-ai-answer')), pass = fv('cloud-ai-pass');
+  if (!c.u || !c.s) { say('В ответе не нашлось ' + (!c.u ? 'адреса сервера (ссылки https://functions.yandexcloud.net/…)' : 'секретного кода сервера') + '. Вставьте последний ответ помощника целиком; если помощник не дошёл до конца — посмотрите, на каком шаге он остановился, и напишите ему «продолжай».', true); return; }
+  if (!pass) { say('Введите пароль шифрования базы: на первом устройстве — придумайте (не короче 12 знаков) и запишите на бумаге; на следующих — тот же.', true); return; }
+  const b = document.getElementById('cloud-ai-go'); if (b) { if (b.disabled) return; b.disabled = true; }
+  say('Подключаюсь к серверу ' + c.u.replace(NEXT_SRV_HOST, '…/') + (c.cu ? ' и коллектору' : '') + '…');
+  try { const r = await pairApplyConn(c, pass); if (!r.ok) { say(r.text, true); return; } openSyncSheet('replace', { text: r.text + ' Теперь удалите чат помощника — в нём остались коды.' }); }
+  catch (e) { logErr('yc:ai-apply', e); say('Сбой: ' + ((e && e.message) || e), true); }
+  finally { const bb = document.getElementById('cloud-ai-go'); if (bb) bb.disabled = false; }
 }
 async function ycCopyPrompt(kind) { const t = ycAiPrompt(kind); try { await navigator.clipboard.writeText(t); toast('Запрос скопирован — вставьте его в чат ИИ-помощника консоли Облака'); } catch (e) { logErr('yc:copy', e); openSheet('Запрос для ИИ-помощника', `<p class="small muted">Выделите текст и скопируйте вручную.</p><textarea rows="12" readonly style="width:100%">${esc(t)}</textarea>`, true); } }
 async function ycConnect() {
-  let tok = fv('cloud-oauth').trim(); const where = document.getElementById('cloud-where');
+  // v190 (урок 187): сообщение прежнего нажатия снимается при каждом новом — иначе над «Развернуть» остаётся устаревшая ошибка
+  fErr('');
+  let tok = ycAccessExtract(fv('cloud-oauth')); const where = document.getElementById('cloud-where');
   // голый ключ + идентификаторы (снимок пользователя 05.10.2026): собирается тот же JSON, что в файле; без идентификаторов — поля открываются и объясняются
-  if (ycAccessKind(tok) === 'pem') { const ids = document.getElementById('cloud-key-ids'); if (ids) ids.hidden = false; const kid = fv('cloud-key-id').trim(), sid = fv('cloud-sa-id').trim(); if (kid && sid) tok = JSON.stringify(ycKeyFromPem(tok, kid, sid)); }
+  if (ycAccessKind(tok) === 'pem') { const ids = document.getElementById('cloud-key-ids'); if (ids) ids.hidden = false; const kid = fv('cloud-key-id').trim(), sid = fv('cloud-sa-id').trim(); if (kid && sid) tok = JSON.stringify(ycKeyFromPem(tok, kid, sid));
+    // v190 (урок 187): без идентификаторов в Облако не идём — останавливаемся словами
+    // объяснение — рядом с полями (под «Подключиться»), а не в общем блоке у «Развернуть»
+    else { if (where) where.innerHTML = '<div class="info-box warning" role="alert">Вставлен только закрытый ключ. Впишите выше «Идентификатор ключа» и «Идентификатор сервисного аккаунта» (их показывает помощник или консоль: сервисный аккаунт → ключи) — или вставьте файл ключа целиком.</div>'; return; } }
   if (!tok) { fErr('Вставьте ключ сервисного аккаунта, IAM-токен или строку доступа — см. способы выше'); return; }
   const b = document.getElementById('cloud-connect'); if (b) b.disabled = true;
   where.innerHTML = '<p class="small muted">Подключаюсь…</p>';
@@ -12174,6 +12260,7 @@ async function ycFolders(cloudId) {
   const sel = document.getElementById('cloud-folder'); if (sel) sel.innerHTML = ycFolderOptions();
 }
 async function ycRunWizard() {
+  fErr('');
   const oauth = fv('cloud-oauth').trim(), bucket = fv('cloud-bucket').trim().toLowerCase();
   const cloudId = (document.getElementById('cloud-cloud') || {}).value, folderId = (document.getElementById('cloud-folder') || {}).value || '';
   if (!oauth || !cloudId) { fErr('Сначала шаг 1: «Подключиться к Облаку»'); return; }
@@ -12194,9 +12281,10 @@ async function ycRunWizard() {
       <div class="section-label">Что дальше</div><ol class="steps-list">
         <li>«Синхронизация» → шаг 1: адрес и код уже вписаны — придумайте пароль шифрования (не короче 12 знаков), впишите его и нажмите «Сохранить и проверить связь».</li>
         <li>Шаг 4 — «Отправить изменения на сервер»: база этого устройства уйдёт на сервер зашифрованной.</li>
-        <li>Телефон: в «Синхронизации» те же адрес, секретный код и пароль. Код можно скопировать кнопкой ниже — вставьте его на телефоне сами, не пересылайте в открытых чатах.</li>
+        <li>Телефон и планшет: после шагов 1–2 нажмите «Подключить телефон» — появится QR-код. На телефоне: «Синхронизация» → «Подключиться по QR-коду» → навести камеру → ввести пароль шифрования. Адрес и код вводить не нужно.</li>
         <li>Прежняя программа хранит свои настройки отдельно: если пользуетесь ею, впишите там те же адрес, код и пароль («Синхронизация» → «Личный сервер»).</li></ol>
-      <div class="form-actions"><button type="button" class="button primary" id="cloud-to-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button><button type="button" class="button" id="cloud-copy-secret" onclick="ycCopySecret()">${icon('files', 'icon-sm')}Скопировать секретный код</button></div>`;
+      <div class="info-box warning" id="cloud-cleanup"><b>Удалите ключ доступа к Облаку</b> — мастеру он больше не нужен, а с ним можно управлять всем облаком: console.yandex.cloud → «Сервисные аккаунты» → crm-admin → ключи → удалить (можно удалить и весь аккаунт crm-admin; сервер работает от своего аккаунта crm-server). Если ключ делал ИИ-помощник — удалите и его чат: значок истории вверху окна помощника → значок удаления у строки чата. Файл ключа, если скачивали, удалите с компьютера.</div>
+      <div class="form-actions"><button type="button" class="button primary" id="cloud-to-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button><button type="button" class="button" id="cloud-pair-out" onclick="openPairOutSheet(true)">${icon('phone', 'icon-sm')}Подключить телефон</button><button type="button" class="button" id="cloud-copy-secret" onclick="ycCopySecret()">${icon('files', 'icon-sm')}Скопировать секретный код</button></div>`;
     toast(ok ? 'Сервер развёрнут и подключён' : 'Сервер развёрнут');
   } catch (e) {
     logErr('yc:deploy', e); YC_SESS.fail = String((e && e.message) || e); const el = logEl(); if (el) el.innerHTML = ycStepsHtml();
@@ -12217,6 +12305,294 @@ async function ycApply(res) {
 async function ycCopySecret() {
   try { await navigator.clipboard.writeText(SRV.secret || ''); toast('Секретный код скопирован — вставьте его на телефоне'); }
   catch (e) { logErr('yc:copy', e); toast('Не удалось скопировать', true); }
+}
+
+// ▼▼▼ sync/pair.js
+// ═══ sync/pair.js — «Подключить телефон» одной кнопкой (v190, решение пользователя 22.10.2026 21:00: «делать QR-код») ═══
+// Первое устройство (обычно компьютер, где мастер развернул сервер) показывает QR-код и код подключения. В них — адрес сервера, его
+// секретный код, адрес и код коллектора, время создания. Всё это зашифровано ПАРОЛЕМ ШИФРОВАНИЯ БАЗЫ (PBKDF2-SHA-256 → AES-GCM), самого
+// пароля в коде нет: на втором устройстве его вводят руками. Снимок экрана или пересланный код без пароля бесполезен; код действует 24 часа.
+// Второе устройство: «Синхронизация» → «Подключиться по QR-коду» — сканирование камерой (где браузер умеет распознавать QR-коды) или
+// вставка кода; ссылка из QR-кода открывает программу с кодом в части адреса после «#» (на сайт она не уходит и сразу стирается из адреса).
+// Генератор QR-кода — свой (правило 1 раздела 1: внешних библиотек нет): байтовый режим, уровень коррекции M, версии 1–40, выбор маски по
+// штрафам стандарта ISO/IEC 18004 (алгоритм — как в открытой реализации Nayuki, переписан).
+
+// ── QR-код ──
+const QR_ECC = { L: [1, [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25]],
+  M: [0, [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+    [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49]],
+  Q: [3, [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68]],
+  H: [2, [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81]] };
+function qrRawModules(ver) { let r = (16 * ver + 128) * ver + 64; if (ver >= 2) { const na = Math.floor(ver / 7) + 2; r -= (25 * na - 10) * na - 55; if (ver >= 7) r -= 36; } return r; }
+function qrDataCodewords(ver, ecl) { const e = QR_ECC[ecl]; return Math.floor(qrRawModules(ver) / 8) - e[1][ver] * e[2][ver]; }
+function qrAlignPos(ver) {
+  if (ver === 1) return [];
+  const na = Math.floor(ver / 7) + 2, size = ver * 4 + 17, step = Math.floor((ver * 8 + na * 3 + 5) / (na * 4 - 4)) * 2, out = [6];
+  for (let p = size - 7; out.length < na; p -= step) out.splice(1, 0, p);
+  return out;
+}
+function qrGfMul(x, y) { let z = 0; for (let i = 7; i >= 0; i--) { z = (z << 1) ^ ((z >>> 7) * 0x11D); z ^= ((y >>> i) & 1) * x; } return z & 0xFF; }
+function qrRsDivisor(deg) { const r = new Array(deg).fill(0); r[deg - 1] = 1; let root = 1; for (let i = 0; i < deg; i++) { for (let j = 0; j < r.length; j++) { r[j] = qrGfMul(r[j], root); if (j + 1 < r.length) r[j] ^= r[j + 1]; } root = qrGfMul(root, 2); } return r; }
+function qrRsRemainder(data, div) { const r = new Array(div.length).fill(0); for (const b of data) { const f = b ^ r.shift(); r.push(0); div.forEach((c, i) => { r[i] ^= qrGfMul(c, f); }); } return r; }
+// text → { size, modules: boolean[y][x], ver, mask }. opts: { ecl: 'L'|'M'|'Q'|'H' (по умолчанию M), mask: 0–7 (для проверки), minVer }
+function qrEncode(text, opts) {
+  opts = opts || {};
+  const ecl = opts.ecl || 'M', bytes = Array.from(new TextEncoder().encode(String(text)));
+  let ver = Math.max(1, opts.minVer || 1);
+  for (;; ver++) {
+    if (ver > 40) throw new Error('слишком длинный текст для QR-кода');
+    const need = 4 + (ver < 10 ? 8 : 16) + bytes.length * 8;
+    if (need <= qrDataCodewords(ver, ecl) * 8) break;
+  }
+  // биты: байтовый режим, длина, данные, окончание, дополнение до байта, байты-заполнители EC 11
+  const bits = []; const put = (v, n) => { for (let i = n - 1; i >= 0; i--) bits.push((v >>> i) & 1); };
+  put(4, 4); put(bytes.length, ver < 10 ? 8 : 16); for (const b of bytes) put(b, 8);
+  const cap = qrDataCodewords(ver, ecl) * 8;
+  put(0, Math.min(4, cap - bits.length)); put(0, (8 - bits.length % 8) % 8);
+  for (let pad = 0xEC; bits.length < cap; pad ^= 0xEC ^ 0x11) put(pad, 8);
+  const data = []; for (let i = 0; i < bits.length; i += 8) { let b = 0; for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j]; data.push(b); }
+  // блоки с кодами коррекции, чередование
+  const E = QR_ECC[ecl], nb = E[2][ver], eccLen = E[1][ver], raw = Math.floor(qrRawModules(ver) / 8), nShort = nb - raw % nb, shortLen = Math.floor(raw / nb);
+  const div = qrRsDivisor(eccLen), blocks = [];
+  for (let i = 0, k = 0; i < nb; i++) { const d = data.slice(k, k + shortLen - eccLen + (i < nShort ? 0 : 1)); k += d.length; const ecc = qrRsRemainder(d, div); if (i < nShort) d.push(0); blocks.push(d.concat(ecc)); }
+  const cw = []; for (let i = 0; i < blocks[0].length; i++) for (let j = 0; j < blocks.length; j++) if (i !== shortLen - eccLen || j >= nShort) cw.push(blocks[j][i]);
+  // поле: служебные узоры
+  const size = ver * 4 + 17, M = [], F = [];
+  for (let y = 0; y < size; y++) { M.push(new Array(size).fill(false)); F.push(new Array(size).fill(false)); }
+  const fn = (x, y, dark) => { M[y][x] = !!dark; F[y][x] = true; };
+  for (let i = 0; i < size; i++) { fn(6, i, i % 2 === 0); fn(i, 6, i % 2 === 0); }
+  const finder = (cx, cy) => { for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) { const d = Math.max(Math.abs(dx), Math.abs(dy)), x = cx + dx, y = cy + dy; if (x >= 0 && x < size && y >= 0 && y < size) fn(x, y, d !== 2 && d !== 4); } };
+  finder(3, 3); finder(size - 4, 3); finder(3, size - 4);
+  const ap = qrAlignPos(ver), na = ap.length;
+  for (let i = 0; i < na; i++) for (let j = 0; j < na; j++) {
+    if ((i === 0 && j === 0) || (i === 0 && j === na - 1) || (i === na - 1 && j === 0)) continue;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) fn(ap[i] + dx, ap[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }
+  const format = mask => {
+    const d = (E[0] << 3) | mask; let r = d; for (let i = 0; i < 10; i++) r = (r << 1) ^ ((r >>> 9) * 0x537);
+    const b = ((d << 10) | r) ^ 0x5412, bit = i => ((b >>> i) & 1) !== 0;
+    for (let i = 0; i <= 5; i++) fn(8, i, bit(i));
+    fn(8, 7, bit(6)); fn(8, 8, bit(7)); fn(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) fn(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) fn(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) fn(8, size - 15 + i, bit(i));
+    fn(8, size - 8, true);
+  };
+  format(0);
+  if (ver >= 7) {
+    let r = ver; for (let i = 0; i < 12; i++) r = (r << 1) ^ ((r >>> 11) * 0x1F25);
+    const b = (ver << 12) | r;
+    for (let i = 0; i < 18; i++) { const bit = ((b >>> i) & 1) !== 0, a = size - 11 + i % 3, c = Math.floor(i / 3); fn(a, c, bit); fn(c, a, bit); }
+  }
+  // данные — змейкой по парам столбцов снизу вверх и сверху вниз
+  for (let right = size - 1, i = 0; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let v = 0; v < size; v++) for (let j = 0; j < 2; j++) {
+      const x = right - j, up = ((right + 1) & 2) === 0, y = up ? size - 1 - v : v;
+      if (!F[y][x] && i < cw.length * 8) { M[y][x] = ((cw[i >>> 3] >>> (7 - (i & 7))) & 1) !== 0; i++; }
+    }
+  }
+  const inv = (m, x, y) => [(x + y) % 2 === 0, y % 2 === 0, x % 3 === 0, (x + y) % 3 === 0, (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+    x * y % 2 + x * y % 3 === 0, (x * y % 2 + x * y % 3) % 2 === 0, ((x + y) % 2 + x * y % 3) % 2 === 0][m];
+  const applyMask = m => { for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!F[y][x] && inv(m, x, y)) M[y][x] = !M[y][x]; };
+  const penalty = () => {
+    let res = 0;
+    const addHist = (len, h) => { if (h[0] === 0) len += size; h.pop(); h.unshift(len); };
+    const count = h => { const n = h[1], core = n > 0 && h[2] === n && h[3] === n * 3 && h[4] === n && h[5] === n; return (core && h[0] >= n * 4 && h[6] >= n ? 1 : 0) + (core && h[6] >= n * 4 && h[0] >= n ? 1 : 0); };
+    const term = (color, len, h) => { if (color) { addHist(len, h); len = 0; } len += size; addHist(len, h); return count(h); };
+    for (let pass = 0; pass < 2; pass++) for (let a = 0; a < size; a++) {
+      let color = false, run = 0; const h = [0, 0, 0, 0, 0, 0, 0];
+      for (let b = 0; b < size; b++) {
+        const m = pass ? M[b][a] : M[a][b];
+        if (m === color) { run++; if (run === 5) res += 3; else if (run > 5) res++; }
+        else { addHist(run, h); if (!color) res += count(h) * 40; color = m; run = 1; }
+      }
+      res += term(color, run, h) * 40;
+    }
+    for (let y = 0; y < size - 1; y++) for (let x = 0; x < size - 1; x++) { const c = M[y][x]; if (c === M[y][x + 1] && c === M[y + 1][x] && c === M[y + 1][x + 1]) res += 3; }
+    let dark = 0; for (const row of M) for (const c of row) if (c) dark++;
+    const total = size * size; res += (Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1) * 10;
+    return res;
+  };
+  let mask = opts.mask;
+  if (mask === undefined || mask === null) {
+    let best = Infinity;
+    for (let m = 0; m < 8; m++) { applyMask(m); format(m); const p = penalty(); if (p < best) { best = p; mask = m; } applyMask(m); }
+  }
+  applyMask(mask); format(mask);
+  return { size, modules: M, ver, mask };
+}
+// QR-код → SVG: чёрное на белом при любой теме (камерам нужен контраст), поле тишины 4 модуля
+function qrSvg(q, px) {
+  const n = q.size + 8; let d = '';
+  for (let y = 0; y < q.size; y++) for (let x = 0; x < q.size; x++) if (q.modules[y][x]) d += 'M' + (x + 4) + ' ' + (y + 4) + 'h1v1h-1z';
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${n} ${n}" width="${px || 260}" height="${px || 260}" style="display:block;max-width:100%;height:auto" shape-rendering="crispEdges" role="img" aria-label="QR-код подключения"><rect width="${n}" height="${n}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+}
+
+// ── пакет подключения ──
+const PAIR_PREFIX = 'CRM1.', PAIR_TTL = 24 * 3600 * 1000, PAIR_ITER = 200000;
+const pairB64u = u8 => { let s = ''; for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const pairUnB64u = s => { const b = atob(String(s).replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((String(s).length + 3) % 4)); const u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+async function pairKey(pass, salt) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(String(pass)), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: PAIR_ITER, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+// адрес функции Яндекса хранится одним идентификатором (QR-код меньше и легче читается камерой)
+const pairUrlIn = u => { const s = String(u || ''); return s.startsWith(NEXT_SRV_HOST) ? s.slice(NEXT_SRV_HOST.length) : s; };
+const pairUrlOut = u => { const s = String(u || ''); return !s || /^https?:\/\//.test(s) ? s : NEXT_SRV_HOST + s; };
+// o: { u, s, cu, cs } → строка «CRM1.…»
+async function pairPack(o, pass, now) {
+  const body = { v: 1, t: Number(now || Date.now()), u: pairUrlIn(o.u), s: String(o.s || '') };
+  if (o.cu && o.cs) { body.cu = pairUrlIn(o.cu); body.cs = String(o.cs); }
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await pairKey(pass, salt), new TextEncoder().encode(JSON.stringify(body))));
+  const all = new Uint8Array(28 + ct.length); all.set(salt, 0); all.set(iv, 16); all.set(ct, 28);
+  return PAIR_PREFIX + pairB64u(all);
+}
+// из вставленного текста (ссылка целиком, код, код с пробелами и переносами) — код «CRM1.…» или ''
+function pairCodeOf(text) {
+  const t = String(text || '').replace(/\s+/g, '');
+  const m = t.match(/CRM1\.[A-Za-z0-9_-]{40,}/);
+  return m ? m[0] : '';
+}
+// строка → { ok, u, s, cu, cs, t } или { ok:false, why: 'format'|'pass'|'expired'|'future' }
+async function pairUnpack(code, pass, now) {
+  const c = pairCodeOf(code); if (!c) return { ok: false, why: 'format' };
+  let all; try { all = pairUnB64u(c.slice(PAIR_PREFIX.length)); } catch (e) { return { ok: false, why: 'format' }; }
+  if (all.length < 28 + 17) return { ok: false, why: 'format' };
+  let body;
+  try { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: all.slice(16, 28) }, await pairKey(pass, all.slice(0, 16)), all.slice(28)); body = JSON.parse(new TextDecoder().decode(pt)); }
+  catch (e) { return { ok: false, why: 'pass' }; }
+  if (!body || body.v !== 1 || !body.u || !body.s) return { ok: false, why: 'format' };
+  const at = Number(now || Date.now()), t = Number(body.t) || 0;
+  if (t > at + 10 * 60 * 1000) return { ok: false, why: 'future' };
+  if (at - t > PAIR_TTL) return { ok: false, why: 'expired' };
+  return { ok: true, u: pairUrlOut(body.u), s: String(body.s), cu: body.cu ? pairUrlOut(body.cu) : '', cs: body.cs ? String(body.cs) : '', t };
+}
+const PAIR_WHY = { format: 'Это не код подключения. Вставьте строку, которая начинается с «CRM1.», целиком — или ссылку из QR-кода',
+  pass: 'Пароль не подошёл. Нужен пароль шифрования базы — тот же, что на первом устройстве (не секретный код сервера). Буквы, раскладка и регистр важны',
+  expired: 'Код устарел: он действует 24 часа. На первом устройстве нажмите «Новый код» и отсканируйте снова',
+  future: 'Время на этом устройстве отстаёт от первого больше чем на 10 минут — проверьте дату и время в настройках телефона' };
+
+// ── ссылка из QR-кода: «…/#pair=CRM1.…» — код забирается до запуска интерфейса и сразу стирается из адреса ──
+const PAIR_LINK = { code: '' };
+try {
+  const h = String(location.hash || '');
+  if (/^#pair=/.test(h)) { PAIR_LINK.code = pairCodeOf(decodeURIComponent(h.slice(6))); history.replaceState(history.state, '', location.pathname + location.search); }
+} catch (e) { logErr('pair:link', e); }
+const pairLinkBase = () => String(location.href).split('#')[0].replace(/index\.html$/, '');
+function pairStart() { if (PAIR_LINK.code) openPairInSheet(PAIR_LINK.code, typeof sheetIsOpen === 'function' && sheetIsOpen()); }
+
+// ── первое устройство: «Подключить телефон» ──
+const PAIR_OUT = { code: '', at: 0 };
+function pairSecretsNow() { return { u: SRV.url, s: SRV.secret, cu: localStorage.getItem('crm_collector_url') || '', cs: localStorage.getItem('crm_collector_secret') || '' }; }
+async function openPairOutSheet(sub, msg) {
+  const ready = typeof nextSrvConfigured === 'function' && nextSrvConfigured() && nextSrvChecked();
+  const steps = `<div class="section-label">Что сделать на телефоне или планшете</div><ol class="steps-list" id="pair-steps">
+      <li>Откройте программу <b>так, как будете ею пользоваться</b>: значок на экране «Домой» (iPhone), приложение «CRM Адвоката» (Android) или браузер. Это важно: у значка, приложения и браузера свои настройки.</li>
+      <li>Внизу «Ещё» → «Синхронизация» → <b>«Подключиться по QR-коду»</b>.</li>
+      <li>Нажмите «Сканировать QR-код» и наведите камеру на квадрат на этом экране. Если такой кнопки нет или камера не открылась — нажмите здесь «Скопировать код», передайте код на телефон (например, письмом самому себе) и вставьте его в поле «Код подключения».</li>
+      <li>Введите <b>пароль шифрования базы</b> — тот же, что на этом устройстве, и нажмите «Подключиться». Должно появиться: «Подключено…» и число записей, полученных с сервера.</li></ol>
+    <p class="small muted">Можно и обычной камерой телефона: она откроет программу в браузере. Если пользуетесь значком «Домой» или приложением, на открывшейся странице нажмите «Скопировать код» и вставьте его в своей программе.</p>`;
+  if (!ready) {
+    const has = !!(SRV.url && SRV.secret);
+    openSheet('Подключить телефон или планшет', `<p class="small muted">Здесь появится QR-код, по которому второе устройство подключится к вашему серверу само: вводить адрес и секретный код не нужно, только пароль шифрования базы.</p>
+      <div class="info-box warning" id="pair-out-need">${has && !SRVDB.pass ? 'Сначала задайте пароль шифрования базы: «Синхронизация» → шаг 1 → «Пароль шифрования базы» → «Сохранить и проверить связь». Если пароля ещё нет — придумайте (не короче 12 знаков) и запишите на бумаге.' : has ? 'Сначала проверьте связь с сервером: «Синхронизация» → шаг 1 → «Сохранить и проверить связь». Должно ответить «Связь есть».' : 'Сервер на этом устройстве ещё не подключён. Подключите его («Синхронизация» → шаг 1) или создайте («Свой сервер в Яндекс Облаке»).'}</div>
+      <div class="form-actions">${btn('Синхронизация', 'openSyncSheet()', 'primary', 'refresh-cw')}</div>`, sub);
+    return;
+  }
+  if (!PAIR_OUT.code || Date.now() - PAIR_OUT.at > PAIR_TTL - 3600 * 1000) { try { PAIR_OUT.code = await pairPack(pairSecretsNow(), SRVDB.pass); PAIR_OUT.at = Date.now(); } catch (e) { logErr('pair:pack', e); PAIR_OUT.code = ''; } }
+  if (!PAIR_OUT.code) { openSheet('Подключить телефон или планшет', `<div class="info-box warning">Не удалось подготовить код: браузер не дал шифрование. Пришлите «Журнал ошибок».</div>`, sub); return; }
+  const link = pairLinkBase() + '#pair=' + PAIR_OUT.code;
+  let qr = ''; try { qr = qrSvg(qrEncode(link), 300); } catch (e) { logErr('pair:qr', e); }
+  const till = new Date(PAIR_OUT.at + PAIR_TTL).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  openSheet('Подключить телефон или планшет', `<p class="small muted">Второе устройство подключится к вашему серверу ${esc(SRV.url.replace(NEXT_SRV_HOST, '…/'))}${localStorage.getItem('crm_collector_url') ? ' и коллектору судов' : ''} само. Адрес и секретный код зашифрованы в QR-коде вашим паролем шифрования; сам пароль в код не входит — его вводят на телефоне.</p>
+    ${msg ? `<div class="info-box" role="status">${esc(msg)}</div>` : ''}
+    <div class="pair-qr" id="pair-qr" style="background:#fff;padding:12px;border-radius:var(--radius);width:max-content;max-width:100%;margin:8px auto">${qr || '<p class="small">QR-код не построен — используйте «Скопировать код».</p>'}</div>
+    <p class="small muted" style="text-align:center">Код действует до ${esc(till)}.</p>
+    <div class="form-actions" style="justify-content:center">${btn('Скопировать код', 'pairCopyOut()', '', 'files')}<button type="button" class="button" id="pair-new" onclick="pairNewOut()">${icon('refresh-cw')}Новый код</button></div>
+    ${steps}
+    <div class="info-box">Безопасность: без пароля код ничего не открывает, но всё равно не публикуйте его и не показывайте QR-код на снимках экрана. Код, отправленный себе письмом или в мессенджер, удалите после подключения. Пароль шифрования никогда не пересылайте — его вводят руками.</div>`, sub);
+}
+async function pairCopyOut() { try { await navigator.clipboard.writeText(PAIR_OUT.code); toast('Код скопирован. Вставьте его на телефоне в поле «Код подключения»'); } catch (e) { logErr('pair:copy', e); openSheet('Код подключения', `<p class="small muted">Выделите и скопируйте вручную.</p><textarea rows="5" readonly style="width:100%">${esc(PAIR_OUT.code)}</textarea>`, true); } }
+function pairNewOut() { PAIR_OUT.code = ''; openPairOutSheet('replace', 'Создан новый код. Прежний тоже действует до своего срока.'); }
+
+// ── второе устройство: «Подключиться по QR-коду» ──
+const pairScanSupported = () => typeof window !== 'undefined' && 'BarcodeDetector' in window && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+const PAIR_SCAN = { stream: null, timer: 0 };
+function openPairInSheet(code, sub, msg) {
+  const fromLink = !!code, other = SRV.url && SRV.secret;
+  const standalone = (typeof matchMedia === 'function' && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true || !!(window.AndroidApp || window.CRMDesktop);
+  openSheet('Подключиться к своему серверу', `<p class="small muted">Для второго устройства, когда сервер уже работает на первом. На первом устройстве: «Синхронизация» → <b>«Подключить телефон»</b> — появится QR-код. Здесь нужен только пароль шифрования базы.</p>
+    ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="pair-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
+    ${fromLink ? `<div class="info-box" id="pair-from-link">Код получен из QR-кода.${standalone ? '' : ' Если вы пользуетесь программой со значка на экране «Домой» или в приложении «CRM Адвоката» — подключайтесь там, а не в этом окне браузера: нажмите «Скопировать код», откройте свою программу → «Синхронизация» → «Подключиться по QR-коду» и вставьте код.'}</div>
+      ${standalone ? '' : `<div class="form-actions">${btn('Скопировать код', 'pairCopyIn()', '', 'files')}</div>`}` : ''}
+    ${!fromLink && pairScanSupported() ? `<div class="form-actions"><button type="button" class="button primary" id="pair-scan" onclick="pairScan()">${icon('search')}Сканировать QR-код</button></div><div id="pair-cam"></div>` : ''}
+    ${!fromLink && !pairScanSupported() ? `<p class="small muted" id="pair-noscan">Этот браузер не умеет распознавать QR-коды. Наведите на QR-код обычную камеру телефона — откроется страница программы, нажмите там «Скопировать код» и вставьте его сюда. Или на первом устройстве нажмите «Скопировать код» и передайте его сюда.</p>` : ''}
+    <div class="form-grid">
+      <label class="field wide"><span>Код подключения (или ссылка из QR-кода)</span><textarea id="pair-code" rows="3" autocomplete="off" spellcheck="false" placeholder="CRM1.…">${esc(code || '')}</textarea></label>
+      ${fInput('pair-pass', 'Пароль шифрования базы (тот же, что на первом устройстве)', '', 'type="password" autocomplete="off"')}
+    </div>
+    ${other ? `<div class="info-box warning" id="pair-other">На этом устройстве уже подключён сервер ${esc(String(SRV.url).replace(NEXT_SRV_HOST, '…/'))}. Если код от того же сервера — обновятся код и пароль. Если от другого — программа остановится и подскажет, что сделать.</div>` : ''}
+    <div class="form-actions"><button type="button" class="button primary" id="pair-go" onclick="pairConnect()">${icon('shield-check')}Подключиться</button></div>
+    <p class="small muted">После подключения программа сама проверит связь и загрузит базу с сервера. Записи, которые уже есть на этом устройстве, останутся — они объединятся с базой сервера.</p>`, sub);
+}
+async function pairCopyIn() { const c = pairCodeOf(fv('pair-code')) || PAIR_LINK.code; try { await navigator.clipboard.writeText(c); toast('Код скопирован — вставьте его в своей программе'); } catch (e) { logErr('pair:copy-in', e); toast('Не удалось скопировать — выделите код в поле и скопируйте вручную', true); } }
+function pairScanStop() { if (PAIR_SCAN.timer) { clearInterval(PAIR_SCAN.timer); PAIR_SCAN.timer = 0; } if (PAIR_SCAN.stream) { try { PAIR_SCAN.stream.getTracks().forEach(t => t.stop()); } catch (e) { logErr('pair:stop', e); } PAIR_SCAN.stream = null; } }
+async function pairScan() {
+  const box = document.getElementById('pair-cam'); if (!box) return;
+  pairScanStop();
+  try {
+    const det = new BarcodeDetector({ formats: ['qr_code'] });
+    PAIR_SCAN.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    box.innerHTML = `<video id="pair-video" playsinline muted autoplay style="width:100%;max-width:360px;border-radius:var(--radius);display:block;margin:8px auto"></video><p class="small muted" style="text-align:center">Наведите камеру на QR-код на первом устройстве.</p>`;
+    const v = document.getElementById('pair-video'); v.srcObject = PAIR_SCAN.stream; await v.play().catch(() => {});
+    PAIR_SCAN.timer = setInterval(async () => {
+      // лист закрыли — камеру выключить
+      if (!document.getElementById('pair-video')) { pairScanStop(); return; }
+      try { const r = await det.detect(v); const hit = r.map(x => pairCodeOf(x.rawValue)).find(Boolean);
+        if (hit) { pairScanStop(); const ta = document.getElementById('pair-code'); if (ta) ta.value = hit; box.innerHTML = `<div class="info-box" role="status">QR-код прочитан. Введите пароль шифрования и нажмите «Подключиться».</div>`; const p = document.getElementById('pair-pass'); if (p) p.focus(); } }
+      catch (e) { /* кадр не распознан — пробуем следующий */ }
+    }, 350);
+  } catch (e) { logErr('pair:scan', e); pairScanStop(); box.innerHTML = `<div class="info-box warning" role="alert">Камера не открылась (${esc((e && e.name) || 'ошибка')}). Разрешите камеру для программы или вставьте код подключения в поле ниже.</div>`; }
+}
+// общее для QR-кода и ответа ИИ-помощника (sync/ycdeploy.js): записать подключение, проверить связь, загрузить базу
+// c: { u, s, cu, cs }; возвращает { ok, text }
+async function pairApplyConn(c, pass) {
+  const bad = nextSrvUrlCheck(c.u); if (bad) return { ok: false, text: bad };
+  if (!pass) return { ok: false, text: 'Введите пароль шифрования базы' };
+  const cur = String(SRV.url || '').trim().replace(/\/+$/, '');
+  // другой сервер уже подключён — замена идёт через «Синхронизацию», где учтён перенос файлов документов (sync/blobmove.js)
+  if (cur && SRV.secret && cur !== c.u.replace(/\/+$/, '')) return { ok: false, text: 'На этом устройстве подключён другой сервер (' + cur.replace(NEXT_SRV_HOST, '…/') + '). Если хотите перейти на новый: «Синхронизация» → «Отключить сервер», затем подключитесь снова. Записи на устройстве останутся.' };
+  if (c.u !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
+  if (c.u !== SRV.url || pass !== SRVDB.pass) SRVDB.ver = 0;
+  if (pass !== SRVDB.pass && typeof SRVDB2 === 'object') SRVDB2.ver = 0;
+  SRV.url = c.u; if (c.s !== SRV.secret) SRV.secret = c.s; if (pass !== SRVDB.pass) CLOUD.pass = pass;
+  if (c.cu && c.cs) { localStorage.setItem('crm_collector_url', c.cu); localStorage.setItem('crm_collector_secret', c.cs); if (typeof bumpSecrets === 'function') bumpSecrets('crm_collector_secret'); if (typeof bumpSettings === 'function') bumpSettings(); }
+  const r = await nextServerCheck();
+  if (!r.ok) return { ok: false, text: 'Код принят, но связи с сервером нет: ' + r.error + '. Адрес и код сохранены — когда связь появится, «Синхронизация» → «Сохранить и проверить связь».' };
+  if (!r.dbVer) return { ok: true, text: 'Подключено: сервер версии ' + r.srvVer + '. Базы на сервере пока нет. Если это ваше первое устройство — шаг 4 «Отправить изменения на сервер». Если второе — сначала отправьте базу с первого, затем здесь шаг 2 «Загрузить базу с сервера».' };
+  const g = await nextServerPull();
+  if (!g.ok) return { ok: false, text: 'Подключено, но база не загрузилась: ' + g.error + '.' };
+  return { ok: true, text: 'Подключено. С сервера: новых записей — ' + (g.added || 0) + ', обновлено — ' + (g.updated || 0) + '. Дальше: шаг 5 «Автоматический обмен» — после первой отправки по кнопке.' };
+}
+async function pairConnect() {
+  const b = document.getElementById('pair-go'); if (b) { if (b.disabled) return; b.disabled = true; }
+  const raw = fv('pair-code'), pass = fv('pair-pass');
+  try {
+    if (!pairCodeOf(raw)) { openPairInSheet(raw, 'replace', { text: PAIR_WHY.format, bad: true }); return; }
+    if (!pass) { openPairInSheet(raw, 'replace', { text: 'Введите пароль шифрования базы — тот же, что на первом устройстве', bad: true }); return; }
+    const p = await pairUnpack(raw, pass);
+    if (!p.ok) { openPairInSheet(raw, 'replace', { text: PAIR_WHY[p.why] || p.why, bad: true }); return; }
+    const r = await pairApplyConn(p, pass);
+    if (!r.ok) { openPairInSheet(raw, 'replace', { text: r.text, bad: true }); return; }
+    PAIR_LINK.code = ''; pairScanStop();
+    openSyncSheet('replace', { text: r.text });
+  } catch (e) { logErr('pair:connect', e); openPairInSheet(raw, 'replace', { text: 'Сбой подключения: ' + ((e && e.message) || e), bad: true }); }
+  finally { const bb = document.getElementById('pair-go'); if (bb) bb.disabled = false; }
 }
 
 // ▼▼▼ next/migrate.js
@@ -12472,7 +12848,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openImportSheet('clients')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openCalImportSheet()', "openToCalSheet('hearings','Х3')", 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", "openMonitorEventSheet('МН4')", "openMonitorEventSheet('МН5')", "openPartyFix('Д-16/2026')", "openCaseSheet('Д-36/2026')", "openProcNew('Д-36/2026')", "openProcSheet('Д-36/2026', 'pr-seed-ap1')", "openProcSheet('Д-36/2026', 'cur:appeal')", "openProcForm('Д-36/2026')", "openProcForm('Д-36/2026', 'pr-seed-cs1')", "openMonitorEventSheet('МН6')", "openProcRebind('МН6')", 'openErrlogSheet()', 'openViewDiagSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", "openStageForm('Ф1', '')", "openStageForm('Ф1', 'э1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseFormTab('Д-42/2026', 'agreement')", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineSheet('Д-41/2026', 'dl-41d')", "openDeadlineSheet('Д-41/2026', 'dl-41e')", "openDeadlineSheet('Д-41/2026', 'dl-41f')","openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openImportSheet('clients')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openPairOutSheet()', "openPairInSheet('')", "openPairInSheet('CRM1.AbcdefghijAbcdefghijAbcdefghijAbcdefghijAbcdefghij')",'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openCalImportSheet()', "openToCalSheet('hearings','Х3')", 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", "openMonitorEventSheet('МН4')", "openMonitorEventSheet('МН5')", "openPartyFix('Д-16/2026')", "openCaseSheet('Д-36/2026')", "openProcNew('Д-36/2026')", "openProcSheet('Д-36/2026', 'pr-seed-ap1')", "openProcSheet('Д-36/2026', 'cur:appeal')", "openProcForm('Д-36/2026')", "openProcForm('Д-36/2026', 'pr-seed-cs1')", "openMonitorEventSheet('МН6')", "openProcRebind('МН6')", 'openErrlogSheet()', 'openViewDiagSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", "openStageForm('Ф1', '')", "openStageForm('Ф1', 'э1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseFormTab('Д-42/2026', 'agreement')", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineSheet('Д-41/2026', 'dl-41d')", "openDeadlineSheet('Д-41/2026', 'dl-41e')", "openDeadlineSheet('Д-41/2026', 'dl-41f')","openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -13078,6 +13454,8 @@ async function openSyncSheet(sub, msg) {
     <p class="small muted">${NEXT_ROOT ? 'Программа читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5).' : 'Новая версия читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5). Прежняя программа работает как раньше.'}</p>
     ${typeof fsyncSyncHtml === 'function' ? fsyncSyncHtml() : ''}
     ${step(1, 'Подключить сервер', checked)}
+    ${typeof openPairInSheet === 'function' && !checked ? `<div class="info-box" id="sy-pair-in">Сервер уже работает на другом вашем устройстве? Подключитесь по QR-коду: на том устройстве «Синхронизация» → «Подключить телефон», здесь — кнопка ниже. Вводить адрес и код не нужно, только пароль шифрования.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary" id="sy-pair" onclick="openPairInSheet('', true)">${icon('shield-check')}Подключиться по QR-коду</button></div></div>` : ''}
+    ${typeof openPairOutSheet === 'function' && checked ? `<div class="form-actions"><button type="button" class="button" id="sy-pair-out" onclick="openPairOutSheet(true)">${icon('phone')}Подключить телефон или планшет — QR-код</button></div>` : ''}
     <p class="small muted" id="sy-two">Нужны две разные строки — это не один пароль дважды. <b>Секретный код сервера</b> открывает доступ к серверу; он есть в Яндекс Облаке: функция crm-bridge → «Редактор» → переменная SECRET. <b>Пароль шифрования базы</b> открывает саму базу; в Облаке его нет, его знаете только вы — это тот пароль, которым база шифровалась при синхронизации (${NEXT_ROOT ? 'в прежней программе или раньше по адресу /next/' : 'в прежней программе или раньше здесь'}).</p>
     <div class="form-grid">
       ${wide(fInput('sy-url', 'Адрес сервера', SRV.url, 'type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="' + NEXT_SRV_HOST + '…"'))}
@@ -22354,7 +22732,7 @@ const HELP_SECTIONS = [
 <p>Дела, доверители, заседания, сроки и деньги хранятся <b>на вашем устройстве</b>. Автору программы сведения о делах не передаются.</p>
 <h3>Первые шаги</h3>
 <ol><li><b>Пропуск (лицензионный ключ)</b> — Настройки → «Лицензия» → вставить строку из письма → «Проверить и сохранить». Без пропуска — деморежим: до 5 новых записей в месяц в каждом разделе, просмотр и правка не ограничены.</li>
-<li><b>Данные с другого устройства</b> — «Синхронизация»: адрес и код своего сервера, пароль шифрования → «Сохранить и проверить связь» → «Загрузить базу с сервера». Если сервера ещё нет — Настройки → «Свой сервер в Яндекс Облаке».</li>
+<li><b>Данные с другого устройства</b> — «Синхронизация» → «Подключиться по QR-коду» (QR-код показывает первое устройство: «Синхронизация» → «Подключить телефон») и пароль шифрования. Или вручную: адрес и код своего сервера, пароль шифрования → «Сохранить и проверить связь» → «Загрузить базу с сервера». Если сервера ещё нет — Настройки → «Свой сервер в Яндекс Облаке».</li>
 <li><b>Первое дело</b> — кнопка «Создать» (или «+» на телефоне) → «Дело».</li></ol>
 <h3>Где что</h3>
 <p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам, доверителям, судам и судьям (и по номеру телефона) и переключатель темы.</p>
@@ -22429,17 +22807,30 @@ const HELP_SECTIONS = [
 <li>Пароль шифрования базы: придумайте заранее (не короче 12 знаков) и запишите на бумаге. Он нигде не хранится и не восстанавливается; тот же пароль вводится на каждом устройстве.</li></ol>
 <h3>Путь А. Мастер «Свой сервер в Яндекс Облаке» (приложение для компьютера)</h3>
 <ol><li>Установите приложение для компьютера (CRM_Advokata_Setup.exe с сайта программы). Windows может спросить разрешение — установщик подписан не магазином, это ожидаемо.</li>
-<li>В приложении: Настройки → «Свой сервер в Яндекс Облаке». Шаг 1 — доступ к Облаку. С 1 июня 2026 года Облако не принимает новые строки «y0_…», поэтому проще всего ключ сервисного аккаунта: либо скажите ИИ-помощнику консоли (запрос — в мастере, «Способ 4»), либо сами: в консоли Облака слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; затем вверху выберите само облако → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» → скачайте файл, откройте его в «Блокноте», скопируйте всё и вставьте в поле мастера. Нажмите «Подключиться к Облаку» — появятся облако и каталог. Вставлять нужно файл целиком (в нём есть id и service_account_id); если скопирован только закрытый ключ, мастер попросит два идентификатора. Закрытый ключ — секрет: после развёртывания удалите его в консоли.</li>
+<li>В приложении: Настройки → «Свой сервер в Яндекс Облаке». Шаг 1 — доступ к Облаку. Проще всего — <b>способ 1, ИИ-помощник консоли</b>: в мастере «Открыть консоль Облака» → войдите → вверху выберите облако и каталог → кнопка ИИ-помощника «AI-ассистент» (в некоторых версиях консоли — «Чат с AI») → в мастере «Скопировать запрос» → вставьте в чат и отправьте. <b>Помощник много раз попросит подтверждение</b>: перед каждым изменением он показывает, что сделает, и ждёт кнопку «Подтвердить» — это его обязательное правило, отключить нельзя. Подтверждайте шаги про crm-admin, роль admin и ключ; если он предлагает что-то другое — «Отклонить» и «Делай только то, что в запросе». В конце скопируйте весь ответ помощника и вставьте в поле мастера — программа сама найдёт ключ среди пояснений. Способ 2 — то же вручную: в консоли Облака слева «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; затем вверху выберите само облако → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» → скачайте файл, откройте его в «Блокноте», скопируйте всё и вставьте в поле мастера. Нажмите «Подключиться к Облаку» — появятся облако и каталог. Вставлять нужно файл целиком (в нём есть id и service_account_id); если скопирован только закрытый ключ, мастер попросит два идентификатора. Закрытый ключ — секрет: после развёртывания удалите его в консоли.</li>
 <li>Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки (коллектор судов, сбор по расписанию) → «Развернуть». Мастер создаёт сервисный аккаунт для функций, бакет, функции crm-bridge и collector-sud с таймером; ход виден по шагам. Обычно 2–4 минуты.</li>
-<li>В конце мастер покажет адрес сервера и секретный код и сам впишет их в «Синхронизацию»; введите пароль шифрования → «Сохранить и проверить связь». Ключ crm-admin после этого можно удалить в консоли.</li></ol>
-<h3>Путь Б. ИИ-помощник консоли Облака (без приложения)</h3>
-<p>В консоли console.yandex.cloud вверху есть «Чат с AI» — он умеет создавать ресурсы сам. Настройки → «Свой сервер в Яндекс Облаке» → «Скопировать запрос для ИИ-помощника» → вставьте в чат и подтверждайте шаги. В конце помощник покажет адрес сервера и секретный код — впишите их в «Синхронизацию» вместе с паролем шифрования. Коды и ключи — секрет: после настройки очистите чат помощника («Удалить сейчас»).</p>
+<li>В конце мастер покажет адрес сервера и секретный код и сам впишет их в «Синхронизацию»; введите пароль шифрования → «Сохранить и проверить связь». Затем <b>удалите ключ доступа</b>: консоль → «Сервисные аккаунты» → crm-admin → ключи → удалить (можно и весь аккаунт crm-admin — сервер работает от своего аккаунта crm-server). Если ключ делал ИИ-помощник — удалите его чат: значок истории вверху окна помощника → значок удаления у строки чата.</li></ol>
+<h3>Путь Б. ИИ-помощник создаёт весь сервер — без компьютера (пробно)</h3>
+<p>Подходит, если компьютера под рукой нет: всё делается в браузере телефона или планшета. Способ новый и проверяется: помощнику нужно взять файлы программы по ссылкам с сайта — если он ответит, что не может, используйте путь А.</p>
+<ol><li>Откройте Настройки → «Свой сервер в Яндекс Облаке» → раздел «Путь Б» (в браузере — сразу после «Что понадобится», в приложении для компьютера — внизу листа мастера). Если помощник не справится — путь Б не подходит, используйте путь А и сообщите автору, на каком шаге он остановился.</li>
+<li>«Открыть консоль Облака» → войдите → вверху выберите облако и каталог → кнопка ИИ-помощника «AI-ассистент» («Чат с AI»).</li>
+<li>В программе «Скопировать запрос» → вставьте в чат помощника (долгое нажатие → «Вставить») → отправьте.</li>
+<li>Помощник попросит подтверждение около двадцати раз — перед каждым созданием каталога, бакета, аккаунта, функций и таймера. Нажимайте «Подтвердить» на шагах из запроса; на любом другом — «Отклонить».</li>
+<li>В конце помощник покажет четыре строки: «СЕРВЕР», «КОД СЕРВЕРА», «КОЛЛЕКТОР», «КОД КОЛЛЕКТОРА». Скопируйте его последний ответ целиком и вставьте в поле «Ответ помощника»; ниже — пароль шифрования базы (если сервер новый — придумайте и запишите на бумаге) → «Подключить». Программа проверит связь сама.</li>
+<li>Удалите чат помощника — в нём остались коды: значок истории вверху окна помощника → значок удаления у строки чата.</li></ol>
 <h3>Путь В. Вручную в консоли Облака</h3>
 <ol><li>Консоль → «Object Storage» → «Создать бакет»: имя латиницей (например, crm-ваша-фамилия), остальное по умолчанию.</li>
 <li>«Сервисные аккаунты» → «Создать» → имя crm-server → роли <b>storage.editor</b> и <b>serverless.functions.invoker</b>.</li>
 <li>Скачайте с сайта программы файл <b>dist/loader-bridge-index.js</b> — это загрузчик: он сам берёт код сервера с сайта программы и обновляет его. Консоль → «Cloud Functions» → «Создать функцию» → имя <b>crm-bridge</b> → среда Node.js → «Редактор»: вставьте содержимое файла в index.js, точка входа <b>index.handler</b>, таймаут 300 с, память 256 МБ, сервисный аккаунт crm-server. Переменные окружения: <b>SECRET</b> — придуманный вами секретный код (длинный, латиницей и цифрами), <b>BUCKET</b> — имя бакета, <b>UPDATE_URL</b> — https://advocate33.github.io/dist. «Создать версию».</li>
 <li>На странице функции включите «Публичная функция». «Ссылка для вызова» вида https://functions.yandexcloud.net/d4e… — это адрес сервера.</li>
 <li>В программе: «Синхронизация» → адрес сервера, секретный код (тот же SECRET), пароль шифрования → «Сохранить и проверить связь». Должно ответить, что сервер отвечает, с номером версии.</li></ol>
+<h3>Подключить телефон или планшет — по QR-коду</h3>
+<p>Когда сервер уже работает на одном устройстве (обычно компьютере), второе подключается само: вводить адрес и секретный код не нужно, только пароль шифрования базы.</p>
+<ol><li>На первом устройстве: «Синхронизация» → «Подключить телефон или планшет — QR-код». Появится квадрат с узором и срок действия кода (24 часа). Кнопки нет — сначала на этом устройстве должны быть введены пароль шифрования и проверена связь (шаг 1).</li>
+<li>На телефоне откройте программу <b>так, как будете ею пользоваться</b>: значок на экране «Домой» (iPhone), приложение «CRM Адвоката» (Android) или браузер. У значка, приложения и браузера настройки свои — подключать нужно там, где будете работать.</li>
+<li>«Ещё» → «Синхронизация» → «Подключиться по QR-коду» → «Сканировать QR-код» → наведите камеру на квадрат. Кнопки сканирования нет или камера не открылась (iPhone, приложение) — наведите на квадрат обычную камеру телефона: откроется программа в браузере, нажмите там «Скопировать код» и вставьте его в поле «Код подключения» в своей программе. Другой способ — на первом устройстве «Скопировать код» и передать код на телефон письмом самому себе.</li>
+<li>Введите пароль шифрования базы — тот же, что на первом устройстве (не секретный код сервера) → «Подключиться». Должно появиться: «Подключено. С сервера: новых записей — …». Программа сама проверит связь и загрузит базу.</li></ol>
+<p>Если «Пароль не подошёл» — введён не тот пароль (буквы, раскладка, регистр важны). «Код устарел» — на первом устройстве «Новый код». «Подключён другой сервер» — сначала «Синхронизация» → «Отключить сервер». Безопасность: адрес и код сервера в QR-коде зашифрованы вашим паролем, сам пароль в код не входит — без него код ничего не открывает. Всё равно не показывайте QR-код на снимках экрана и удалите код из переписки после подключения.</p>
 <h3>Работа с сервером</h3>
 <ol><li>«Загрузить базу с сервера» — база сервера объединяется с базой устройства: ничего не стирается, одинаковые записи сливаются по полям, спорные правки показываются в «Журнале коллизий». Там у поля, где при обмене осталось чужое значение, есть «Вернуть моё» — значение этого устройства уйдёт на остальные при следующем обмене; если поле уже правили после обмена, программа сначала спросит. Списки (сроки, участники, платежи) объединяются по элементам — их правьте в самой записи.</li>
 <li>«Проверить слияние» — что изменится на сервере и на устройстве, без записи. Полезно перед первой отправкой с нового устройства.</li>
@@ -23208,6 +23599,8 @@ const NEXT_BOOT = {
     try { if (typeof devrStart === 'function') devrStart(); } catch (e) { logErr('devremind:start', e); }
     // п. 9 (04.10.2026): лицензионное соглашение — при первом запуске на устройстве и при новой редакции (ui/help.js)
     try { if (typeof eulaGate === 'function') eulaGate(); } catch (e) { logErr('eula:gate', e); }
+    // v190: программу открыли ссылкой из QR-кода «Подключить телефон» — лист подключения с кодом (sync/pair.js)
+    try { if (typeof pairStart === 'function') pairStart(); } catch (e) { logErr('pair:start', e); }
     try { if (typeof pwaShortcut === 'function') pwaShortcut(); } catch (e) { logErr('pwa:shortcut', e); }
   },
 };
