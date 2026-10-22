@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="21.10.2026 20:13 · a4e8f66">
-<meta name="build-no" content="187">
+<meta name="build" content="22.10.2026 09:07 · 95186cc+">
+<meta name="build-no" content="188">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -7986,6 +7986,8 @@ function crmFlowActRender() { if (typeof UI === 'object' && UI.ready) nav(UI.scr
 async function crmCollectorStatus(manual) { if (typeof monitorCollectorStatus === 'function') return monitorCollectorStatus(manual); }
 // ── далее — построчно из v312 ──
 function crmMonNorm(v){return String(v||'').toLowerCase().replace(/[\s–—-]+/g,'').replace(/[«»"']/g,'');}
+// v188 (урок 185): тот же суд — пустое у одного, равенство или название, продолжающее другое (добавлен регион)
+function crmMonCourtEq(a,b){const x=crmMonNorm(a).replace(/ё/g,'е'),y=crmMonNorm(b).replace(/ё/g,'е');return !x||!y||x===y||x.startsWith(y)||y.startsWith(x);}
 async function crmMonHash(text){const b=new TextEncoder().encode(String(text||'')),h=await crypto.subtle.digest('SHA-256',b);return Array.from(new Uint8Array(h)).map(x=>x.toString(16).padStart(2,'0')).join('');}
 function crmMonIsoDate(v){const s=String(v||'').trim();let m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return `${m[1]}-${m[2]}-${m[3]}`;m=s.match(/(\d{1,2})[.\/]([0-1]?\d)[.\/](\d{4})/);return m?`${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`:'';}
 function crmMonField(o,names){for(const n of names){if(o?.[n]!==undefined&&o[n]!==null)return o[n];}return'';}
@@ -8223,7 +8225,8 @@ async function crmMonAutoApply(rows) {
       // v170 (аудит сборки 169, А6.2): суд и судья — рассмотрения-владельца (прежнее — из его сведений, затем со страницы), не текущих полей
       const courtOf = () => crmMonCourtOwn(c, e, own);
       const scE = courtOf(), sameDay = list.filter(x => x.date === e.date); // v294: сначала точное совпадение по времени и суду
-      const sameCourt = sameDay.filter(x => !x.court || !scE.court || crmMonNorm(x.court) === crmMonNorm(scE.court));
+      // v188 (урок 185): «Ковровский городской суд» и «… Владимирской области» — один суд; при точном равенстве создавалась вторая запись
+      const sameCourt = sameDay.filter(x => crmMonCourtEq(x.court, scE.court));
       const tmin = t => { const m = /^(\d{1,2}):(\d{2})/.exec(t || ''); return m ? (+m[1]) * 60 + (+m[2]) : null; };
       const near = x => { const a = tmin(x.time), c2 = tmin(b.time); return a === null || c2 === null || Math.abs(a - c2) <= 180; }; // v299: разница больше 3 часов — другое событие
       let h = (sameCourt.length === 1 && near(sameCourt[0])) ? sameCourt[0] : (sameCourt.find(x => b.time && x.time === b.time) || null), how = '';
@@ -8243,7 +8246,7 @@ async function crmMonAutoApply(rows) {
         how = 'дополнено по данным суда: ' + ch.join(', '); n.updated++;
       } else if (e.date >= today) {
         const scM = courtOf(); // v271: переносить можно только заседание той же инстанции (тот же суд)
-        const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date) && (!x.court || !scM.court || crmMonNorm(x.court) === crmMonNorm(scM.court)));
+        const free = list.filter(x => x.date >= today && x.status !== 'Проведено' && !(courtDates[c.id] || new Set()).has(x.date) && crmMonCourtEq(x.court, scM.court));
         if (free.length === 1) { h = free[0]; how = `перенесено по данным суда: ${fmtDate(h.date)}${h.time ? ' ' + h.time : ''} → ${fmtDate(e.date)}${b.time ? ' ' + b.time : ''}`; h.movedFrom = { date: h.date, time: h.time || '', room: h.room || '' }; h.date = e.date; if (b.time) h.time = b.time; if (b.room) h.room = b.room; if (e.judge) h.judge = e.judge; if (scM.court && !h.court) h.court = scM.court; if (crmMonStageOf(e) && !h.stage) h.stage = crmMonStageOf(e); n.moved++; }
         else { const sc = courtOf(), same = hearSame(c.id, e.date, b.time, own.id); if (same) { h = same; const ch = []; if (b.room && !h.room) { h.room = b.room; ch.push('зал ' + b.room); } if (e.judge && !h.judge) { h.judge = e.judge; ch.push('судья ' + e.judge); } if (sc.court && !h.court) { h.court = sc.court; ch.push('суд ' + sc.court); } how = 'та же запись с другого устройства' + (ch.length ? ' — дополнено: ' + ch.join(', ') : ''); n.updated++; }
           else { h = { id: newHearId(c.id, e.date, b.time, own.id), caseId: c.id, caseNum: c.number, date: e.date, time: b.time, room: b.room, court: sc.court, judge: e.judge || sc.judge || '', stage: crmMonStageOf(e) || '', status: 'Назначено', note: e.title, monitorEventId: e.id, createdAt: Date.now(), ...(own.id ? { proceedingId: own.id } : {}) }; hearings.push(h); how = 'создано по данным суда'; n.hearings++; } } // v246/v253: суд по инстанции события, при пустом — с самой страницы
@@ -9357,6 +9360,22 @@ function heardupVal(h, f) {
   return typeof v === 'object' ? JSON.stringify(v) : String(v).trim();
 }
 const heardupNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^a-zа-я0-9]+/g, ' ').trim();
+// v188 (снимок пользователя 22.10.2026: «Ковровский городской суд» и «Ковровский городской суд Владимирской области» у двух копий одного
+// заседания; урок 185): название суда, которое продолжает другое (добавлен регион), — тот же суд; оставляется более полное
+function heardupCourtEq(a, b) { const x = heardupNorm(a), y = heardupNorm(b); return !x || !y || x === y || x.startsWith(y + ' ') || y.startsWith(x + ' '); }
+// v188: сведения с сайта суда (дело, рассмотрение, суд, судья, зал, инстанция, описание) — у одной копии пусто, у другой есть: объединение
+// дополняет, ничего не теряя; различаются по существу — решение пользователя. Поля, которые ведёте вы (статус, итог, комментарий, участие,
+// подготовка), должны совпадать полностью: пустое у одной копии может быть вашим очищением
+const HEARDUP_SRC = ['caseId', 'caseNum', 'proceedingId', 'room', 'court', 'judge', 'stage', 'note'];
+function hearingDupCompat(g) {
+  return HEARDUP_SIG.every(f => {
+    if (!HEARDUP_SRC.includes(f)) return g.every(h => heardupVal(h, f) === heardupVal(g[0], f));
+    const vals = [...new Set(g.map(h => heardupVal(h, f)).filter(v => v !== ''))];
+    if (f === 'court') return vals.every(a => vals.every(b => heardupCourtEq(a, b)));
+    if (f === 'room' || f === 'judge' || f === 'stage') return new Set(vals.map(heardupNorm)).size <= 1;
+    return vals.length <= 1;
+  });
+}
 // ключ двойника: дело (внутренняя связь, иначе номер), дата, время.
 // v187 (снимок пользователя 21.10.2026: два одинаковых заседания в календаре; урок 184): рассмотрение в ключ не входит — копия, созданная
 // до рассмотрений (v169) или на устройстве, где событие отнесли иначе, без proceedingId, а другая с ним, в одну группу не попадали и не
@@ -9382,18 +9401,30 @@ function hearingDupPlan(hearings, cases) {
     if (g.length < 2) continue;
     // v177 (N2): разные суды или инстанции у копий — это разные заседания (одна дата и пустое время ещё не совпадение)
     const differ = f => new Set(g.map(h => heardupNorm(h[f])).filter(Boolean)).size > 1;
-    if (differ('court') || differ('stage')) continue;
+    // v188: суд — с учётом продолжения названия (heardupCourtEq)
+    const courts = g.map(h => h.court).filter(v => heardupNorm(v));
+    if (!courts.every(a => courts.every(b => heardupCourtEq(a, b))) || differ('stage')) continue;
     g.sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
     const keep = { ...g[0] }, drop = g.slice(1), fill = [];
     for (const f of HEARDUP_FIELDS) { if (heardupVal(keep, f) !== '') continue; const src = drop.find(x => heardupVal(x, f) !== ''); if (src) { keep[f] = src[f]; fill.push(f); } }
+    // v188: из равнозначных названий суда — более полное
+    const longCourt = courts.reduce((m, x) => (heardupNorm(x).length > heardupNorm(m).length ? x : m), keep.court || '');
+    if (longCourt && longCourt !== keep.court) { keep.court = longCourt; if (!fill.includes('court')) fill.push('court'); }
     const conflicts = [], rankS = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1;
     // первым вариантом (выбран по умолчанию) — значение записи 1; у статуса — «Проведено», затем «Дата прошла»
-    for (const [f, label] of HEARDUP_CHOICE) { const vals = []; g.forEach((h, i) => { const v = heardupVal(h, f); if (v !== '' && !vals.some(x => x.v === v)) vals.push({ v, i }); }); if (f === 'status') vals.sort((a, b) => rankS(b.v) - rankS(a.v)); if (vals.length > 1) conflicts.push({ f, label, opts: vals }); }
+    // v188: равнозначные названия суда выбора не требуют (оставлено полное)
+    for (const [f, label] of HEARDUP_CHOICE) { if (f === 'court') continue; const vals = []; g.forEach((h, i) => { const v = heardupVal(h, f); if (v !== '' && !vals.some(x => x.v === v)) vals.push({ v, i }); }); if (f === 'status') vals.sort((a, b) => rankS(b.v) - rankS(a.v)); if (vals.length > 1) conflicts.push({ f, label, opts: vals }); }
     // статус без выбора: проведённое с результатом важнее «Назначено» и «Дата прошла»; «Дата прошла» важнее «Назначено»
     if (!conflicts.some(c => c.f === 'status')) { const rank = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1; const best = g.reduce((m, x) => (rank(x.status) > rank(m.status) ? x : m), g[0]); if (best.status && best.status !== keep.status) { keep.status = best.status; fill.push('status'); } }
     if (!keep.caseId) { const src = g.find(x => x.caseId); if (src) { keep.caseId = src.caseId; fill.push('caseId'); } }
+    if (!keep.caseNum) { const src = g.find(x => x.caseNum); if (src) { keep.caseNum = src.caseNum; fill.push('caseNum'); } }
     keep.mergedIds = [...new Set([...(keep.mergedIds || []), ...drop.map(x => x.id)])];
-    const cid = g[0].caseId, auto = !!cid && g.every(h => h.caseId === cid && h.monitorEventId) && !!heardupTime(g[0].time) && hearingDupSame(g);
+    // v188 (урок 185): сама программа объединяет копии одного дела (связь установлена — по id или однозначному номеру) с известным временем,
+    // у которых ваши поля совпадают, а сведения с сайта суда не противоречат друг другу (пустое дополняется). Прежнее условие — все поля
+    // буква в букву и у всех копий отметка события суда — оставляло копии с разным написанием суда, копию без связи с делом по id и копию,
+    // внесённую вручную, а копии с разным написанием суда не показывались нигде
+    const keyCid = key.split('|')[0], cid = keep.caseId || '';
+    const auto = !!keyCid && !keyCid.startsWith('n:') && !!heardupTime(g[0].time) && hearingDupCompat(g);
     plan.push({ key, keep, drop, copies: g.map(h => ({ ...h })), fill, conflicts, auto, sig: hearingDupSig(g), caseId: cid || '', caseNum: keep.caseNum || g.find(x => x.caseNum)?.caseNum || '', date: keep.date, time: heardupTime(keep.time) });
   }
   return plan;
@@ -22251,7 +22282,7 @@ const HELP_SECTIONS = [
 <p>Деньги по делу — группа «Деньги: счета, расходы, деньги доверителя» в карточке дела, там три разных вещи. <b>Счёт</b> — гонорар по соглашению: что начислено доверителю и что оплачено («Выставить счёт» в группе; оплата — в карточке счёта или на экране «Финансы»). Аванс, оплата отдельного действия и окончательный расчёт — это платежи по одному счёту: при любой схеме (аванс и остаток после решения, оплата каждого действия, вся сумма в конце) выставьте счёт на гонорар по соглашению и записывайте каждое поступление как платёж; долг по счёту — то, что доверитель ещё должен. Отчёты «Получено» и «Доход» считают именно оплаты счетов — по дате платежа. <b>Этапы работ</b> в карточке счёта («Добавить этап»: название, сумма, «Выполнен») показывают, какая часть оплаченного отработана: «не отработано» — оплачено сверх выполненных этапов, такой аванс при расторжении соглашения возвращается; счета с неотработанным авансом — фильтр «Не отработано» на экране «Финансы», итог — в отчёте «Финансы» → «Неотработанные авансы». У абонентской платы «Счёт за следующий месяц» переносит этапы шаблоном — названия и суммы, не выполненные: новый месяц начинается с нуля отработанного. <b>Деньги доверителя на расходы</b> — суммы, которые доверитель передаёт вперёд на госпошлину, экспертизу и подобное: «Внести», а по мере трат — «Списать» (за что — в назначении); остаток по делу виден там же, списание больше остатка программа записывает только после второго нажатия «Сохранить»; в отчёты эти деньги не входят — это не гонорар. <b>Расход</b> — ваши затраты по делу («Записать расход»), с отметкой «к возмещению». Все операции денег по делу видны в ленте дела по фильтру «Деньги»; остатки денег доверителей по всем делам — «Финансы» → «Деньги на расходы». Операции, внесённые в прежней программе как «депозит», видны здесь как деньги на расходы; если вы записывали туда аванс гонорара — выставьте счёт и отметьте его оплату, а операцию удалите.</p>
 <p>Участники дела (третьи лица, представители, противная сторона): карточка дела → «Суд, стороны, инстанции» → «Изменить участников». У каждого — роль, ИНН (кнопка «По ИНН» заполняет адрес), телефон, почта, заметка. Участник, которого вы убрали, не вернётся ни при обмене с другими устройствами, ни с сайта суда.</p>
 <p>Конфликт интересов: при сохранении дела, доверителя и участников программа ищет то же имя в других делах — доверитель, который проходит у вас противной стороной или третьим лицом, и наоборот (подп. 10 п. 1 ст. 9, п. 1 ст. 11 Кодекса профессиональной этики адвоката). Совпадение имени или фамилии — только предупреждение: если конфликта нет, нажмите «Сохранить» ещё раз.</p>
-<p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер. Заседания-двойники (одно заседание, записанное по событию суда на нескольких устройствах до обмена базой, — до 19.10.2026 у каждого устройства получалась своя запись) программа сводит сама при запуске и после обмена, если копии не правили; копии с вашими правками показывает здесь строкой «Заседания-двойники» с листом «Оставить одно». Так же со сроками, которые программа рассчитала сама (от даты акта, по жалобе), — до сборки 187 каждое устройство записывало свою копию: одинаковые копии сводятся сами, различающиеся — строка «Сроки-двойники», в листе отмечаете, какую оставить. Пока есть неразобранные двойники, на «Сегодня» стоит строка «Повторяющиеся записи» с кнопкой «Разобрать».</p>
+<p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер. Заседания-двойники (одно заседание, записанное по событию суда на нескольких устройствах до обмена базой, — до 19.10.2026 у каждого устройства получалась своя запись) программа сводит сама при запуске и после обмена, если ваши поля у копий совпадают (статус, итог, комментарий, участие, подготовка), а сведения с сайта суда не противоречат: пустое у одной копии дополняется из другой, суд, записанный коротко и с регионом («… городской суд» и «… городской суд … области»), — один суд, остаётся полное название; копии, которые различаются по существу (разные залы, итоги, комментарии), показывает здесь строкой «Заседания-двойники» с листом «Оставить одно». Так же со сроками, которые программа рассчитала сама (от даты акта, по жалобе), — до сборки 187 каждое устройство записывало свою копию: одинаковые копии сводятся сами, различающиеся — строка «Сроки-двойники», в листе отмечаете, какую оставить. Пока есть неразобранные двойники, на «Сегодня» стоит строка «Повторяющиеся записи» с кнопкой «Разобрать».</p>
 <p>Жест: строку «Выполнено» в «Задачах и сроках» и на «Сегодня» можно смахнуть пальцем вправо — задача или срок отмечаются выполненными; у прошедшего заседания смахивание открывает «Итог заседания». Кнопки в строке работают как раньше.</p>
 <p>Настройки: строка «Найти настройку» вверху — введите слово (например, «PIN», «Telegram», «ордер»), останутся только подходящие пункты.</p>
 <p>Журнал ордеров: «Настройки» → «Журнал ордеров» или карточка дела → «Суд, стороны, инстанции» → «Выписать ордер». Номер предлагается следующим за последним в журнале — сверьте его с бланком из книжки; повтор номера программа показывает и записывает только после второго нажатия. Номер ордера, вписанный в форму дела (вкладка «Соглашение»), попадает в журнал сам, один раз. Реестр ордеров для печати — кнопка в журнале.</p>
