@@ -24,6 +24,8 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.27: проверка сертификатов TLS у процесса включена: личный сервер, хранилище, Telegram, API и обновления проверяются; послабления —
+//         только у запросов к сайтам судов *.sudrf.ru через отдельный транспорт (аудит сборки 188 от 22.10.2026, R6).
 //  v3.26: «Подготовка дела к рассмотрению» (КоАП, движение дела) — не заседание; беседа и собеседование — заседания (19.10.2026).
 //  v3.25: ссылка текущего рассмотрения несёт cpid — событие с proceedingId без смены ключа (аудит сборки 169, А2).
 //  v3.24: ссылка рассмотрения дела несёт pid — события этой ссылки с proceedingId, ключ с |p:<id> (аудит 17.10.2026, рассмотрения дела).
@@ -86,14 +88,27 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.26';
-// Сетевые послабления ТОЛЬКО ради сайтов судов: у многих *.sudrf.ru
-// самоподписанные/просроченные сертификаты и устаревший TLS, которые Node
-// по умолчанию отвергает («fetch failed»). Коллектор лишь читает публичные
-// страницы, поэтому проверку сертификатов отключаем осознанно.
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-try { tls.DEFAULT_MIN_VERSION = 'TLSv1'; } catch (e) {}
-try { tls.DEFAULT_CIPHERS = tls.DEFAULT_CIPHERS + ':@SECLEVEL=0'; } catch (e) {}
+const COLLECTOR_VER = '3.27';
+// v3.27 (аудит сборки 188, R6): сетевые послабления (самоподписанные и просроченные сертификаты, устаревший TLS у многих *.sudrf.ru) —
+// ТОЛЬКО у запросов к сайтам судов ГАС «Правосудие» и только через отдельный транспорт (courtDispatcher). Процесс целиком их больше не
+// получает: личный сервер (с кодом), хранилище (с IAM-токеном), Telegram, API Assist, СУДиДЕЛО и загрузка обновлений проверяют сертификаты.
+// Переменная NODE_TLS_REJECT_UNAUTHORIZED=0, заданная функции прежним мастером, снимается при загрузке модуля: Node читает её при каждом
+// соединении, и она отключала проверку у всех соединений процесса (в том числе у загрузчика после первого обновления)
+delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+const TLS_RELAXED_SUFFIXES = ['.sudrf.ru'];
+function tlsRelaxedFor(host) { const h = String(host || '').toLowerCase().replace(/\.$/, ''); return TLS_RELAXED_SUFFIXES.some(sfx => h === sfx.slice(1) || h.endsWith(sfx)); }
+let COURT_DISPATCHER = null, COURT_DISPATCHER_ERR = '';
+// транспорт undici (встроен в Node 18+, класс — у глобального диспетчера fetch) с ослабленной проверкой; создаётся один раз.
+// Недоступен — страницы судов читаются обычным fetch со строгой проверкой (сайт с плохим сертификатом — повтор по http, как и прежде)
+function courtDispatcher() {
+  if (COURT_DISPATCHER || COURT_DISPATCHER_ERR) return COURT_DISPATCHER;
+  try {
+    const g = globalThis[Symbol.for('undici.globalDispatcher.1')], Agent = g && g.constructor;
+    if (typeof Agent !== 'function') throw new Error('undici Agent недоступен');
+    COURT_DISPATCHER = new Agent({ connect: { rejectUnauthorized: false, minVersion: 'TLSv1', ciphers: tls.DEFAULT_CIPHERS + ':@SECLEVEL=0' } });
+  } catch (e) { COURT_DISPATCHER_ERR = (e && e.message) || String(e); console.log('транспорт для сайтов судов не создан: ' + COURT_DISPATCHER_ERR + ' — сертификаты судов проверяются строго'); }
+  return COURT_DISPATCHER;
+}
 try { dns.setDefaultResultOrder('ipv4first'); } catch (e) {} // Windows/IPv6 нередко ломает доступ к судам
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -731,14 +746,16 @@ async function fetchPage(url, timeoutMs) {
     for (let hop = 0; ; hop++) {
       let pu = null; try { pu = new URL(cur); } catch (e) { throw finalErr('некорректный адрес страницы'); }
       if (!/^https?:$/.test(pu.protocol) || netHostBad(pu.hostname)) throw finalErr('адрес не похож на сайт суда (' + pu.protocol + '//' + pu.hostname + ') — коллектор туда не обращается');
-      const r = await fetch(cur, {
+      // v3.27: послабления TLS — только у сайта суда *.sudrf.ru (проверяется адрес КАЖДОГО перехода; секретов в этих запросах нет)
+      const relaxed = tlsRelaxedFor(pu.hostname) ? courtDispatcher() : null;
+      const r = await fetch(cur, Object.assign({
         signal: ctrl.signal, redirect: 'manual',
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml',
           'Accept-Language': 'ru-RU,ru;q=0.9'
         }
-      });
+      }, relaxed ? { dispatcher: relaxed } : {}));
       const loc = r.status >= 300 && r.status < 400 && r.headers && typeof r.headers.get === 'function' ? r.headers.get('location') : null;
       if (loc) {
         try { if (r.body && typeof r.body.cancel === 'function') await r.body.cancel(); } catch (e) { /* штатно: тело переадресации не нужно */ }
@@ -1195,6 +1212,7 @@ function runTests() {
     const P = '<table><tr><td>Подготовка дела к рассмотрению</td><td>30.09.2026</td><td>10:18</td><td></td><td>Назначено судебное заседание</td></tr><tr><td>Судебное заседание</td><td>14.10.2026</td><td>09:30</td><td>3</td><td></td></tr><tr><td>Подготовка дела (собеседование)</td><td>01.10.2026</td><td>10:00</td><td></td><td></td></tr><tr><td>Подготовка материалов к судебному разбирательству</td><td>02.10.2026</td><td>11:00</td><td></td><td></td></tr></table>';
     return parseCasePage(P).hearings.map(h => h.date).join() === '14.10.2026,01.10.2026' && !isHearingLabel('Подготовка дела к рассмотрению') && isHearingLabel('Подготовка дела (собеседование)') && isHearingLabel('Беседа');
   })());
+  t('v3.27: проверка сертификатов у процесса включена, послабления — только *.sudrf.ru', process.env.NODE_TLS_REJECT_UNAUTHORIZED === undefined && tls.DEFAULT_MIN_VERSION !== 'TLSv1' && !/SECLEVEL=0/.test(String(tls.DEFAULT_CIPHERS)) && tlsRelaxedFor('kovrovsky--wld.sudrf.ru') && tlsRelaxedFor('sudrf.ru') && !tlsRelaxedFor('functions.yandexcloud.net') && !tlsRelaxedFor('storage.yandexcloud.net') && !tlsRelaxedFor('advocate33.github.io') && !tlsRelaxedFor('evil-sudrf.ru') && !tlsRelaxedFor('mos-gorsud.ru') && !tlsRelaxedFor('api.telegram.org'));
   console.log(`коллектор: ${pass}/${pass + fail}`);
   process.exit(fail ? 1 : 0);
 }

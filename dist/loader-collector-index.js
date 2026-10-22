@@ -5,6 +5,10 @@
 //  Переменные: UPDATE_URL (папка обновлений автора), UPDATE_PIN (например 3.12 — зафиксировать).
 // ════════════════════════════════════════════════════════════════════
 'use strict';
+// v1.3 (аудит сборки 188 от 22.10.2026, R6): переменная NODE_TLS_REJECT_UNAUTHORIZED=0, заданная функции прежним мастером, отключала
+// проверку сертификатов у всего процесса — в том числе у загрузки version.json и кода коллектора. Снимается до первого запроса:
+// обновления читаются с проверкой сертификата; послабления для сайтов судов коллектор 3.27 делает сам, только у запросов к ним
+delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
 const fs = require('fs'), path = require('path'), crypto = require('crypto'), { pathToFileURL } = require('url');
 const UPDATE_URL = String(process.env.UPDATE_URL || '').replace(/\/+$/, '');
 const PIN = String(process.env.UPDATE_PIN || '').trim();

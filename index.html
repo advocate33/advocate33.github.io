@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="22.10.2026 09:07 · 95186cc+">
-<meta name="build-no" content="188">
+<meta name="build" content="22.10.2026 19:29 · 2f99544+">
+<meta name="build-no" content="189">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -1355,7 +1355,7 @@ function fieldStamps(obj, prev, ts) {
   return obj;
 }
 // служебные свойства элемента рассмотрения, у которых своей метки нет
-const PROC_EL_SKIP = ['id', 'fields', 'fieldsCh', 'fieldsBy', 'metaCh', 'updatedAt', 'createdAt'];
+const PROC_EL_SKIP = ['id', 'fields', 'fieldsCh', 'fieldsBy', 'fieldsByAlso', 'metaCh', 'updatedAt', 'createdAt'];
 const procElJ = v => JSON.stringify(v === undefined ? null : v);
 // метки полей элементов рассмотрений: изменённое, добавленное и очищенное поле — ts; неизменённое без метки — метка прежней версии элемента
 // (замораживается: иначе оно выглядело бы правленым при каждом слиянии); новый элемент — ts всем полям без метки. Значение поля изменено,
@@ -1366,13 +1366,15 @@ function procFieldStamps(list, prevList, ts) {
     if (!el || el.id == null || typeof el !== 'object') continue;
     const pe = pm.get(el.id), base = pe ? Number(pe.updatedAt || pe.createdAt || 0) : 0;
     const f = el.fields && typeof el.fields === 'object' ? el.fields : {}, pf = pe && pe.fields && typeof pe.fields === 'object' ? pe.fields : {};
-    const fc = Object.assign({}, pe && pe.fieldsCh || {}, el.fieldsCh || {}), by = Object.assign({}, el.fieldsBy || {}), pby = pe && pe.fieldsBy || {};
+    const fc = Object.assign({}, pe && pe.fieldsCh || {}, el.fieldsCh || {}), by = Object.assign({}, el.fieldsBy || {}), pby = pe && pe.fieldsBy || {}, also = Object.assign({}, el.fieldsByAlso || {});
     for (const k of new Set(Object.keys(f).concat(Object.keys(pf)))) {
       if (!pe) { if (fc[k] === undefined) fc[k] = ts; continue; }
-      if (procElJ(f[k]) !== procElJ(pf[k])) { const given = el.fieldsCh && pe.fieldsCh && Number(el.fieldsCh[k] || 0) > Number(pe.fieldsCh[k] || 0); if (!given) fc[k] = ts; if (by[k] !== undefined && procElJ(by[k]) === procElJ(pby[k])) delete by[k]; }
+      // v189 (аудит сборки 188, R2): вместе с отметкой происхождения снимаются и подтверждения других событий (fieldsByAlso)
+      if (procElJ(f[k]) !== procElJ(pf[k])) { const given = el.fieldsCh && pe.fieldsCh && Number(el.fieldsCh[k] || 0) > Number(pe.fieldsCh[k] || 0); if (!given) fc[k] = ts; if (by[k] !== undefined && procElJ(by[k]) === procElJ(pby[k])) { delete by[k]; delete also[k]; } }
       else if (fc[k] === undefined) fc[k] = base;
     }
     el.fieldsCh = fc; if (Object.keys(by).length) el.fieldsBy = by; else delete el.fieldsBy;
+    if (Object.keys(also).length) el.fieldsByAlso = also; else delete el.fieldsByAlso;
     const mc = Object.assign({}, pe && pe.metaCh || {}, el.metaCh || {});
     for (const k of new Set(Object.keys(el).concat(pe ? Object.keys(pe) : []))) {
       if (PROC_EL_SKIP.includes(k) || k.startsWith('_')) continue;
@@ -1394,14 +1396,28 @@ function mergeProceeding(x, y) {
   // updatedAt растёт от правки ДРУГОГО поля при промежуточном слиянии и менял победителя прежнего спора — три копии в разном порядке
   // обмена давали разных судей. Пара (метка поля, значение) упорядочена полностью — итог не зависит от порядка и повтора доставки
   const pickT = (a, b, ta, tb, va, vb) => { if (ta !== tb) return ta > tb ? a : b; return procElJ(va) <= procElJ(vb) ? a : b; };
-  const out = {}, fx = x.fields || {}, fy = y.fields || {}, cx = x.fieldsCh || {}, cy = y.fieldsCh || {}, bx = x.fieldsBy || {}, by = y.fieldsBy || {};
+  const out = {}, fx = x.fields || {}, fy = y.fields || {}, cx = x.fieldsCh || {}, cy = y.fieldsCh || {}, bx = x.fieldsBy || {}, by = y.fieldsBy || {}, ax = x.fieldsByAlso || {}, ay = y.fieldsByAlso || {};
   const t = (fl, c, u, k) => c[k] !== undefined ? Number(c[k] || 0) : (fl[k] !== undefined ? u : 0);
-  const fields = {}, fc = {}, fb = {};
+  const fields = {}, fc = {}, fb = {}, fa = {};
+  const idsOf = (b, a) => [].concat(b !== undefined && b !== null && b !== '' ? [String(b)] : [], Array.isArray(a) ? a.map(String) : []);
   for (const k of new Set(Object.keys(fx).concat(Object.keys(fy), Object.keys(cx), Object.keys(cy)))) {
     const tx = t(fx, cx, ux, k), ty = t(fy, cy, uy, k), w = pickT(x, y, tx, ty, fx[k], fy[k]), src = w === x ? fx : fy;
     if (src[k] !== undefined) fields[k] = JSON.parse(JSON.stringify(src[k]));
     fc[k] = Math.max(tx, ty);
-    const b = (w === x ? bx : by)[k]; if (b !== undefined && src[k] !== undefined) fb[k] = b;
+    if (src[k] === undefined) continue;
+    // v189 (аудит сборки 188, R2): происхождение — вместе со значением и меткой, а не по положению аргумента. Метки и значения равны, а
+    // записавшие события разные — оба подтверждают дату: fieldsBy — меньший id, остальные — fieldsByAlso (procActProof → 'other':
+    // дата при переносе любого из них не убирается); одинаково в любом порядке и при повторе доставки. Отметка есть лишь у одной
+    // копии — происхождение не доказано (снимается). Метки разные — отметки победившей копии
+    if (tx === ty && procElJ(fx[k]) === procElJ(fy[k])) {
+      if (bx[k] === undefined || by[k] === undefined || bx[k] === null || by[k] === null) continue;
+      const ids = [...new Set(idsOf(bx[k], ax[k]).concat(idsOf(by[k], ay[k])))].sort();
+      if (!ids.length) continue;
+      fb[k] = ids[0]; if (ids.length > 1) fa[k] = ids.slice(1);
+      continue;
+    }
+    const b = (w === x ? bx : by)[k]; if (b !== undefined) fb[k] = b;
+    const a = (w === x ? ax : ay)[k]; if (b !== undefined && Array.isArray(a) && a.length) fa[k] = a.slice();
   }
   const mx = x.metaCh || {}, my = y.metaCh || {}, mc = {};
   for (const k of new Set(Object.keys(x).concat(Object.keys(y)))) {
@@ -1412,7 +1428,7 @@ function mergeProceeding(x, y) {
     mc[k] = Math.max(tx, ty);
   }
   for (const k of Object.keys(mx).concat(Object.keys(my))) if (mc[k] === undefined) mc[k] = Math.max(Number(mx[k] || 0), Number(my[k] || 0));
-  out.id = x.id; out.fields = fields; out.fieldsCh = fc; if (Object.keys(fb).length) out.fieldsBy = fb; out.metaCh = mc;
+  out.id = x.id; out.fields = fields; out.fieldsCh = fc; if (Object.keys(fb).length) out.fieldsBy = fb; if (Object.keys(fa).length) out.fieldsByAlso = fa; out.metaCh = mc;
   out.createdAt = Math.min(Number(x.createdAt || ux), Number(y.createdAt || uy)) || Number(x.createdAt || y.createdAt || 0);
   out.updatedAt = Math.max(ux, uy);
   return out;
@@ -1497,7 +1513,7 @@ function mergeProcCurrent(a, b, list, tombs) {
 // которое его записало, теряет отметку происхождения fieldsBy. Ответ — true, если элемент изменён.
 function procSlotMaterialize(el, rec, def, now) {
   if (!el || !rec || !def) return false;
-  const ch = rec._ch || {}, fields = Object.assign({}, el.fields || {}), fc = Object.assign({}, el.fieldsCh || {}), by = Object.assign({}, el.fieldsBy || {});
+  const ch = rec._ch || {}, fields = Object.assign({}, el.fields || {}), fc = Object.assign({}, el.fieldsCh || {}), by = Object.assign({}, el.fieldsBy || {}), also = Object.assign({}, el.fieldsByAlso || {});
   // элемент без единого поля (заготовка проигравшего рассмотрения) принимает всё; элемент прежней сборки с полями, но без fieldsCh —
   // только правки позже его метки
   const base = Object.keys(fields).length ? Number(el.updatedAt || el.createdAt || 0) : 0; let changed = false, top = 0;
@@ -1507,10 +1523,11 @@ function procSlotMaterialize(el, rec, def, now) {
     if (!(t > tE) && !(tE === 0 && !procEmpty(rec[k]) && fields[k] === undefined)) continue;
     const v = rec[k], has = !procEmpty(v), same = has ? JSON.stringify(v) === JSON.stringify(fields[k]) : fields[k] === undefined;
     if (has) fields[k] = JSON.parse(JSON.stringify(v)); else delete fields[k];
-    fc[k] = t; if (!same) delete by[k]; if (t > top) top = t; changed = true;
+    fc[k] = t; if (!same) { delete by[k]; delete also[k]; } if (t > top) top = t; changed = true;
   }
   if (!changed) return false;
   el.fields = fields; el.fieldsCh = fc; if (Object.keys(by).length) el.fieldsBy = by; else delete el.fieldsBy;
+  if (Object.keys(also).length) el.fieldsByAlso = also; else delete el.fieldsByAlso;
   el.updatedAt = Math.max(Number(now || 0), Number(el.updatedAt || 0) + 1, top);
   return true;
 }
@@ -1537,7 +1554,24 @@ function mergeCaseRecords(cur, rec, base, events) {
   if (newer._delItems || older._delItems) { const dl = {}; for (const src of [older._delItems, newer._delItems]) if (src) for (const f of Object.keys(src)) { dl[f] = dl[f] || {}; for (const id of Object.keys(src[f] || {})) dl[f][id] = Math.max(Number(dl[f][id] || 0), Number(src[f][id] || 0)); } m._delItems = dl; }
   if (Array.isArray(newer.proceedings) || Array.isArray(older.proceedings)) m.proceedings = mergeItemLists(newer.proceedings, older.proceedings, 1, 0, m._delItems && m._delItems.proceedings, mergeProceeding);
   // v258: остальные поля — по меткам изменения (_ch), если они есть у обеих версий
-  if (newer._ch && older._ch) { const chN = newer._ch, chO = older._ch; for (const k of Object.keys(older)) { if (k.startsWith('_') || k === 'id' || last[CASE_MERGE_FIELDS[k] || k] || ['deadlines', 'participants', 'history', 'ipReceipts', 'proceedings'].includes(k)) continue; if ((chO[k] || 0) > (chN[k] || 0)) m[k] = older[k]; } m._ch = Object.assign({}, chO, chN); }
+  // v189 (аудит сборки 188, R1): значение и метка поля выбираются одной операцией — у выбранного значения остаётся ЕГО метка (прежде
+  // метка всегда бралась из более новой записи дела и у значения из старшей копии оказывалась меньше, чем у вытесненной правки: третья
+  // копия со средней меткой возвращала старого судью). Равные метки при разных значениях — меньшее по записи (не время правки другого
+  // поля — одинаково у всех устройств в любом порядке доставки). Поле, удалённое позже на одной стороне, — удалено (отсутствие — тоже правка).
+  // Инвариант: метка выбранного поля не меньше любой из двух
+  if (newer._ch && older._ch) {
+    const chN = newer._ch, chO = older._ch, ch = {}, lists = ['deadlines', 'participants', 'history', 'ipReceipts', 'proceedings'], sj = v => JSON.stringify(v === undefined ? null : v);
+    for (const k of new Set(Object.keys(chO).concat(Object.keys(chN), Object.keys(older), Object.keys(newer)))) {
+      if (k.startsWith('_') || k === 'id') continue;
+      const tN = Number(chN[k] || 0), tO = Number(chO[k] || 0); ch[k] = Math.max(tN, tO);
+      if (last[CASE_MERGE_FIELDS[k] || k] || lists.includes(k)) continue;
+      let fromOlder = tO > tN;
+      if (tO === tN && tO > 0 && sj(older[k]) !== sj(newer[k])) fromOlder = sj(older[k]) < sj(newer[k]);
+      if (!fromOlder) continue;
+      if (older[k] === undefined) delete m[k]; else m[k] = JSON.parse(JSON.stringify(older[k]));
+    }
+    m._ch = ch;
+  }
   // v170 (аудит сборки 169, А5): текущие рассмотрения — по инстанциям, а не одним объектом (иначе новое рассмотрение одного устройства
   // пропадало целиком вместе со своим id)
   if (newer.procCurrent || older.procCurrent) {
@@ -2008,10 +2042,12 @@ async function migrateStableRelations() {
     }
   }
 }
-function addCaseHistoryEvent(obj, field, from, to, source) {
+function addCaseHistoryEvent(obj, field, from, to, source, extra) {
   if (!obj || from === to) return;
   const ev = { id: uid('СБ'), caseId: obj.id || '', caseNum: obj.number || '', ts: Date.now(),
     field: field || '', from: from || '', to: to || '', source: source || 'form' };
+  // v189 (аудит сборки 188, R7): extra — дополнительные сведения записи журнала (snap — снимок обеих версий при объединении рассмотрений)
+  if (extra && typeof extra === 'object') for (const k of Object.keys(extra)) if (!(k in ev)) ev[k] = extra[k];
   if (field === 'status') {
     // v197: вехи статуса дублируются в записи дела — их читает аналитика закрытий (caseClosedInRange и др.);
     // одинаковый id с записью журнала исключает задвоение при объединённом показе
@@ -3265,9 +3301,11 @@ function nxFiledOf(c, act) {
 // после обмена у дела оставалось столько копий, сколько устройств пересчитали срок до обмена (урок 173 — то же у заседаний).
 // Занятый живым сроком этого дела id (например, у срока прежнего рассмотрения с ключом p:<id>|…) получает суффикс — порядок у устройств одинаков.
 function nxHash(s) { let h = 0x811c9dc5; s = String(s || ''); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(36); }
+// v189 (аудит сборки 188, R5): занят и id удалённого срока (надгробие _delDl) — иначе срок, созданный заново тем же правилом, получал id
+// надгробия и при слиянии исчезал, если отметка удаления (с устройства со спешащими часами) оказывалась позже его createdAt
 function dlAutoId(c, key) {
   if (!c || !c.id || !key) return uid('СР');
-  const base = 'СР-' + nxHash(c.id + '|' + key), taken = new Set((Array.isArray(c.deadlines) ? c.deadlines : []).filter(Boolean).map(d => d.id));
+  const base = 'СР-' + nxHash(c.id + '|' + key), taken = new Set((Array.isArray(c.deadlines) ? c.deadlines : []).filter(Boolean).map(d => d.id).concat(Object.keys(c._delDl && typeof c._delDl === 'object' ? c._delDl : {})));
   let id = base, n = 1; while (taken.has(id)) id = base + '-' + (++n); return id;
 }
 // nowISO — «сегодня» для правила «срок уже прошёл» (урок 8: часы передаются параметром; по умолчанию — часы программы)
@@ -9367,9 +9405,22 @@ function heardupCourtEq(a, b) { const x = heardupNorm(a), y = heardupNorm(b); re
 // дополняет, ничего не теряя; различаются по существу — решение пользователя. Поля, которые ведёте вы (статус, итог, комментарий, участие,
 // подготовка), должны совпадать полностью: пустое у одной копии может быть вашим очищением
 const HEARDUP_SRC = ['caseId', 'caseNum', 'proceedingId', 'room', 'court', 'judge', 'stage', 'note'];
+// v189 (аудит сборки 188, R3): пустое поле сведений суда — «не заполнено» или «очищено вами»? Поля суда, судьи, зала, инстанции, описания и
+// рассмотрения правятся и вручную: метка правки поля (_ch, fieldStamps) у копии с пустым значением ПОЗЖЕ, чем у копии со значением, — это
+// очищение после заполнения, а не незаполненное поле: сама программа не дополняет, в ручном разборе предлагается и пустой вариант (первым —
+// как последнее решение). Связь с делом (caseId, caseNum) пользователь не очищает — к ней это не относится; без меток (прежние сборки) — пусто
+const HEARDUP_CLEARABLE = ['court', 'judge', 'room', 'stage', 'note', 'proceedingId'];
+const heardupStamp = (h, f) => Number((h && h._ch && h._ch[f]) || 0);
+function heardupClearedLater(g, f) {
+  if (!HEARDUP_CLEARABLE.includes(f)) return false;
+  let tE = -1, tF = -1;
+  for (const h of g) { const t = heardupStamp(h, f); if (heardupVal(h, f) === '') { if (t > tE) tE = t; } else if (t > tF) tF = t; }
+  return tE > 0 && tF >= 0 && tE > tF;
+}
 function hearingDupCompat(g) {
   return HEARDUP_SIG.every(f => {
     if (!HEARDUP_SRC.includes(f)) return g.every(h => heardupVal(h, f) === heardupVal(g[0], f));
+    if (heardupClearedLater(g, f)) return false;
     const vals = [...new Set(g.map(h => heardupVal(h, f)).filter(v => v !== ''))];
     if (f === 'court') return vals.every(a => vals.every(b => heardupCourtEq(a, b)));
     if (f === 'room' || f === 'judge' || f === 'stage') return new Set(vals.map(heardupNorm)).size <= 1;
@@ -9386,11 +9437,16 @@ function hearingDupKey(h, caseIdOf) { const cid = h.caseId || (caseIdOf ? caseId
 function hearingDupSame(g) { return g.every(h => HEARDUP_SIG.every(f => heardupVal(h, f) === heardupVal(g[0], f))); }
 // v177 (N1): прежнее имя — для совместимости вызовов; теперь «трогали» = копия отличается от другой копии содержимым
 function hearingUserTouched(h, other) { return other ? !hearingDupSame([h, other]) : !h.monitorEventId; }
-// подпись плана: id и версии всех копий группы — изменение любой копии после предпросмотра меняет подпись (N3)
-function hearingDupSig(g) { return g.map(h => String(h.id) + ':' + Number(h._upd || 0)).sort().join(','); }
+// подпись плана: id и версии всех копий группы — изменение любой копии после предпросмотра меняет подпись (N3).
+// v189 (аудит сборки 188, R4): и события суда, применённые к копиям (их версии) — объединение правит и их
+function hearingDupSig(g, events) {
+  const ids = new Set(g.map(h => h.id)), ev = (events || []).filter(e => e && !e._deleted && ids.has(e.appliedRecordId)).map(e => 'e' + String(e.id) + ':' + Number(e._upd || 0));
+  return g.map(h => String(h.id) + ':' + Number(h._upd || 0)).concat(ev).sort().join(',');
+}
 // план объединения: группы из двух и более живых заседаний с одним ключом; keep — копия с наименьшим id, дополненная пустыми полями из остальных;
 // conflicts — поля с разными непустыми значениями (выбор пользователя); auto — копии одинаковы, все созданы по событию суда, одно дело, время известно
-function hearingDupPlan(hearings, cases) {
+// v189: events — события суда (для подписи плана); без них подпись — только по заседаниям
+function hearingDupPlan(hearings, cases, events) {
   // v177 (N2): номер дела — только однозначный (два дела с одним номером — связь по номеру не строится)
   const byNum = new Map(), dupNum = new Set(); (cases || []).forEach(c => { if (!c || c._deleted || !c.number) return; if (byNum.has(c.number) && byNum.get(c.number) !== c.id) dupNum.add(c.number); else byNum.set(c.number, c.id); });
   const caseIdOf = num => (dupNum.has(num) ? '' : byNum.get(num)) || '';
@@ -9406,14 +9462,16 @@ function hearingDupPlan(hearings, cases) {
     if (!courts.every(a => courts.every(b => heardupCourtEq(a, b))) || differ('stage')) continue;
     g.sort((a, b) => (String(a.id) < String(b.id) ? -1 : 1));
     const keep = { ...g[0] }, drop = g.slice(1), fill = [];
-    for (const f of HEARDUP_FIELDS) { if (heardupVal(keep, f) !== '') continue; const src = drop.find(x => heardupVal(x, f) !== ''); if (src) { keep[f] = src[f]; fill.push(f); } }
+    // v189 (R3): поле, очищенное позже, чем заполнено у другой копии, не дополняется — выбор пользователя (с пустым вариантом)
+    for (const f of HEARDUP_FIELDS) { if (heardupVal(keep, f) !== '' || heardupClearedLater(g, f)) continue; const src = drop.find(x => heardupVal(x, f) !== ''); if (src) { keep[f] = src[f]; fill.push(f); } }
     // v188: из равнозначных названий суда — более полное
     const longCourt = courts.reduce((m, x) => (heardupNorm(x).length > heardupNorm(m).length ? x : m), keep.court || '');
-    if (longCourt && longCourt !== keep.court) { keep.court = longCourt; if (!fill.includes('court')) fill.push('court'); }
+    if (longCourt && longCourt !== keep.court && !heardupClearedLater(g, 'court')) { keep.court = longCourt; if (!fill.includes('court')) fill.push('court'); }
     const conflicts = [], rankS = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1;
     // первым вариантом (выбран по умолчанию) — значение записи 1; у статуса — «Проведено», затем «Дата прошла»
     // v188: равнозначные названия суда выбора не требуют (оставлено полное)
-    for (const [f, label] of HEARDUP_CHOICE) { if (f === 'court') continue; const vals = []; g.forEach((h, i) => { const v = heardupVal(h, f); if (v !== '' && !vals.some(x => x.v === v)) vals.push({ v, i }); }); if (f === 'status') vals.sort((a, b) => rankS(b.v) - rankS(a.v)); if (vals.length > 1) conflicts.push({ f, label, opts: vals }); }
+    // v189 (R3): очищенное позже поле — выбор с пустым вариантом первым (последнее решение пользователя)
+    for (const [f, label] of HEARDUP_CHOICE) { const cleared = heardupClearedLater(g, f); if (f === 'court' && !cleared) continue; const vals = []; g.forEach((h, i) => { const v = heardupVal(h, f); if (v !== '' && !vals.some(x => x.v === v)) vals.push({ v, i }); }); if (f === 'status') vals.sort((a, b) => rankS(b.v) - rankS(a.v)); if (cleared) vals.unshift({ v: '', i: g.findIndex(h => heardupVal(h, f) === '') }); if (vals.length > 1) conflicts.push({ f, label, opts: vals }); }
     // статус без выбора: проведённое с результатом важнее «Назначено» и «Дата прошла»; «Дата прошла» важнее «Назначено»
     if (!conflicts.some(c => c.f === 'status')) { const rank = s => s === 'Проведено' ? 3 : s === 'Дата прошла' ? 2 : 1; const best = g.reduce((m, x) => (rank(x.status) > rank(m.status) ? x : m), g[0]); if (best.status && best.status !== keep.status) { keep.status = best.status; fill.push('status'); } }
     if (!keep.caseId) { const src = g.find(x => x.caseId); if (src) { keep.caseId = src.caseId; fill.push('caseId'); } }
@@ -9425,7 +9483,7 @@ function hearingDupPlan(hearings, cases) {
     // внесённую вручную, а копии с разным написанием суда не показывались нигде
     const keyCid = key.split('|')[0], cid = keep.caseId || '';
     const auto = !!keyCid && !keyCid.startsWith('n:') && !!heardupTime(g[0].time) && hearingDupCompat(g);
-    plan.push({ key, keep, drop, copies: g.map(h => ({ ...h })), fill, conflicts, auto, sig: hearingDupSig(g), caseId: cid || '', caseNum: keep.caseNum || g.find(x => x.caseNum)?.caseNum || '', date: keep.date, time: heardupTime(keep.time) });
+    plan.push({ key, keep, drop, copies: g.map(h => ({ ...h })), fill, conflicts, auto, sig: hearingDupSig(g, events), caseId: cid || '', caseNum: keep.caseNum || g.find(x => x.caseNum)?.caseNum || '', date: keep.date, time: heardupTime(keep.time) });
   }
   return plan;
 }
@@ -9472,14 +9530,19 @@ function heardupTx(fn) {
 }
 // применить одну группу внутри транзакции по свежим записям: план перечитан; подпись иная — отказ с новым планом; auto — копии всё ещё одинаковы
 function hearingDupApplyIn(H, E, C, key, sig, choices, mustAuto) {
-  const p = hearingDupPlan(H.filter(h => h && !h._deleted), C).find(x => x.key === key);
+  const p = hearingDupPlan(H.filter(h => h && !h._deleted), C, E).find(x => x.key === key);
   if (!p) return { error: 'gone', text: 'Двойников у этого заседания уже нет' };
-  if (sig && p.sig !== sig) return { error: 'changed', text: 'Копии заседания изменились после того, как вы открыли лист — проверьте новый план', plan: p };
+  if (sig && p.sig !== sig) return { error: 'changed', text: 'Копии заседания или их события суда изменились после того, как вы открыли лист — проверьте новый план', plan: p };
   if (mustAuto && !p.auto) return { error: 'changed', text: 'Копии больше не одинаковы — объединение только вручную' };
   const keep = hearingDupKeep(p, choices), now = Date.now(), dropIds = new Set(p.drop.map(x => x.id));
+  // v189 (аудит сборки 188, R4): рассмотрение различалось у копий и выбрано в листе — это выбор пользователя: отметка procManual у оставленной
+  // записи (автоматическое исправление связей и «Вернуть как текущее» её не трогают), а применённые к копиям события суда получают то же
+  // рассмотрение — расхождение «событие — заседание» не создаётся. Ссылка, карточка и прочие сведения источника у событий не меняются
+  const procChosen = (p.conflicts || []).some(x => x.f === 'proceedingId');
+  if (procChosen) { keep.procManual = now; keep.procAuto = null; keep.procOp = ''; }
   const iK = H.findIndex(h => h && h.id === keep.id); if (iK < 0) return { error: 'gone', text: 'Запись не найдена' }; H[iK] = keep;
   for (const h of H) if (h && dropIds.has(h.id)) { h._deleted = true; h._deletedAt = now; h.mergedInto = keep.id; }
-  let moved = 0; for (const e of E) if (e && !e._deleted && dropIds.has(e.appliedRecordId)) { e.appliedRecordId = keep.id; moved++; }
+  let moved = 0; for (const e of E) { if (!e || e._deleted) continue; const mine = dropIds.has(e.appliedRecordId) || e.appliedRecordId === keep.id; if (!mine) continue; if (dropIds.has(e.appliedRecordId)) { e.appliedRecordId = keep.id; moved++; } if (procChosen) { if (keep.proceedingId) e.proceedingId = keep.proceedingId; else delete e.proceedingId; e.procManual = now; delete e.procRepair; } }
   const c = C.find(x => x && !x._deleted && (keep.caseId ? x.id === keep.caseId : x.number === p.caseNum));
   if (c && typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, 'hearing_upd', '', `Заседание ${fmtDate(p.date)}${p.time ? ' ' + p.time : ''}: объединены ${p.drop.length + 1} одинаковые записи — оставлена одна, остальные в корзине`, 'auto');
   return { ok: true, n: p.drop.length, moved, keepId: keep.id };
@@ -9487,9 +9550,9 @@ function hearingDupApplyIn(H, E, C, key, sig, choices, mustAuto) {
 // автоматическое объединение (запуск, автоприменение событий, после обмена): только группы auto (копии одинаковы); ответ — сколько записей
 // убрано и сколько групп ждут решения пользователя («Проверка данных»)
 async function hearingDedupe() {
-  let hearings, cases;
-  try { hearings = await getAllRaw('hearings'); cases = await getAllRaw('cases'); } catch (e) { logErr('heardup:read', e); return { n: 0, manual: 0 }; }
-  const plan = hearingDupPlan(hearings, cases); let n = 0, manual = 0;
+  let hearings, cases, events;
+  try { hearings = await getAllRaw('hearings'); cases = await getAllRaw('cases'); events = await getAllRaw('monitorEvents'); } catch (e) { logErr('heardup:read', e); return { n: 0, manual: 0 }; }
+  const plan = hearingDupPlan(hearings, cases, events); let n = 0, manual = 0;
   for (const p of plan) {
     if (!p.auto) { manual++; continue; }
     try { const r = await heardupTx((H, E, C) => hearingDupApplyIn(H, E, C, p.key, p.sig, null, true)); if (r && r.ok) n += r.n; else if (r && r.error === 'changed') manual++; } catch (e) { logErr('heardup:apply', e); }
@@ -9499,7 +9562,7 @@ async function hearingDedupe() {
 }
 // строки «Проверки данных»: группы, которые программа сама не объединяет (копии различаются)
 function integrityHearingDups(d, out) {
-  for (const p of hearingDupPlan(d.hearings, d.cases)) {
+  for (const p of hearingDupPlan(d.hearings, d.cases, d.monitorEvents)) {
     if (p.auto) continue;
     out.push({ type: 'Заседания-двойники', label: 'Заседание ' + fmtDate(p.date) + (p.time ? ' ' + p.time : '') + (p.caseNum ? ' · ' + p.caseNum : ''), detail: 'Записей: ' + (p.drop.length + 1) + (p.conflicts.length ? '. Различаются: ' + p.conflicts.map(c => c.label.toLowerCase()).join(', ') + ' — выберите, что оставить' : '. Похоже на одно заседание, записанное несколько раз — проверьте и решите'), open: ['hearingDupOpen', p.key] });
   }
@@ -9518,11 +9581,11 @@ function integrityHearingDups(d, out) {
 }
 // лист группы: копии списком; поля, которые различаются, — выбор (по умолчанию — первая запись); «Оставить одно» — по выбору
 async function hearingDupOpen(key) {
-  const hearings = await getAll('hearings'), cases = await getAll('cases');
-  const p = hearingDupPlan(hearings, cases).find(x => x.key === key); if (!p) { toast('Двойников у этого заседания уже нет'); return; }
+  const hearings = await getAll('hearings'), cases = await getAll('cases'), events = await getAll('monitorEvents');
+  const p = hearingDupPlan(hearings, cases, events).find(x => x.key === key); if (!p) { toast('Двойников у этого заседания уже нет'); return; }
   const all = p.copies || [p.keep, ...p.drop];
   const row = (h, i) => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span><b>Запись ${i + 1}</b> · ${i ? 'уйдёт в корзину' : 'останется'} · ${esc(h.status || 'Назначено')}${h.room ? ' · зал ' + esc(h.room) : ''}${h.result ? '<br>' + esc('итог: ' + h.result) : ''}${h.comment ? '<br>' + esc('комментарий: ' + h.comment) : ''}${h.prep ? '<br>' + esc('подготовить: ' + h.prep) : ''}${h.participation ? '<br>' + esc(h.participation) : ''}<br><span class="small muted">${esc(h.court || '')}${h.judge ? ' · ' + esc(h.judge) : ''}${h.monitorEventId ? ' · по данным суда' : ' · внесено вручную'}</span></span>${icon('chevron-right')}</button>`;
-  const show = (f, v) => { if (f === 'attended') return v === 'да' ? 'участвовал(а)' : 'не участвовал(а)'; if (f === 'proceedingId' && typeof procLabelOf === 'function') { const c = cases.find(x => x.id === p.caseId); return c ? procLabelOf(c, v) : v; } return v; };
+  const show = (f, v) => { if (v === '') return '— (пусто: очищено вами позже)'; if (f === 'attended') return v === 'да' ? 'участвовал(а)' : 'не участвовал(а)'; if (f === 'proceedingId' && typeof procLabelOf === 'function') { const c = cases.find(x => x.id === p.caseId); return c ? procLabelOf(c, v) : v; } return v; };
   const choice = p.conflicts.map(c => `<fieldset class="heardup-choice" data-f="${esc(c.f)}" style="border:1px solid var(--line);border-radius:var(--r-md);padding:8px 10px;margin:8px 0"><legend class="small muted">${esc(c.label)}</legend>${c.opts.map((o, j) => `<label style="display:flex;gap:8px;align-items:flex-start;min-height:44px"><input type="radio" name="hd-${esc(c.f)}" value="${o.i}"${j === 0 ? ' checked' : ''}><span>${esc(show(c.f, o.v))} <span class="small muted">(запись ${o.i + 1})</span></span></label>`).join('')}</fieldset>`).join('');
   openSheet('Заседания-двойники · ' + fmtDate(p.date) + (p.time ? ' ' + p.time : ''), `<p class="small muted">${esc(p.caseNum ? 'Дело ' + p.caseNum + '. ' : '')}Одно заседание записано ${all.length} раза — так бывает, когда событие суда применяется на нескольких устройствах до обмена базой. «Оставить одно» оставит запись 1, допишет в неё то, чего в ней нет, из остальных, остальные уйдут в корзину (восстановить можно оттуда), события суда перейдут на оставленную.${p.conflicts.length ? ' Где записи различаются — выберите значение ниже.' : ''}</p>
     <div class="list-rows">${all.map(row).join('')}</div>${choice}
@@ -11973,7 +12036,9 @@ async function ycDeploy(o, log) {
     const colSecret = ycRand(28); res.collectorSecret = colSecret;
     const col = await fnOf('collector-sud', 'CRM Адвоката: коллектор судов'); res.collectorId = col.id;
     await ycOp(await ycApi('POST', YC.versions, iam, { functionId: col.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: { memory: '268435456' }, executionTimeout: '600s', serviceAccountId: sa.id, content: colZip,
-      environment: Object.assign({ SECRET: colSecret, BRIDGE_URL: res.bridgeUrl, BRIDGE_SECRET: secret, BUCKET: o.bucket, NODE_TLS_REJECT_UNAUTHORIZED: '0', PARALLEL: '3', UPDATE_URL: dist }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {}) }), iam, 'версия коллектора');
+      // v189 (аудит сборки 188, R6): NODE_TLS_REJECT_UNAUTHORIZED больше не задаётся — коллектор 3.27 проверяет сертификаты сервера,
+      // хранилища и обновлений, послабления TLS — только у сайтов судов *.sudrf.ru внутри него самого
+      environment: Object.assign({ SECRET: colSecret, BRIDGE_URL: res.bridgeUrl, BRIDGE_SECRET: secret, BUCKET: o.bucket, PARALLEL: '3', UPDATE_URL: dist }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {}) }), iam, 'версия коллектора');
     await ycOp(await ycApi('POST', YC.fns + '/' + col.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к коллектору');
     res.collectorUrl = 'https://functions.yandexcloud.net/' + col.id;
     if (o.withTimer) {
@@ -12077,7 +12142,7 @@ function ycAiPrompt(kind) {
     '3. Создай сервисный аккаунт crm-server с ролями storage.editor и serverless.functions.invoker на каталог crm.',
     '4. Создай для сервисного аккаунта crm-server статический ключ доступа (не API-ключ и не авторизованный): идентификатор ключа понадобится как S3_KEY_ID, секретная часть — как S3_SECRET. Секретную часть мне в чат не показывай — сразу впиши её в переменную функции на шаге 5.',
     '5. Функция ' + P.bridge.name + ': среда ' + P.runtime + ', точка входа ' + P.entry + ', таймаут ' + P.bridge.timeout + ' секунд, память 256 МБ, сервисный аккаунт crm-server, публичный вызов (serverless.functions.invoker для allUsers). Код — ДВА файла в корне архива (без вложенной папки): ' + files(P.bridge) + '. Переменные окружения: BUCKET = имя бакета из шага 2; SECRET = случайная строка из 32 латинских букв и цифр (покажи её мне); S3_KEY_ID и S3_SECRET — из шага 4; FOLDER_ID = идентификатор каталога crm; UPDATE_URL = ' + D + '.',
-    '6. Функция ' + P.collector.name + ': ' + P.runtime + ', ' + P.entry + ', таймаут ' + P.collector.timeout + ' секунд, 256 МБ, тот же сервисный аккаунт, публичный вызов. Код — ДВА файла в корне архива: ' + files(P.collector) + '. Переменные: BRIDGE_URL = ссылка для вызова функции crm-bridge; BRIDGE_SECRET = тот же SECRET; SECRET = ещё одна случайная строка из 32 знаков (покажи её); BUCKET = тот же бакет; NODE_TLS_REJECT_UNAUTHORIZED = 0; PARALLEL = 3; UPDATE_URL = ' + D + '.',
+    '6. Функция ' + P.collector.name + ': ' + P.runtime + ', ' + P.entry + ', таймаут ' + P.collector.timeout + ' секунд, 256 МБ, тот же сервисный аккаунт, публичный вызов. Код — ДВА файла в корне архива: ' + files(P.collector) + '. Переменные: BRIDGE_URL = ссылка для вызова функции crm-bridge; BRIDGE_SECRET = тот же SECRET; SECRET = ещё одна случайная строка из 32 знаков (покажи её); BUCKET = тот же бакет; PARALLEL = 3; UPDATE_URL = ' + D + '. Переменную NODE_TLS_REJECT_UNAUTHORIZED НЕ задавать (если она есть у прежней версии функции — убрать).',
     '7. Создай таймер-триггер collector-timer для функции collector-sud с cron-выражением «30 4,12 ? * * *» (07:30 и 15:30 по Москве), сервисный аккаунт crm-server.',
     '8. Проверь запуск: открой ссылку для вызова crm-bridge — должен прийти ответ JSON с полем "ver" (номер версии сервера), а не «Unable to import index.handler module» и не «Cannot find module». Если ошибка — проверь, что оба файла лежат в корне версии и точка входа ' + P.entry + '.',
     '9. В конце покажи отдельными строками: ссылку для вызова crm-bridge, SECRET сервера, ссылку для вызова collector-sud, SECRET коллектора и ответ из шага 8. Если что-то не получилось — скажи, какой шаг и почему.'].join('\n');
@@ -21313,7 +21378,7 @@ function procArchivePreview(c, target, skip) {
   const rows = procModel(c, []);
   return procArchiveSlots(c, target, []).map(d => { const r = rows.find(x => x.kind === 'current' && x.slot === d.slot); return { slot: d.slot, label: r ? r.label : d.title, view: procView(c, d), optional: d.slot !== target, on: d.slot === target || !(skip || []).includes(d.slot) }; });
 }
-const procEv = (c, f, from, to, src) => { if (typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, f, from, to, src); };
+const procEv = (c, f, from, to, src, extra) => { if (typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, f, from, to, src, extra); };
 const procJournaled = k => typeof CASE_MERGE_FIELDS === 'object' && CASE_MERGE_FIELDS && !!CASE_MERGE_FIELDS[k];
 // v169 (P6): метка удаления или изменения элемента — позже его версии (часы устройства могли не сдвинуться)
 const procStampAfter = (p, now) => Math.max(Number(now || 0), Number(p && p.createdAt || 0) + 1, Number(p && p.updatedAt || 0) + 1);
@@ -21529,7 +21594,7 @@ function procActToProceeding(c, id, field, date, title, now, evId) {
   if (i < 0 || !procList(c).some(p => p.id === id)) return '';
   const p = Object.assign({}, list[i]), f = Object.assign({}, p.fields || {});
   if (f[field]) return f[field] === date ? 'same' : 'other';
-  f[field] = date; p.fields = f; if (evId) p.fieldsBy = Object.assign({}, p.fieldsBy || {}, { [field]: evId }); p.updatedAt = procStampAfter(list[i], now); list[i] = p; c.proceedings = list;
+  f[field] = date; p.fields = f; if (evId) { p.fieldsBy = Object.assign({}, p.fieldsBy || {}, { [field]: evId }); if (p.fieldsByAlso && p.fieldsByAlso[field]) { const a = Object.assign({}, p.fieldsByAlso); delete a[field]; if (Object.keys(a).length) p.fieldsByAlso = a; else delete p.fieldsByAlso; } } p.updatedAt = procStampAfter(list[i], now); list[i] = p; c.proceedings = list;
   procEv(c, 'proceeding', '', (title || 'Дата акта') + ' ' + (typeof fmtDate === 'function' ? fmtDate(date) : date) + ' — записана в «' + procLabelOf(c, id) + '» по данным суда', 'monitor');
   return 'set';
 }
@@ -21657,7 +21722,7 @@ function procTodayItems(events, cases, today) {
     if (!c || c._deleted) continue;
     for (const p of procList(c).filter(x => x.conflictOf && x.status !== 'archived')) {
       out.push({ key: 'procconf:' + c.id + ':' + p.id, kind: 'procconf', pr: 1, date: today, caseId: c.id, title: 'Дело ' + (c.number || '') + ': два новых рассмотрения одной инстанции', sub: 'Созданы на разных устройствах: «' + procLabelOf(c, p.conflictOf) + '» (текущее) и «' + procLabelOf(c, p.id) + '». Если это одно рассмотрение — объедините; если разные — оставьте оба',
-        when: 'После обмена', badges: [['Проверить', 'warn']], open: `openCaseSheet('${jsq(c.id)}')`, act: { fn: `procConflictMerge('${jsq(c.id)}', '${jsq(p.id)}')`, label: 'Это одно — объединить', icon: 'check' }, dismiss: `procConflictKeep('${jsq(c.id)}', '${jsq(p.id)}')`, dismissLabel: 'Разные — оставить оба' });
+        when: 'После обмена', badges: [['Проверить', 'warn']], open: `openCaseSheet('${jsq(c.id)}')`, act: { fn: `procConflictOpen('${jsq(c.id)}', '${jsq(p.id)}')`, label: 'Это одно — объединить', icon: 'check' }, dismiss: `procConflictKeep('${jsq(c.id)}', '${jsq(p.id)}')`, dismissLabel: 'Разные — оставить оба' });
     }
   }
   return out;
@@ -21667,30 +21732,92 @@ async function procNeedDismiss(eventId) {
   e.cmpNeedSeen = Date.now(); try { await put('monitorEvents', e); } catch (x) { logErr('proc:need', x); toast('Не удалось записать отметку', true); return; }
   toast('Отмечено'); nav(UI.screen || 'today');
 }
-// объединение рассмотрения-двойника с текущим: заседания, сроки — на id текущего, двойник удаляется (надгробие); реквизиты двойника — в пустые
-// поля текущего. Одна транзакция дела и заседаний; события суда — после неё
-function procConflictMergeApply(c, id, now, hearings) {
+// объединение рассмотрения-двойника с текущим: заседания, сроки и события суда — на id текущего, двойник удаляется (надгробие).
+// v189 (аудит сборки 188, R7, R8): перед объединением — лист «текущее / другое / итог» (procConflictOpen): пустое у текущего дополняется из
+// двойника, разные непустые значения выбирает пользователь (по умолчанию — текущее); суд, номер и ссылка — один комплект; снимок обеих
+// версий и отвергнутые значения — в журнале дела (snap); план подписан версиями дела и двойника; дело, заседания, сроки, события суда и
+// журнал — одна транзакция procTxRun, события отбираются внутри неё; «объединено» — только после её завершения
+function procFieldLabel(k) { const tabs = typeof CASE_FORM_TABS === 'object' && Array.isArray(CASE_FORM_TABS) ? CASE_FORM_TABS : []; for (const t of tabs) for (const f of (t.fields || [])) if (f && f[0] === k) return f[1]; return k; }
+function procConflictDiff(c, p) {
+  const def = procSlotDef(p.slot), f = p.fields || {}, isSlot = k => def.keys.includes(k) || def.re.test(k);
+  const keys = [...new Set(procSlotKeys(c, def).concat(Object.keys(f).filter(isSlot)))], reqKeys = [def.court, def.court2, def.no, def.no2, def.link].filter(Boolean);
+  let fill = []; const conflicts = [], same = []; let req = null;
+  for (const k of keys) {
+    const a = c[k], b = f[k];
+    if (procEmpty(b)) continue;
+    if (procEmpty(a)) { fill.push(k); continue; }
+    if (JSON.stringify(a) === JSON.stringify(b)) { same.push(k); continue; }
+    if (reqKeys.includes(k)) { req = req || { f: 'req', label: 'Суд, номер и ссылка', keys: [] }; continue; }
+    conflicts.push({ f: k, label: procFieldLabel(k), cur: a, other: b });
+  }
+  // комплект реквизитов различается — выбирается целиком (дополнение его полей по отдельности собрало бы несовместимую карточку)
+  if (req) { req.keys = reqKeys.filter(x => !procEmpty(c[x]) || !procEmpty(f[x])); fill = fill.filter(k => !reqKeys.includes(k)); conflicts.unshift(req); }
+  return { fill, conflicts, same, reqKeys };
+}
+function procConflictSig(c, p) { return procHash(procStable({ c: Number(c && c._upd || 0), p: Number(p && p.updatedAt || 0), id: p ? p.id : '', to: p ? p.conflictOf || '' : '' })); }
+function procConflictMergeApply(c, id, now, hearings, evs, choices, sig) {
   const p = procList(c).find(x => x.id === id); if (!p || !p.conflictOf) return { error: 'Двойник рассмотрения не найден — возможно, уже объединён' };
   const def = procSlotDef(p.slot), target = p.conflictOf;
   if (procCurrentId(c, p.slot) !== target) return { error: 'Текущее рассмотрение инстанции сменилось — откройте раздел «Рассмотрения дела» и решите вручную' };
-  const filled = [];
-  for (const [k, v] of Object.entries(p.fields || {})) if (!procEmpty(v) && procEmpty(c[k])) { if (procJournaled(k)) procEv(c, k, '', String(v), 'proceeding'); c[k] = v; filled.push(k); }
-  let dl = 0; for (const d of (c.deadlines || [])) if (d && d.proceedingId === id) { d.proceedingId = target; if (d.autoKey && d.autoKey.indexOf('p:' + id + '|') === 0) d.autoKey = 'p:' + target + '|' + d.autoKey.slice(('p:' + id + '|').length); d.updatedAt = now; dl++; }
+  if (sig && procConflictSig(c, p) !== sig) return { error: 'Пока лист был открыт, дело или рассмотрение изменились (другая вкладка или устройство) — план объединения пересчитан, проверьте его и подтвердите снова', stale: true };
+  const d = procConflictDiff(c, p), ch = choices || {}, f = p.fields || {}, before = procSlotData(c, def), filled = [], chosen = [], rejected = [];
+  const fmtV = v => procEmpty(v) ? '—' : (typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const take = k => {
+    const v = f[k];
+    if (procJournaled(k)) procEv(c, k, procEmpty(c[k]) ? '' : String(c[k]), procEmpty(v) ? '' : String(v), 'proceeding');
+    if (procEmpty(v)) { if (c[k] !== undefined) c[k] = ''; } else c[k] = JSON.parse(JSON.stringify(v));
+    // доказанное происхождение даты переходит вместе со значением (метку правки ставит procTxRun — pend)
+    const ev = (p.fieldsBy || {})[k]; if (ev && !procEmpty(v)) c.procFieldsBy = Object.assign({}, c.procFieldsBy || {}, { [k]: { ev, at: 0, pend: 1 } });
+  };
+  for (const k of d.fill) { take(k); filled.push(k); }
+  for (const cf of d.conflicts) {
+    const other = ch[cf.f] === 'other';
+    if (cf.f === 'req') { if (other) { for (const k of cf.keys) take(k); chosen.push(...cf.keys); } else rejected.push(...cf.keys.filter(k => !procEmpty(f[k]) && JSON.stringify(f[k]) !== JSON.stringify(before[k]))); continue; }
+    if (other) { take(cf.f); chosen.push(cf.f); } else rejected.push(cf.f);
+  }
+  let dl = 0; for (const x of (c.deadlines || [])) if (x && x.proceedingId === id) { x.proceedingId = target; if (x.autoKey && x.autoKey.indexOf('p:' + id + '|') === 0) x.autoKey = 'p:' + target + '|' + x.autoKey.slice(('p:' + id + '|').length); x.updatedAt = now; dl++; }
   const moved = []; for (const h of (hearings || [])) if (h && h.proceedingId === id) { h.proceedingId = target; moved.push(h.id); }
-  const label = procLabelOf(c, id);
+  // события суда двойника и отметки места записи даты (actWrote/actSeen.to) — на текущее, в той же транзакции (R8)
+  let evN = 0; for (const e of (evs || [])) { if (!e || e._deleted || e.caseId !== c.id) continue; let t = false; if (e.proceedingId === id) { e.proceedingId = target; t = true; } if (e.actWrote && e.actWrote.to === id) { e.actWrote.to = target; t = true; } if (e.actSeen && e.actSeen.to === id) { e.actSeen.to = target; t = true; } if (t) evN++; }
+  const label = procLabelOf(c, id), lab = k => procFieldLabel(k);
   c.proceedings = (c.proceedings || []).filter(x => x && x.id !== id);
   c._delItems = Object.assign({}, c._delItems || {}); c._delItems.proceedings = Object.assign({}, c._delItems.proceedings || {}, { [id]: procStampAfter(p, now) });
-  procEv(c, 'proceeding', '', 'Объединено с текущим: ' + label + ' (создано на другом устройстве)' + (moved.length ? '; заседаний: ' + moved.length : '') + (dl ? '; сроков: ' + dl : ''), 'card');
-  return { label, moved, target, dl, filled };
+  const snap = { op: 'procmerge', at: now, into: target, current: before, dropped: { id: p.id, slot: p.slot, fields: JSON.parse(JSON.stringify(f)), fieldsBy: p.fieldsBy || null, basis: p.basis || '', createdAt: p.createdAt || 0, updatedAt: p.updatedAt || 0 }, filled, chosen, rejected };
+  const parts = ['Объединено с текущим: ' + label + ' (создано на другом устройстве)'];
+  if (filled.length) parts.push('дополнено из второй копии: ' + filled.map(k => lab(k) + ' «' + fmtV(f[k]) + '»').join(', '));
+  if (chosen.length) parts.push('взято из второй копии: ' + chosen.map(k => lab(k) + ' «' + fmtV(f[k]) + '» (было «' + fmtV(before[k]) + '»)').join(', '));
+  if (rejected.length) parts.push('отвергнуто (осталось текущее): ' + rejected.map(k => lab(k) + ' «' + fmtV(f[k]) + '»').join(', '));
+  if (moved.length) parts.push('заседаний: ' + moved.length); if (dl) parts.push('сроков: ' + dl); if (evN) parts.push('событий суда: ' + evN);
+  procEv(c, 'proceeding', '', parts.join('; '), 'card', { snap });
+  return { label, moved, target, dl, filled, chosen, rejected, ev: evN };
+}
+// лист перед объединением: что дополнится, что различается (выбор), подпись плана
+async function procConflictOpen(caseId, procId) {
+  const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
+  const p = procList(c).find(x => x.id === procId); if (!p || !p.conflictOf) { toast('Двойник рассмотрения не найден — возможно, уже объединён'); return; }
+  const def = procSlotDef(p.slot), d = procConflictDiff(c, p), f = p.fields || {};
+  const fmtV = (k, v) => procEmpty(v) ? '—' : (/Date$/.test(k) && typeof fmtDate === 'function' ? fmtDate(String(v)) : (typeof v === 'object' ? JSON.stringify(v) : String(v)));
+  const side = (keys, src) => keys.map(k => esc(procFieldLabel(k)) + ': ' + esc(fmtV(k, src[k]))).join('; ');
+  const opt = (name, val, checked, text) => `<label style="display:flex;gap:8px;align-items:flex-start;min-height:44px"><input type="radio" name="${esc(name)}" value="${val}"${checked ? ' checked' : ''}><span>${text}</span></label>`;
+  const rows = d.conflicts.map(cf => `<fieldset class="proc-choice" data-f="${esc(cf.f)}" style="border:1px solid var(--line);border-radius:var(--r-md);padding:8px 10px;margin:8px 0"><legend class="small muted">${esc(cf.label)}</legend>${cf.f === 'req'
+    ? opt('pc-req', 'cur', true, '<b>Текущее</b> — ' + side(cf.keys, c)) + opt('pc-req', 'other', false, '<b>Другое</b> — ' + side(cf.keys, f))
+    : opt('pc-' + cf.f, 'cur', true, esc(fmtV(cf.f, cf.cur)) + ' <span class="small muted">(текущее)</span>') + opt('pc-' + cf.f, 'other', false, esc(fmtV(cf.f, cf.other)) + ' <span class="small muted">(другое)</span>')}</fieldset>`).join('');
+  const fills = d.fill.map(k => procFieldLabel(k) + ': ' + fmtV(k, f[k]));
+  openSheet('Объединить рассмотрения · ' + def.title, `<p class="small muted">${esc(c.number ? 'Дело ' + c.number + '. ' : '')}Рассмотрение «${esc(procLabelOf(c, procId))}» создано на другом устройстве; если это то же рассмотрение, что текущее, его заседания, сроки и события суда перейдут к текущему, а сама запись уйдёт из списка. Снимок обеих версий останется в журнале дела.</p>
+    ${fills.length ? `<p class="small">Будет дополнено из второй копии (у текущего пусто): ${esc(fills.join('; '))}.</p>` : ''}
+    ${d.conflicts.length ? `<p class="small">Реквизиты различаются — выберите, что оставить (по умолчанию — текущее; отвергнутое останется в журнале дела):</p>${rows}` : '<p class="small muted">Реквизиты не противоречат друг другу.</p>'}
+    <div class="form-actions" style="margin-top:8px"><button type="button" class="button primary" id="proc-conf-merge" data-sig="${esc(procConflictSig(c, p))}" onclick="procConflictMerge('${jsq(caseId)}', '${jsq(procId)}')">${icon('check', 'icon-sm')}Объединить</button><button type="button" class="button" onclick="procConflictKeep('${jsq(caseId)}', '${jsq(procId)}')">Разные — оставить оба</button></div>`, sheetIsOpen() ? true : undefined);
 }
 async function procConflictMerge(caseId, procId) {
+  const doc = typeof document !== 'undefined' ? document : null, b = doc ? doc.getElementById('proc-conf-merge') : null, sig = b ? String(b.dataset.sig || '') : '', choices = {};
+  if (doc) doc.querySelectorAll('#sheetContent .proc-choice').forEach(fs => { const r = fs.querySelector('input[type=radio]:checked'); if (r) choices[fs.dataset.f] = r.value; });
   let res = null;
-  try { res = await procTxRun(caseId, (rec, hs) => procConflictMergeApply(rec, procId, Date.now(), hs)); } catch (e) { logErr('proc:conf', e); toast((e && e.message) || 'Не удалось сохранить — ничего не записано', true); return; }
-  if (!res || res.error) { toast(res ? res.error : 'Дело не найдено', true); return; }
-  // события суда двойника — на текущее
-  try { for (const e of await getAllRaw('monitorEvents')) if (e && !e._deleted && e.caseId === caseId && e.proceedingId === procId) { e.proceedingId = res.target; await put('monitorEvents', e); } } catch (e) { logErr('proc:conf-ev', e); }
+  const sel = e => e && e.caseId === caseId && (e.proceedingId === procId || (e.actWrote && e.actWrote.to === procId) || (e.actSeen && e.actSeen.to === procId));
+  try { res = await procTxRun(caseId, (rec, hs, evs) => procConflictMergeApply(rec, procId, Date.now(), hs, evs, choices, sig), sel); } catch (e) { logErr('proc:conf', e); toast((e && e.message) || 'Не удалось сохранить — ничего не записано', true); return; }
+  if (!res || res.error) { toast(res ? res.error : 'Дело не найдено', true); if (res && res.stale) procConflictOpen(caseId, procId); return; }
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
-  toast('Рассмотрения объединены'); nav(UI.screen || 'today');
+  if (typeof closeSheet === 'function') closeSheet();
+  toast('Рассмотрения объединены' + (res.rejected && res.rejected.length ? ' — отвергнутые реквизиты записаны в журнал дела' : '')); nav(UI.screen || 'today');
 }
 async function procConflictKeep(caseId, procId) {
   try { await recUpdate('cases', caseId, rec => { const list = Array.isArray(rec.proceedings) ? rec.proceedings.slice() : [], i = list.findIndex(p => p && p.id === procId); if (i < 0 || !list[i].conflictOf) return false; const p = Object.assign({}, list[i]); delete p.conflictOf; p.updatedAt = procStampAfter(list[i], Date.now()); list[i] = p; rec.proceedings = list; procEv(rec, 'proceeding', '', 'Оставлены оба рассмотрения: ' + procLabelOf(rec, procId) + ' — параллельное', 'card'); }); }
@@ -21755,10 +21882,14 @@ function procActProof(c, e, slot, fromId, field, all, hs) {
   const stamp = p ? Number(((p.fieldsCh || {})[field]) || 0) : Number(((c._ch || {})[field]) || 0);
   let ok = false;
   // fieldsBy снимается при любой правке поля в элементе (procSlotMaterialize, merge.js), поэтому сама по себе — доказательство
-  if (p) ok = ((p.fieldsBy || {})[field] === e.id) || (same(w) && stamp <= Number(w.at || 0));
+  // v189 (аудит сборки 188, R2): fieldsByAlso — другие события, записавшие ту же дату с той же меткой на другом устройстве (слияние
+  // равноправных копий): каждое из них — записавшее, и для каждого ответ 'other' — дата при переносе любого из них не убирается
+  const also = p ? ((p.fieldsByAlso || {})[field] || []) : [], byId = p ? (p.fieldsBy || {})[field] : undefined;
+  if (p) ok = (byId === e.id) || (Array.isArray(also) && also.includes(e.id)) || (same(w) && stamp <= Number(w.at || 0));
   else { const pb = ((c.procFieldsBy || {})[field]) || null; ok = (same(w) && stamp <= Number(w.at || 0)) || !!(pb && pb.ev === e.id && stamp <= Number(pb.at || 0)); }
   if (!ok) return 'unproved';
-  const other = (all || []).some(o => o && o.id !== e.id && !o._deleted && o.caseId === c.id && (same(o.actWrote) || same(o.actSeen)) && procEventPlace(c, o, slot, hs) === fromId);
+  const shared = [].concat(byId !== undefined && byId !== null && byId !== '' ? [byId] : [], Array.isArray(also) ? also : []).some(id => id && id !== e.id);
+  const other = shared || (all || []).some(o => o && o.id !== e.id && !o._deleted && o.caseId === c.id && (same(o.actWrote) || same(o.actSeen)) && procEventPlace(c, o, slot, hs) === fromId);
   return other ? 'other' : 'proved';
 }
 // инстанция события в деле: по виду события, иначе — по рассмотрению, которое событие называет (id или ссылка источника)
@@ -22015,7 +22146,9 @@ function procTxRun(caseId, fn, evIds) {
   return new Promise((res, rej) => {
     let done = false, out = null; const finish = (ok, v) => { if (done) return; done = true; if (ok) res(v); else rej(v); };
     // v173: пустой список evIds — события читаются (allEv для архивирования), но не пишутся
-    const withEv = Array.isArray(evIds);
+    // v189 (аудит сборки 188, R8): evIds — функция-отбор: события выбираются по СВЕЖИМ записям внутри транзакции (принадлежность
+    // рассмотрению), а не по списку, прочитанному до неё
+    const withEv = Array.isArray(evIds) || typeof evIds === 'function', evSel = typeof evIds === 'function' ? evIds : (x => evIds.includes(x.id));
     let t; try { t = db.transaction(withEv ? ['cases', 'hearings', 'caseEvents', 'monitorEvents'] : ['cases', 'hearings', 'caseEvents'], 'readwrite'); } catch (e) { if (typeof storageWriteError === 'function') storageWriteError(e); finish(false, new Error('Не удалось сохранить: ' + ((e && e.message) || 'хранилище недоступно'))); return; }
     const cs = t.objectStore('cases'), hs = t.objectStore('hearings'), g = cs.get(caseId);
     const stop = r => { out = r; try { t.abort(); } catch (e) { /* штатно: транзакция уже завершается */ } };
@@ -22028,7 +22161,7 @@ function procTxRun(caseId, fn, evIds) {
       ga.onsuccess = () => { if (!withEv) { body([], []); return; }
         const ms = t.objectStore('monitorEvents'), ea = ms.getAll();
         ea.onerror = () => { finish(false, new Error('Не удалось прочитать события суда (' + ((ea.error && ea.error.message) || 'ошибка чтения') + ')')); try { t.abort(); } catch (e) { /* штатно */ } };
-        ea.onsuccess = () => { const eCur = (ea.result || []).filter(x => x && !x._deleted && evIds.includes(x.id)); body(eCur, eCur.map(x => JSON.parse(JSON.stringify(x))), (ea.result || []).filter(x => x && !x._deleted && x.caseId === caseId).map(x => JSON.parse(JSON.stringify(x)))); };
+        ea.onsuccess = () => { const eCur = (ea.result || []).filter(x => x && !x._deleted && evSel(x)); body(eCur, eCur.map(x => JSON.parse(JSON.stringify(x))), (ea.result || []).filter(x => x && !x._deleted && x.caseId === caseId).map(x => JSON.parse(JSON.stringify(x)))); };
       };
       // v172 (аудит сборки 171, R3/R4): allEv — события суда дела (копии, только чтение) для разбора жалобы внутри той же транзакции
       const body = (eCur, eWork, allEv) => {
