@@ -7,8 +7,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://functions.yandexcloud.net https://storage.yandexcloud.net https://suggestions.dadata.ru; worker-src 'self' blob:; manifest-src 'self' data: blob:; media-src 'self' data: blob:">
 <meta name="robots" content="noindex">
-<meta name="build" content="22.10.2026 19:31 · b2e2f8b+">
-<meta name="build-no" content="190">
+<meta name="build" content="22.10.2026 22:05 · 7509bed+">
+<meta name="build-no" content="191">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката — новая версия (этап 4)</title>
 <style>
@@ -249,6 +249,7 @@ body.upd-shown #toast{top:calc(var(--topbar-h,76px) + 12px + var(--sa-t));bottom
 /* ── «Дела» (этап 1в): фильтры, список, таблица, доска, панель карточки справа ── */
 .work-grid{display:grid;grid-template-columns:minmax(0,1fr);align-items:start}
 .side{display:none}
+.side-grip{display:none}
 .toolbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin-bottom:16px}
 .toolbar-right{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-left:auto}
 .toolbar .search-wrap{width:280px;max-width:100%}
@@ -281,7 +282,13 @@ table.grid tbody tr:last-child td{border-bottom:0}
 .stage-track li.past .stage-btn{background:var(--good-bg);color:var(--good)}.stage-track li.cur .stage-btn{background:var(--accent);color:var(--on-accent);font-weight:600}
 @media (max-width:760px){.stage-track li .stage-btn{min-height:44px}}
 @media(min-width:1200px){
-  .work-grid.has-side{grid-template-columns:minmax(0,1fr) 440px}
+  /* v191 (23.10.2026): ширина карточки задаётся тягой за левую границу (--side-w ставит sideWApply в ui/shell.js) */
+  .work-grid{position:relative}
+  .work-grid.has-side{grid-template-columns:minmax(0,1fr) var(--side-w,440px)}
+  .work-grid.has-side .side-grip{display:block;position:absolute;top:0;bottom:0;right:var(--side-w,440px);width:12px;margin-right:-6px;cursor:col-resize;touch-action:none;z-index:6;outline:none}
+  .side-grip::after{content:'';position:absolute;top:0;bottom:0;left:5px;width:2px;background:transparent;transition:background .15s}
+  .side-grip:hover::after,.side-grip:focus-visible::after,html.side-resizing .side-grip::after{background:var(--accent)}
+  html.side-resizing,html.side-resizing *{cursor:col-resize!important;user-select:none!important}
   /* п. 1.2 (03.10.2026): панель начинается под шапкой, поэтому высота — без высоты шапки (--topbar-h измеряется), иначе её низ (и кнопка «Сохранить») уходил за экран */
   .side{display:block;position:sticky;top:var(--sa-t);height:calc(100vh - var(--topbar-h,76px));height:calc(100dvh - var(--topbar-h,76px) - var(--sa-t));overflow-y:auto;border-left:1px solid var(--line);background:var(--surface)}
   .side[hidden]{display:none}
@@ -12774,7 +12781,7 @@ function shellRender() {
         <button type="button" class="icon-button" id="theme-toggle" onclick="themeToggle()"></button>
       </div>
     </header>
-    <div class="work-grid" id="work-grid"><main class="main" id="main" tabindex="-1"></main><aside class="side" id="side" aria-label="Карточка" hidden></aside></div>
+    <div class="work-grid" id="work-grid"><main class="main" id="main" tabindex="-1"></main><aside class="side" id="side" aria-label="Карточка" hidden></aside><div class="side-grip" id="side-grip" role="separator" aria-orientation="vertical" aria-controls="side" tabindex="0" aria-label="Ширина карточки" title="Потяните, чтобы изменить ширину карточки. Двойной щелчок — обычная ширина"></div></div>
   </div>
 </div>
 <nav class="bottom-nav" aria-label="Основные разделы">${NAV_PHONE.map(id => { const i = NAV_ITEMS.find(x => x.id === id); return `<button type="button" data-nav="${id}" onclick="nav('${id}')">${icon(i.icon)}<span>${esc(i.title)}</span></button>`; }).join('')}<button type="button" data-more onclick="openMoreSheet()">${icon('ellipsis')}<span>Ещё</span></button></nav>
@@ -12794,10 +12801,55 @@ function shellRender() {
   d.addEventListener('close', () => { if (d.open) return; sheetHistDrop(); const side = document.getElementById('side'), box = document.getElementById('sheetContent'); if (UI.moving || (side && !side.hidden && box && box.parentNode === side)) return; UI.stack = []; UI.cur = null; });
   themeToggleRender();
   topbarMeasure(); // высота шапки — в переменную для боковой панели (как v308 в прежней программе)
+  sideGripInit();
+}
+// ── v191 (23.10.2026, пожелание пользователя): ширина карточки в боковой панели — тягой за левую границу, как колонка в Проводнике ──
+// Мышь, перо и палец (pointer events), двойной щелчок — обычная ширина, клавиатура — стрелки и Home. Ширина — настройка устройства:
+// ключ crm_next_side_w не входит в SYNC_SETTINGS_KEYS, на другие устройства не уходит и обмен базой не запускает (урок 179).
+// Пределы: не уже 360 px; не шире двух третей рабочей области и так, чтобы основному экрану оставалось 480 px; обычная (440) — всегда допустима.
+const SIDE_W = { def: 440, min: 360, mainMin: 480, maxPart: 2 / 3, step: 24, key: 'crm_next_side_w' };
+function sideWMax(gridW) { return Math.max(SIDE_W.def, Math.min(Math.floor(gridW * SIDE_W.maxPart), gridW - SIDE_W.mainMin)); }
+function sideWClamp(w, gridW) {
+  let v = Math.round(Number(w)); if (!isFinite(v) || v <= 0) v = SIDE_W.def;
+  return Math.max(SIDE_W.min, Math.min(sideWMax(gridW), v));
+}
+function sideWSaved() { try { const v = Number(localStorage.getItem(SIDE_W.key)); return v > 0 ? v : SIDE_W.def; } catch (e) { logErr('side:w', e); return SIDE_W.def; } }
+// w — желаемая ширина (null — сохранённая); save — запомнить на устройстве (обычная ширина — ключ снимается)
+function sideWApply(w, save) {
+  const grid = document.getElementById('work-grid'); if (!grid) return SIDE_W.def;
+  const gw = grid.clientWidth || window.innerWidth, v = sideWClamp(w == null ? sideWSaved() : w, gw);
+  grid.style.setProperty('--side-w', v + 'px');
+  const g = document.getElementById('side-grip');
+  if (g) { g.setAttribute('aria-valuenow', String(v)); g.setAttribute('aria-valuemin', String(SIDE_W.min)); g.setAttribute('aria-valuemax', String(sideWMax(gw))); }
+  if (save) { try { if (v === SIDE_W.def) localStorage.removeItem(SIDE_W.key); else localStorage.setItem(SIDE_W.key, String(v)); } catch (e) { logErr('side:w', e); } }
+  return v;
+}
+function sideWNow() { const g = document.getElementById('side-grip'); return Number(g && g.getAttribute('aria-valuenow')) || sideWSaved(); }
+function sideGripInit() {
+  const g = document.getElementById('side-grip'); if (!g) return;
+  sideWApply(null);
+  g.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return; e.preventDefault();
+    const x0 = e.clientX, w0 = sideWNow(); let last = w0;
+    try { g.setPointerCapture(e.pointerId); } catch (x) { logErr('side:grip', x); }
+    document.documentElement.classList.add('side-resizing');
+    // граница слева от панели: тянем влево — панель шире
+    const move = ev => { last = sideWApply(w0 + (x0 - ev.clientX)); };
+    // конец тяги — по отпусканию, отмене или потере захвата (указатель ушёл за окно, окно потеряло фокус); срабатывает один раз
+    let done = false;
+    const up = () => { if (done) return; done = true; for (const t of ['pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) g.removeEventListener(t, t === 'pointermove' ? move : up);
+      document.documentElement.classList.remove('side-resizing'); sideWApply(last, true); };
+    g.addEventListener('pointermove', move); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up); g.addEventListener('lostpointercapture', up);
+  });
+  g.addEventListener('dblclick', e => { e.preventDefault(); sideWApply(SIDE_W.def, true); });
+  g.addEventListener('keydown', e => {
+    const w = sideWNow(), to = e.key === 'ArrowLeft' ? w + SIDE_W.step : e.key === 'ArrowRight' ? w - SIDE_W.step : e.key === 'Home' ? SIDE_W.def : null;
+    if (to == null) return; e.preventDefault(); sideWApply(to, true);
+  });
 }
 // высота шапки измеряется, а не зашивается (урок 15)
 function topbarMeasure() { try { const t = document.querySelector('.topbar'); if (t && t.offsetHeight) document.documentElement.style.setProperty('--topbar-h', t.offsetHeight + 'px'); } catch (e) { logErr('topbar', e); } }
-window.addEventListener('resize', () => topbarMeasure());
+window.addEventListener('resize', () => { topbarMeasure(); sideWApply(null); });
 // «Назад» телефона и браузера закрывает открытый лист, а не уходит со страницы
 window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; sheetHistWanted(); return; } if (UI.hist) { UI.hist = false; const d = document.getElementById('sheet');
   // разбор GPT 04.10.2026, п. 2: «Назад» телефона, пока идёт запись, — лист остаётся до исхода записи
@@ -22644,6 +22696,7 @@ const HELP_SECTIONS = [
   { id: 'cases', title: 'Дела, сроки, стадии', html: `
 <p>«Дела» — список с фильтрами и поиском, таблица (на компьютере можно выбрать столбцы) и доска по стадиям. Поиск и фильтр сохраняются, пока вы смотрите карточки.</p>
 <p><b>Карточка дела</b>: сверху доверитель, суд и судья, строка «Соглашение № … от … · подписано» и «Ордер № … от …» (кнопки «Указать» / «Изменить» открывают форму дела на вкладке «Соглашение», «Выписать ордер» / «Открыть» — журнал ордеров; соглашение — поля самого дела, отдельной записи у него нет), ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Сайты судов», «Папка документов», «Связаться с доверителем». «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам.</p>
+<p><b>Ширина карточки на компьютере.</b> На широком экране (от 1200 точек) карточка дела открывается панелью справа. Её ширину можно менять, как колонку в Проводнике: наведите указатель на левую границу панели (он станет двусторонней стрелкой) и потяните влево — шире, вправо — уже. Двойной щелчок по границе возвращает обычную ширину. С клавиатуры: клавишей Tab дойдите до границы, стрелки «влево» и «вправо» меняют ширину, Home — обычная. Панель не бывает уже 360 точек, а основному экрану слева всегда остаётся место. Ширина запоминается на этом устройстве и на другие устройства не переходит. На телефоне и в узком окне карточка, как раньше, открывается во весь экран.</p>
 <p><b>Рассмотрения дела</b> (группа в карточке дела): каждое рассмотрение — своя строка с судом, номером, ссылкой, заседаниями и сроками; рассмотрений в одной инстанции может быть сколько угодно. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение (кассация — в апелляцию, апелляция или кассация — в первую инстанцию), нажмите «Новое рассмотрение после отмены» (если суд прислал такое событие, на «Сегодня» появится строка «Дело направлено на новое рассмотрение» с этой же кнопкой): выберите инстанцию, впишите, какой акт отменён и каким актом, новый номер и ссылку (их можно не знать — строка «ожидаются реквизиты» появится сразу, сведения добавляются позже в форме дела). Прежнее рассмотрение этой инстанции перейдёт в историю; рассмотрения выше — по отметкам в предпросмотре (снятая отметка оставляет рассмотрение текущим), параллельные не меняются. В историю они уходят как «Апелляция №1», «Кассация №1» и т. д. — со ссылками, номерами, датами, заседаниями и сроками от их актов; ничего не удаляется, ручные сроки не меняются, а поля инстанции в форме дела освобождаются для нового рассмотрения (новое — «Апелляция №2»). Сроки от актов прежних рассмотрений больше не пересчитываются, заседания прежних рассмотрений не поднимают стадию дела; старые ссылки остаются в «Сайтах судов». Ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее» в строке прежнего — пока в инстанции не внесены сведения нового. «Добавить рассмотрение» — параллельное рассмотрение (например, частная жалоба): его ссылка уходит коллектору вместе с остальными, заседание к нему относится выбором «Рассмотрение» в форме заседания (или кнопкой «Заседание этого рассмотрения»). События сайтов судов (акты, жалобы, заседания) программа относит к рассмотрению по отметке ссылки, с которой событие собрано (каждая ссылка — и текущая, и параллельная — уходит коллектору с номером своего рассмотрения), затем по номеру дела в суде и дате: акт прежнего рассмотрения, пришедший с опозданием, записывается в прежнее, а не в поля нового; карточка суда прежнего рассмотрения дополняет только его сведения. Дата — по дате, с которой дело направлено на новое рассмотрение (поле в листе «Новое рассмотрение после отмены»), а не по дню, когда вы создали строку в программе. Если номер совпадает у нескольких рассмотрений, в инстанции есть параллельное рассмотрение или дата не решает — строка «Требует привязки» на «Сегодня», ничего не меняется, пока вы не выберете рассмотрение. В карточке события строка «Как определено» называет, почему событие отнесено к рассмотрению (по ссылке, с которой оно собрано, по номеру дела в суде, по дате или вашим выбором); кнопка «Отнести к другому рассмотрению» сначала показывает, что изменится (дата акта, заседание, жалоба), и записывает дело (поля и сроки), заседание, событие и журнал дела одной записью базы: при сбое не меняется ничего. Если до нажатия «Перенести» дело, событие или заседание изменились, программа покажет новый план и попросит подтвердить снова. Дата акта убирается из прежнего рассмотрения, только если доказано, что её записало именно это событие и вы её с тех пор не правили; иначе она остаётся, и это сказано; дата, которую подтверждает другое событие того же рассмотрения (та же дата на сайте), тоже остаётся. Доказательство одинаково для текущего, параллельного и прежнего рассмотрения: при «Новом рассмотрении» с датой в историю уходят отметка о том, какое событие её записало, и факт вашей правки; «Вернуть как текущее» возвращает их. Жалоба разбирается для нового рассмотрения в той же записи, даже если была «Разобрано»; отмеченная «Не применять» последствий не получает. Сроки жалобы, поставленные для прежнего или параллельного рассмотрения, остаются с пометкой «Жалоба отнесена к другому рассмотрению» — в паспорте срока «Оставить срок» или «Снять срок». Если событие отнесено к одному рассмотрению, а его заседание вы отнесли к другому, в листе переноса есть оба варианта: «как у заседания» оставляет ваш выбор в заседании и исправляет только событие, «как в событии» переносит заседание. При «Новом рассмотрении» сроки жалоб уходящей инстанции закрепляются за прежним рассмотрением вместе со сроками от актов; срок жалобы, событие которой в деле не найдено, получает пометку «ждёт решения». «Кто обжалует» считается по жалобам одного рассмотрения: жалоба оппонента в прежней апелляции не делает «Обе стороны» в новой. Если разбор неприменённого события после переноса не завершился, программа так и скажет и повторит его при следующем получении данных. Карточка суда не переносится — её сведения сверяйте в форме дела. В «Справочники → Проверка данных» события, собранные со ссылки одного рассмотрения, а применённые к другому, исправляются кнопкой «Исправить однозначные связи»; она не трогает событие, рассмотрение которого выбрали вы, заседание, которое вы отнесли в форме заседания, расхождение «событие — заседание» и дату акта с недоказанным происхождением — такие записи показываются с причиной для вашего решения. Там же — карточки суда другого рассмотрения, приложенные к текущему (до 18.10.2026).Жалоба параллельного рассмотрения, оставленная без движения, даёт свой срок устранения недостатков; если сторона жалобы не установлена — строка «Событие получено, срок не создан». Если два устройства независимо создали новое рассмотрение одной инстанции, после обмена сохраняются оба, а на «Сегодня» — выбор «Это одно — объединить» или «Разные — оставить оба». Форма «Новое рассмотрение», открытая до того, как рассмотрения изменились (другая вкладка или устройство), ничего не создаст — откройте её заново. Новое заседание сразу получает отметку своего рассмотрения (в форме — поле «Рассмотрение»); выбор, сделанный вами, «Вернуть как текущее» не снимает. Прежние рассмотрения на сайтах судов не опрашиваются. Создание нового рассмотрения и «Вернуть как текущее» записывают дело, сроки и заседания одной операцией: при сбое не записывается ничего, повторное нажатие не создаёт второе рассмотрение. Ограничения: сроки и жалобы вручную к рассмотрению не относятся (только автоматически), судебные акты отдельным списком не ведутся.</p>
 <p><b>Типовые задачи</b> (кнопка рядом с «Задача») создают одним нажатием набор задач для вида дела — например, для арбитражного: претензия, иск, отзыв, судебные расходы. Сроки считаются от даты принятия дела (её можно сменить в листе) и примерные — поправьте их в задаче. Задачи, которые уже есть в деле, не отмечены — дублей не будет. Наборы правятся в «Настройки» → «Типовые задачи» и общие с прежней программой.</p>
 <p><b>Сводка</b> — дело одним листом для печати или PDF: «Досье» (служебное: сведения, движение дела, заседания, сроки, задачи, ордера, участники, расходы, счета, заметки) и «Отчёт доверителю» (без внутренних заметок, гонорара, задач, ордеров и контактов участников). «Скачать для Word» — тот же документ файлом, чтобы поправить текст перед отправкой.</p>
