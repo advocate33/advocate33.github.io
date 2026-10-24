@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="24.10.2026 16:09 · a8f71d7">
-<meta name="build-no" content="194">
+<meta name="build" content="24.10.2026 20:52 · 4689554">
+<meta name="build-no" content="195">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -845,6 +845,16 @@ function localKV() {
 }
 async function kvGet(key) { const d = await localKV(); return new Promise(res => { const t = d.transaction('kv').objectStore('kv').get(key); t.onsuccess = () => res(t.result); t.onerror = () => res(undefined); }); }
 async function kvSet(key, val) { const d = await localKV(); return new Promise(res => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(val, key); t.oncomplete = () => res(true); t.onerror = () => res(false); }); }
+// v195 (аудит сборки 194, R2): условная запись — в одной транзакции: записать, только если ревизия на диске (поле rev) всё ещё expectRev.
+// Ответ: true — записано; 'conflict' — другая вкладка успела записать свою версию; false — сбой записи
+async function kvCas(key, expectRev, val) {
+  const d = await localKV();
+  return new Promise(res => {
+    let out = false; const t = d.transaction('kv', 'readwrite'), s = t.objectStore('kv'), g = s.get(key);
+    g.onsuccess = () => { if (Number(g.result && g.result.rev || 0) !== Number(expectRev || 0)) { out = 'conflict'; return; } s.put(val, key); out = true; };
+    t.oncomplete = () => res(out); t.onerror = () => res(false); t.onabort = () => res(out === 'conflict' ? 'conflict' : false);
+  });
+}
 
 // ▼▼▼ core/crypto.js
 // ═══ core/crypto.js — перенесено из v310 без изменений (этап 1а); порядок кусков — исходный ═══
@@ -959,8 +969,11 @@ async function secretsUnlockPin(pin) { // вызывается при успеш
   try {
     const k = await secPinKey(pin);
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(_sec.pending.iv) }, k, new Uint8Array(_sec.pending.ct));
-    _sec.map = JSON.parse(new TextDecoder().decode(pt)) || {}; _sec.pinKey = k; _sec.pending = null;
-    localStorage.removeItem('crm_sec_pin_stale'); return true;
+    // v195 (R3): изменения, сделанные пока слой ждал PIN (в том числе перенос открытых значений), — поверх открытого словаря и на диск
+    _sec.map = secOpsApply(JSON.parse(new TextDecoder().decode(pt)) || {}, _sec.ops); _sec.pinKey = k; _sec.pending = null;
+    localStorage.removeItem('crm_sec_pin_stale');
+    if (Object.keys(_sec.ops).length) secretsPersist().catch(secSaveFailed);
+    return true;
   } catch (e) { localStorage.setItem('crm_sec_pin_stale', '1'); logErr('secrets:pin-unlock', 'секреты закрыты другим PIN — нужен прежний'); return false; } // v299: PIN сменён на другом устройстве
 }
 async function secretsRecoverOldPin() { // v299: перенос секретов с прежнего PIN на текущий
@@ -969,27 +982,99 @@ async function secretsRecoverOldPin() { // v299: перенос секретов
   const newPin = prompt('Теперь введите ТЕКУЩИЙ PIN-код входа'); if (!newPin || !(await lockVerify(newPin))) { toast('Текущий PIN не подтверждён', true); return; }
   try {
     const kOld = await secPinKey(oldPin); const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(_sec.pending.iv) }, kOld, new Uint8Array(_sec.pending.ct));
-    _sec.map = JSON.parse(new TextDecoder().decode(pt)) || {}; _sec.pending = null;
-    localStorage.removeItem('crm_sec_pin_salt'); _sec.pinKey = await secPinKey(newPin); await secretsPersist(); localStorage.removeItem('crm_sec_pin_stale');
+    _sec.map = secOpsApply(JSON.parse(new TextDecoder().decode(pt)) || {}, _sec.ops); _sec.pending = null;
+    localStorage.removeItem('crm_sec_pin_salt'); _sec.pinKey = await secPinKey(newPin); await secretsPersist({ replace: true }); localStorage.removeItem('crm_sec_pin_stale');
     toast('Секреты перенесены на текущий PIN-код'); if (typeof syncStatusRender === 'function') syncStatusRender(); if (typeof srvdbPull === 'function') srvdbPull(false).catch(() => {});
   } catch (e) { toast('Прежний PIN не подошёл', true); }
 }
 async function secretsPinToggle(on, pin) { // включить/выключить слой PIN; при включении нужен текущий PIN
+  // v195: прежний ключ PIN — чтобы прочитать контейнер диска при перезаписи (R2: запись — поверх актуального контейнера)
+  _sec.pinKeyPrev = _sec.pinKey;
   if (on) { if (!pin) return false; _sec.pinKey = await secPinKey(pin); localStorage.setItem('crm_sec_pin', '1'); }
   else { localStorage.removeItem('crm_sec_pin'); _sec.pinKey = null; }
-  await secretsPersist(); return true;
+  await secretsPersist({ force: true }); return true;
 }
 const _lsRaw = (typeof Storage !== 'undefined') ? { getItem: Storage.prototype.getItem, setItem: Storage.prototype.setItem, removeItem: Storage.prototype.removeItem } : null;
-async function secretsPersist() {
-  if (!_sec.ok || _sec.pending) return; // пока слой PIN не открыт — на диске остаётся прежний вариант
-  let payload = new TextEncoder().encode(JSON.stringify(_sec.map)), inner = null;
+// v195 (аудит сборки 194, R2, R3): запись секретов — не «весь словарь из памяти поверх диска», а изменения отдельных ключей поверх
+// актуального контейнера. _sec.ops[k] — несохранённое изменение ключа ({v} — значение, {del:1} — удаление); запись (secretsPersist):
+// по очереди в пределах вкладки (_sec.chain); каждая — перечитать контейнер с диска, применить изменения, зашифровать и записать условно
+// по ревизии (kvCas): если другая вкладка успела записать свою версию — повторить с её версией. Изменение снимается из _sec.ops только
+// после подтверждённой записи; при сбое остаётся и уйдёт со следующей записью. После записи другие вкладки получают весть и перечитывают.
+// _sec.migrated — открытые значения прежних версий, перенесённые в память: из localStorage они удаляются только после подтверждённой записи.
+Object.assign(_sec, { ops: {}, chain: Promise.resolve(), rev: 0, pinKeyPrev: null, migrated: {}, failWarned: false });
+const _secBc = (typeof BroadcastChannel === 'function') ? (() => { try { return new BroadcastChannel('crm-secrets'); } catch (e) { return null; } })() : null;
+function secOpsApply(map, ops) { for (const k of Object.keys(ops)) { if (ops[k].del) delete map[k]; else map[k] = ops[k].v; } return map; }
+function secSetOp(k, op) { _sec.ops[k] = op; }
+// словарь из контейнера диска; null — контейнера нет; undefined — прочитать нельзя (закрыт PIN, которого нет, или повреждён)
+async function secDiskMap(disk) {
+  if (!disk || !disk.iv || !disk.ct) return null;
+  try {
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(disk.iv) }, _sec.key, new Uint8Array(disk.ct));
+    const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
+    if (!(obj && obj.pin === 1 && obj.ct)) return obj;
+    for (const k of [_sec.pinKey, _sec.pinKeyPrev]) { if (!k) continue; try { return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(obj.iv) }, k, new Uint8Array(obj.ct)))) || {}; } catch (e) { /* другой PIN — следующий ключ */ } }
+  } catch (e) { logErr('secrets:read', e); }
+  return undefined;
+}
+async function secEncrypt(map, rev) {
+  let payload = new TextEncoder().encode(JSON.stringify(map)), inner = null;
   if (secPinOn() && _sec.pinKey) { // v292: внутренний слой — на ключе из PIN
     const iv2 = crypto.getRandomValues(new Uint8Array(12)); const ct2 = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv2 }, _sec.pinKey, payload);
     inner = { pin: 1, iv: Array.from(iv2), ct: Array.from(new Uint8Array(ct2)) }; payload = new TextEncoder().encode(JSON.stringify(inner));
   }
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, _sec.key, payload);
-  await kvSet('secrets', { iv: Array.from(iv), ct: Array.from(new Uint8Array(ct)), pin: inner ? 1 : 0 });
+  return { iv: Array.from(iv), ct: Array.from(new Uint8Array(ct)), pin: inner ? 1 : 0, rev };
+}
+// opts.force — записать и без изменений (сменился слой PIN); opts.replace — основа — словарь этой вкладки, а не диск (секреты только что
+// открыты прежним PIN: прочитать диск новым ключом нельзя). Ответ: true — записано, false — не записано (слой ждёт PIN, хранилища нет)
+async function secWriteOnce(opts) {
+  if (!_sec.ok || _sec.pending) return false; // пока слой PIN не открыт — на диске остаётся прежний вариант, изменения ждут в _sec.ops
+  const o = opts || {};
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const ops = Object.assign({}, _sec.ops);
+    if (!Object.keys(ops).length && !o.force && !o.replace) return true;
+    const disk = await kvGet('secrets'), rev = Number(disk && disk.rev || 0);
+    let base = o.replace ? Object.assign({}, _sec.map) : await secDiskMap(disk);
+    if (base === undefined) { logErr('secrets:read', 'контейнер на диске не читается — записывается словарь этой вкладки'); base = Object.assign({}, _sec.map); }
+    const next = secOpsApply(Object.assign({}, base || {}), ops);
+    // без условной записи (kv.js прежней сборки в обвязке) — обычная запись: очередь вкладки и чтение диска перед записью остаются
+    const box = await secEncrypt(next, rev + 1), r = typeof kvCas === 'function' ? await kvCas('secrets', rev, box) : (await kvSet('secrets', box)) !== false;
+    if (r === 'conflict') continue;
+    if (r !== true) throw new Error('защищённое хранилище не записало секреты');
+    // записано: снять применённые изменения (если ключ не меняли снова), принять версию диска с изменениями, сделанными за время записи
+    for (const k of Object.keys(ops)) if (_sec.ops[k] === ops[k]) delete _sec.ops[k];
+    _sec.map = secOpsApply(Object.assign({}, next), _sec.ops); _sec.rev = rev + 1; _sec.pinKeyPrev = null; o.replace = false;
+    if (_lsRaw) for (const k of Object.keys(_sec.migrated)) { if (_sec.map[k] === _sec.migrated[k] && _lsRaw.getItem.call(localStorage, k) === _sec.migrated[k]) _lsRaw.removeItem.call(localStorage, k); delete _sec.migrated[k]; }
+    if (_secBc) { try { _secBc.postMessage({ rev: _sec.rev }); } catch (e) { /* весть — не обязательна, перечитают при своей записи */ } }
+    return true;
+  }
+  throw new Error('секреты меняются в другой вкладке слишком часто — запись не удалась');
+}
+function secretsPersist(opts) {
+  const p = _sec.chain.then(() => secWriteOnce(opts));
+  _sec.chain = p.catch(() => {});
+  return p;
+}
+// другая вкладка записала секреты — перечитать (свои несохранённые изменения остаются поверх)
+async function secretsReload() {
+  if (!_sec.ok || _sec.pending) return;
+  const disk = await kvGet('secrets'); if (Number(disk && disk.rev || 0) <= _sec.rev) return;
+  const m = await secDiskMap(disk); if (!m) return;
+  _sec.map = secOpsApply(Object.assign({}, m), _sec.ops); _sec.rev = Number(disk.rev || 0);
+}
+if (_secBc) _secBc.onmessage = () => { _sec.chain = _sec.chain.then(secretsReload).catch(e => logErr('secrets:reload', e)); };
+// сбой записи: изменение остаётся в памяти и в очереди; пользователю — одно предупреждение за запуск
+function secSaveFailed(e) {
+  logErr('secrets:save', e);
+  if (_sec.failWarned || typeof setTimeout !== 'function') return; _sec.failWarned = true;
+  setTimeout(() => { if (typeof toast === 'function') toast('Пароль или ключ не записан на диск — он действует до закрытия программы. Повторите ввод позже', true); }, 0);
+}
+// перенос открытых значений прежних версий: в память и в очередь записи; из localStorage — только после подтверждённой записи (R3)
+function secMigratePlain() {
+  let moved = false;
+  for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { _sec.map[k] = v; secSetOp(k, { v }); _sec.migrated[k] = v; moved = true; } }
+  return moved;
 }
 async function secretsInit() {
   try {
@@ -1000,16 +1085,17 @@ async function secretsInit() {
     const blob = await kvGet('secrets');
     if (blob && blob.iv && blob.ct) { try { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct)); const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
       if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); } } else _sec.map = obj; } catch (e) { logErr('secrets:decrypt', e); } } // v292
-    let moved = false; // миграция открытых значений
-    for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { _sec.map[k] = v; _lsRaw.removeItem.call(localStorage, k); moved = true; } }
-    if (moved) await secretsPersist();
+    _sec.rev = Number(blob && blob.rev || 0);
+    // v195 (R3): открытые значения удаляются из localStorage только после подтверждённой записи (secWriteOnce); слой ждёт PIN — перенос отложен
+    if (secMigratePlain()) await secretsPersist().catch(secSaveFailed);
   } catch (e) { logErr('secrets:init', e); }
   _sec.ready = true;
 }
 if (_lsRaw) {
   Storage.prototype.getItem = function (k) { if (this === localStorage && SECRET_KEYS_PROTECTED.includes(k)) { if (k in _sec.map) return _sec.map[k]; return _lsRaw.getItem.call(this, k); } return _lsRaw.getItem.call(this, k); };
-  Storage.prototype.setItem = function (k, v) { if (this === localStorage && SECRET_KEYS_PROTECTED.includes(k) && _sec.ok) { _sec.map[k] = String(v); _lsRaw.removeItem.call(this, k); secretsPersist().catch(e => logErr('secrets:save', e)); return; } return _lsRaw.setItem.call(this, k, v); };
-  Storage.prototype.removeItem = function (k) { if (this === localStorage && SECRET_KEYS_PROTECTED.includes(k)) { const had = k in _sec.map; delete _sec.map[k]; _lsRaw.removeItem.call(this, k); if (had && _sec.ok) secretsPersist().catch(e => logErr('secrets:save', e)); return; } return _lsRaw.removeItem.call(this, k); };
+  // v195 (R2): каждое изменение — отдельной операцией ключа (_sec.ops), запись — очередью поверх актуального контейнера
+  Storage.prototype.setItem = function (k, v) { if (this === localStorage && SECRET_KEYS_PROTECTED.includes(k) && _sec.ok) { _sec.map[k] = String(v); secSetOp(k, { v: String(v) }); delete _sec.migrated[k]; _lsRaw.removeItem.call(this, k); secretsPersist().catch(secSaveFailed); return; } return _lsRaw.setItem.call(this, k, v); };
+  Storage.prototype.removeItem = function (k) { if (this === localStorage && SECRET_KEYS_PROTECTED.includes(k)) { const had = k in _sec.map; delete _sec.map[k]; delete _sec.migrated[k]; _lsRaw.removeItem.call(this, k); if (_sec.ok) { secSetOp(k, { del: 1 }); if (had || _sec.rev) secretsPersist().catch(secSaveFailed); } return; } return _lsRaw.removeItem.call(this, k); };
 }
 // ════════════════════════════════════════════════════════════
 // ЗАЩИТА ВХОДА — PIN-код (+ биометрия, если поддерживается)
@@ -1483,8 +1569,20 @@ const numTs = v => (typeof v === 'number' ? v : 0);
 // правка, добавление) и прежнего надгробия: часы устройства, создавшего элемент, могли спешить, и надгробие «сейчас» оказывалось раньше
 // createdAt — удалённый платёж возвращался при обмене и уменьшал задолженность. Тот же приём у рассмотрений — procStampAfter
 function delStampAfter(el, prevTomb, now) { const n = v => Number(v) || 0; return Math.max(n(now), n(el && el.createdAt) + 1, n(el && el.updatedAt) + 1, n(el && el.addedAt) + 1, n(el && el._u) + 1, n(prevTomb)); }
+// v195 (аудит сборки 194, R1): содержимое записи без метки устройства, с упорядоченными ключами — для сравнения двух версий
+function recCanon(r) {
+  const ord = v => Array.isArray(v) ? v.map(ord) : v && typeof v === 'object' ? Object.keys(v).sort().reduce((o, k) => { if (k !== '_device') o[k] = ord(v[k]); return o; }, {}) : v;
+  return JSON.stringify(ord(r));
+}
+// v195 (аудит сборки 194, R1): какая из двух версий «новее» — по _upd, при равенстве по _device, затем по содержимому; одинаково на любом
+// устройстве и в любом порядке доставки (прежде при равном _upd основой слияния всегда становилась входящая запись)
+function recNewer(cur, rec) {
+  const uc = Number(cur._upd || 0), ur = Number(rec._upd || 0); if (uc !== ur) return ur > uc ? rec : cur;
+  const dc = String(cur._device || ''), dr = String(rec._device || ''); if (dc !== dr) return dr > dc ? rec : cur;
+  return recCanon(rec) >= recCanon(cur) ? rec : cur;
+}
 function mergeByFields(cur, rec) {
-  const newer = (rec._upd || 0) >= (cur._upd || 0) ? rec : cur, older = newer === rec ? cur : rec;
+  const newer = recNewer(cur, rec), older = newer === rec ? cur : rec;
   const m = JSON.parse(JSON.stringify(newer)); const chN = newer._ch || {}, chO = older._ch || {}; const ch = Object.assign({}, chO, chN);
   const dels = {}; for (const src of [newer._delItems, older._delItems]) if (src) for (const f of Object.keys(src)) { dels[f] = dels[f] || {}; for (const id of Object.keys(src[f])) dels[f][id] = Math.max(numTs(dels[f][id]), numTs(src[f][id])); } // v299: надгробия — по максимуму
   if (Object.keys(dels).length) m._delItems = dels;
@@ -1565,7 +1663,7 @@ function procSlotMaterialize(el, rec, def, now) {
   return true;
 }
 function mergeCaseRecords(cur, rec, base, events) {
-  const newer = (rec._upd || 0) >= (cur._upd || 0) ? rec : cur, older = newer === rec ? cur : rec;
+  const newer = recNewer(cur, rec), older = newer === rec ? cur : rec;
   const m = JSON.parse(JSON.stringify(newer));
   // поля по журналу: последняя правка каждого поля после базы
   const last = {};
@@ -1677,7 +1775,10 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
       if (!cur) { if (!dry) { if (await writeRaw(s, rec)) added++; } else added++; continue; } // v297/v299
       else {
         const curT = cur._upd || 0, newT = rec._upd || 0;
-        if (s === 'cases' && base && curT > base && newT > base && curT !== newT) { // v252
+        // v195 (аудит сборки 194, R1): равный _upd не доказывает одинаковое содержимое — часы двух устройств могут совпасть. Одинаковое
+        // содержимое — ничего не делать (повторный обмен не порождает новых версий); разное — слияние, как при разных версиях
+        if (curT === newT && recCanon(cur) === recCanon(rec)) { skipped++; continue; }
+        if (s === 'cases' && base && curT > base && newT > base) { // v252
           if (!caseEventsAll) { const loc = await getAllRaw('caseEvents'); const inc = parsed.data.caseEvents || []; const ids = new Set(loc.map(e => e && e.id)); caseEventsAll = loc.concat(inc.filter(e => e && !ids.has(e.id))); }
           const merged = mergeCaseRecords(cur, rec, base, caseEventsAll);
           const diff = conflictDiff(cur, rec, merged);
@@ -1685,7 +1786,7 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
           conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по журналу изменений', diff });
           continue;
         }
-        if (base && curT > base && newT > base && curT !== newT && s !== 'refs' && (cur._ch || rec._ch)) { // v258: обе стороны правили — по полям
+        if (base && curT > base && newT > base && s !== 'refs' && (cur._ch || rec._ch)) { // v258: обе стороны правили — по полям
           const merged = mergeByFields(cur, rec);
           const diff = conflictDiff(cur, rec, merged); // v297: какие поля разошлись и что выбрано
           if (dry) { conflicts.push({ store: s, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по полям', diff }); updated++; continue; }
@@ -1693,7 +1794,7 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
           conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по полям', diff });
           continue;
         }
-        if (base && curT > base && newT > base && curT !== newT && s !== 'refs') {
+        if (base && curT > base && newT > base && s !== 'refs') {
           conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept: newT > curT ? 'другого устройства' : 'этого устройства', diff: conflictDiff(cur, rec, newT > curT ? rec : cur) }); // v297
         }
         const winsTie = newT === curT && String(rec._device||'') > String(cur._device||'');
@@ -3725,9 +3826,12 @@ async function secretsInit() {
     const blob = await kvGet('secrets');
     if (blob && blob.iv && blob.ct) { try { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct)); const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
       if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); } } else _sec.map = Object.assign(obj, early); } catch (e) { logErr('secrets:decrypt', e); } }
-    let moved = Object.keys(early).length > 0;
-    for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { _sec.map[k] = v; _lsRaw.removeItem.call(localStorage, k); moved = true; } }
-    if (moved) await secretsPersist();
+    _sec.rev = Number(blob && blob.rev || 0);
+    // v195 (аудит сборки 194, R2, R3): введённое до конца запуска — операциями ключей (запись поверх актуального контейнера);
+    // открытые значения прежних версий удаляются из localStorage только после подтверждённой записи; слой ждёт PIN — перенос отложен
+    for (const k of Object.keys(early)) secSetOp(k, { v: early[k] });
+    const moved = secMigratePlain() || Object.keys(early).length > 0;
+    if (moved) await secretsPersist().catch(secSaveFailed);
   } catch (e) { logErr('secrets:init', e); if (!_sec.ok && secMemTakePlain()) secMemWarn(); }
   _sec.ready = true;
 }
@@ -23548,8 +23652,9 @@ async function secretsRecoverGo() {
   if (!(await lockVerify(newPin))) { fErr('Текущий PIN-код не подходит'); return; }
   try {
     const kOld = await secPinKey(oldPin); const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(_sec.pending.iv) }, kOld, new Uint8Array(_sec.pending.ct));
-    _sec.map = JSON.parse(new TextDecoder().decode(pt)) || {}; _sec.pending = null;
-    localStorage.removeItem('crm_sec_pin_salt'); _sec.pinKey = await secPinKey(newPin); await secretsPersist(); localStorage.removeItem('crm_sec_pin_stale');
+    // v195 (аудит сборки 194, R2): изменения, ждавшие PIN, — поверх открытого словаря; основа записи — этот словарь (диск новым PIN не читается)
+    _sec.map = secOpsApply(JSON.parse(new TextDecoder().decode(pt)) || {}, _sec.ops); _sec.pending = null;
+    localStorage.removeItem('crm_sec_pin_salt'); _sec.pinKey = await secPinKey(newPin); await secretsPersist({ replace: true }); localStorage.removeItem('crm_sec_pin_stale');
   } catch (e) { logErr('lock:recover', e); fErr('Прежний PIN-код не подошёл — секреты остались закрытыми'); return; }
   if (typeof syncStatusRender === 'function') syncStatusRender();
   sheetBack(true); openSecuritySheet('replace', { text: 'Секреты перенесены на текущий PIN-код' });
