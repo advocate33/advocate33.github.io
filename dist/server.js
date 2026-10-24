@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v194: напоминания — remindput и таймер пишут файл условно по ETag и повторяют при изменении (аудит сборки 194, R4)
 //  v193: событие суда сохраняет proceedingId (id рассмотрения дела от коллектора 3.24+) и сравнивается с ним (аудит сборки 169, А1)
 //  v192: аудит 14.10.2026 — пределы форм по адресу платформы, ответы в пределах функции, код не в журнал, напоминания до 4096 знаков
 //  v191: icalget — закрытая ссылка календаря Google или Apple: события окна дат для «Быстрых записей» программы (этап 6 плана по ЮрТопосу)
@@ -160,7 +161,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 193,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 194,
       ready: readiness()
     });
   }
@@ -180,7 +181,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 193, cal: true, ask: true, ical: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 194, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -1129,15 +1130,29 @@ async function snapGet(body) {
 //  v177: НАПОМИНАНИЯ С СЕРВЕРА (Telegram по таймеру)
 // ════════════════════════════════════════════════════════════
 const remindKey = () => 'remind-' + storeId() + '.json';
-async function remindLoad() { const r = await s3Get(remindKey()); if (r.status === 404) return { items: [], sent: {} }; if (!r.ok) throw new Error('s3 ' + r.status); try { const j = JSON.parse(await r.text()); return { items: j.items || [], sent: j.sent || {}, updatedAt: j.updatedAt }; } catch (e) { return { items: [], sent: {} }; } }
+// v194: вместе со списком — ETag прочитанного файла и признак «файла не было»: условие записи (remindSave)
+async function remindLoad() { const r = await s3Get(remindKey()); if (r.status === 404) return { items: [], sent: {}, exists: false, etag: '' }; if (!r.ok) throw new Error('s3 ' + r.status); const etag = (r.headers && r.headers.get && r.headers.get('etag')) || ''; try { const j = JSON.parse(await r.text()); return { items: j.items || [], sent: j.sent || {}, updatedAt: j.updatedAt, exists: true, etag }; } catch (e) { return { items: [], sent: {}, exists: true, etag }; } }
+// v194 (аудит сборки 194, R4): запись только если файл с чтения не менялся; изменился — { ok:false, changed:true }, вызывающий перечитывает
+async function remindSave(data, cur) {
+  const body = JSON.stringify(data), CT = 'application/json', cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
+  let r = cond ? await s3PutIf(remindKey(), body, CT, cond) : await s3Put(remindKey(), body, CT);
+  if (cond && condFailed(r)) return { ok: false, changed: true };
+  if (cond && condUnsupported(r)) { console.log('remind: условная запись не поддерживается (501) — запись без условия'); r = await s3Put(remindKey(), body, CT); }
+  return { ok: r.ok, status: r.status };
+}
 async function remindPut(body) { // список от CRM: [{ id, date (ГГГГ-ММ-ДД), time?, title, text? }]
   needStorage();
   const items = (Array.isArray(body.items) ? body.items : []).filter(x => x && x.id && /^\d{4}-\d{2}-\d{2}$/.test(x.date || '') && !isNaN(Date.parse(x.date))).slice(0, 500)
     .map(x => ({ id: String(x.id).slice(0, 80), date: x.date, time: x.time ? String(x.time).slice(0, 5) : '', title: String(x.title || '').slice(0, 160), text: String(x.text || '').slice(0, 200) }));
   // v189: отметка «строка о просрочке сегодня уже отправлена» (ov:<дата>) переживает новый список — иначе вторая сводка за день повторила бы её
-  const prev = await remindLoad(); const keep = {}; const ids = new Set(items.map(i => i.id)), ovFrom = 'ov:' + mskDateISO(-2); for (const k of Object.keys(prev.sent)) if (ids.has(k) || (k.startsWith('ov:') && k >= ovFrom)) keep[k] = prev.sent[k];
-  const r = await s3Put(remindKey(), JSON.stringify({ items, sent: keep, updatedAt: Date.now() }), 'application/json');
-  if (!r.ok) throw new Error('s3 ' + r.status);
+  // v194: отметки «отправлено» — из файла, прочитанного непосредственно перед условной записью (таймер мог отметить отправку за это время)
+  const ids = new Set(items.map(i => i.id)), ovFrom = 'ov:' + mskDateISO(-2);
+  for (let i = 0; ; i++) {
+    const prev = await remindLoad(); const keep = {}; for (const k of Object.keys(prev.sent)) if (ids.has(k) || (k.startsWith('ov:') && k >= ovFrom)) keep[k] = prev.sent[k];
+    const r = await remindSave({ items, sent: keep, updatedAt: Date.now() }, prev);
+    if (r.ok) break;
+    if (!r.changed || i >= 4) throw new Error(r.changed ? 'список напоминаний меняется одновременно — повторите' : 's3 ' + r.status);
+  }
   return { ok: true, n: items.length, telegram: !!(process.env.TG_TOKEN && process.env.TG_CHAT) };
 }
 function mskDateISO(offsetDays) { const d = new Date(Date.now() + 3 * 3600e3 + (offsetDays || 0) * 864e5); return d.toISOString().slice(0, 10); }
@@ -1160,10 +1175,16 @@ async function remindTick() { // сегодня и завтра — по одн�
   let r; try { r = await tgSend(text, 10000); } catch (e) { return { ok: false, error: 'telegram: ' + String(e && e.message || e).slice(0, 80) }; }
   if (!r.ok) return { ok: false, error: 'telegram ' + r.status };
   // v192: отметки «отправлено» — в список, перечитанный после отправки: список, переданный программой за это время, не затирается
-  const cur = await remindLoad(); const have = new Set(cur.items.map(i => i.id));
-  due.forEach(x => { if (have.has(x.id)) cur.sent[x.id] = x.date; }); if (ovNeed) cur.sent[ovKey] = today;
-  const w = await s3Put(remindKey(), JSON.stringify({ items: cur.items, sent: cur.sent, updatedAt: cur.updatedAt || Date.now() }), 'application/json');
-  if (!w.ok) console.log('remind: отметки об отправке не записаны (s3 ' + w.status + ') — напоминание может прийти повторно');
+  // v194 (аудит сборки 194, R4): запись отметок — условная по ETag перечитанного файла; список программы, записанный между чтением и записью,
+  // не затирается: файл изменился — перечитать и отметить заново (отметка — только у пунктов, которые есть в новом списке)
+  let w = { ok: false, status: 0 };
+  for (let i = 0; i < 5; i++) {
+    const cur = await remindLoad(); const have = new Set(cur.items.map(x => x.id));
+    due.forEach(x => { if (have.has(x.id)) cur.sent[x.id] = x.date; }); if (ovNeed) cur.sent[ovKey] = today;
+    w = await remindSave({ items: cur.items, sent: cur.sent, updatedAt: cur.updatedAt || Date.now() }, cur);
+    if (w.ok || !w.changed) break;
+  }
+  if (!w.ok) console.log('remind: отметки об отправке не записаны (' + (w.changed ? 'список всё время меняется' : 's3 ' + w.status) + ') — напоминание может прийти повторно');
   return { ok: true, sent: due.length, overdue: ovNeed ? over : 0 };
 }
 
