@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="24.10.2026 14:13 · a39a8ab">
-<meta name="build-no" content="193">
+<meta name="build" content="24.10.2026 16:09 · a8f71d7">
+<meta name="build-no" content="194">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -342,6 +342,8 @@ table.grid tbody tr:last-child td{border-bottom:0}
   .side .modal-head{padding:4px 6px 4px 14px}.side .modal-content{padding:8px 14px 10px}}
 .list-rows>.list-btn{width:100%;text-align:left;color:inherit;min-height:44px;cursor:pointer}
 .list-rows>.list-btn:hover{background:var(--surface2)}
+/* v194: карточки «С чего начать» в листе «Синхронизация» — значок, заголовок с пояснением в две строки, стрелка справа */
+.list-rows>.sy-start{align-items:center}.list-rows>.sy-start>span{flex:1;min-width:0;line-height:1.35;text-align:left}.list-rows>.sy-start>span .small{display:block;margin-top:2px;text-align:left}
 /* этап 2б: показатели и строки «Сначала важное» — кнопки */
 button.stat{text-align:left;width:100%;cursor:pointer;color:inherit;display:block}
 button.stat:hover{border-color:var(--accent)}
@@ -11914,8 +11916,9 @@ async function calImpApplyNow() {
 // Всё находится по имени и переиспользуется — повторный запуск после сбоя ничего не задваивает. Отличия: адрес сервера — всегда адрес
 // функции (https://functions.yandexcloud.net/…): новая версия ходит к серверу только по адресу функции (CSP); шлюза для ленты календаря нет
 // (13.10.2026) — лента отдаётся самой функцией по ссылке с меткой (сервер 187), без секретного кода в адресе.
-// Работает в приложении для компьютера: запросы к API Облака идут через мост CRMDesktop.ycHttp (из браузера их не пустит CORS; мост пускает
-// только https://*.api.cloud.yandex.net). OAuth- и IAM-токены — только в памяти, пока открыт лист. В браузере лист даёт пошаговую инструкцию.
+// Работает в приложении для компьютера (мост CRMDesktop.ycHttp) и с 1.27 — в приложении для Android (мост AndroidApp.ycHttp): из браузера
+// запросы к API Облака не пустит CORS; оба моста пускают только https://*.api.cloud.yandex.net. OAuth- и IAM-токены — только в памяти, пока
+// открыт лист. В браузере лист даёт пошаговую инструкцию.
 
 const desktopApp = () => (typeof window !== 'undefined' && window.CRMDesktop) ? window.CRMDesktop : null;
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
@@ -11951,7 +11954,23 @@ const YC = {
   op: 'https://operation.api.cloud.yandex.net/operations/',
   oauthLink: 'https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb' // публичный клиент Яндекс Облака (как у yc CLI)
 };
-const ycSupported = () => !!(desktopApp() && typeof desktopApp().ycHttp === 'function');
+// v194: мастер работает и в приложении для Android 1.27+ — мост AndroidApp.ycHttp(reqId, method, url, token, body) отвечает
+// window.__ycHttpResult(reqId, { status, body } | { error }); тот же перечень адресов (*.api.cloud.yandex.net), предел 120 с
+const androidYc = () => (typeof window !== 'undefined' && window.AndroidApp && typeof window.AndroidApp.ycHttp === 'function') ? window.AndroidApp : null;
+const ycSupported = () => !!((desktopApp() && typeof desktopApp().ycHttp === 'function') || androidYc());
+const YC_PENDING = new Map();
+if (typeof window !== 'undefined') window.__ycHttpResult = (reqId, r) => { const p = YC_PENDING.get(reqId); if (!p) return; YC_PENDING.delete(reqId); clearTimeout(p.t); if (r && r.error) p.reject(new Error(String(r.error))); else p.resolve(r || {}); };
+// один вызов моста для обеих оболочек: ответ — { status, body }
+function ycBridgeHttp(method, url, token, body) {
+  if (desktopApp() && typeof desktopApp().ycHttp === 'function') return desktopApp().ycHttp(method, url, token, body);
+  const app = androidYc(); if (!app) return Promise.reject(new Error('мост к Яндекс Облаку недоступен: нужно приложение для компьютера или Android 1.27+'));
+  return new Promise((resolve, reject) => {
+    const reqId = 'yc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    const t = setTimeout(() => { if (YC_PENDING.delete(reqId)) reject(new Error('сеть: приложение не ответило за 130 с')); }, 130000);
+    YC_PENDING.set(reqId, { resolve, reject, t });
+    try { app.ycHttp(reqId, method, url, token, body); } catch (e) { YC_PENDING.delete(reqId); clearTimeout(t); reject(e); }
+  });
+}
 const ycSleep = ms => new Promise(r => setTimeout(r, ms));
 // ── доступ к Облаку (05.10.2026): три вида строки доступа → IAM-токен ──
 // Яндекс Облако с 01.06.2026 не принимает новые OAuth-токены Яндекс ID (прежние действуют до истечения года). Поэтому принимается:
@@ -12008,7 +12027,7 @@ async function ycAccess(tok) {
   throw new Error('Не похоже ни на ключ сервисного аккаунта ({…}), ни на IAM-токен (t1.…), ни на строку доступа (y0_…)');
 }
 async function ycApi(method, url, token, body) {
-  const r = await desktopApp().ycHttp(method, url, token || null, body === undefined ? null : JSON.stringify(body));
+  const r = await ycBridgeHttp(method, url, token || null, body === undefined ? null : JSON.stringify(body));
   let j = null; try { j = r.body ? JSON.parse(r.body) : {}; } catch (e) { j = { raw: r.body }; }
   if (r.status >= 400) { const e = new Error((j && (j.message || (j.error && j.error.message))) || ('HTTP ' + r.status)); e.status = r.status; e.body = j; throw e; }
   return j;
@@ -12111,6 +12130,9 @@ async function ycDeploy(o, log) {
 // Код раздачи (server.js, collector-sud.mjs, загрузчики) — из корневой папки dist сайта, а не из /next/dist
 const YC_DIST = () => location.origin + '/dist';
 const YC_APP_URL = 'https://advocate33.github.io/apps/CRM_Advokata_Setup.exe';
+// v194: мастер и в приложении для Android 1.27+ — на телефоне предлагается оно
+const YC_APK_URL = 'https://advocate33.github.io/apps/CRM_Advokata.apk';
+const ycOnAndroid = () => typeof navigator === 'object' && /Android/i.test(navigator.userAgent || '');
 let YC_SESS = { iam: null, clouds: [], folders: [], log: [], fail: '', res: null };
 function ycStepsHtml() {
   const L = YC_SESS.log; if (!L.length) return '';
@@ -12130,11 +12152,12 @@ function openYcSetupSheet(sub) {
     openSheet('Свой сервер в Яндекс Облаке', `${status}
       <p class="small muted">Сервер создаётся в <b>вашем</b> Яндекс Облаке — автор программы к нему доступа не имеет. Он нужен для синхронизации компьютера и телефона, мониторинга судов, ленты календаря и снимков базы.</p>
       <div class="info-box" id="pair-have-server">Сервер уже работает на другом вашем устройстве? Тогда создавать ничего не нужно: на том устройстве «Синхронизация» → «Подключить телефон» — появится QR-код.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary" id="cloud-pair-in" onclick="openPairInSheet('', true)">${icon('shield-check')}Подключиться по QR-коду</button></div></div>
-      <div class="info-box" id="cloud-browser">Два пути. <b>Путь А — мастер</b> (рекомендуем, проверен): работает в приложении «CRM Адвоката» для компьютера — браузер не пускает запросы к Яндекс Облаку. <b>Путь Б — пробный</b>: весь сервер создаёт ИИ-помощник консоли Облака, компьютер не нужен; пока проверяется, работает ли он.</div>
+      <div class="info-box" id="cloud-browser">Два пути. <b>Путь А — мастер</b> (рекомендуем, проверен): работает в приложении «CRM Адвоката» для компьютера или для Android (1.27 и новее) — браузер не пускает запросы к Яндекс Облаку. <b>Путь Б — пробный</b>: весь сервер создаёт ИИ-помощник консоли Облака, приложение не нужно; пока проверяется, работает ли он.</div>
       ${need}
       ${ycPathBHtml(true)}
-      <div class="section-label">Путь А. Мастер в приложении для компьютера · рекомендуем</div><ol class="steps-list">
-        <li>Скачайте и установите приложение для компьютера (файл CRM_Advokata_Setup.exe). Windows может спросить, доверять ли файлу, — это установщик программы с сайта advocate33.github.io.<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APP_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать установщик</a></div></li>
+      <div class="section-label">Путь А. Мастер в приложении для компьютера или Android · рекомендуем</div><ol class="steps-list">
+        ${ycOnAndroid() ? `<li>Установите приложение «CRM Адвоката» для Android (файл CRM_Advokata.apk, версия 1.27 и новее). Android спросит, разрешить ли установку из этого источника, — это файл с сайта программы advocate33.github.io. Если приложение уже стоит, но мастер в нём не открывается, — обновите его: Настройки → «Проверить обновления».<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APK_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать приложение</a></div></li>`
+      : `<li>Скачайте и установите приложение для компьютера (файл CRM_Advokata_Setup.exe). Windows может спросить, доверять ли файлу, — это установщик программы с сайта advocate33.github.io. На телефоне Android то же делает приложение для Android 1.27 и новее.<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APP_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать установщик</a></div></li>`}
         <li>В приложении: Настройки → «Свой сервер в Яндекс Облаке» → шаг 1: ключ сервисного аккаунта (инструкция и запрос для ИИ-помощника консоли — в самом мастере) → «Подключиться к Облаку».</li>
         <li>Выберите «новый каталог «crm»», оставьте предложенное имя бакета и все галочки → «Развернуть». Мастер работает 3–7 минут и пишет, что делает. В конце — «Сервер работает» и адреса.</li>
         <li>Вернитесь сюда: «Синхронизация» → шаг 1 — впишите адрес сервера и секретный код (мастер показывает их в конце; код — кнопка «Скопировать секретный код») и пароль шифрования → «Сохранить и проверить связь». Должно ответить: «Связь есть: сервер версии …».</li>
@@ -12190,7 +12213,7 @@ const YC_PKG = { runtime: 'nodejs22', entry: 'index.handler',
 // путь Б — один блок для браузера и приложения для компьютера. В браузере он развёрнут и имя бакета — своё поле; в приложении — свёрнут
 // под мастером (путь А), имя бакета — общее с шагом 3 мастера (поле cloud-bucket одно на лист).
 function ycPathBHtml(browser) {
-  const body = `<div class="info-box warning" id="cloud-ai-trial"><b>Путь Б — пробный.</b> Помощнику нужно взять файлы программы по ссылкам с сайта и создать из них функции. Если он ответит, что не может, или остановится с ошибкой — путь Б не подходит: используйте путь А (мастер в приложении для компьютера) и сообщите автору, на каком шаге помощник остановился. Ничего лишнего помощник не создаст, если вы подтверждаете только шаги из запроса.</div>
+  const body = `<div class="info-box warning" id="cloud-ai-trial"><b>Путь Б — пробный.</b> Помощнику нужно взять файлы программы по ссылкам с сайта и создать из них функции. Если он ответит, что не может, или остановится с ошибкой — путь Б не подходит: используйте путь А (мастер в приложении для компьютера или Android) и сообщите автору, на каком шаге помощник остановился. Ничего лишнего помощник не создаст, если вы подтверждаете только шаги из запроса.</div>
       ${browser ? `<div class="form-grid">${wide(fInput('cloud-bucket', 'Имя бакета для запроса (латиница, цифры, дефис)', 'crm-' + ycRand(8), 'autocomplete="off" spellcheck="false"'))}</div>` : '<p class="small muted">Имя бакета для запроса — из поля «Имя бакета» в шаге 3 ниже.</p>'}
       ${ycAiStepsHtml('all')}
       <div class="form-grid">
@@ -13530,6 +13553,21 @@ function setFontFam(k) { localStorage.setItem('crm_fontfam', k); applyFontSettin
 // Синхронизация (этап 1г) — мастер из двух шагов: «Подключить сервер» → «Загрузить базу». Строка состояния вверху;
 // второй шаг неактивен, пока связь не проверена (правило о страницах-инструментах, урок 41). Логика — sync/pull.js.
 // msg — итог последнего действия: { text, bad }.
+// v194 (решение пользователя 24.10.2026, этап А для коллег): пока ничего не подключено — выбор способа обмена первым блоком: без сервера
+// (файл в облаке, 5 минут), свой сервер (мониторинг судов, лента, Telegram) или сервер уже есть на другом устройстве (QR-код).
+// Как только что-то подключено (сервер проверен или файл привязан), блок исчезает.
+function syncStartHtml(checked) {
+  const fsOn = typeof fsyncState === 'function' && fsyncState() !== 'off';
+  if (checked || fsOn || (typeof SRV === 'object' && SRV.url)) return '';
+  const card = (id, fn, ic, title, text) => `<button type="button" class="list-btn sy-start" id="${id}" onclick="${fn}">${icon(ic)}<span><b>${title}</b><br><span class="small muted">${text}</span></span>${icon('chevron-right')}</button>`;
+  return `<div class="section-label">С чего начать</div>
+    <p class="small muted">Программа уже работает на этом устройстве. Обмен между устройствами и сетевые возможности — по выбору; его можно изменить позже.</p>
+    <div class="list-rows" id="sy-start">
+      ${card('sy-start-file', 'openFsyncSheet(true)', 'files', 'Без сервера — файл в облаке', 'Google Диск, Яндекс Диск, Dropbox или другое облако; настройка 5 минут. Мониторинг судов, лента календаря и напоминания в Telegram недоступны.')}
+      ${typeof openYcSetupSheet === 'function' ? card('sy-start-yc', 'openYcSetupSheet(true)', 'hard-drive', 'Свой сервер в Яндекс Облаке', 'Обмен сам, мониторинг судов, лента календаря, Telegram, онлайн-запись. Нужны аккаунт Яндекса с картой и 15–30 минут; мастер ведёт по шагам.') : ''}
+      ${typeof openPairInSheet === 'function' ? card('sy-start-qr', "openPairInSheet('', true)", 'phone', 'Сервер уже есть на другом устройстве', 'Подключиться по QR-коду: на том устройстве «Синхронизация» → «Подключить телефон или планшет — QR-код». Здесь нужен только пароль шифрования.') : ''}
+    </div>`;
+}
 async function openSyncSheet(sub, msg) {
   let rows = '';
   try { for (const st of ['cases', 'clients', 'hearings', 'tasks', 'finance', 'documents']) rows += `<div><span>${esc(STORE_TITLES[st] || st)}</span><span class="muted num">${(await getAll(st)).length}</span></div>`; }
@@ -13545,6 +13583,7 @@ async function openSyncSheet(sub, msg) {
     ${unsent ? `<p class="small muted" id="sync-unsent">${esc(unsent)}.</p>` : ''}
     ${msg ? `<div class="info-box ${msg.bad ? 'warning' : ''}" id="sync-msg" role="${msg.bad ? 'alert' : 'status'}">${esc(msg.text)}</div>` : ''}
     <p class="small muted">${NEXT_ROOT ? 'Программа читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5).' : 'Новая версия читает базу с вашего личного сервера, а отправляет изменения по кнопке (шаг 4) или сама, если включён автообмен (шаг 5). Прежняя программа работает как раньше.'}</p>
+    ${typeof syncStartHtml === 'function' ? syncStartHtml(checked) : ''}
     ${typeof fsyncSyncHtml === 'function' ? fsyncSyncHtml() : ''}
     ${step(1, 'Подключить сервер', checked)}
     ${typeof openPairInSheet === 'function' && !checked ? `<div class="info-box" id="sy-pair-in">Сервер уже работает на другом вашем устройстве? Подключитесь по QR-коду: на том устройстве «Синхронизация» → «Подключить телефон», здесь — кнопка ниже. Вводить адрес и код не нужно, только пароль шифрования.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary" id="sy-pair" onclick="openPairInSheet('', true)">${icon('shield-check')}Подключиться по QR-коду</button></div></div>` : ''}
@@ -15087,6 +15126,14 @@ async function licVerifyKey(keyStr, todayIso) {
 function licDaysLeft(until, todayIso) { if (!until || until === 'бессрочно' || !/^\d{4}-\d{2}-\d{2}$/.test(until)) return null; return Math.round((Date.parse(until + 'T00:00:00Z') - Date.parse(todayIso + 'T00:00:00Z')) / 864e5); }
 function licRenewStage(days) { if (days === null || days === undefined) return null; if (days < 0) return 'expired'; if (days <= 1) return '1'; if (days <= 7) return '7'; if (days <= 30) return '30'; return null; }
 let LIC_CACHE = null; // { key, today, v } — пропуск проверяется один раз за день, а не при каждом открытии «Сегодня»
+// v194: ссылка из письма или QR-кода «…/#lic=<пропуск>» — пропуск забирается до запуска интерфейса и стирается из адреса (как #pair=),
+// подставляется в поле листа «Лицензия»; сохранение — только по кнопке «Проверить и сохранить» (ссылку мог открыть не тот человек)
+const LIC_LINK = { key: '' };
+try {
+  const h = typeof location === 'object' ? String(location.hash || '') : '';
+  if (/^#lic=/.test(h)) { const k = decodeURIComponent(h.slice(5)).replace(/\s+/g, ''); if (/^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}$/.test(k)) LIC_LINK.key = k; history.replaceState(history.state, '', location.pathname + location.search); }
+} catch (e) { logErr('license:link', e); }
+function licLinkStart() { if (!LIC_LINK.key) return; const k = LIC_LINK.key; LIC_LINK.key = ''; openLicenseSheet(typeof sheetIsOpen === 'function' && sheetIsOpen() ? true : undefined, { text: 'Пропуск из ссылки подставлен в поле — проверьте, что письмо адресовано вам, и нажмите «Проверить и сохранить».' }, k); }
 async function licCurrent() {
   const key = localStorage.getItem(LIC_STORE_KEY) || '', today = localISO(new Date());
   if (!key) return { key: '', v: null };
@@ -15105,7 +15152,7 @@ async function licRenewBox() {
     <div class="lic-body"><p class="small">${esc(text)}</p><div class="form-actions" style="margin:8px 0 0"><button type="button" class="button small-btn" id="lic-renew-open" onclick="openLicenseSheet()">${icon('shield-check', 'icon-sm')}Лицензия и продление</button></div></div></section>`;
 }
 function licRenewHide(stage, until) { localStorage.setItem(LIC_NAG_KEY, stage + ':' + until); toast(stage === 'expired' ? 'Скрыто' : 'Скрыто до следующего напоминания'); nav('today'); }
-async function openLicenseSheet(sub, msg) {
+async function openLicenseSheet(sub, msg, prefill) {
   const cur = await licCurrent(), v = cur.v, today = localISO(new Date()), days = v ? licDaysLeft(v.until, today) : null;
   const state = !cur.key ? ['', 'Пропуск не введён на этом устройстве'] : !v ? ['bad', 'Пропуск не подлинный или повреждён — проверьте, что он скопирован целиком'] : v.expired ? ['bad', 'Срок лицензии истёк ' + fmtDate(v.until)]
     // А6: решение сервера лицензий (отозван, устройство не зарегистрировано и мест нет) — главнее проверки пропуска на устройстве
@@ -15123,7 +15170,7 @@ async function openLicenseSheet(sub, msg) {
     <div class="list-rows" id="lic-tariffs">${LIC_TARIFFS.map(([t, p]) => `<div><span>${esc(t)}</span><span class="muted">${esc(p)}</span></div>`).join('')}</div>
     ${v && v.ok ? '<p class="small muted">Если лицензию не продлить, программа перейдёт в деморежим: до 5 новых записей в месяц в каждом разделе; данные сохраняются полностью.</p>' : ''}
     <div class="section-label step-label">Шаг 2. Вставить пропуск</div>
-    <div class="field"><label for="lic-key">Пропуск (лицензионный ключ)</label><textarea id="lic-key" rows="3" autocomplete="off" spellcheck="false" placeholder="Вставьте строку из письма"></textarea></div>
+    <div class="field"><label for="lic-key">Пропуск (лицензионный ключ)</label><textarea id="lic-key" rows="3" autocomplete="off" spellcheck="false" placeholder="Вставьте строку из письма">${esc(prefill || '')}</textarea></div>
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
     <div class="form-actions"><button type="button" class="button primary" id="lic-save" onclick="licSave()">${icon('check')}Проверить и сохранить</button>${cur.key && typeof openLicDevicesSheet === 'function' ? `<button type="button" class="button" id="lic-devices" onclick="openLicDevicesSheet()">${icon('list')}Устройства</button>` : ''}${cur.key ? `<button type="button" class="button danger push-right" id="lic-remove" onclick="licRemove()">${icon('trash-2')}Удалить с этого устройства</button>` : ''}</div>`, sub);
 }
@@ -15200,6 +15247,10 @@ async function demoInfoHtml(v, now) {
 // в лимите пропуска (изоляция хранилища, урок 34, иначе дала бы новой версии второй отпечаток). Отпечаток читается, но не меняется.
 const LIC_SERVER_DEFAULT = 'https://functions.yandexcloud.net/d4e4ltdbqfuo1tdabfv9'; // crm-license, раздел 0а правил
 const LIC_BLOCK_KEY = 'crm_lic_block', LIC_CHECKED_KEY = 'crm_lic_checked_at', LIC_DEV_DAY = 24 * 3600000;
+// v194: отметка «это устройство отвязано вами» — проверка не регистрирует его заново сама (иначе «Отвязать это» ничего не меняло бы,
+// пока место свободно); снимается вводом пропуска (licDevActivate) и кнопкой «Зарегистрировать это устройство»
+const LIC_DETACHED_KEY = 'crm_lic_detached';
+function licDevDetached() { return localStorage.getItem(LIC_DETACHED_KEY) === '1'; }
 function licServerUrl() { return localStorage.getItem('crm_lic_server') || LIC_SERVER_DEFAULT; }
 // отпечаток: прежней программы на этом устройстве (ключ без префикса изоляции, только чтение) или свой
 function licDevId() {
@@ -15240,6 +15291,7 @@ function licSrvModel(j) {
 function licBlockSave(b) { if (b) localStorage.setItem(LIC_BLOCK_KEY, JSON.stringify({ ...b, at: Date.now() })); else localStorage.removeItem(LIC_BLOCK_KEY); LIC_CACHE = null; }
 // регистрация этого устройства (после ввода пропуска и при проверке, если устройство не зарегистрировано)
 async function licDevActivate(key) {
+  localStorage.removeItem(LIC_DETACHED_KEY);
   const m = licSrvModel(await licSrvCall('activate', key));
   if (m.state === 'active') { licBlockSave(null); localStorage.setItem(LIC_CHECKED_KEY, String(Date.now())); }
   else if (m.block) licBlockSave(m.block);
@@ -15251,7 +15303,11 @@ async function licDevCheck(force) {
   if (!force && Date.now() - (Number(localStorage.getItem(LIC_CHECKED_KEY)) || 0) < LIC_DEV_DAY && !licBlocked()) return null;
   const m = licSrvModel(await licSrvCall('check', key));
   if (m.state === 'active') { licBlockSave(null); localStorage.setItem(LIC_CHECKED_KEY, String(Date.now())); return m; }
-  if (m.state === 'unknown') return licDevActivate(key);
+  // v194: отвязанное вами устройство заново не регистрируется — деморежим до кнопки «Зарегистрировать это устройство»
+  if (m.state === 'unknown') {
+    if (!licDevDetached()) return licDevActivate(key);
+    m.block = { status: 'unknown_device' }; licBlockSave(m.block); localStorage.setItem(LIC_CHECKED_KEY, String(Date.now())); return m;
+  }
   if (m.block) licBlockSave(m.block);
   return m;
 }
@@ -15269,7 +15325,7 @@ async function openLicDevicesSheet(sub) {
     : m.state === 'limit' ? 'Мест для устройств нет: ' + m.devices.length + ' из ' + (m.limit || '—') + ' — отвяжите устройство, которым больше не пользуетесь.'
     : licBlockText(m.block).replace(/^./, ch => ch.toUpperCase()) + '.';
   openSheet('Устройства лицензии', `<div class="status-line ${m.state === 'active' ? 'good' : m.state === 'net' ? '' : 'bad'}" id="lic-dev-state" role="status"><span>${esc(head)}</span></div>
-    <p class="small muted">Пропуск действует на ограниченном числе устройств. Отвязанное устройство перейдёт в деморежим при следующей проверке — данные на нём сохраняются. Прежняя программа на этом же устройстве считается тем же устройством.</p>
+    <p class="small muted">Пропуск действует на ограниченном числе устройств. «Отвязать» освобождает место на сервере; данные на устройстве сохраняются. Чужое устройство, где пропуск остался введённым, при следующей проверке само займёт свободное место снова — чтобы оно перестало пользоваться пропуском, удалите пропуск на нём («Лицензия» → «Удалить пропуск»). Это устройство после «Отвязать это» заново не регистрируется и переходит в деморежим при следующей проверке — до кнопки «Зарегистрировать это устройство». Прежняя программа на этом же устройстве считается тем же устройством.</p>
     ${rows ? `<div class="list-rows" id="lic-dev-rows">${rows}</div>` : ''}
     <div class="form-actions">${m.state === 'unknown' || m.state === 'limit' ? btn('Зарегистрировать это устройство', 'licDevRegister()', 'primary', 'check') : ''}${btn('Обновить', "openLicDevicesSheet('replace')", '', 'refresh-cw')}</div>`, sub === 'replace' ? 'replace' : (sheetIsOpen() ? true : undefined));
 }
@@ -15283,8 +15339,8 @@ async function licDevUnbind(id) {
   const key = localStorage.getItem(LIC_STORE_KEY) || ''; if (!key) return;
   const j = await licSrvCall('deactivate', key, { deviceId: id });
   if (!j || j.net || !j.ok) { toast('Сервер лицензий не подтвердил отвязку — повторите позже', true); return; }
-  if (id === licDevId()) { localStorage.removeItem(LIC_CHECKED_KEY); toast('Это устройство отвязано — при следующей проверке программа перейдёт в деморежим'); }
-  else toast('Устройство отвязано — его место свободно');
+  if (id === licDevId()) { localStorage.setItem(LIC_DETACHED_KEY, '1'); localStorage.removeItem(LIC_CHECKED_KEY); toast('Это устройство отвязано — при следующей проверке программа перейдёт в деморежим; вернуть — «Зарегистрировать это устройство»'); }
+  else toast('Устройство отвязано — его место свободно (если пропуск на нём остался введённым, оно займёт место снова)');
   openLicDevicesSheet('replace');
 }
 // снять устройство с сервера при удалении пропуска с этого устройства (без связи — пропуск удаляется, место освободится позже вручную)
@@ -23026,8 +23082,8 @@ HFIG.where = { h: 250, title: 'Где в программе: Настройки 
   ['Автоматизация', 'Копии базы', 'Файл в облаке', '…', 'Напоминания на устройстве', 'Свой сервер в Яндекс Облаке', 'Корзина', 'Импорт из файла'].forEach((n, i) => { s += hf.row(312, 50 + i * 22, 196, n, n === 'Свой сервер в Яндекс Облаке', 10); });
   s += hf.num(508, 170, 2);
   return s; })() };
-// 3. Лист мастера «Свой сервер в Яндекс Облаке» (приложение для компьютера): шаги 1–3
-HFIG.wizard = { h: 236, title: 'Лист мастера «Свой сервер в Яндекс Облаке»', caption: 'Мастер в приложении для компьютера: шаг 1 — ключ доступа к Облаку (способ 1: его создаёт ИИ-помощник консоли — кнопки «Открыть консоль Облака» и «Скопировать запрос», поле для ответа помощника, «Подключиться к Облаку»); шаг 2 — облако и каталог; шаг 3 — имя бакета и галочки → «Развернуть».', svg: (() => {
+// 3. Лист мастера «Свой сервер в Яндекс Облаке» (приложение для компьютера или Android 1.27+): шаги 1–3
+HFIG.wizard = { h: 236, title: 'Лист мастера «Свой сервер в Яндекс Облаке»', caption: 'Мастер в приложении для компьютера или Android: шаг 1 — ключ доступа к Облаку (способ 1: его создаёт ИИ-помощник консоли — кнопки «Открыть консоль Облака» и «Скопировать запрос», поле для ответа помощника, «Подключиться к Облаку»); шаг 2 — облако и каталог; шаг 3 — имя бакета и галочки → «Развернуть».', svg: (() => {
   let s = hf.defs('wizard') + hf.box(10, 6, 500, 224, { rx: 8 }) + hf.t(20, 24, 'Свой сервер в Яндекс Облаке', { bold: true, fs: 13 });
   s += hf.box(20, 32, 480, 18, { fill: 'var(--surface2)', rx: 4 }) + hf.t(28, 45, 'Сервер не подключён', { fs: 10, fill: 'var(--text-muted)' });
   s += hf.num(30, 68, 1) + hf.t(46, 72, 'Шаг 1. Доступ к Облаку', { bold: true, fs: 12 });
@@ -23105,8 +23161,9 @@ const HELP_SECTIONS = [
 <p>Дела, доверители, заседания, сроки и деньги хранятся <b>на вашем устройстве</b>. Автору программы сведения о делах не передаются.</p>
 <h3>Первые шаги</h3>
 <ol><li><b>Пропуск (лицензионный ключ)</b> — Настройки → «Лицензия» → вставить строку из письма → «Проверить и сохранить». Без пропуска — деморежим: до 5 новых записей в месяц в каждом разделе, просмотр и правка не ограничены.</li>
-<li><b>Данные с другого устройства</b> — «Синхронизация» → «Подключиться по QR-коду» (QR-код показывает первое устройство: «Синхронизация» → «Подключить телефон или планшет — QR-код») и пароль шифрования. Или вручную: адрес и код своего сервера, пароль шифрования → «Сохранить и проверить связь» → «Загрузить базу с сервера». Если сервера ещё нет — Настройки → «Свой сервер в Яндекс Облаке».</li>
-<li><b>Первое дело</b> — кнопка «Создать» (или «+» на телефоне) → «Дело».</li></ol>
+<li><b>Как обмениваться данными между устройствами</b> — «Синхронизация» (в «Ещё» на телефоне или в боковой панели), блок «С чего начать»; пока ничего не подключено, он предлагает три пути: <b>без сервера</b> — «Файл в облаке» (Google Диск, Яндекс Диск, Dropbox; 5 минут; мониторинг судов, лента календаря и Telegram недоступны); <b>свой сервер в Яндекс Облаке</b> — мастер по шагам (раздел «Синхронизация и свой сервер»); <b>сервер уже есть на другом устройстве</b> — «Подключиться по QR-коду» (QR-код показывает первое устройство: «Синхронизация» → «Подключить телефон или планшет — QR-код») и пароль шифрования. Способ можно сменить позже; программа работает и без обмена — всё хранится на устройстве.</li>
+<li><b>Первое дело</b> — кнопка «Создать» (или «+» на телефоне) → «Дело».</li>
+<li><b>Помощь с настройкой</b> — если что-то не получается, напишите автору тем способом, которым получили пропуск (письмо с пропуском содержит адрес для связи). Настройку своего сервера можно пройти вместе по демонстрации экрана за 15–20 минут; ключи и пароли при этом не показывайте и не пересылайте.</li></ol>
 <h3>Где что</h3>
 <p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам, доверителям, судам и судьям (и по номеру телефона) и переключатель темы.</p>
 <p><b>Оформление</b> (Настройки → «Оформление»: тема, размер текста, начертание) — настройка каждого устройства: на планшете может быть тёмная тема, на телефоне светлая, и обмен базой это не меняет. Остальные настройки (пояс заседаний, напоминания, справочники) по-прежнему общие для всех устройств.</p>
@@ -23183,7 +23240,7 @@ ${typeof helpFig === 'function' ? helpFig('scheme') : ''}
 <h3>С чего начать</h3>
 <p>Сначала решите, какой из трёх случаев ваш:</p>
 <ol><li><b>Сервер уже работает на другом вашем устройстве</b> (например, на компьютере) — создавать ничего не нужно. На телефоне: «Ещё» → «Синхронизация» → «Подключиться по QR-коду»; код показывает первое устройство («Синхронизация» → «Подключить телефон или планшет — QR-код»). Подробно — ниже, «Подключить телефон или планшет — по QR-коду».</li>
-<li><b>Сервера ещё нет, есть компьютер с Windows</b> — путь А: мастер в приложении для компьютера делает всё сам, от вас — ключ доступа к Облаку (его создаёт ИИ-помощник консоли) и несколько нажатий. Это проверенный путь.</li>
+<li><b>Сервера ещё нет, есть компьютер с Windows или телефон Android</b> — путь А: мастер в приложении для компьютера или для Android (1.27 и новее) делает всё сам, от вас — ключ доступа к Облаку (его создаёт ИИ-помощник консоли) и несколько нажатий. Это проверенный путь.</li>
 <li><b>Сервера нет и компьютера нет</b> — путь Б (пробный): весь сервер создаёт ИИ-помощник консоли Облака в браузере телефона или планшета; или путь В — вручную кнопками консоли.</li></ol>
 <h3>Где это в программе</h3>
 <p>Мастер и инструкции к путям А, Б и В открываются одним пунктом: <b>«Настройки» → «Свой сервер в Яндекс Облаке»</b>. На компьютере «Настройки» — внизу боковой панели слева; на телефоне — внизу экрана «Ещё», затем «Настройки». В списке настроек пункт стоит в группе «Данные», ниже середины списка (на телефоне — прокрутите). Второй вход — лист «Синхронизация» (рядом с «Настройками»): пока сервер не подключён, внизу листа есть кнопка «Свой сервер в Яндекс Облаке — по шагам». Вверху листа мастера — строка состояния: «Сервер не подключён» или «Сервер подключён: адрес».</p>
@@ -23192,8 +23249,8 @@ ${typeof helpFig === 'function' ? helpFig('where') : ''}
 <ol><li>Аккаунт Яндекса и банковская карта: без платёжного аккаунта функции Облака не запускаются. При обычной работе расходы — в пределах бесплатных лимитов, за хранение — рубли в месяц.</li>
 <li>Облако: откройте <a href="https://console.yandex.cloud/" target="_blank" rel="noopener noreferrer">console.yandex.cloud</a> и войдите аккаунтом Яндекса — облако создастся само. Слева «Биллинг» → вкладка «Аккаунт» → «Создать аккаунт» → тип «Физическое лицо» → способ оплаты: банковская карта или «Пополнение вручную» → «Создать» → дождитесь статуса «Активен». Справка Яндекса о платёжном аккаунте: <a href="https://yandex.cloud/ru/docs/billing/quickstart/" target="_blank" rel="noopener noreferrer">yandex.cloud/ru/docs/billing/quickstart</a>.</li>
 <li>Пароль шифрования базы: придумайте заранее (не короче 12 знаков) и запишите на бумаге. Он нигде не хранится и не восстанавливается; тот же пароль вводится на каждом устройстве. Это не «секретный код сервера» — код сервера мастер придумает сам.</li></ol>
-<h3>Путь А. Мастер «Свой сервер в Яндекс Облаке» в приложении для компьютера</h3>
-<ol><li><b>Установите приложение для компьютера</b> — файл CRM_Advokata_Setup.exe с сайта программы (кнопка «Скачать установщик» есть в самом листе «Свой сервер в Яндекс Облаке», если открыть его в браузере). Windows может спросить разрешение — установщик подписан не магазином, это ожидаемо. В браузере мастер не работает: браузер не пускает запросы к Яндекс Облаку, поэтому в браузере тот же пункт настроек показывает только инструкцию.</li>
+<h3>Путь А. Мастер «Свой сервер в Яндекс Облаке» в приложении для компьютера или Android</h3>
+<ol><li><b>Установите приложение</b> — для компьютера: файл CRM_Advokata_Setup.exe с сайта программы (Windows может спросить разрешение — установщик подписан не магазином, это ожидаемо); для телефона или планшета Android: файл CRM_Advokata.apk, версия 1.27 и новее (Android спросит, разрешить ли установку из этого источника). Кнопка скачивания есть в самом листе «Свой сервер в Яндекс Облаке», если открыть его в браузере: на телефоне она предлагает приложение для Android, на компьютере — установщик для Windows. В браузере мастер не работает: браузер не пускает запросы к Яндекс Облаку, поэтому в браузере тот же пункт настроек показывает только инструкцию. На iPhone приложения нет — сервер создаётся с компьютера или телефона Android, а iPhone подключается по QR-коду.</li>
 <li><b>Откройте мастер</b>: в приложении «Настройки» → «Свой сервер в Яндекс Облаке». Лист устроен так: строка состояния, «Что понадобится», затем «Путь А» с шагами 1–3 и внизу свёрнутый «Путь Б». Шаги идут по порядку — шаг 2 станет доступен после шага 1.</li></ol>
 ${typeof helpFig === 'function' ? helpFig('wizard') : ''}
 <ol start="3"><li><b>Шаг 1 — ключ доступа к Облаку, способ 1: его создаёт ИИ-помощник консоли.</b> В мастере раскрыт блок «Способ 1 — ИИ-помощник консоли Облака создаёт ключ». Нажмите «Открыть консоль Облака» — откроется <a href="https://console.yandex.cloud/" target="_blank" rel="noopener noreferrer">console.yandex.cloud</a>; войдите аккаунтом Яндекса, в котором создано облако. Вверху консоли выберите своё облако и любой каталог (например, default) — помощник работает в выбранном каталоге. Затем найдите кнопку ИИ-помощника: она подписана <b>«AI-ассистент»</b> (в некоторых версиях консоли — «Чат с AI»); нажмите её — откроется окно чата. Справка Яндекса о помощнике: <a href="https://yandex.cloud/ru/docs/console/operations/ai-assistant" target="_blank" rel="noopener noreferrer">yandex.cloud/ru/docs/console/operations/ai-assistant</a>.</li></ol>
@@ -24009,6 +24066,8 @@ const NEXT_BOOT = {
     try { if (typeof eulaGate === 'function') eulaGate(); } catch (e) { logErr('eula:gate', e); }
     // v190: программу открыли ссылкой из QR-кода «Подключить телефон» — лист подключения с кодом (sync/pair.js)
     try { if (typeof pairStart === 'function') pairStart(); } catch (e) { logErr('pair:start', e); }
+    // v194: пропуск из ссылки письма или QR-кода
+    try { if (typeof licLinkStart === 'function') licLinkStart(); } catch (e) { logErr('license:start', e); }
     try { if (typeof pwaShortcut === 'function') pwaShortcut(); } catch (e) { logErr('pwa:shortcut', e); }
   },
 };
