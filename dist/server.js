@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v195: списки хранилища — целиком по страницам (файлы документов, изменения базы, история снимков; аудит сборки 194, 6.7)
 //  v194: напоминания — remindput и таймер пишут файл условно по ETag и повторяют при изменении (аудит сборки 194, R4)
 //  v193: событие суда сохраняет proceedingId (id рассмотрения дела от коллектора 3.24+) и сравнивается с ним (аудит сборки 169, А1)
 //  v192: аудит 14.10.2026 — пределы форм по адресу платформы, ответы в пределах функции, код не в журнал, напоминания до 4096 знаков
@@ -161,7 +162,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 194,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 195,
       ready: readiness()
     });
   }
@@ -181,7 +182,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 194, cal: true, ask: true, ical: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 195, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -456,6 +457,24 @@ async function s3Get(key) {
   });
 }
 
+// v195 (аудит сборки 194, 6.7): список объектов с префиксом — целиком, по страницам ListObjectsV2 (IsTruncated, NextContinuationToken).
+// Ответ — как у s3Get одной страницы ({ ok, status, text() }), text() — склеенные <Contents> всех страниц. Страница не прочиталась, ответ
+// без признака окончания или объектов больше maxObjects — { ok:false }: вызывающий не должен принимать неполный список за полный.
+async function s3ListAll(prefix, maxObjects) {
+  const limit = maxObjects || 100000; let token = '', parts = [], n = 0;
+  for (let page = 0; page < 1000; page++) {
+    const r = await s3Get('?list-type=2&prefix=' + prefix + '&max-keys=1000' + (token ? '&continuation-token=' + encodeURIComponent(token) : ''));
+    if (!r.ok) return { ok: false, status: r.status, text: async () => '' };
+    const xml = await r.text(), items = xml.match(/<Contents>[\s\S]*?<\/Contents>/g) || [];
+    parts.push(items.join('')); n += items.length;
+    if (n > limit) return { ok: false, status: 507, text: async () => '' };
+    const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml), next = (xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/) || [])[1] || '';
+    if (!truncated) return { ok: true, status: 200, count: n, text: async () => '<ListBucketResult>' + parts.join('') + '</ListBucketResult>' };
+    if (!next || next === token) return { ok: false, status: 502, text: async () => '' };
+    token = next.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  }
+  return { ok: false, status: 508, text: async () => '' };
+}
 // Диагностика ленты: сервер сам читает свой объект и считает события
 async function calCheck() {
   if (!process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) {
@@ -486,7 +505,8 @@ function dbHistKey(ver) { return dbHistPrefix() + String(ver) + '.crypt'; }
 const DB_HIST_LAST = 5, DB_HIST_DAYS = 14;
 async function dbHistList() {
   const prefix = dbHistPrefix();
-  const r = await s3Get('?list-type=2&prefix=' + prefix + '&max-keys=1000');
+  // v195: список целиком (s3ListAll)
+  const r = await s3ListAll(prefix);
   if (!r.ok) return { ok: false, error: 's3 list ' + r.status };
   const xml = await r.text(); const items = []; const re = /<Contents>([\s\S]*?)<\/Contents>/g; let m;
   while ((m = re.exec(xml))) {
@@ -1047,7 +1067,8 @@ async function snapCommit(body) {
     try {
       const jobs = [s3Copy(pending, dbKey()).then(c1 => { if (!c1.ok) { legacy = false; console.log('snap legacy copy: s3 ' + c1.status); } return c1.ok ? s3Delete(pending) : null; }).catch(() => { legacy = false; }), s3Delete(dbClaimKey(ver)).catch(() => {})];
       if (have) { const all = have.concat([ver]), keep = dbHistKeep(all, ver); all.filter(v => !keep.has(v)).forEach(v => jobs.push(s3Delete(dbHistKey(v)).then(rd => { if (rd.ok || rd.status === 404) pruned++; }).catch(() => {}))); }
-      const pl = await s3Get('?list-type=2&prefix=' + snapPrefix() + 'pending-&max-keys=1000');
+      // v195: незавершённые загрузки — список целиком
+      const pl = await s3ListAll(snapPrefix() + 'pending-');
       if (pl.ok) for (const m of (await pl.text()).matchAll(/<Key>([^<]+)<\/Key>[\s\S]*?<LastModified>([^<]+)<\/LastModified>/g)) { if (m[1] !== pending && Date.now() - Date.parse(m[2]) > PENDING_TTL) jobs.push(s3Delete(m[1]).catch(() => {})); }
       jobs.push(deltaPrune().catch(e => console.log('delta prune: ' + (e && e.message || e))));
       await Promise.race([Promise.all(jobs), new Promise(res => setTimeout(res, 2000))]);
@@ -1062,7 +1083,8 @@ const deltaKey = (ver, base) => deltaPrefix() + String(ver) + '-' + String(base)
 const deltaPendingKey = token => deltaPrefix() + 'pending-' + token + '.crypt';
 // сохранённые изменения: [{ ver, base, bytes, key, at }]
 async function deltaList() {
-  const r = await s3Get('?list-type=2&prefix=' + deltaPrefix() + '&max-keys=1000'); if (!r.ok) return { ok: false, error: 's3 list ' + r.status };
+  // v195: список целиком (s3ListAll)
+  const r = await s3ListAll(deltaPrefix()); if (!r.ok) return { ok: false, error: 's3 list ' + r.status };
   const items = [];
   for (const m of (await r.text()).matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
     const key = (m[1].match(/<Key>([^<]+)<\/Key>/) || [])[1] || '', mm = /\/(\d+)-(\d+)\.crypt$/.exec(key); if (!mm || !key.startsWith(deltaPrefix())) continue;
@@ -1091,7 +1113,8 @@ async function deltaRegister(token, bytes, ver, base) {
 }
 // хранятся DELTA_KEEP последних и не старше DELTA_DAYS; незавершённые загрузки старше суток удаляются
 async function deltaPrune() {
-  const r = await s3Get('?list-type=2&prefix=' + deltaPrefix() + '&max-keys=1000'); if (!r.ok) return 0;
+  // v195: список целиком (s3ListAll)
+  const r = await s3ListAll(deltaPrefix()); if (!r.ok) return 0;
   const xml = await r.text(), now = Date.now(), jobs = [], done = [];
   for (const m of xml.matchAll(/<Key>([^<]+)<\/Key>[\s\S]*?<LastModified>([^<]+)<\/LastModified>/g)) if (/\/pending-/.test(m[1]) && now - Date.parse(m[2]) > PENDING_TTL) jobs.push(s3Delete(m[1]));
   const l = await deltaList(); if (l.ok) { const sorted = l.items.sort((a, b) => b.ver - a.ver); sorted.forEach((d, i) => { if (i >= DELTA_KEEP || (d.at && now - d.at > DELTA_DAYS * 864e5)) { jobs.push(s3Delete(d.key)); done.push(d.ver); } }); }
@@ -1208,7 +1231,8 @@ async function blobGet(body) {
 async function blobList() {
   needStorage();
   const prefix = 'blob-' + storeId() + '/';
-  const r = await s3Get('?list-type=2&prefix=' + prefix + '&max-keys=1000');
+  // v195: список файлов целиком — по нему программа решает, что есть на сервере (s3ListAll)
+  const r = await s3ListAll(prefix);
   if (!r.ok) return { ok: false, error: 's3 list ' + r.status };
   const xml = await r.text(); const items = [];
   const re = /<Contents>([\s\S]*?)<\/Contents>/g; let m;
