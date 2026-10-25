@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="25.10.2026 08:17 · c779bb2">
-<meta name="build-no" content="198">
+<meta name="build" content="25.10.2026 10:48 · d3849c9">
+<meta name="build-no" content="199">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -846,6 +846,16 @@ function localKV() {
 }
 async function kvGet(key) { const d = await localKV(); return new Promise(res => { const t = d.transaction('kv').objectStore('kv').get(key); t.onsuccess = () => res(t.result); t.onerror = () => res(undefined); }); }
 async function kvSet(key, val) { const d = await localKV(); return new Promise(res => { const t = d.transaction('kv', 'readwrite'); t.objectStore('kv').put(val, key); t.oncomplete = () => res(true); t.onerror = () => res(false); }); }
+// сборка 199 (аудит сборки 198, N1): «взять или создать» одной транзакцией — если ключа нет, записать val; ответ — сохранённое значение
+// (своё или записанное другой вкладкой раньше), только после завершения транзакции; null — сбой или прерывание
+async function kvGetOrCreate(key, val) {
+  const d = await localKV();
+  return new Promise(res => {
+    let out = null; const t = d.transaction('kv', 'readwrite'), s = t.objectStore('kv'), g = s.get(key);
+    g.onsuccess = () => { if (g.result !== undefined && g.result !== null) { out = g.result; return; } s.put(val, key); out = val; };
+    t.oncomplete = () => res(out); t.onerror = () => res(null); t.onabort = () => res(null);
+  });
+}
 // v195 (аудит сборки 194, R2): условная запись — в одной транзакции: записать, только если ревизия на диске (поле rev) всё ещё expectRev.
 // Ответ: true — записано; 'conflict' — другая вкладка успела записать свою версию; false — сбой записи
 async function kvCas(key, expectRev, val) {
@@ -966,7 +976,8 @@ async function secPinKey(pin) { // ключ из PIN: PBKDF2 → AES-GCM, сол
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64ToBuf(salt), iterations: 210000, hash: 'SHA-256' }, km, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 async function secretsUnlockPin(pin) { // вызывается при успешном вводе PIN
-  if (!_sec.pending) { if (secPinOn() && _sec.ok && !_sec.pinKey) { try { _sec.pinKey = await secPinKey(pin); } catch (e) { logErr('secrets:pin', e); } } return true; }
+  // сборка 199 (N2): ключ PIN получен — изменения, ждавшие его (слой PIN включён в другой вкладке), записываются
+  if (!_sec.pending) { if (secPinOn() && _sec.ok && !_sec.pinKey) { try { _sec.pinKey = await secPinKey(pin); if (Object.keys(_sec.ops).length) secretsPersist().catch(secSaveFailed); } catch (e) { logErr('secrets:pin', e); } } return true; }
   try {
     const k = await secPinKey(pin);
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(_sec.pending.iv) }, k, new Uint8Array(_sec.pending.ct));
@@ -1017,8 +1028,17 @@ async function secDiskMap(disk) {
   } catch (e) { logErr('secrets:read', e); }
   return undefined;
 }
+// сборка 199 (аудит сборки 198, N2): контейнер, внешний слой которого читается, а внутренний закрыт PIN, — внутренний слой; иначе null
+async function secDiskInner(disk) {
+  if (!disk || !disk.iv || !disk.ct || !_sec.key) return null;
+  try { const obj = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(disk.iv) }, _sec.key, new Uint8Array(disk.ct)))) || {}; return obj && obj.pin === 1 && obj.ct ? obj : null; } catch (e) { return null; }
+}
+// нужен PIN, чтобы записать секреты: на экране блокировки (если он есть и не открыт) — ввод PIN; изменения ждут в _sec.ops
+function secNeedPin() { try { if (typeof LOCK === 'object' && LOCK.enabled && typeof lockShow === 'function' && !(typeof LOCK_UI === 'object' && LOCK_UI.locked)) lockShow(); } catch (e) { logErr('secrets:need-pin', e); } }
 async function secEncrypt(map, rev) {
   let payload = new TextEncoder().encode(JSON.stringify(map)), inner = null;
+  // сборка 199 (N2): слой PIN включён, а ключа PIN в этой вкладке нет — без слоя не записывать
+  if (secPinOn() && !_sec.pinKey) throw new Error('секреты закрыты PIN-кодом — нужен PIN');
   if (secPinOn() && _sec.pinKey) { // v292: внутренний слой — на ключе из PIN
     const iv2 = crypto.getRandomValues(new Uint8Array(12)); const ct2 = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv2 }, _sec.pinKey, payload);
     inner = { pin: 1, iv: Array.from(iv2), ct: Array.from(new Uint8Array(ct2)) }; payload = new TextEncoder().encode(JSON.stringify(inner));
@@ -1032,12 +1052,20 @@ async function secEncrypt(map, rev) {
 async function secWriteOnce(opts) {
   if (!_sec.ok || _sec.pending) return false; // пока слой PIN не открыт — на диске остаётся прежний вариант, изменения ждут в _sec.ops
   const o = opts || {};
+  // сборка 199 (N2): слой PIN включён (возможно, другой вкладкой), ключа PIN нет — ждать PIN, слой не снимать
+  if (secPinOn() && !_sec.pinKey) { secNeedPin(); return false; }
   for (let attempt = 0; attempt < 6; attempt++) {
     const ops = Object.assign({}, _sec.ops);
     if (!Object.keys(ops).length && !o.force && !o.replace) return true;
     const disk = await kvGet('secrets'), rev = Number(disk && disk.rev || 0);
     let base = o.replace ? Object.assign({}, _sec.map) : await secDiskMap(disk);
-    if (base === undefined) { logErr('secrets:read', 'контейнер на диске не читается — записывается словарь этой вкладки'); base = Object.assign({}, _sec.map); }
+    // сборка 199 (аудит сборки 198, N2): нечитаемый контейнер словарём этой вкладки не перезаписывается. Закрыт PIN — ждать PIN;
+    // не читается ключом устройства — остановить запись (прежний контейнер цел); заменить — только осознанно (secretsResetUnreadable),
+    // прежний контейнер сохраняется копией
+    if (base === undefined) {
+      if (_sec.discardDisk) { if ((await kvSet('secrets_unreadable_' + Date.now(), disk)) !== true) throw new Error('копия прежнего контейнера секретов не записана'); base = {}; }
+      else { const inner = await secDiskInner(disk); if (inner) { _sec.pending = inner; secNeedPin(); return false; } _sec.unreadable = true; throw new Error('сохранённые пароли и ключи не читаются ключом этого устройства — запись остановлена, прежние не тронуты'); }
+    }
     const next = secOpsApply(Object.assign({}, base || {}), ops);
     // без условной записи (kv.js прежней сборки в обвязке) — обычная запись: очередь вкладки и чтение диска перед записью остаются
     const box = await secEncrypt(next, rev + 1), r = typeof kvCas === 'function' ? await kvCas('secrets', rev, box) : (await kvSet('secrets', box)) !== false;
@@ -1045,7 +1073,7 @@ async function secWriteOnce(opts) {
     if (r !== true) throw new Error('защищённое хранилище не записало секреты');
     // записано: снять применённые изменения (если ключ не меняли снова), принять версию диска с изменениями, сделанными за время записи
     for (const k of Object.keys(ops)) if (_sec.ops[k] === ops[k]) delete _sec.ops[k];
-    _sec.map = secOpsApply(Object.assign({}, next), _sec.ops); _sec.rev = rev + 1; _sec.pinKeyPrev = null; o.replace = false;
+    _sec.map = secOpsApply(Object.assign({}, next), _sec.ops); _sec.rev = rev + 1; _sec.pinKeyPrev = null; o.replace = false; _sec.discardDisk = false; _sec.unreadable = false;
     if (_lsRaw) for (const k of Object.keys(_sec.migrated)) { if (_sec.map[k] === _sec.migrated[k] && _lsRaw.getItem.call(localStorage, k) === _sec.migrated[k]) _lsRaw.removeItem.call(localStorage, k); delete _sec.migrated[k]; }
     if (_secBc) { try { _secBc.postMessage({ rev: _sec.rev }); } catch (e) { /* весть — не обязательна, перечитают при своей записи */ } }
     return true;
@@ -1061,8 +1089,26 @@ function secretsPersist(opts) {
 async function secretsReload() {
   if (!_sec.ok || _sec.pending) return;
   const disk = await kvGet('secrets'); if (Number(disk && disk.rev || 0) <= _sec.rev) return;
-  const m = await secDiskMap(disk); if (!m) return;
+  const m = await secDiskMap(disk);
+  // сборка 199 (N2): другая вкладка закрыла секреты PIN-кодом, которого здесь нет, — ждать PIN (запись без слоя запрещена)
+  if (m === undefined) { const inner = await secDiskInner(disk); if (inner) { _sec.pending = inner; secNeedPin(); } return; }
+  if (!m) return;
   _sec.map = secOpsApply(Object.assign({}, m), _sec.ops); _sec.rev = Number(disk.rev || 0);
+}
+// сборка 199 (N2): осознанная замена нечитаемого контейнера (ключ устройства сменился, контейнер повреждён): прежний сохраняется копией
+// (kv secrets_unreadable_<время>), на диск — пароли и ключи, введённые в этом запуске
+async function secretsResetUnreadable() { _sec.discardDisk = true; try { await secretsPersist({ force: true }); } finally { _sec.discardDisk = false; } return !_sec.unreadable; }
+// сборка 199 (аудит сборки 198, N1): ключ устройства — «взять или создать» одной транзакцией (две первые вкладки получают один ключ);
+// готов только после подтверждённой записи, иначе исключение — защищённого хранения нет, открытые значения прежних версий не трогаются
+async function secDevKey() {
+  const have = await kvGet('devkey'); if (have) return have;
+  const cand = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  let key = null, atomic = false;
+  if (typeof kvGetOrCreate === 'function') { try { key = await kvGetOrCreate('devkey', cand); atomic = true; } catch (e) { logErr('secrets:devkey', e); } }
+  // без «взять или создать» (обвязка прежних сборок): запись, ответ false — сбой (контракт kvSet), затем чтение того, что сохранилось
+  if (!atomic && (await kvSet('devkey', cand)) !== false) key = await kvGet('devkey');
+  if (!key) throw new Error('ключ устройства не записан в хранилище браузера');
+  return key;
 }
 if (_secBc) _secBc.onmessage = () => { _sec.chain = _sec.chain.then(secretsReload).catch(e => logErr('secrets:reload', e)); };
 // сбой записи: изменение остаётся в памяти и в очереди; пользователю — одно предупреждение за запуск
@@ -1080,12 +1126,14 @@ function secMigratePlain() {
 async function secretsInit() {
   try {
     if (!_lsRaw || !window.crypto || !crypto.subtle || !window.indexedDB) { _sec.ready = true; return; }
-    let key = await kvGet('devkey');
-    if (!key) { key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']); await kvSet('devkey', key); }
+    // сборка 199 (N1): ключ устройства — подтверждённый и общий для вкладок
+    const key = await secDevKey();
     _sec.key = key; _sec.ok = true;
     const blob = await kvGet('secrets');
+    // сборка 199 (N2): слой PIN без PIN-кода — секреты вводятся заново, прежний контейнер при первой записи сохраняется копией;
+    // контейнер не читается ключом устройства — запись останавливается до осознанной замены (secretsResetUnreadable)
     if (blob && blob.iv && blob.ct) { try { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct)); const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
-      if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); } } else _sec.map = obj; } catch (e) { logErr('secrets:decrypt', e); } } // v292
+      if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); _sec.discardDisk = true; } } else _sec.map = obj; } catch (e) { logErr('secrets:decrypt', e); _sec.unreadable = true; } } // v292
     _sec.rev = Number(blob && blob.rev || 0);
     // v195 (R3): открытые значения удаляются из localStorage только после подтверждённой записи (secWriteOnce); слой ждёт PIN — перенос отложен
     if (secMigratePlain()) await secretsPersist().catch(secSaveFailed);
@@ -1559,7 +1607,9 @@ const itemListKey = (a) => Array.isArray(a) && a.length > 0 && a.every(x => x &&
 function mergeItemLists(a, b, tsA, tsB, dels, mergeEl) {
   const out = [], seen = new Set();
   // v177 (N4): элементы с одним id — функцией слияния по полям, если она передана (рассмотрения дела — mergeProceeding)
-  const pick = mergeEl ? (x, y) => mergeEl(x, y) : (x, y) => { const ux = Number(x.updatedAt || x.createdAt || 0), uy = Number(y.updatedAt || y.createdAt || 0); if (ux !== uy) return ux > uy ? x : y; return tsA >= tsB ? x : y; }; // v299: сначала метка самого элемента, потом метка списка
+  // v299: сначала метка самого элемента; сборка 199 (аудит сборки 198, N3-B): при равной метке — по содержимому (меньшее по записи), а не
+  // по метке списка: она растёт от правки другого поля при промежуточном слиянии, и итог зависел от порядка обмена
+  const pick = mergeEl ? (x, y) => mergeEl(x, y) : (x, y) => { const ux = Number(x.updatedAt || x.createdAt || 0), uy = Number(y.updatedAt || y.createdAt || 0); if (ux !== uy) return ux > uy ? x : y; return recCanon(x) <= recCanon(y) ? x : y; };
   const mapB = new Map((Array.isArray(b) ? b : []).map(x => [x.id, x]));
   (Array.isArray(a) ? a : []).forEach(x => { const y = mapB.get(x.id); out.push(y ? pick(x, y) : x); seen.add(x.id); });
   (Array.isArray(b) ? b : []).forEach(y => { if (!seen.has(y.id)) out.push(y); });
@@ -1592,6 +1642,9 @@ function mergeByFields(cur, rec) {
     const tN = chN[k] || 0, tO = chO[k] || 0;
     if (itemListKey(newer[k]) || itemListKey(older[k])) { m[k] = mergeItemLists(newer[k], older[k], tN, tO, dels[k]); ch[k] = Math.max(tN, tO); continue; } // v294: платежи обеих сторон
     if (tO > tN) { m[k] = older[k]; ch[k] = tO; }
+    // сборка 199 (аудит сборки 198, N3-B): равные метки поля при разных значениях — меньшее по записи, а не значение «более новой» записи
+    // целиком (её _upd растёт от правки другого поля): одинаково в любом порядке обмена трёх устройств
+    else if (tO === tN && tO > 0 && recCanon(older[k]) < recCanon(newer[k])) m[k] = older[k];
   }
   for (const f of Object.keys(dels)) if (Array.isArray(m[f])) m[f] = m[f].filter(x => !(x && dels[f][x.id] > Number(x.createdAt || 0)));
   if (Array.isArray(m.payments) && typeof finRecalc === 'function') finRecalc(m); // v299: итог оплаты — из платежей
@@ -1675,7 +1728,8 @@ function mergeCaseRecords(cur, rec, base, events) {
   m._delDl = {}; for (const src of [older._delDl, newer._delDl]) if (src) for (const id of Object.keys(src)) m._delDl[id] = Math.max(Number(m._delDl[id] || 0), Number(src[id] || 0)); // v294/v299: по максимуму
   // v169 (P2): срок с одним id — из той версии дела, где сам срок менялся позже (_u, fieldStamps); без отметок — из более новой версии дела
   const dlOld = new Map((Array.isArray(older.deadlines) ? older.deadlines : []).filter(d => d && d.id != null).map(d => [d.id, d]));
-  const dlPick = d => { const o = d && d.id != null ? dlOld.get(d.id) : null; return o && Number(o._u || 0) > Number(d._u || 0) ? o : d; };
+  // сборка 199 (аудит сборки 198, N3-B): равные _u при разном содержимом — меньшее по записи, а не срок «более новой» записи дела
+  const dlPick = d => { const o = d && d.id != null ? dlOld.get(d.id) : null; if (!o) return d; const uo = Number(o._u || 0), ud = Number(d._u || 0); if (uo !== ud) return uo > ud ? o : d; return recCanon(o) < recCanon(d) ? o : d; };
   m.deadlines = unionBy((Array.isArray(newer.deadlines) ? newer.deadlines : []).map(dlPick), older.deadlines, d => d && d.id).filter(d => !(d && d.id && m._delDl[d.id] > (d.createdAt || 0))).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
   if (!Object.keys(m._delDl).length) delete m._delDl;
   m.participants = unionBy(newer.participants, older.participants, p => p && crmMonNorm(p.name || ''));
@@ -1779,20 +1833,25 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
         // v195 (аудит сборки 194, R1): равный _upd не доказывает одинаковое содержимое — часы двух устройств могут совпасть. Одинаковое
         // содержимое — ничего не делать (повторный обмен не порождает новых версий); разное — слияние, как при разных версиях
         if (curT === newT && recCanon(cur) === recCanon(rec)) { skipped++; continue; }
-        if (s === 'cases' && base && curT > base && newT > base) { // v252
+        // сборка 199 (аудит сборки 198, N3-A): общей истории обмена нет (base = 0: первый обмен, перенос через файл без сервера) — это не
+        // «конфликта нет», а «неизвестно, кто правил»: обе версии сливаются по полям и элементам (рассмотрения, сроки, платежи — по id), а не
+        // заменяются целиком; слияние записывается в журнал коллизий
+        const both = base ? (curT > base && newT > base) : true, noHist = !base;
+        if (s === 'cases' && both) { // v252
           if (!caseEventsAll) { const loc = await getAllRaw('caseEvents'); const inc = parsed.data.caseEvents || []; const ids = new Set(loc.map(e => e && e.id)); caseEventsAll = loc.concat(inc.filter(e => e && !ids.has(e.id))); }
           const merged = mergeCaseRecords(cur, rec, base, caseEventsAll);
           const diff = conflictDiff(cur, rec, merged);
           if (!dry) { if (await writeRaw(s, merged)) { updated++; CLOUD.dirty = true; } } else updated++;
-          conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по журналу изменений', diff });
+          conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept: noHist ? 'объединено: общей истории обмена нет' : 'объединено по журналу изменений', diff });
           continue;
         }
-        if (base && curT > base && newT > base && s !== 'refs' && (cur._ch || rec._ch)) { // v258: обе стороны правили — по полям
+        if (both && s !== 'refs' && (cur._ch || rec._ch)) { // v258: обе стороны правили — по полям
           const merged = mergeByFields(cur, rec);
-          const diff = conflictDiff(cur, rec, merged); // v297: какие поля разошлись и что выбрано
-          if (dry) { conflicts.push({ store: s, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по полям', diff }); updated++; continue; }
+          const diff = conflictDiff(cur, rec, merged);
+          const kept = noHist ? 'объединено по полям: общей истории обмена нет' : 'объединено по полям';
+          if (dry) { conflicts.push({ store: s, label: recLabel(s, cur), at: Date.now(), kept, diff }); updated++; continue; }
           if (await writeRaw(s, merged)) { updated++; CLOUD.dirty = true; }
-          conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept: 'объединено по полям', diff });
+          conflicts.push({ store:s, id: rec.id, label: recLabel(s, cur), at: Date.now(), kept, diff });
           continue;
         }
         if (base && curT > base && newT > base && s !== 'refs') {
@@ -3821,28 +3880,32 @@ function secMemWarn() {
   if (SECMEM.warned) return; SECMEM.warned = true;
   setTimeout(() => { if (typeof toast === 'function') toast('Защищённое хранилище браузера недоступно: пароли и ключи хранятся только до перезапуска программы и на диск не записываются', true); }, 1500);
 }
-function secMemTakePlain() { // открытые значения прежних запусков — в память, с диска удалить
+// открытые значения прежних запусков — в память, с диска удалить; keep — оставить на диске (сбой ключа устройства, сборка 199)
+function secMemTakePlain(keep) {
   if (!_lsRaw) return 0; let n = 0;
-  for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { if (!(k in _sec.map)) _sec.map[k] = v; _lsRaw.removeItem.call(localStorage, k); n++; } }
+  for (const k of SECRET_KEYS_PROTECTED) { const v = _lsRaw.getItem.call(localStorage, k); if (v !== null) { if (!(k in _sec.map)) _sec.map[k] = v; if (!keep) _lsRaw.removeItem.call(localStorage, k); n++; } }
   return n;
 }
 async function secretsInit() {
   const early = Object.assign({}, _sec.map);
   try {
     if (!_lsRaw || !window.crypto || !crypto.subtle || !window.indexedDB) { _sec.ready = true; if (secMemTakePlain() || Object.keys(early).length) secMemWarn(); return; }
-    let key = await kvGet('devkey');
-    if (!key) { key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']); await kvSet('devkey', key); }
+    // сборка 199 (аудит сборки 198, N1, N2): ключ устройства — подтверждённый и общий для вкладок (secDevKey); слой PIN без PIN-кода —
+    // прежний контейнер при первой записи сохраняется копией; нечитаемый контейнер — запись остановлена до осознанной замены
+    const key = await secDevKey();
     _sec.key = key; _sec.ok = true;
     const blob = await kvGet('secrets');
     if (blob && blob.iv && blob.ct) { try { const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(blob.iv) }, key, new Uint8Array(blob.ct)); const obj = JSON.parse(new TextDecoder().decode(pt)) || {};
-      if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); } } else _sec.map = Object.assign(obj, early); } catch (e) { logErr('secrets:decrypt', e); } }
+      if (obj && obj.pin === 1 && obj.ct) { if (LOCK.enabled) _sec.pending = obj; else { logErr('secrets', 'слой PIN без PIN-кода — секреты нужно ввести заново'); localStorage.removeItem('crm_sec_pin'); _sec.discardDisk = true; } } else _sec.map = Object.assign(obj, early); } catch (e) { logErr('secrets:decrypt', e); _sec.unreadable = true; } }
     _sec.rev = Number(blob && blob.rev || 0);
     // v195 (аудит сборки 194, R2, R3): введённое до конца запуска — операциями ключей (запись поверх актуального контейнера);
     // открытые значения прежних версий удаляются из localStorage только после подтверждённой записи; слой ждёт PIN — перенос отложен
     for (const k of Object.keys(early)) secSetOp(k, { v: early[k] });
     const moved = secMigratePlain() || Object.keys(early).length > 0;
     if (moved) await secretsPersist().catch(secSaveFailed);
-  } catch (e) { logErr('secrets:init', e); if (!_sec.ok && secMemTakePlain()) secMemWarn(); }
+  // сборка 199 (N1): ключ устройства не записался — режим «только в памяти», но открытые значения прежних версий с диска НЕ удаляются
+  // (без подтверждённого ключа и контейнера их удаление — потеря после перезапуска)
+  } catch (e) { logErr('secrets:init', e); if (!_sec.ok && secMemTakePlain(true)) secMemWarn(); }
   _sec.ready = true;
 }
 // запись секрета, пока защищённого слоя нет (запуск не закончен или слой недоступен), — только в память
@@ -3853,7 +3916,8 @@ if (typeof _lsRaw !== 'undefined' && _lsRaw) {
     return secPrevSet.call(this, k, v);
   };
 }
-function secMemLine() { return !_sec.ready ? 'проверяется' : _sec.ok ? (_sec.pending ? 'защищены, ждут PIN-кода' : 'защищены ключом устройства') : 'только в памяти до перезапуска — защищённое хранилище браузера недоступно'; }
+// сборка 199 (N2): сохранённые не читаются ключом устройства — новые не записываются, пока пользователь не заменит контейнер осознанно
+function secMemLine() { return !_sec.ready ? 'проверяется' : _sec.ok ? (_sec.unreadable ? 'сохранённые не читаются ключом этого устройства — новые не записываются (прежние не тронуты)' : _sec.pending ? 'защищены, ждут PIN-кода' : 'защищены ключом устройства') : 'только в памяти до перезапуска — защищённое хранилище браузера недоступно'; }
 
 // ▼▼▼ data/numbering.js
 // ═══ data/numbering.js — автонумерация дел и соглашений (поручение пользователя 03.10.2026) ═══
@@ -6618,7 +6682,7 @@ async function backupPreviewModel(text, pass) {
   // v164 (N3): для режима «без повреждённых файлов» предпросмотр считается по очищенному плану — тем же, что будет применён
   let safe = null;
   if (block === 'blobs') { try { safe = await backupSafePrepare({ parsed: checked.parsed, verify }); const sd = await mergeIncoming(JSON.parse(JSON.stringify(safe.plan)), false, backupMergeOpts({ dryRun: true })); safe.added = sd.added; safe.updated = sd.updated; safe.skipped = sd.skipped; } catch (e) { logErr('backup:safe-preview', e); safe = null; } }
-  // 25.10.2026 (аудит сборки 194, 6.4): пробное восстановление — отчёт о связях и файлах
+  // 25.10.2026 (аудит сборки 194, 6.4): проверка структуры копии — отчёт о связях и файлах (сборка 199, N5: название по уровню проверки)
   let restore = null; try { restore = backupRestoreReport(checked.parsed.data); } catch (e) { logErr('backup:restore-report', e); }
   return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, restore, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files, verify, block, safe };
 }
@@ -6714,24 +6778,30 @@ function backupVerifyText(v, files) {
   }
   return 'Контрольные суммы НЕ сошлись — файл повреждён или неполон: ' + [v.countBad.length ? 'записей не хватает или раздел не учтён (' + v.countBad.join(', ') + ')' : '', v.blobMissing.length ? 'нет файлов документов: ' + v.blobMissing.length : '', v.blobBad.length ? 'изменено содержимое файлов: ' + v.blobBad.length : '', (v.blobUnlisted || []).length ? 'файлов без контрольной суммы: ' + v.blobUnlisted.length : ''].filter(Boolean).join('; ') + (v.countBad.length ? '. Объединять такую копию нельзя: более новые записи из неё заменили бы здешние. Возьмите другую копию.' : '. Обычное объединение закрыто: повреждённый файл заменил бы исправный. Можно объединить без повреждённых файлов — остальное из копии будет принято, а файлы на этом устройстве останутся прежними вместе со сведениями о них; отметки окончательного удаления из такой копии не принимаются.');
 }
-// 25.10.2026 (аудит сборки 194, 6.4; план п. 3в): пробное восстановление — в памяти, база устройства не меняется. Контрольные суммы
-// подтверждают, что файл не повреждён; этот отчёт — что из копии получится рабочая база: сколько записей восстановится, все ли записи,
-// привязанные к делу, ссылаются на дело из той же копии, у скольких версий документов есть файл в копии. Чистая функция (тест next_133).
+// 25.10.2026 (аудит сборки 194, 6.4; план п. 3в): проверка структуры копии — в памяти, база устройства не меняется. Контрольные суммы
+// подтверждают, что файл не повреждён; этот отчёт — связи внутри копии: сколько записей, все ли записи, привязанные к делу, ссылаются на
+// дело из той же копии, у каждой ли версии документа есть документ, у скольких версий есть файл в копии. Чистая функция (тест next_133).
+// Сборка 199 (аудит сборки 198, N5): файл считается доступным по тем же правилам, что при открытии документа (удалённый — нет, данные — не
+// пустые и вида data:); версия без своего документа — потерянная связь; это проверка структуры, а не восстановление в отдельную базу —
+// так и названо в отчёте (восстановления с открытием документов в изолированной базе программа пока не выполняет).
 const BACKUP_LINKED = ['hearings', 'tasks', 'meetings', 'finance', 'expenses', 'mail', 'correspondence', 'documents', 'poa', 'deposits', 'orders', 'caseEvents', 'monitorEvents'];
 function backupRestoreReport(data) {
   const d = data || {}, live = st => (Array.isArray(d[st]) ? d[st] : []).filter(x => x && x.id != null && !x._deleted);
   const cases = new Set(live('cases').map(c => c.id)); let total = 0; for (const st of STORES) total += live(st).length;
   const orphans = []; let orphanTotal = 0;
   for (const st of BACKUP_LINKED) { const n = live(st).filter(x => x.caseId && !cases.has(x.caseId)).length; if (n) { orphans.push({ store: st, title: PREVIEW_TITLES[st] || st, n }); orphanTotal += n; } }
-  const blobs = new Set((Array.isArray(d.docBlobs) ? d.docBlobs : []).filter(b => b && b.id && b.data).map(b => b.id));
-  const withFile = live('docVersions').filter(v => v.hasBlob || v.dataUrl), inCopy = withFile.filter(v => v.dataUrl || blobs.has(v.id)).length;
-  return { total, cases: cases.size, orphans, orphanTotal, docFiles: withFile.length, docInCopy: inCopy, docMissing: withFile.length - inCopy };
+  const okData = x => typeof x === 'string' && /^data:[^,]*,./.test(x);
+  const blobs = new Set(live('docBlobs').filter(b => okData(b.data)).map(b => b.id)), docs = new Set(live('documents').map(x => x.id));
+  const vers = live('docVersions'), noDoc = vers.filter(v => !v.documentId || !docs.has(v.documentId)).length;
+  const withFile = vers.filter(v => v.hasBlob || v.dataUrl), inCopy = withFile.filter(v => okData(v.dataUrl) || blobs.has(v.id)).length;
+  return { total, cases: cases.size, orphans, orphanTotal, verNoDoc: noDoc, docFiles: withFile.length, docInCopy: inCopy, docMissing: withFile.length - inCopy };
 }
 function backupRestoreText(r) {
   if (!r) return '';
   const links = r.orphanTotal ? `${r.orphanTotal} ${plural(r.orphanTotal, 'запись ссылается', 'записи ссылаются', 'записей ссылаются')} на дело, которого в копии нет (${r.orphans.map(o => o.title + ' — ' + o.n).join(', ')}): после восстановления они будут без дела` : 'все записи, привязанные к делу, ссылаются на дела из этой копии';
   const docs = !r.docFiles ? 'файлов документов в копии нет и не должно быть' : r.docMissing ? `файлы документов: в копии ${r.docInCopy} из ${r.docFiles}, не хватает ${r.docMissing} — такие версии останутся без файла, если его нет на устройстве или на сервере` : `файлы всех ${r.docFiles} ${plural(r.docFiles, 'версии', 'версий', 'версий')} документов — в копии`;
-  return `Пробное восстановление (в памяти, база устройства не менялась): записей ${r.total}, дел ${r.cases}; ${links}; ${docs}.`;
+  const vnd = r.verNoDoc ? `; ${r.verNoDoc} ${plural(r.verNoDoc, 'версия', 'версии', 'версий')} без своего документа — после восстановления их не будет видно` : '';
+  return `Проверка структуры копии (в памяти, база устройства не менялась; восстановление с открытием документов не выполнялось): записей ${r.total}, дел ${r.cases}; ${links}${vnd}; ${docs}.`;
 }
 let BACKUP_PENDING = null;
 // слияние из файла не сдвигает базу определения коллизий серверов (второй разбор GPT 12.10.2026, урок 117): иначе одновременная правка поля,
@@ -13056,7 +13126,7 @@ const NAV_ITEMS = NAV_GROUPS.flatMap(g => g.items);
 // Параметры проверки интерфейса (ui_check.py читает их из программы) — состав экранов и листов новой версии.
 window.UI_MANIFEST = {
   screens: NAV_ITEMS.map(i => i.id),
-  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openImportSheet('clients')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openPairOutSheet()', 'openTodayLayoutSheet()', "openPairInSheet('')", "openPairInSheet('CRM1.AbcdefghijAbcdefghijAbcdefghijAbcdefghijAbcdefghij')",'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openCalImportSheet()', "openToCalSheet('hearings','Х3')", 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", "openMonitorEventSheet('МН4')", "openMonitorEventSheet('МН5')", "openPartyFix('Д-16/2026')", "openCaseSheet('Д-36/2026')", "openProcNew('Д-36/2026')", "openProcSheet('Д-36/2026', 'pr-seed-ap1')", "openProcSheet('Д-36/2026', 'cur:appeal')", "openProcForm('Д-36/2026')", "openProcForm('Д-36/2026', 'pr-seed-cs1')", "openMonitorEventSheet('МН6')", "openProcRebind('МН6')", 'openErrlogSheet()', 'openViewDiagSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", "openStageForm('Ф1', '')", "openStageForm('Ф1', 'э1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseFormTab('Д-42/2026', 'agreement')", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineSheet('Д-41/2026', 'dl-41d')", "openDeadlineSheet('Д-41/2026', 'dl-41e')", "openDeadlineSheet('Д-41/2026', 'dl-41f')","openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
+  sheets: ["openCourtContacts('ДК1')", "openCourtSites('Д-42/2026')", "openImportSheet('clients')", "openSnapRbSheet('file',0,{})", 'openSnapRbUndo()', "openChecklistApply('Д-42/2026')", 'openChecklistEditor()', "openCaseSummarySheet('Д-42/2026')", "openCaseSummarySheet('Д-42/2026', 'client')", "openDocTplPicker('case','Д-42/2026')", "openDocTplDoc('case','Д-42/2026','b:pretension')", "openDocTplDoc('case','Д-42/2026','b:expenses')", "openDocTplDoc('case','Д-42/2026','b:agreement')", "openDocTplPicker('client','К2')", "openDocTplPicker('lead','ОБ1')", 'openTplListSheet()', "openTplForm('','motion')", 'openLawyerProfileSheet()',"openRefEditSheet('courts')", "openCourtInfoForm('Ковровский городской суд')", 'openCourtsSheet()', "openCourtsSheet('4922')", "openCourtsSheet('Ковров')", "openCourtCard('Ковровский городской суд')", "openCourtCard('Владимирский областной суд')", "openJudgeCard('Смирнова Е. В.')",'openHolidaysSheet()', 'openIntegritySheet()', 'openCasesColsSheet()', 'openYcSetupSheet()', 'openPairOutSheet()', 'openTodayLayoutSheet()', "openPairInSheet('')", "openPairInSheet('CRM1.AbcdefghijAbcdefghijAbcdefghijAbcdefghijAbcdefghij')",'openRemindSheet()', 'openAutomationSheet()', 'openCalFeedSheet()', 'openDevCalSheet()', 'openCalImportSheet()', "openToCalSheet('hearings','Х3')", 'openLicenseSheet()', "openContactSheet('К2')", "openCaseDocs('Д-42/2026')", "openStateFeeSheet()", "openSecuritySheet()", "openHelpSection('cases')", "openEulaSheet(false)", "openPrintSheet()", "openDevRemindSheet()", "openQuickSheet()", "openPoaForm()", "openCalc395Sheet()", 'openSettingsSheet()', 'openCreateSheet()', 'openBackupSheet()', "openCaseForm().then(() => guardPrompt('close'))", "openDbSizeSheet(dbSizeModel({cases:[{id:'a',number:'Д-1/2026',subject:'Спор'}],hearings:[{id:'h',result:'Отложено'}]},{}))", "openPushConfirm({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[]},0),conflicts:[],conflictsTotal:0,size:{fits:true,fitsOld:false,request:2790000,effective:2790000,needOld:313,limit:3500000,oldLimit:2740000}})", "openSrvHistorySheet({ok:true,items:[{ver:1790000000000,bytes:1200000},{ver:1789900000000,bytes:1190000}]})", "openMergePreviewSheet({ok:true,ver:1,model:mergePreviewModel({cases:[{id:'a',_upd:2}]},{cases:[{id:'b',_upd:1}]},0),conflicts:[],conflictsTotal:0})", "openCaseCardResult('Д-42/2026', { done: ['судья: Смирнова Е. В.'], errs: ['Апелляция: нет ответа'], ask: [{ val: '2-1234/2026', label: 'номер дела в суде', was: '2-1243/2026' }] })", 'openDadataSheet()', 'openPochtaSheet()', 'openMonitorSettingsSheet()', "openMonitorEventSheet('МН1')", "openMonitorEventSheet('МН2')", "openMonitorEventSheet('МН3')", "openMonitorEventSheet('МН4')", "openMonitorEventSheet('МН5')", "openPartyFix('Д-16/2026')", "openCaseSheet('Д-36/2026')", "openProcNew('Д-36/2026')", "openProcSheet('Д-36/2026', 'pr-seed-ap1')", "openProcSheet('Д-36/2026', 'cur:appeal')", "openProcForm('Д-36/2026')", "openProcForm('Д-36/2026', 'pr-seed-cs1')", "openMonitorEventSheet('МН6')", "openProcRebind('МН6')", 'openErrlogSheet()', 'openViewDiagSheet()', 'openFinanceForm()', "openFinanceSheet('Ф1')", "openFinanceSheet('Ф4')", "openFinanceSheet('Ф2')", "openPayForm('Ф1')", "openPlanForm('Ф1')", "openStageForm('Ф1', '')", "openStageForm('Ф1', 'э1')", 'openExpenseForm()', 'openLeadForm()', "openLeadSheet('ОБ1')", "openLeadSheet('ОБ3')", 'openClientForm()', "openClientSheet('К2')", "openClientSheet('К5')", 'openMailForm()', "openMailSheet('ПС1')", "openMailSheet('ПС2')", "openMailSheet('ПС3')", "openEnvelopeSheet('ПС1')", 'openSyncSheet()', 'showConflictsSheet()', 'openRefsSheet()', 'openHelpSheet()', 'openMoreSheet()', "openSearchSheet('Иванов')", "openCalcPenaltySheet()", 'openCalcIndexSheet()', 'openCalcTermSheet()', 'openCalcDaysSheet()', 'openKeyRatesSheet()', 'openCpiSheet()', "openCalcLinksSheet('consultant')", "openJudgeInfoForm('Смирнова Е. В.')", "openCaseSheet('Д-42/2026')", 'openCaseForm()', "openCaseForm('Д-42/2026')", "openCaseForm('Д-42/2026', true)", "openCaseFormTab('Д-42/2026', 'agreement')", "openCaseForm('Д-39/2026', true).then(() => caseTabPick('crim1'))", "openCaseForm('ДК1', true).then(() => caseTabPick('koap'))", "openCaseSheet('ДК1')", "openDeadlineSheet('Д-41/2026', 'dl-41a')", "openDeadlineSheet('Д-41/2026', 'dl-41d')", "openDeadlineSheet('Д-41/2026', 'dl-41e')", "openDeadlineSheet('Д-41/2026', 'dl-41f')","openDeadlineAdd('Д-41/2026')", "openDeadlineForm('Д-41/2026', '')", 'openTaskForm()', "openHearingForm('', 'Д-42/2026')", 'openMeetingForm()', "openMeetingForm('В1')", "openAfterHearing('ХД1')", "openAfterHearing('ХД1', 'decision')", "openDepositForm('', 'Д-42/2026')", 'openOrdersSheet()', "openOrderForm('', 'Д-42/2026')", "openPartiesForm('Д-42/2026')", 'openCardsAllSheet()', 'openBookSheet()', 'openAskSheet()', "openLeadSheet('О-ask-qseed1')",'openBlobAuditSheet()', 'openFsyncSheet()', "openFsyncHelpSheet('gdrive')", "openClientMerge('n:сидоров олег викторович')", 'openSecretsRecover()', 'openSecretsReset()', 'openTrashSheet()', "openDeleteSheet('cases', 'Д-42/2026')", "openPurgeSheet('', '')"],
   nav: "nav('{s}')", activeScreen: '.screen.active', sheetRoot: 'sheetContent', sheetOpen: 'dialog[open], #side:not([hidden])', sheetTitle: 'h2',
   sidebar: '.sidebar', sidebarItem: 'button.nav-item', topbar: '.topbar', more: 'openMoreSheet()',
   required: ['openSettingsSheet', 'openRefsSheet', 'openSyncSheet', 'openHelpSheet'], scrollScreen: 'today',
@@ -13627,7 +13697,7 @@ async function openSettingsSheet(sub) {
       <div><span>Обмен с сервером</span><span class="muted">${esc(typeof syncDiagLine === 'function' ? syncDiagLine() : '—')}</span></div>
       ${typeof deltaLastText === 'function' && deltaLastText() ? `<div><span>Получение с сервера</span><span class="muted">${esc(deltaLastText())}</span></div>` : ''}
       <div><span>Правила сроков</span><span class="muted">${esc(NEXT_RULES_VER)}</span></div>
-      <div><span>Пароли и ключи</span><span class="muted" id="set-secmem">${esc(typeof secMemLine === 'function' ? secMemLine() : '—')}</span></div>
+      <div><span>Пароли и ключи</span><span class="muted" id="set-secmem">${esc(typeof secMemLine === 'function' ? secMemLine() : '—')}${typeof _sec === 'object' && _sec && _sec.unreadable && typeof openSecretsReset === 'function' ? ' <button type="button" class="text-button" id="set-secreset" onclick="openSecretsReset()">Начать заново</button>' : ''}</span></div>
       <div><span>Автор и правообладатель</span><span class="muted">адвокат Канзавели Дмитрий Давидович, рег. № 33/1198</span></div>
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
@@ -22182,6 +22252,9 @@ function procNewDefaults(c, want) {
   // v169 (аудит, 6.3): отменённый акт и акт об отмене — разные поля: основание возврата — акт вышестоящей инстанции, отменён — акт целевой
   // v170 (А2): процессуальная граница начала нового рассмотрения — дата акта об отмене (вышестоящей инстанции); событие «направлено на
   // новое рассмотрение» уточняет её в openProcNew
+  // сборка 199 (поручение пользователя 25.10.2026): новое рассмотрение в той же инстанции (заочное решение отменено тем же судом) — отменён
+  // акт этой инстанции, основание возврата — определение об отмене (в деле его нет: пользователь вписывает или берёт из события суда)
+  if (hd.slot === target) return { target, same: true, basis: '', cancelled: v.date ? actOf(hd, v) : '', court: tv.court, from: '' };
   return { target, basis: actOf(hd, v) + (v.result ? ' — ' + v.result : ''), cancelled: hd.slot !== target && tv.date ? actOf(procSlotDef(target), tv) : '', court: tv.court, from: hd.slot !== target ? procLastActDate(c, hd) : '' };
 }
 // что уйдёт в историю при новом рассмотрении в инстанции target: она сама и инстанции выше, где есть сведения (или текущее без реквизитов);
@@ -22494,9 +22567,12 @@ function procEventOwner(c, e, slot, date) {
 }
 // предложение по событию суда «направлено на новое рассмотрение» и события, требующие привязки к рассмотрению, — для «Сегодня»
 const PROC_REMAND_RE = /(направ\S*|передан\S*)\s+(дел\S*\s+)?на\s+новое\s+(рассмотрение|судебное разбирательство)/i;
+// сборка 199 (поручение пользователя 25.10.2026): заочное решение отменено тем же судом — рассмотрение первой инстанции возобновляется,
+// на сайте суда у дела нередко новый номер; прежнее рассмотрение (номер, ссылка, сроки от заочного решения) должно уйти в историю
+const PROC_ZAOCH_RE = /отмен\S*\s+заочн\S*\s+решени|заочн\S*\s+решени\S*\s+(\S+\s+){0,2}отмен/i;
 // инстанция нового рассмотрения по тексту события: «… направлено на новое рассмотрение в суд апелляционной инстанции» → appeal; не названа — ''
 function procRemandTarget(text) {
-  const s = String(text || ''), m = PROC_REMAND_RE.exec(s); if (!m) return '';
+  const s = String(text || ''), m = PROC_REMAND_RE.exec(s); if (!m) return PROC_ZAOCH_RE.test(s) ? 'first' : '';
   const tail = s.slice(m.index + m[0].length, m.index + m[0].length + 80).toLowerCase();
   if (/апелляц/.test(tail)) return 'appeal';
   if (/кассац/.test(tail)) return 'cass';
@@ -22508,7 +22584,8 @@ function procRemandEvents(events, cases) {
   for (const e of events || []) {
     if (!e || e._deleted || !e.caseId || e.remandSeen || e.status === 'ignored' || (e.eventType !== 'caseflow' && e.eventType !== 'notice')) continue;
     const ro = typeof crmMonRawObj === 'function' ? crmMonRawObj(e) : {};
-    if (!PROC_REMAND_RE.test(String(e.title || '') + ' ' + String(ro.result || ''))) continue;
+    const txt = String(e.title || '') + ' ' + String(ro.result || '');
+    if (!PROC_REMAND_RE.test(txt) && !PROC_ZAOCH_RE.test(txt)) continue;
     const c = (cases || []).find(x => x && x.id === e.caseId); if (!c || c.archived) continue;
     // уже создано новое рассмотрение после этого события — предложение не повторяется (повторная доставка того же события — тоже)
     const pcs = c.procCurrent || {}; if (Object.values(pcs).some(x => x && ((x.remandEvent && x.remandEvent === e.id) || (x.startedAt && e.date && x.startedAt >= e.date)))) continue;
@@ -22518,7 +22595,7 @@ function procRemandEvents(events, cases) {
 }
 function procTodayItems(events, cases, today) {
   const out = [];
-  for (const { e, c } of procRemandEvents(events, cases)) out.push({ key: 'remand:' + e.id, kind: 'remand', pr: 1, date: e.date || today, caseId: c.id, title: 'Дело ' + (c.number || '') + ' направлено на новое рассмотрение',
+  for (const { e, c } of procRemandEvents(events, cases)) out.push({ key: 'remand:' + e.id, kind: 'remand', pr: 1, date: e.date || today, caseId: c.id, title: 'Дело ' + (c.number || '') + (PROC_ZAOCH_RE.test(String(e.title || '')) && !PROC_REMAND_RE.test(String(e.title || '')) ? ': заочное решение отменено — рассмотрение возобновлено' : ' направлено на новое рассмотрение'),
     sub: [c.client || '', e.title || ''].filter(Boolean).join(' · '), when: e.date ? 'По данным суда от ' + fmtDate(e.date) : 'С сайта суда', badges: [['Новое рассмотрение', 'warn']],
     open: `openMonitorEventSheet('${jsq(e.id)}')`, act: { fn: `openProcNew('${jsq(c.id)}', '${jsq(e.id)}')`, label: 'Создать новое рассмотрение', icon: 'plus' }, dismiss: `procRemandDismiss('${jsq(e.id)}')`, dismissLabel: 'Новое рассмотрение не нужно — скрыть' });
   for (const e of events || []) {
@@ -23024,7 +23101,7 @@ function procBlockHtml(c, hearings) {
   const rows = procModel(c, hearings), court = typeof KIND_COURT !== 'undefined' ? KIND_COURT.includes(c.kind) : true;
   if (!rows.length && !court) return '';
   const canNew = PROC_TARGETS.some(s => procHasData(c, procSlotDef(s)) || ((c.procCurrent || {})[s]));
-  return `<p class="small muted" id="proc-help">Каждое рассмотрение — своя строка: суд, номер, ссылка, заседания и сроки. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение, нажмите «Новое рассмотрение после отмены» — прежние сведения останутся в истории. События сайтов судов программа относит к рассмотрению по номеру дела и дате; если не может — спросит («Требует привязки»).</p>
+  return `<p class="small muted" id="proc-help">Каждое рассмотрение — своя строка: суд, номер, ссылка, заседания и сроки. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение или суд отменил своё заочное решение (на сайте суда у дела бывает новый номер), нажмите «Новое рассмотрение после отмены» и выберите инстанцию — прежние сведения (номер, ссылка, сроки от отменённого акта) останутся в истории, новый номер не смешается с прежним. События сайтов судов программа относит к рассмотрению по номеру дела и дате; если не может — спросит («Требует привязки»).</p>
     ${rows.length ? `<div class="list-rows" id="proc-rows">${rows.map(r => procRowHtml(c, r)).join('')}</div>` : '<p class="small muted">Сведений об инстанциях нет — заполните их в форме дела («Изменить»).</p>'}
     <div class="actions" style="margin:8px 0">${canNew ? `<button type="button" class="button small-btn" id="proc-new" onclick="openProcNew('${jsq(c.id)}')">${icon('plus', 'icon-sm')}Новое рассмотрение после отмены</button>` : ''}<button type="button" class="button small-btn" id="proc-add" onclick="openProcForm('${jsq(c.id)}')">${icon('plus', 'icon-sm')}Добавить рассмотрение</button></div>`;
 }
@@ -23046,13 +23123,13 @@ async function openProcNew(caseId, remandEventId) {
   UI.procNewCase = caseId; UI.procNewOp = 'op-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); UI.procNewRemand = remandEventId || '';
   // v170 (А8): текущие рассмотрения на момент открытия — сохранение сверит их со свежей записью
   UI.procNewExpect = Object.fromEntries(PROC_SLOTS.map(d => [d.slot, procCurrentId(c, d.slot)]));
-  const body = `<p class="small muted">Прежнее рассмотрение этой инстанции перейдёт в историю дела вместе со ссылками, номерами, датами и сроками от его актов — ничего не удаляется. Поля инстанции в деле освободятся для нового рассмотрения; ручные сроки не меняются. Реквизиты нового можно не знать — строка появится сразу.</p>
+  const body = `<p class="small muted">Прежнее рассмотрение этой инстанции перейдёт в историю дела вместе со ссылками, номерами, датами и сроками от его актов — ничего не удаляется. Поля инстанции в деле освободятся для нового рассмотрения; ручные сроки не меняются. Реквизиты нового можно не знать — строка появится сразу. Отменено заочное решение — выберите «Первая инстанция»: отменённое решение и его номер дела уйдут в историю, новый номер с сайта суда впишите в «№ дела в новом рассмотрении».</p>
     <div class="form-grid">
     ${fSelect('pn-target', 'Новое рассмотрение — в инстанции *', dfl.target, opts)}
     ${wide(fInput('pn-cancelled', 'Какой акт отменён', dfl.cancelled, 'autocomplete="off" placeholder="Апелляционное определение от … (если известно)"'))}
-    ${wide(fInput('pn-basis', 'Каким актом (основание возврата)', dfl.basis, 'autocomplete="off" placeholder="Кассационное определение от … — направлено на новое рассмотрение"'))}
+    ${wide(fInput('pn-basis', 'Каким актом (основание возврата)', dfl.basis, `autocomplete="off" placeholder="${dfl.same ? 'Определение об отмене заочного решения от …' : 'Кассационное определение от … — направлено на новое рассмотрение'}"`))}
     ${fInput('pn-court', 'Суд', dfl.court, 'autocomplete="off" oninput="this.dataset.touched=1"', typeof refList === 'function' ? refList('courts') : null)}${fInput('pn-no', '№ дела в новом рассмотрении', '', 'autocomplete="off" placeholder="если уже известен"')}
-    ${fInput('pn-from', 'Дело направлено на новое рассмотрение (дата)', dfl.from || '', 'type="date"')}
+    ${fInput('pn-from', dfl.same ? 'Рассмотрение возобновлено (дата определения)' : 'Дело направлено на новое рассмотрение (дата)', dfl.from || '', 'type="date"')}
     ${fInput('pn-judge', 'Судья (докладчик)', '', 'autocomplete="off"')}${wide(fInput('pn-link', 'Ссылка на дело (новое рассмотрение)', '', 'type="url" inputmode="url" autocomplete="off" placeholder="https://…  — можно добавить позже в форме дела"'))}
     </div>
     <div class="section-label">Уйдёт в историю</div><div id="pn-preview">${procPreviewHtml(c, dfl.target, [])}</div>
@@ -23337,7 +23414,7 @@ const HELP_SECTIONS = [
 <p><b>Название дела</b> можно не вводить: если при сохранении поле «Предмет спора» пустое, оно заполняется само из доверителя и противной стороны («Иванов И. И. к ООО «Гарант»»; без противной стороны — доверитель и категория) и дальше правится как обычное. Выключается в Настройки → «Дела» → отметка «Название дела заполняется само…» — настройка этого устройства.</p>
 <p><b>Карточка дела</b>: сверху доверитель, суд и судья, строка «Соглашение № … от … · подписано» и «Ордер № … от …» (кнопки «Указать» / «Изменить» открывают форму дела на вкладке «Соглашение», «Выписать ордер» / «Открыть» — журнал ордеров; соглашение — поля самого дела, отдельной записи у него нет), ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Сайты судов», «Папка документов», «Связаться с доверителем». «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам.</p>
 <p><b>Ширина карточки на компьютере.</b> На широком экране (от 1200 точек) карточка дела открывается панелью справа. Её ширину можно менять, как колонку в Проводнике: наведите указатель на левую границу панели (он станет двусторонней стрелкой) и потяните влево — шире, вправо — уже. Двойной щелчок по границе возвращает обычную ширину. С клавиатуры: клавишей Tab дойдите до границы, стрелки «влево» и «вправо» меняют ширину, Home — обычная. Панель не бывает уже 360 точек, а основному экрану слева всегда остаётся место. Ширина запоминается на этом устройстве и на другие устройства не переходит. На телефоне и в узком окне карточка, как раньше, открывается во весь экран.</p>
-<p><b>Рассмотрения дела</b> (группа в карточке дела): каждое рассмотрение — своя строка с судом, номером, ссылкой, заседаниями и сроками; рассмотрений в одной инстанции может быть сколько угодно. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение (кассация — в апелляцию, апелляция или кассация — в первую инстанцию), нажмите «Новое рассмотрение после отмены» (если суд прислал такое событие, на «Сегодня» появится строка «Дело направлено на новое рассмотрение» с этой же кнопкой): выберите инстанцию, впишите, какой акт отменён и каким актом, новый номер и ссылку (их можно не знать — строка «ожидаются реквизиты» появится сразу, сведения добавляются позже в форме дела). Прежнее рассмотрение этой инстанции перейдёт в историю; рассмотрения выше — по отметкам в предпросмотре (снятая отметка оставляет рассмотрение текущим), параллельные не меняются. В историю они уходят как «Апелляция №1», «Кассация №1» и т. д. — со ссылками, номерами, датами, заседаниями и сроками от их актов; ничего не удаляется, ручные сроки не меняются, а поля инстанции в форме дела освобождаются для нового рассмотрения (новое — «Апелляция №2»). Сроки от актов прежних рассмотрений больше не пересчитываются, заседания прежних рассмотрений не поднимают стадию дела; старые ссылки остаются в «Сайтах судов». Ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее» в строке прежнего — пока в инстанции не внесены сведения нового. «Добавить рассмотрение» — параллельное рассмотрение (например, частная жалоба): его ссылка уходит коллектору вместе с остальными, заседание к нему относится выбором «Рассмотрение» в форме заседания (или кнопкой «Заседание этого рассмотрения»). События сайтов судов (акты, жалобы, заседания) программа относит к рассмотрению по отметке ссылки, с которой событие собрано (каждая ссылка — и текущая, и параллельная — уходит коллектору с номером своего рассмотрения), затем по номеру дела в суде и дате: акт прежнего рассмотрения, пришедший с опозданием, записывается в прежнее, а не в поля нового; карточка суда прежнего рассмотрения дополняет только его сведения. Дата — по дате, с которой дело направлено на новое рассмотрение (поле в листе «Новое рассмотрение после отмены»), а не по дню, когда вы создали строку в программе. Если номер совпадает у нескольких рассмотрений, в инстанции есть параллельное рассмотрение или дата не решает — строка «Требует привязки» на «Сегодня», ничего не меняется, пока вы не выберете рассмотрение. В карточке события строка «Как определено» называет, почему событие отнесено к рассмотрению (по ссылке, с которой оно собрано, по номеру дела в суде, по дате или вашим выбором); кнопка «Отнести к другому рассмотрению» сначала показывает, что изменится (дата акта, заседание, жалоба), и записывает дело (поля и сроки), заседание, событие и журнал дела одной записью базы: при сбое не меняется ничего. Если до нажатия «Перенести» дело, событие или заседание изменились, программа покажет новый план и попросит подтвердить снова. Дата акта убирается из прежнего рассмотрения, только если доказано, что её записало именно это событие и вы её с тех пор не правили; иначе она остаётся, и это сказано; дата, которую подтверждает другое событие того же рассмотрения (та же дата на сайте), тоже остаётся. Доказательство одинаково для текущего, параллельного и прежнего рассмотрения: при «Новом рассмотрении» с датой в историю уходят отметка о том, какое событие её записало, и факт вашей правки; «Вернуть как текущее» возвращает их. Жалоба разбирается для нового рассмотрения в той же записи, даже если была «Разобрано»; отмеченная «Не применять» последствий не получает. Сроки жалобы, поставленные для прежнего или параллельного рассмотрения, остаются с пометкой «Жалоба отнесена к другому рассмотрению» — в паспорте срока «Оставить срок» или «Снять срок». Если событие отнесено к одному рассмотрению, а его заседание вы отнесли к другому, в листе переноса есть оба варианта: «как у заседания» оставляет ваш выбор в заседании и исправляет только событие, «как в событии» переносит заседание. При «Новом рассмотрении» сроки жалоб уходящей инстанции закрепляются за прежним рассмотрением вместе со сроками от актов; срок жалобы, событие которой в деле не найдено, получает пометку «ждёт решения». «Кто обжалует» считается по жалобам одного рассмотрения: жалоба оппонента в прежней апелляции не делает «Обе стороны» в новой. Если разбор неприменённого события после переноса не завершился, программа так и скажет и повторит его при следующем получении данных. Карточка суда не переносится — её сведения сверяйте в форме дела. В «Справочники → Проверка данных» события, собранные со ссылки одного рассмотрения, а применённые к другому, исправляются кнопкой «Исправить однозначные связи»; она не трогает событие, рассмотрение которого выбрали вы, заседание, которое вы отнесли в форме заседания, расхождение «событие — заседание» и дату акта с недоказанным происхождением — такие записи показываются с причиной для вашего решения. Там же — карточки суда другого рассмотрения, приложенные к текущему (до 18.10.2026).Жалоба параллельного рассмотрения, оставленная без движения, даёт свой срок устранения недостатков; если сторона жалобы не установлена — строка «Событие получено, срок не создан». Если два устройства независимо создали новое рассмотрение одной инстанции, после обмена сохраняются оба, а на «Сегодня» — выбор «Это одно — объединить» или «Разные — оставить оба». Форма «Новое рассмотрение», открытая до того, как рассмотрения изменились (другая вкладка или устройство), ничего не создаст — откройте её заново. Новое заседание сразу получает отметку своего рассмотрения (в форме — поле «Рассмотрение»); выбор, сделанный вами, «Вернуть как текущее» не снимает. Прежние рассмотрения на сайтах судов не опрашиваются. Создание нового рассмотрения и «Вернуть как текущее» записывают дело, сроки и заседания одной операцией: при сбое не записывается ничего, повторное нажатие не создаёт второе рассмотрение. Ограничения: сроки и жалобы вручную к рассмотрению не относятся (только автоматически), судебные акты отдельным списком не ведутся.</p>
+<p><b>Рассмотрения дела</b> (группа в карточке дела): каждое рассмотрение — своя строка с судом, номером, ссылкой, заседаниями и сроками; рассмотрений в одной инстанции может быть сколько угодно. Если вышестоящий суд отменил акт и направил дело на новое рассмотрение (кассация — в апелляцию, апелляция или кассация — в первую инстанцию) либо суд отменил своё заочное решение и возобновил рассмотрение (на сайте суда у дела бывает новый номер — так прежний номер, ссылка и сроки от заочного решения уйдут в историю и не смешаются с новыми; выберите инстанцию «Первая инстанция», событие суда об отмене заочного решения тоже даёт строку на «Сегодня»), нажмите «Новое рассмотрение после отмены» (если суд прислал такое событие, на «Сегодня» появится строка «Дело направлено на новое рассмотрение» с этой же кнопкой): выберите инстанцию, впишите, какой акт отменён и каким актом, новый номер и ссылку (их можно не знать — строка «ожидаются реквизиты» появится сразу, сведения добавляются позже в форме дела). Прежнее рассмотрение этой инстанции перейдёт в историю; рассмотрения выше — по отметкам в предпросмотре (снятая отметка оставляет рассмотрение текущим), параллельные не меняются. В историю они уходят как «Апелляция №1», «Кассация №1» и т. д. — со ссылками, номерами, датами, заседаниями и сроками от их актов; ничего не удаляется, ручные сроки не меняются, а поля инстанции в форме дела освобождаются для нового рассмотрения (новое — «Апелляция №2»). Сроки от актов прежних рассмотрений больше не пересчитываются, заседания прежних рассмотрений не поднимают стадию дела; старые ссылки остаются в «Сайтах судов». Ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее» в строке прежнего — пока в инстанции не внесены сведения нового. «Добавить рассмотрение» — параллельное рассмотрение (например, частная жалоба): его ссылка уходит коллектору вместе с остальными, заседание к нему относится выбором «Рассмотрение» в форме заседания (или кнопкой «Заседание этого рассмотрения»). События сайтов судов (акты, жалобы, заседания) программа относит к рассмотрению по отметке ссылки, с которой событие собрано (каждая ссылка — и текущая, и параллельная — уходит коллектору с номером своего рассмотрения), затем по номеру дела в суде и дате: акт прежнего рассмотрения, пришедший с опозданием, записывается в прежнее, а не в поля нового; карточка суда прежнего рассмотрения дополняет только его сведения. Дата — по дате, с которой дело направлено на новое рассмотрение (поле в листе «Новое рассмотрение после отмены»), а не по дню, когда вы создали строку в программе. Если номер совпадает у нескольких рассмотрений, в инстанции есть параллельное рассмотрение или дата не решает — строка «Требует привязки» на «Сегодня», ничего не меняется, пока вы не выберете рассмотрение. В карточке события строка «Как определено» называет, почему событие отнесено к рассмотрению (по ссылке, с которой оно собрано, по номеру дела в суде, по дате или вашим выбором); кнопка «Отнести к другому рассмотрению» сначала показывает, что изменится (дата акта, заседание, жалоба), и записывает дело (поля и сроки), заседание, событие и журнал дела одной записью базы: при сбое не меняется ничего. Если до нажатия «Перенести» дело, событие или заседание изменились, программа покажет новый план и попросит подтвердить снова. Дата акта убирается из прежнего рассмотрения, только если доказано, что её записало именно это событие и вы её с тех пор не правили; иначе она остаётся, и это сказано; дата, которую подтверждает другое событие того же рассмотрения (та же дата на сайте), тоже остаётся. Доказательство одинаково для текущего, параллельного и прежнего рассмотрения: при «Новом рассмотрении» с датой в историю уходят отметка о том, какое событие её записало, и факт вашей правки; «Вернуть как текущее» возвращает их. Жалоба разбирается для нового рассмотрения в той же записи, даже если была «Разобрано»; отмеченная «Не применять» последствий не получает. Сроки жалобы, поставленные для прежнего или параллельного рассмотрения, остаются с пометкой «Жалоба отнесена к другому рассмотрению» — в паспорте срока «Оставить срок» или «Снять срок». Если событие отнесено к одному рассмотрению, а его заседание вы отнесли к другому, в листе переноса есть оба варианта: «как у заседания» оставляет ваш выбор в заседании и исправляет только событие, «как в событии» переносит заседание. При «Новом рассмотрении» сроки жалоб уходящей инстанции закрепляются за прежним рассмотрением вместе со сроками от актов; срок жалобы, событие которой в деле не найдено, получает пометку «ждёт решения». «Кто обжалует» считается по жалобам одного рассмотрения: жалоба оппонента в прежней апелляции не делает «Обе стороны» в новой. Если разбор неприменённого события после переноса не завершился, программа так и скажет и повторит его при следующем получении данных. Карточка суда не переносится — её сведения сверяйте в форме дела. В «Справочники → Проверка данных» события, собранные со ссылки одного рассмотрения, а применённые к другому, исправляются кнопкой «Исправить однозначные связи»; она не трогает событие, рассмотрение которого выбрали вы, заседание, которое вы отнесли в форме заседания, расхождение «событие — заседание» и дату акта с недоказанным происхождением — такие записи показываются с причиной для вашего решения. Там же — карточки суда другого рассмотрения, приложенные к текущему (до 18.10.2026).Жалоба параллельного рассмотрения, оставленная без движения, даёт свой срок устранения недостатков; если сторона жалобы не установлена — строка «Событие получено, срок не создан». Если два устройства независимо создали новое рассмотрение одной инстанции, после обмена сохраняются оба, а на «Сегодня» — выбор «Это одно — объединить» или «Разные — оставить оба». Форма «Новое рассмотрение», открытая до того, как рассмотрения изменились (другая вкладка или устройство), ничего не создаст — откройте её заново. Новое заседание сразу получает отметку своего рассмотрения (в форме — поле «Рассмотрение»); выбор, сделанный вами, «Вернуть как текущее» не снимает. Прежние рассмотрения на сайтах судов не опрашиваются. Создание нового рассмотрения и «Вернуть как текущее» записывают дело, сроки и заседания одной операцией: при сбое не записывается ничего, повторное нажатие не создаёт второе рассмотрение. Ограничения: сроки и жалобы вручную к рассмотрению не относятся (только автоматически), судебные акты отдельным списком не ведутся.</p>
 <p><b>Типовые задачи</b> (кнопка рядом с «Задача») создают одним нажатием набор задач для вида дела — например, для арбитражного: претензия, иск, отзыв, судебные расходы. Сроки считаются от даты принятия дела (её можно сменить в листе) и примерные — поправьте их в задаче. Задачи, которые уже есть в деле, не отмечены — дублей не будет. Наборы правятся в «Настройки» → «Типовые задачи» и общие с прежней программой.</p>
 <p><b>Сводка</b> — дело одним листом для печати или PDF: «Досье» (служебное: сведения, движение дела, заседания, сроки, задачи, ордера, участники, расходы, счета, заметки) и «Отчёт доверителю» (без внутренних заметок, гонорара, задач, ордеров и контактов участников). «Скачать для Word» — тот же документ файлом, чтобы поправить текст перед отправкой.</p>
 <p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. В своих шаблонах есть фильтры ({{СуммаИска:прописью}}, {{ДатаРешения:словами}}, {{Дата:плюс_дней 10}}, {{Доверитель:кратко}}), условия ({{#если Оппонент}} … {{#иначе}} … {{/если}}) и повторы по спискам дела ({{#каждый расходы}} {{№}}. {{категория}} — {{сумма}} {{/каждый}}; списки: расходы, платежи, заседания, работы); «Проверить шаблон» в форме находит незакрытые блоки и незнакомые поля, прежние версии своего шаблона хранятся в его форме («Вернуть»). Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
@@ -23530,7 +23607,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p>Если разобранное событие в календаре перенесли, отменили, удалили или изменили его название или место, на «Сегодня» появится строка «В календаре перенесено …» («изменено …») с тем, что было и что стало, — программа сама заседание не меняет: проверьте и нажмите «Разобрано». У неразобранной записи новые дата, время, название и место подставляются сами. Сменили ссылку на календарь — программа не сочтёт события прежнего календаря удалёнными. Если событие читается из двух календарей (ссылка на компьютере и календарь телефона), календарь, который ещё показывает прежние время, название или место после того, как другой сообщил новые, считается «ещё не обновившимся» — строки не чередуются; событие, которого нет в одном календаре, но есть в другом, отмечается строкой «Нет в одном из календарей» (не «удалено») — проверьте, где верно; «Удалено из календаря» — когда его не показывает ни один из них. Если один из календарей заменили или отключили, итог пересчитывается при ближайшем чтении оставшегося: не показывает и он — «удалено»; показывает — строка о расхождении снимается. Календарь, который ещё показывает событие отменённым (или не отменённым) после того, как другой сообщил обратное, тоже считается «ещё не обновившимся», но его новые название и место при этом замечаются.</p>` },
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
-<p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями. Копия с 16.10.2026 несёт контрольные суммы — число записей по разделам и содержимое каждого файла документа; «Проверить файл» пересчитывает их и предупреждает, если файл повреждён или неполон. Там же — пробное восстановление (в памяти, база устройства не меняется): сколько записей восстановится, нет ли записей, привязанных к делу, которого в копии нет, и у скольких версий документов файл есть в самой копии. Копию с несошедшимися суммами программа не объединяет и не даёт вернуть к ней базу; если повреждены только файлы документов — можно «Объединить без повреждённых файлов», файлы на устройстве останутся прежними. Объединение добавляет и обновляет записи: более новые записи из копии заменяют здешние.</p>
+<p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями. Копия с 16.10.2026 несёт контрольные суммы — число записей по разделам и содержимое каждого файла документа; «Проверить файл» пересчитывает их и предупреждает, если файл повреждён или неполон. Там же — проверка структуры копии (в памяти, база устройства не меняется): сколько записей восстановится, нет ли записей, привязанных к делу, которого в копии нет, и у скольких версий документов файл есть в самой копии. Копию с несошедшимися суммами программа не объединяет и не даёт вернуть к ней базу; если повреждены только файлы документов — можно «Объединить без повреждённых файлов», файлы на устройстве останутся прежними. Объединение добавляет и обновляет записи: более новые записи из копии заменяют здешние.</p>
 <p><b>Вернуть базу к снимку.</b> «Синхронизация» → «Снимки на сервере» (откроется лист «Снимки базы на сервере») → «Вернуть…» у нужного снимка (или «Копии базы» → проверить файл → «Вернуть базу к копии…»). Программа сравнит снимок с базой на устройстве и покажет три группы: удалённое после снимка — вернётся; изменённое после снимка — вернётся к значениям снимка; созданное после снимка — по желанию уйдёт в корзину (по умолчанию не отмечено). Снимите отметки с того, что возвращать не нужно, и нажмите «Вернуть выбранное». Возврат записывается как новые правки и при обмене уходит на остальные устройства; перед возвратом получите изменения с сервера, чтобы учесть правки других устройств. Не меняются настройки, файлы документов, события судов и история изменений дел. Возврат можно отменить: «Отменить возврат…» в тех же листах — записи получат версии, которые были до возврата. Отменить можно только последний возврат и только если прежние версии поместились в память устройства — программа скажет об этом сразу после возврата; иначе вернуть прежнее можно из копии базы.</p>
 <p>Смена сервера или пароля шифрования: если часть файлов документов лежит только в хранилище прежнего подключения, программа предложит «Перенести» — скачает их на это устройство прежним подключением, затем сменит подключение; в новое хранилище файлы уйдут при ближайшей отправке на сервер. Если скачать удалось не всё, подключение не меняется: «Повторить перенос» докачает остальное, «Сменить без переноса» сменит подключение, а нескачанные файлы откроются только с прежним подключением. «Синхронизация» → «Файлы документов» показывает, где лежат файлы, и скачивает недостающие.</p>
 <p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
@@ -23595,19 +23672,35 @@ function eulaGate() { if (!eulaAccepted()) { openEulaSheet(true); return false; 
 // текущее рассмотрение — плоские поля дела, прежние и параллельные — элементы c.proceedings. Отчёт называет, что создано, что связано, что
 // определить нельзя и где конфликт. Повторный прогон на той же базе даёт тот же отчёт (id берутся из procModel / procCurrentId, не новые).
 // Этапы C (прогон на настоящей базе пользователя) и D (миграция после копии) — отдельно; функция входные данные не меняет.
+// Сборка 199 (аудит сборки 198, N4): явный proceedingId проверяется раньше стадии; события и заседания несуществующих дел — в отчёте;
+// срок по акту привязывается к рассмотрению только по дате акта (autoKey — подсказка инстанции, не доказательство); у каждой записи — план
+// (откуда, куда, основание, нужно ли решение); проекция переносит метаданные (метки полей, происхождение, основания); отчёт разделяет
+// «структура допустима», «связи требуют решения» и «можно выполнять миграцию».
 function procUnifyCase(c, hearings, events) {
-  const out = { caseId: c.id, number: c.number || '', procs: [], hearings: { explicit: 0, inferred: 0, unresolved: [], dangling: [] }, events: { linked: 0, unresolved: [], dangling: [], noStage: 0 },
-    deadlines: { explicit: 0, byAct: 0, general: 0, dangling: [] }, problems: [] };
+  const out = { caseId: c.id, number: c.number || '', procs: [], plan: [], hearings: { explicit: 0, inferred: 0, unresolved: [], dangling: [] }, events: { linked: 0, unresolved: [], dangling: [], noStage: 0 },
+    deadlines: { explicit: 0, byAct: 0, general: 0, unresolved: [], dangling: [] }, deleted: 0, problems: [] };
   const hs = (hearings || []).filter(h => procMine(h, c)), rows = procModel(c, hs);
+  const ch = c._ch || {}, pcs = c.procCurrent || {};
   // рассмотрения: по инстанциям — прежние, текущее, параллельные; порядковый номер — для показа, связь с предыдущим — по порядку в инстанции
   const prevBySlot = {};
   for (const r of rows) {
     const def = procSlotDef(r.slot), status = r.kind === 'current' ? 'current' : r.kind === 'archived' ? 'archived' : 'parallel';
     const fields = r.kind === 'current' ? procSlotData(c, def) : Object.assign({}, (r.p && r.p.fields) || {});
     const p = { id: r.id, caseId: c.id, slot: r.slot, ordinal: r.n, status, fields, prevId: status === 'parallel' ? '' : (prevBySlot[r.slot] || ''), conflictOf: (r.p && r.p.conflictOf) || '', pending: !!r.pending };
+    // метаданные: у текущего — метки правки плоских полей дела (_ch) и отметки указателя procCurrent; у элемента — как есть
+    if (r.kind === 'current') {
+      const fc = {}; for (const k of Object.keys(fields)) if (ch[k] !== undefined) fc[k] = ch[k];
+      const cur = pcs[r.slot] || {}; p.meta = { fieldsCh: fc }; for (const k of Object.keys(cur)) if (k !== 'id' && cur[k] !== undefined) p.meta[k] = JSON.parse(JSON.stringify(cur[k]));
+      if (cur.u !== undefined) p.meta.updatedAt = cur.u;
+    } else {
+      // все свойства элемента, кроме самих реквизитов и места: метки полей, происхождение, основания, отметки отмены и возврата, время
+      const e = r.p || {}; p.meta = {}; for (const k of Object.keys(e)) if (!['id', 'slot', 'status', 'fields'].includes(k) && e[k] !== undefined) p.meta[k] = JSON.parse(JSON.stringify(e[k]));
+    }
     if (status !== 'parallel') prevBySlot[r.slot] = r.id;
     out.procs.push(p);
   }
+  // удалённые (надгробие) — в модель не входят, связи с ними — «ссылка в никуда»
+  out.deleted = (Array.isArray(c.proceedings) ? c.proceedings : []).filter(p => p && p.id && procTomb(c, p.id) > Number(p.createdAt || 0)).length;
   // инварианты модели (docs/PROC_UNIFY_model.md, И1–И4)
   const ids = out.procs.map(p => p.id), dup = ids.filter((x, i) => ids.indexOf(x) !== i);
   if (dup.length) out.problems.push({ kind: 'duplicate-id', ids: [...new Set(dup)] });
@@ -23624,44 +23717,65 @@ function procUnifyCase(c, hearings, events) {
     for (const p of out.procs) if (p.conflictOf && p.slot === def.slot) out.problems.push({ kind: 'conflict', slot: def.slot, id: p.id, of: p.conflictOf });
   }
   const known = new Set(ids);
+  const plan = (kind, id, to, how, need) => out.plan.push({ kind, id, to: to || '', how, need: need || '' });
   // заседания: явная связь (proceedingId) или вывод правилами procModel; ни одного или больше одного рассмотрения — «определить нельзя»
   for (const h of hs) {
-    if (h.proceedingId && !known.has(h.proceedingId)) { out.hearings.dangling.push(h.id); continue; }
+    if (h.proceedingId && !known.has(h.proceedingId)) { out.hearings.dangling.push(h.id); plan('hearing', h.id, '', 'dangling', 'выбрать рассмотрение: указанного нет'); continue; }
     const owners = rows.filter(r => r.hearings.some(x => x.id === h.id));
-    if (owners.length !== 1) { out.hearings.unresolved.push(h.id); continue; }
-    if (h.proceedingId) out.hearings.explicit++; else out.hearings.inferred++;
+    if (owners.length !== 1) { out.hearings.unresolved.push(h.id); plan('hearing', h.id, '', 'unresolved', 'выбрать рассмотрение'); continue; }
+    if (h.proceedingId) { out.hearings.explicit++; plan('hearing', h.id, h.proceedingId, 'explicit'); } else { out.hearings.inferred++; plan('hearing', h.id, owners[0].id, 'inferred'); }
   }
-  // события судов этого дела: правило programmы procEventOwner (явный id, ссылка источника, номер в суде, дата); «спросить» — не определено
+  // события судов этого дела: явный id проверяется первым (N4-A); затем правило программы procEventOwner (ссылка источника, номер, дата)
   for (const e of (events || [])) {
     if (!e || e._deleted || e.caseId !== c.id) continue;
+    if (e.proceedingId) {
+      if (known.has(e.proceedingId)) { out.events.linked++; plan('event', e.id, e.proceedingId, 'explicit'); }
+      else { out.events.dangling.push(e.id); plan('event', e.id, '', 'dangling', 'выбрать рассмотрение: указанного нет'); }
+      continue;
+    }
     const stage = typeof crmMonStageOf === 'function' ? crmMonStageOf(e) : '', slot = PROC_STAGE_SLOT[stage];
-    if (!slot) { out.events.noStage++; continue; }
-    if (e.proceedingId && !known.has(e.proceedingId)) { out.events.dangling.push(e.id); continue; }
+    if (!slot) { out.events.noStage++; plan('event', e.id, '', 'noStage'); continue; }
     const w = procEventOwner(c, e, slot, e.date);
-    if (w.kind === 'ask') out.events.unresolved.push(e.id); else out.events.linked++;
+    if (w.kind === 'ask' || !w.id || !known.has(w.id)) { out.events.unresolved.push(e.id); plan('event', e.id, '', 'unresolved', 'выбрать рассмотрение'); }
+    else { out.events.linked++; plan('event', e.id, w.id, 'inferred'); }
   }
-  // сроки: явная связь (proceedingId); автосрок по акту инстанции — к её текущему рассмотрению; прочие — общие для дела
+  // сроки: явная связь (proceedingId); срок по акту — к рассмотрению инстанции, у которого есть акт с датой основания срока (baseDate),
+  // ровно одному; иначе — решение пользователя (N4-B: префикс autoKey не доказывает принадлежность); прочие — общие для дела
   for (const d of (Array.isArray(c.deadlines) ? c.deadlines : [])) {
     if (!d || d._deleted) continue;
-    if (d.proceedingId) { if (known.has(d.proceedingId)) out.deadlines.explicit++; else out.deadlines.dangling.push(d.id); continue; }
-    if (d.autoKey && PROC_SLOTS.some(def => def.acts.some(a => d.autoKey.indexOf(a) === 0))) out.deadlines.byAct++; else out.deadlines.general++;
+    if (d.proceedingId) { if (known.has(d.proceedingId)) { out.deadlines.explicit++; plan('deadline', d.id, d.proceedingId, 'explicit'); } else { out.deadlines.dangling.push(d.id); plan('deadline', d.id, '', 'dangling', 'выбрать рассмотрение: указанного нет'); } continue; }
+    const def = d.autoKey ? PROC_SLOTS.find(x => x.acts.some(a => d.autoKey.indexOf(a) === 0)) : null;
+    if (!def) { out.deadlines.general++; plan('deadline', d.id, '', 'general'); continue; }
+    const base = String(d.baseDate || '').slice(0, 10);
+    const cand = base ? out.procs.filter(p => p.slot === def.slot && def.date.some(k => String((p.status === 'current' ? c : p.fields)[k] || '').slice(0, 10) === base)) : [];
+    if (cand.length === 1) { out.deadlines.byAct++; plan('deadline', d.id, cand[0].id, 'byAct'); }
+    else { out.deadlines.unresolved.push(d.id); plan('deadline', d.id, '', 'unresolved', base ? (cand.length ? 'акт с этой датой — у нескольких рассмотрений' : 'нет рассмотрения с актом этой даты') : 'нет даты акта — выбрать рассмотрение'); }
   }
   return out;
 }
-// отчёт по базе: cases, hearings, monitorEvents — массивы записей (копии не нужны: функция ничего не меняет)
+// структурные ошибки, при которых миграция невозможна
+const PROC_UNIFY_BLOCK = ['duplicate-id', 'two-current', 'pointer', 'lost-fields'];
+// отчёт по базе: cases, hearings, monitorEvents — массивы записей (функция ничего не меняет). Ответ: sum, per, orphans (заседания и события
+// несуществующих дел, N4-C), structureOk (нет структурных ошибок), needsDecision (связей, требующих решения), ready (можно мигрировать —
+// и структура допустима, и решать нечего)
 function procUnifyPlan(cases, hearings, events) {
   const per = [], sum = { cases: 0, procs: 0, byStatus: { current: 0, archived: 0, parallel: 0 }, hearings: { explicit: 0, inferred: 0, unresolved: 0, dangling: 0 },
-    events: { linked: 0, unresolved: 0, dangling: 0, noStage: 0 }, deadlines: { explicit: 0, byAct: 0, general: 0, dangling: 0 }, problems: 0 };
-  for (const c of (cases || [])) {
-    if (!c || c._deleted || !c.id) continue;
+    events: { linked: 0, unresolved: 0, dangling: 0, noStage: 0 }, deadlines: { explicit: 0, byAct: 0, general: 0, unresolved: 0, dangling: 0 }, deleted: 0, problems: 0 };
+  const live = (cases || []).filter(c => c && !c._deleted && c.id), byId = new Set(live.map(c => c.id)), byNo = new Set(live.map(c => c.number).filter(Boolean));
+  for (const c of live) {
     const r = procUnifyCase(c, hearings, events); per.push(r); sum.cases++;
-    sum.procs += r.procs.length; r.procs.forEach(p => sum.byStatus[p.status]++);
+    sum.procs += r.procs.length; r.procs.forEach(p => sum.byStatus[p.status]++); sum.deleted += r.deleted;
     sum.hearings.explicit += r.hearings.explicit; sum.hearings.inferred += r.hearings.inferred; sum.hearings.unresolved += r.hearings.unresolved.length; sum.hearings.dangling += r.hearings.dangling.length;
     sum.events.linked += r.events.linked; sum.events.unresolved += r.events.unresolved.length; sum.events.dangling += r.events.dangling.length; sum.events.noStage += r.events.noStage;
-    sum.deadlines.explicit += r.deadlines.explicit; sum.deadlines.byAct += r.deadlines.byAct; sum.deadlines.general += r.deadlines.general; sum.deadlines.dangling += r.deadlines.dangling.length;
+    sum.deadlines.explicit += r.deadlines.explicit; sum.deadlines.byAct += r.deadlines.byAct; sum.deadlines.general += r.deadlines.general; sum.deadlines.unresolved += r.deadlines.unresolved.length; sum.deadlines.dangling += r.deadlines.dangling.length;
     sum.problems += r.problems.length;
   }
-  return { sum, per, ready: !per.some(r => r.problems.some(p => p.kind === 'duplicate-id' || p.kind === 'two-current' || p.kind === 'pointer' || p.kind === 'lost-fields')) };
+  // общий проход вне цикла дел: заседания и события, чьё дело не найдено
+  const orphans = { hearings: (hearings || []).filter(h => h && !h._deleted && !(h.caseId ? byId.has(h.caseId) : (h.caseNum && byNo.has(h.caseNum)))).map(h => h.id),
+    events: (events || []).filter(e => e && !e._deleted && e.caseId && !byId.has(e.caseId)).map(e => e.id) };
+  const structureOk = !per.some(r => r.problems.some(p => PROC_UNIFY_BLOCK.includes(p.kind)));
+  const needsDecision = per.reduce((n, r) => n + r.plan.filter(x => x.need).length, 0) + orphans.hearings.length + orphans.events.length;
+  return { sum, per, orphans, structureOk, needsDecision, ready: structureOk && needsDecision === 0 };
 }
 
 // ▼▼▼ security/lockui.js
@@ -23780,6 +23894,16 @@ async function secretsRecoverGo() {
   } catch (e) { logErr('lock:recover', e); fErr('Прежний PIN-код не подошёл — секреты остались закрытыми'); return; }
   if (typeof syncStatusRender === 'function') syncStatusRender();
   sheetBack(true); openSecuritySheet('replace', { text: 'Секреты перенесены на текущий PIN-код' });
+}
+// сборка 199 (аудит сборки 198, N2): сохранённые пароли и ключи не читаются ключом устройства — осознанная замена с копией прежнего
+function openSecretsReset() {
+  openSheet('Начать хранилище паролей заново', `<p class="small muted">Пароли и ключи, сохранённые на этом устройстве раньше, не читаются его ключом (ключ браузера сменился или хранилище повреждено). Программа не записывает новые поверх, чтобы их не потерять.</p>
+    <p class="small muted">«Начать заново» сохранит прежнее хранилище копией внутри браузера и запишет пароли и ключи, введённые сейчас. Прежние значения (код сервера, пароль шифрования, токены) придётся ввести ещё раз — возьмите их там, где храните.</p>
+    <div class="form-actions"><button type="button" class="button danger" id="secreset-go" onclick="secretsResetGo()">Начать заново</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
+}
+async function secretsResetGo() {
+  try { await secretsResetUnreadable(); } catch (e) { logErr('secrets:reset', e); toast('Не удалось: ' + ((e && e.message) || 'ошибка'), true); return; }
+  sheetBack(true); toast('Хранилище паролей начато заново; прежнее сохранено копией');
 }
 async function openSecuritySheet(mode, msg) {
   const bio = await bioAvailable(), on = LOCK.enabled, auto = Number(localStorage.getItem('crm_autolock_min') || 0);
