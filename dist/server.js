@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v196: напоминания — отметка версии и резерв отправки (аудит сборки 198, N6)
 //  v195: списки хранилища — целиком по страницам (файлы документов, изменения базы, история снимков; аудит сборки 194, 6.7)
 //  v194: напоминания — remindput и таймер пишут файл условно по ETag и повторяют при изменении (аудит сборки 194, R4)
 //  v193: событие суда сохраняет proceedingId (id рассмотрения дела от коллектора 3.24+) и сравнивается с ним (аудит сборки 169, А1)
@@ -162,7 +163,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 195,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 196,
       ready: readiness()
     });
   }
@@ -182,7 +183,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 195, cal: true, ask: true, ical: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 196, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -1154,13 +1155,13 @@ async function snapGet(body) {
 // ════════════════════════════════════════════════════════════
 const remindKey = () => 'remind-' + storeId() + '.json';
 // v194: вместе со списком — ETag прочитанного файла и признак «файла не было»: условие записи (remindSave)
-async function remindLoad() { const r = await s3Get(remindKey()); if (r.status === 404) return { items: [], sent: {}, exists: false, etag: '' }; if (!r.ok) throw new Error('s3 ' + r.status); const etag = (r.headers && r.headers.get && r.headers.get('etag')) || ''; try { const j = JSON.parse(await r.text()); return { items: j.items || [], sent: j.sent || {}, updatedAt: j.updatedAt, exists: true, etag }; } catch (e) { return { items: [], sent: {}, exists: true, etag }; } }
+async function remindLoad() { const r = await s3Get(remindKey()); if (r.status === 404) return { items: [], sent: {}, exists: false, etag: '' }; if (!r.ok) throw new Error('s3 ' + r.status); const etag = (r.headers && r.headers.get && r.headers.get('etag')) || ''; try { const j = JSON.parse(await r.text()); return { items: j.items || [], sent: j.sent || {}, updatedAt: j.updatedAt, claim: j.claim || null, exists: true, etag }; } catch (e) { return { items: [], sent: {}, exists: true, etag }; } }
 // v194 (аудит сборки 194, R4): запись только если файл с чтения не менялся; изменился — { ok:false, changed:true }, вызывающий перечитывает
 async function remindSave(data, cur) {
   const body = JSON.stringify(data), CT = 'application/json', cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
   let r = cond ? await s3PutIf(remindKey(), body, CT, cond) : await s3Put(remindKey(), body, CT);
   if (cond && condFailed(r)) return { ok: false, changed: true };
-  if (cond && condUnsupported(r)) { console.log('remind: условная запись не поддерживается (501) — запись без условия'); r = await s3Put(remindKey(), body, CT); }
+  if (cond && condUnsupported(r)) { console.log('remind: условная запись не поддерживается (501) — запись без условия'); r = await s3Put(remindKey(), body, CT); return { ok: r.ok, status: r.status, uncond: true }; }
   return { ok: r.ok, status: r.status };
 }
 async function remindPut(body) { // список от CRM: [{ id, date (ГГГГ-ММ-ДД), time?, title, text? }]
@@ -1172,22 +1173,63 @@ async function remindPut(body) { // список от CRM: [{ id, date (ГГГГ
   const ids = new Set(items.map(i => i.id)), ovFrom = 'ov:' + mskDateISO(-2);
   for (let i = 0; ; i++) {
     const prev = await remindLoad(); const keep = {}; for (const k of Object.keys(prev.sent)) if (ids.has(k) || (k.startsWith('ov:') && k >= ovFrom)) keep[k] = prev.sent[k];
-    const r = await remindSave({ items, sent: keep, updatedAt: Date.now() }, prev);
+    // v196 (N6): резерв отправки, действующий сейчас, сохраняется — иначе новый список во время отправки снимал бы его, и второй вызов отправил бы то же
+    const claim = prev.claim && Number(prev.claim.until || 0) > Date.now() ? { claim: prev.claim } : {};
+    const r = await remindSave(Object.assign({ items, sent: keep, updatedAt: Date.now() }, claim), prev);
     if (r.ok) break;
     if (!r.changed || i >= 4) throw new Error(r.changed ? 'список напоминаний меняется одновременно — повторите' : 's3 ' + r.status);
   }
   return { ok: true, n: items.length, telegram: !!(process.env.TG_TOKEN && process.env.TG_CHAT) };
 }
 function mskDateISO(offsetDays) { const d = new Date(Date.now() + 3 * 3600e3 + (offsetDays || 0) * 864e5); return d.toISOString().slice(0, 10); }
-async function remindTick() { // сегодня и завтра — по одному сообщению
-  if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return { ok: true, sent: 0, error: 'нет TG_TOKEN/TG_CHAT' };
-  if (!process.env.BUCKET) return { ok: true, sent: 0, error: 'нет хранилища' };
-  const st = await remindLoad(); const today = mskDateISO(0), tomorrow = mskDateISO(1);
-  const due = st.items.filter(x => (x.date === today || x.date === tomorrow) && st.sent[x.id] !== x.date).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+// v196 (аудит сборки 198, N6-A): отметка «отправлено» — версия напоминания: дата и отпечаток времени, заголовка и текста. Отметка прежних
+// серверов (только дата) считается отправкой той же версии (переход без повторной рассылки всего списка)
+function remindMark(x) { return x.date + '#' + crypto.createHash('sha256').update([x.date, x.time || '', x.title || '', x.text || ''].join('\n')).digest('hex').slice(0, 12); }
+const remindSentOk = (st, x) => st.sent[x.id] === remindMark(x) || st.sent[x.id] === x.date;
+const REMIND_CLAIM_MS = 120000;
+// что отправить по состоянию st: напоминания на сегодня и завтра, ещё не отправленные в этой версии; строка о просрочке — раз в день
+function remindDue(st, today, tomorrow) {
+  const due = st.items.filter(x => (x.date === today || x.date === tomorrow) && !remindSentOk(st, x)).sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
   // v189: просроченные задачи считаются здесь каждый день (срок раньше сегодняшнего по Москве) — задача, срок которой прошёл, пока программа
   // была закрыта, тоже попадает; строка — раз в день. Программа присылает не больше 200 просроченных задач.
   const over = st.items.filter(x => /^t:/.test(x.id) && x.date < today).length, ovKey = 'ov:' + today, ovNeed = over > 0 && st.sent[ovKey] !== today;
-  if (!due.length && !ovNeed) return { ok: true, sent: 0 };
+  return { due, over, ovKey, ovNeed };
+}
+// v196 (N6-B): резерв отправки — условной записью в тот же файл; занято другим исполнителем (резерв не истёк) — { busy }
+async function remindClaim(me) {
+  for (let i = 0; i < 5; i++) {
+    const cur = await remindLoad(), now = Date.now();
+    if (cur.claim && cur.claim.by !== me && Number(cur.claim.until || 0) > now) return { busy: true };
+    const w = await remindSave({ items: cur.items, sent: cur.sent, updatedAt: cur.updatedAt || now, claim: { by: me, until: now + REMIND_CLAIM_MS } }, cur);
+    if (w.ok) { if (w.uncond) console.log('remind: резерв записан без условия — одновременный вызов может отправить то же'); return { cur }; }
+    if (!w.changed) throw new Error('s3 ' + w.status);
+  }
+  return { busy: true };
+}
+// снять свой резерв (и записать отметки, если переданы); чужой или истёкший — не трогать
+async function remindRelease(me, marks) {
+  let w = { ok: false, status: 0 };
+  for (let i = 0; i < 5; i++) {
+    const cur = await remindLoad(), have = new Set(cur.items.map(x => x.id));
+    for (const [id, m] of Object.entries(marks || {})) if (have.has(id) || id.startsWith('ov:')) cur.sent[id] = m;
+    const data = { items: cur.items, sent: cur.sent, updatedAt: cur.updatedAt || Date.now() };
+    if (cur.claim && cur.claim.by !== me) data.claim = cur.claim;
+    w = await remindSave(data, cur);
+    if (w.ok || !w.changed) break;
+  }
+  return w;
+}
+async function remindTick() { // сегодня и завтра — по одному сообщению
+  if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return { ok: true, sent: 0, error: 'нет TG_TOKEN/TG_CHAT' };
+  if (!process.env.BUCKET) return { ok: true, sent: 0, error: 'нет хранилища' };
+  const today = mskDateISO(0), tomorrow = mskDateISO(1);
+  const first = remindDue(await remindLoad(), today, tomorrow);
+  if (!first.due.length && !first.ovNeed) return { ok: true, sent: 0 };
+  // v196 (N6-B): резерв до внешнего вызова; что отправлять — по состоянию, прочитанному при резерве (другой вызов мог успеть отправить)
+  const me = crypto.randomBytes(8).toString('hex'), cl = await remindClaim(me);
+  if (cl.busy) return { ok: true, sent: 0, busy: true };
+  const { due, over, ovKey, ovNeed } = remindDue(cl.cur, today, tomorrow);
+  if (!due.length && !ovNeed) { await remindRelease(me, null); return { ok: true, sent: 0 }; }
   const line = x => `${x.date === today ? '🔴 сегодня' : '🟠 завтра'}${x.time ? ' ' + x.time : ''} — ${x.title}${x.text ? ' (' + x.text + ')' : ''}`;
   // v192: сообщение Telegram — не длиннее 4096 знаков (длиннее Telegram отклоняет, и не уходило ни одно напоминание); не поместившиеся — счётом
   const tail = ovNeed ? `\n⚠️ Просрочено задач: ${over >= 200 ? 'не меньше 200' : over}` : '';
@@ -1195,18 +1237,15 @@ async function remindTick() { // сегодня и завтра — по одн�
   for (const x of due.slice(0, 25)) { const l = '\n' + line(x); if ((text + l + tail).length > 3900) break; text += l; shown++; }
   if (due.length > shown) text += `\n… и ещё ${due.length - shown}`;
   text += tail;
-  let r; try { r = await tgSend(text, 10000); } catch (e) { return { ok: false, error: 'telegram: ' + String(e && e.message || e).slice(0, 80) }; }
-  if (!r.ok) return { ok: false, error: 'telegram ' + r.status };
+  // сбой отправки или потерянный ответ — резерв снимается без отметок: следующий вызов отправит снова (повтор лучше пропуска)
+  let r; try { r = await tgSend(text, 10000); } catch (e) { await remindRelease(me, null).catch(() => {}); return { ok: false, error: 'telegram: ' + String(e && e.message || e).slice(0, 80) }; }
+  if (!r.ok) { await remindRelease(me, null).catch(() => {}); return { ok: false, error: 'telegram ' + r.status }; }
   // v192: отметки «отправлено» — в список, перечитанный после отправки: список, переданный программой за это время, не затирается
   // v194 (аудит сборки 194, R4): запись отметок — условная по ETag перечитанного файла; список программы, записанный между чтением и записью,
   // не затирается: файл изменился — перечитать и отметить заново (отметка — только у пунктов, которые есть в новом списке)
-  let w = { ok: false, status: 0 };
-  for (let i = 0; i < 5; i++) {
-    const cur = await remindLoad(); const have = new Set(cur.items.map(x => x.id));
-    due.forEach(x => { if (have.has(x.id)) cur.sent[x.id] = x.date; }); if (ovNeed) cur.sent[ovKey] = today;
-    w = await remindSave({ items: cur.items, sent: cur.sent, updatedAt: cur.updatedAt || Date.now() }, cur);
-    if (w.ok || !w.changed) break;
-  }
+  // v196 (N6-A): отметка — версии, которая ушла в сообщении; изменённая за это время остаётся ожидающей
+  const marks = {}; due.forEach(x => { marks[x.id] = remindMark(x); }); if (ovNeed) marks[ovKey] = today;
+  const w = await remindRelease(me, marks);
   if (!w.ok) console.log('remind: отметки об отправке не записаны (' + (w.changed ? 'список всё время меняется' : 's3 ' + w.status) + ') — напоминание может прийти повторно');
   return { ok: true, sent: due.length, overdue: ovNeed ? over : 0 };
 }
@@ -1688,4 +1727,4 @@ async function icalGet(body) {
 }
 
 // Экспорт внутренностей для автотестов (на работу функции не влияет)
-module.exports._test = { icalGet, icalUrlOk, icalFetch, icalWindow, icalUnfold, icalValue, ICAL_HOSTS, askPublish, askGet, askAck, askRequest, askPage, askNotify, askConsentOf, asksLoad, asksPrune, askTg, ASK_TG_RE, bookPublish, bookPage, bookNotify, bookConsentOf, bookConsentKey, consentVer, eventsSave, calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
+module.exports._test = { remindMark, remindClaim, remindRelease, REMIND_CLAIM_MS, icalGet, icalUrlOk, icalFetch, icalWindow, icalUnfold, icalValue, ICAL_HOSTS, askPublish, askGet, askAck, askRequest, askPage, askNotify, askConsentOf, asksLoad, asksPrune, askTg, ASK_TG_RE, bookPublish, bookPage, bookNotify, bookConsentOf, bookConsentKey, consentVer, eventsSave, calToken, calTokenOk, calServe, CAL_LABEL, publishIcs, deltaChain, deltaList, deltaGet, deltaPrune, deltaKey, deltaPrefix, DELTA_KEEP, dbPut, dbVer, dbClaimVer, dbCommitVer, dbClaimKey, bookingsLoad, bookingsSave, bookRequest, bookSet, bookGet, corsProbe, corsSet, corsCheck, lockAcquire, lockRelease, lockHeld, eventsPut, eventsLoad, evLockPrefix, LOCK_TTL, ensureCors, snapPut, snapCommit, snapGet, s3Signed, pick, pickAfter, sigV4, sha256hex, eventsMerge, evNormalize, bearerOf, presign, presignRaw, sttTextFrom, splitChunks, audioFormatOf, bookTaken, bookShell, blobKey, remindPut, remindTick, mskDateISO };
