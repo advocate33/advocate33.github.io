@@ -10,6 +10,7 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v197: напоминания — отметка прежнего сервера (дата) не скрывает изменённое напоминание (аудит сборки 201, R9)
 //  v196: напоминания — отметка версии и резерв отправки (аудит сборки 198, N6)
 //  v195: списки хранилища — целиком по страницам (файлы документов, изменения базы, история снимков; аудит сборки 194, 6.7)
 //  v194: напоминания — remindput и таймер пишут файл условно по ETag и повторяют при изменении (аудит сборки 194, R4)
@@ -163,7 +164,7 @@ module.exports.handler = async function (event, context) {
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 196,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 197,
       ready: readiness()
     });
   }
@@ -183,7 +184,7 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 196, cal: true, ask: true, ical: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 197, cal: true, ask: true, ical: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -1173,6 +1174,14 @@ async function remindPut(body) { // список от CRM: [{ id, date (ГГГГ
   const ids = new Set(items.map(i => i.id)), ovFrom = 'ov:' + mskDateISO(-2);
   for (let i = 0; ; i++) {
     const prev = await remindLoad(); const keep = {}; for (const k of Object.keys(prev.sent)) if (ids.has(k) || (k.startsWith('ov:') && k >= ovFrom)) keep[k] = prev.sent[k];
+    // v197 (аудит сборки 201, R9): отметка прежнего сервера — только дата. Напоминание не менялось (та же версия в прежнем списке) — отметка
+    // переводится в отметку версии; менялось или прежнего элемента нет — снимается, изменённое напоминание уйдёт следующим вызовом
+    const before = new Map((prev.items || []).map(x => [x.id, x])), now = new Map(items.map(x => [x.id, x]));
+    for (const k of Object.keys(keep)) {
+      if (k.startsWith('ov:') || !/^\d{4}-\d{2}-\d{2}$/.test(String(keep[k]))) continue;
+      const was = before.get(k), cur = now.get(k);
+      if (was && cur && keep[k] === cur.date && remindMark(was) === remindMark(cur)) keep[k] = remindMark(cur); else delete keep[k];
+    }
     // v196 (N6): резерв отправки, действующий сейчас, сохраняется — иначе новый список во время отправки снимал бы его, и второй вызов отправил бы то же
     const claim = prev.claim && Number(prev.claim.until || 0) > Date.now() ? { claim: prev.claim } : {};
     const r = await remindSave(Object.assign({ items, sent: keep, updatedAt: Date.now() }, claim), prev);
