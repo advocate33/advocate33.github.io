@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="26.10.2026 14:34 · eeed320">
-<meta name="build-no" content="206">
+<meta name="build" content="26.10.2026 16:03 · 7587acc">
+<meta name="build-no" content="207">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -5944,7 +5944,7 @@ function openRemindSheet(sub, msg) {
     <div class="section-label step-label">Шаг 3. Записать бота в свой сервер</div>
     <ol class="steps-list"><li>console.yandex.cloud → каталог с сервером → Cloud Functions → <b>crm-bridge</b> → «Редактор» → «Переменные окружения».</li>
       <li>Добавьте две переменные: <b>TG_TOKEN</b> — токен из шага 1, <b>TG_CHAT</b> — номер чата из шага 2 → «Создать версию».</li>
-      <li>Таймер: Cloud Functions → crm-bridge → «Триггеры» → создать таймер, выражение cron <b>5 5 * * ? *</b> (это 08:05 по Москве), функция crm-bridge, сервисный аккаунт crm-server.</li></ol>
+      <li>Таймер 08:05 по Москве мастер «Свой сервер в Яндекс Облаке» создаёт сам (с сборки 207, галочка «Напоминания в Telegram по расписанию»). Сервер создан раньше — запустите мастер ещё раз: созданное найдётся, ничего не задвоится. Или вручную: Cloud Functions → crm-bridge → «Триггеры» → создать таймер, выражение cron <b>5 5 ? * * *</b>, функция crm-bridge, сервисный аккаунт crm-server.</li></ol>
     <div class="section-label step-label">Шаг 4. Передавать список на сервер</div>
     <p class="small muted">На сервер уходят даты, номера дел, названия сроков (как вы их записали — не пишите в них фамилии), суд и зал заседаний, сроки задач и доверенностей на 14 дней вперёд, до 300 записей, и до 200 просроченных задач. Имена доверителей не передаются (доверенность приходит как «Доверенность по делу …»). Список обновляется сам через несколько секунд после правки срока, заседания или задачи.</p>
     <label class="check"><input type="checkbox" id="rm-on"${on ? ' checked' : ''}${srv ? '' : ' disabled'} onchange="srvRemindToggle(this.checked)"><span>Передавать список напоминаний на сервер</span></label>
@@ -12407,6 +12407,8 @@ function ycAccessExtract(text) {
 }
 // голый ключ + идентификаторы → тот же JSON, что в скачанном файле
 function ycKeyFromPem(pem, keyId, saId) { const body = String(pem || '').replace(/PLEASE DO NOT REMOVE[^\n]*\n?/g, '').trim(); return { id: String(keyId || '').trim(), service_account_id: String(saId || '').trim(), private_key: /BEGIN PRIVATE KEY/.test(body) ? body : '-----BEGIN PRIVATE KEY-----\n' + body + '\n-----END PRIVATE KEY-----' }; }
+// сборка 207: идентификатор авторизованного ключа сервисного аккаунта из вставленного JSON — '' для IAM-токена и строки y0_
+function ycKeyIdOf(tok) { try { const k = JSON.parse(String(tok || '')); return k && k.id && k.service_account_id && k.private_key ? String(k.id) : ''; } catch (e) { return ''; } }
 async function ycJwtFromKey(key, now) {
   const pem = String(key.private_key).split('\n').filter(l => !/PLEASE DO NOT REMOVE|-----/.test(l)).join('').replace(/\s+/g, '');
   const pk = await crypto.subtle.importKey('pkcs8', b64ToBuf(pem), { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['sign']);
@@ -12505,6 +12507,14 @@ async function ycDeploy(o, log) {
   // HMAC от секретного кода (sync/calfeed.js, calFeedToken), кода в ссылке нет. Прежний шлюз с маршрутом /cal/{secret} клал в адрес подписки
   // сам секретный код сервера (урок 126) — мастер его больше не создаёт; o.withGateway не используется.
   if (typeof calFeedToken === 'function') { try { res.calUrl = res.bridgeUrl + '?cal=' + await calFeedToken(secret); } catch (e) { logErr('yc:calurl', e); } }
+  // 8а. сборка 207 (O-74, этап 3): таймер напоминаний в Telegram — 08:05 по Москве (05:05 UTC), вызывает crm-bridge (remindTick); прежде его
+  // создавал пользователь вручную в консоли (лист «Напоминания в Telegram», шаг 3). Находится по имени — повтор не задваивает
+  if (o.withRemind) {
+    log('Таймер напоминаний в Telegram (08:05 по Москве)…');
+    const hasR = (await ycList(YC.triggers + '?folderId=' + folderId, 'triggers', iam)).some(t => t.name === 'crm-remind-timer');
+    if (!hasR) await ycOp(await ycApi('POST', YC.triggers, iam, { folderId, name: 'crm-remind-timer', description: 'CRM Адвоката: напоминания в Telegram', rule: { timer: { cronExpression: '5 5 ? * * *', invokeFunctionWithRetry: { functionId: bridge.id, functionTag: '$latest', serviceAccountId: sa.id } } } }), iam, 'таймер напоминаний');
+    res.remindTimer = true;
+  }
   // 9. коллектор судов
   if (o.withCollector) {
     log('Функция коллектора судов…');
@@ -12552,9 +12562,8 @@ function openYcSetupSheet(sub) {
     openSheet('Свой сервер в Яндекс Облаке', `${status}
       <p class="small muted">Сервер создаётся в <b>вашем</b> Яндекс Облаке — автор программы к нему доступа не имеет. Он нужен для синхронизации компьютера и телефона, мониторинга судов, ленты календаря и снимков базы.</p>
       <div class="info-box" id="pair-have-server">Сервер уже работает на другом вашем устройстве? Тогда создавать ничего не нужно: на том устройстве «Синхронизация» → «Подключить телефон» — появится QR-код.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary" id="cloud-pair-in" onclick="openPairInSheet('', true)">${icon('shield-check')}Подключиться по QR-коду</button></div></div>
-      <div class="info-box" id="cloud-browser">Два пути. <b>Путь А — мастер</b> (рекомендуем, проверен): работает в приложении «CRM Адвоката» для компьютера или для Android (1.27 и новее) — браузер не пускает запросы к Яндекс Облаку. <b>Путь Б — пробный</b>: весь сервер создаёт ИИ-помощник консоли Облака, приложение не нужно; пока проверяется, работает ли он.</div>
+      <div class="info-box" id="cloud-browser">Два пути. <b>Путь А — мастер</b> (рекомендуем, проверен): работает в приложении «CRM Адвоката» для компьютера или для Android (1.27 и новее) — браузер не пускает запросы к Яндекс Облаку. <b>Путь Б — пробный</b>: весь сервер создаёт ИИ-помощник консоли Облака, приложение не нужно; пока проверяется, работает ли он — свёрнут внизу листа.</div>
       ${need}
-      ${ycPathBHtml(true)}
       <div class="section-label">Путь А. Мастер в приложении для компьютера или Android · рекомендуем</div><ol class="steps-list">
         ${ycOnAndroid() ? `<li>Установите приложение «CRM Адвоката» для Android (файл CRM_Advokata.apk, версия 1.27 и новее). Android спросит, разрешить ли установку из этого источника, — это файл с сайта программы advocate33.github.io. Если приложение уже стоит, но мастер в нём не открывается, — обновите его: Настройки → «Проверить обновления».<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APK_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать приложение</a></div></li>`
       : `<li>Скачайте и установите приложение для компьютера (файл CRM_Advokata_Setup.exe). Windows может спросить, доверять ли файлу, — это установщик программы с сайта advocate33.github.io. На телефоне Android то же делает приложение для Android 1.27 и новее.<div class="form-actions" style="margin:6px 0 0"><a class="button small-btn" id="cloud-app" href="${YC_APP_URL}" target="_blank" rel="noopener">${icon('cloud-download', 'icon-sm')}Скачать установщик</a></div></li>`}
@@ -12563,7 +12572,8 @@ function openYcSetupSheet(sub) {
         <li>Вернитесь сюда: «Синхронизация» → шаг 1 — впишите адрес сервера и секретный код (мастер показывает их в конце; код — кнопка «Скопировать секретный код») и пароль шифрования → «Сохранить и проверить связь». Должно ответить: «Связь есть: сервер версии …».</li>
         <li>Шаг 4 «Отправить изменения на сервер» — база этого устройства уйдёт на сервер зашифрованной. Затем на компьютере «Синхронизация» → «Подключить телефон» — по QR-коду телефон подключится сам, останется ввести пароль шифрования.</li></ol>
       <p class="small muted">Если мастер остановился с ошибкой: исправьте причину (чаще всего — платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова — созданное найдётся, ничего не задвоится. Не получилось — «Журнал ошибок» → «Скопировать» и пришлите текст.</p>
-      <div class="form-actions"><button type="button" class="button primary" id="cloud-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация — ввести адрес и код</button></div>`, sub);
+      <div class="form-actions"><button type="button" class="button primary" id="cloud-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация — ввести адрес и код</button></div>
+      ${ycPathBHtml(true)}`, sub);
     return;
   }
   const bucketSuggest = 'crm-' + ycRand(8);
@@ -12576,17 +12586,19 @@ function openYcSetupSheet(sub) {
     <p class="small muted">Мастеру нужен ключ доступа к вашему Облаку. Проще всего — попросить ИИ-помощника консоли Облака (способ 1): он создаст ключ сам, вы только подтверждаете его шаги.</p>
     <details class="help-text" open id="cloud-ai-way"><summary><b>Способ 1 — ИИ-помощник консоли Облака создаёт ключ</b> (рекомендуем)</summary>
       ${ycAiStepsHtml('key')}</details>
-    <details class="help-text"><summary><b>Способ 2 — ключ сервисного аккаунта вручную</b> (то же самое, но кнопками консоли)</summary>
+    <details class="help-text" id="cloud-other-ways"><summary>Другие способы получить ключ: вручную в консоли, yc CLI, прежняя строка y0_</summary>
+    <details class="help-text sub"><summary><b>Способ 2 — ключ сервисного аккаунта вручную</b> (то же самое, но кнопками консоли)</summary>
       <ol><li>Откройте <b>console.yandex.cloud</b>, войдите аккаунтом, где создано облако.</li>
       <li>В каталоге слева сервис «Identity and Access Management» → «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b> → «Создать».</li>
       <li>Вверху выберите само облако (не каталог) → вкладка «Права доступа» → «Назначить роли» → найдите <b>crm-admin</b> → роль <b>admin</b> → «Сохранить». Без этой роли мастер не сможет создать каталог и функции.</li>
       <li>Снова «Сервисные аккаунты» → <b>crm-admin</b> → «Создать новый ключ» → <b>«Создать авторизованный ключ»</b> (не API-ключ и не статический) → «Скачать файл с ключами».</li>
       <li>Откройте скачанный файл в «Блокноте», выделите всё (Ctrl+A), скопируйте (Ctrl+C) и вставьте в поле ниже. После развёртывания ключ можно удалить в консоли.</li></ol></details>
-    <details class="help-text"><summary><b>Способ 3 — IAM-токен из yc CLI</b> (если умеете работать с командной строкой)</summary>
+    <details class="help-text sub"><summary><b>Способ 3 — IAM-токен из yc CLI</b> (если умеете работать с командной строкой)</summary>
       <ol><li>Установите Yandex Cloud CLI (yandex.cloud/ru/docs/cli/quickstart), выполните <b>yc init</b> — вход через браузер.</li>
       <li>Выполните <b>yc iam create-token</b>, скопируйте строку «t1.…» и вставьте в поле ниже. Она действует 12 часов.</li></ol></details>
-    <details class="help-text"><summary><b>Способ 4 — прежняя строка «y0_…»</b> (только если получена до 1 июня 2026 года)</summary>
+    <details class="help-text sub"><summary><b>Способ 4 — прежняя строка «y0_…»</b> (только если получена до 1 июня 2026 года)</summary>
       <p>С 1 июня 2026 года Яндекс Облако не принимает новые строки «y0_…»; полученные раньше действуют до конца своего года. Если у вас сохранилась такая строка, вставьте её.</p></details>
+    </details>
     <p class="small muted">Вставленное нужно только на время работы мастера. <b>Никому не пересылайте ключ и токены, включая автора.</b></p>
     <div class="form-grid"><label class="field wide"><span>Ответ ИИ-помощника целиком, содержимое файла ключа, IAM-токен или строка y0_</span><textarea id="cloud-oauth" rows="4" autocomplete="off" spellcheck="false" placeholder="{ &quot;id&quot;: …, &quot;service_account_id&quot;: …, &quot;private_key&quot;: … }  или  t1.…  или  y0_…"></textarea></label></div>
     <div class="form-grid" id="cloud-key-ids" hidden>${fInput('cloud-key-id', 'Идентификатор ключа (id)', '', 'autocomplete="off" spellcheck="false" placeholder="aje…"')}${fInput('cloud-sa-id', 'Идентификатор сервисного аккаунта', '', 'autocomplete="off" spellcheck="false" placeholder="aje…"')}</div>
@@ -12598,6 +12610,10 @@ function openYcSetupSheet(sub) {
     <p class="small muted" id="cloud-cal-note">Лента календаря отдаётся по адресу самого сервера (с версии 187) — отдельный шлюз не нужен.</p>
     <label class="check"><input type="checkbox" id="cloud-col" checked><span>Коллектор судов</span></label>
     <label class="check"><input type="checkbox" id="cloud-timer" checked><span>Сбор с сайтов судов по расписанию (07:30 и 15:30 по Москве)</span></label>
+    <label class="check"><input type="checkbox" id="cloud-remind" checked><span>Напоминания в Telegram по расписанию (08:05 по Москве) — таймер сервера</span></label>
+    <label class="check"><input type="checkbox" id="cloud-delkey" checked><span>После развёртывания удалить ключ доступа к Облаку, вставленный в шаге 1</span></label>
+    <div class="form-grid">${fInput('cloud-pass', 'Пароль шифрования базы', '', 'type="password" autocomplete="new-password"')}${fInput('cloud-pass2', 'Повторите пароль', '', 'type="password" autocomplete="new-password"')}</div>
+    <p class="small muted" id="cloud-pass-note">Пароль — не короче 12 знаков. Впишите его — и мастер сам включит обмен: отправит базу этого устройства на сервер зашифрованной и включит автообмен. Пароль знаете только вы, он нигде не хранится, кроме ваших устройств, и не восстанавливается — запишите его на бумаге. Если сервер уже работал — впишите тот же пароль, которым шифруется база. Оставите пустым — обмен включите потом в «Синхронизации».</p>
     <div class="info-box warning" id="form-error" role="alert" hidden></div>
     <div class="form-actions"><button type="button" class="button primary" id="cloud-go" disabled onclick="ycRunWizard()">${icon('send')}Развернуть</button></div>
     <div id="cloud-log" aria-live="polite">${ycStepsHtml()}</div>
@@ -12612,6 +12628,7 @@ const YC_PKG = { runtime: 'nodejs22', entry: 'index.handler',
 // v190 (решение пользователя 21:27: «реализуй и пункт А, и пункт Б — чтобы было понятно, какой пойдёт; если Б работать не будет, уберём»):
 // путь Б — один блок для браузера и приложения для компьютера. В браузере он развёрнут и имя бакета — своё поле; в приложении — свёрнут
 // под мастером (путь А), имя бакета — общее с шагом 3 мастера (поле cloud-bucket одно на лист).
+// сборка 207 (O-74, этап 3): путь Б свёрнут на обоих листах (в браузере — под путём А); порядок шагов — в инструкции
 function ycPathBHtml(browser) {
   const body = `<div class="info-box warning" id="cloud-ai-trial"><b>Путь Б — пробный.</b> Помощнику нужно взять файлы программы по ссылкам с сайта и создать из них функции. Если он ответит, что не может, или остановится с ошибкой — путь Б не подходит: используйте путь А (мастер в приложении для компьютера или Android) и сообщите автору, на каком шаге помощник остановился. Ничего лишнего помощник не создаст, если вы подтверждаете только шаги из запроса.</div>
       ${browser ? `<div class="form-grid">${wide(fInput('cloud-bucket', 'Имя бакета для запроса (латиница, цифры, дефис)', 'crm-' + ycRand(8), 'autocomplete="off" spellcheck="false"'))}</div>` : '<p class="small muted">Имя бакета для запроса — из поля «Имя бакета» в шаге 3 ниже.</p>'}
@@ -12623,8 +12640,7 @@ function ycPathBHtml(browser) {
       <p class="small muted">Пароль шифрования базы — не код сервера: его знаете только вы. Если сервер новый — придумайте пароль (не короче 12 знаков) и запишите на бумаге: он нигде не хранится и не восстанавливается.</p>
       <div class="form-actions"><button type="button" class="button primary" id="cloud-ai-go" onclick="ycAiApply()">${icon('shield-check')}Подключить</button></div>
       <div id="cloud-ai-res" aria-live="polite"></div>`;
-  return browser ? `<div class="section-label" id="cloud-path-b">Путь Б. ИИ-помощник создаёт весь сервер · пробно · без компьютера</div>${body}`
-    : `<details class="help-text" id="cloud-path-b"><summary><b>Путь Б — ИИ-помощник создаёт весь сервер, без мастера</b> · пробно</summary>${body}</details>`;
+  return `<details class="help-text" id="cloud-path-b" style="margin-top:12px"><summary><b>Путь Б — ИИ-помощник создаёт весь сервер${browser ? ', без приложения' : ', без мастера'}</b> · пробно; по шагам — в инструкции</summary>${body}</details>`;
 }
 // v190 (решение пользователя 22.10.2026): шаги для ИИ-помощника консоли — подробно, со ссылкой на консоль и предупреждением о подтверждениях.
 // Справка Облака (console/operations/ai-assistant): кнопка помощника появляется после выбора каталога; перед каждым изменением помощник
@@ -12664,7 +12680,7 @@ function ycAiPrompt(kind) {
     '4. Создай для сервисного аккаунта crm-server статический ключ доступа (не API-ключ и не авторизованный): идентификатор ключа понадобится как S3_KEY_ID, секретная часть — как S3_SECRET. Секретную часть мне в чат не показывай — сразу впиши её в переменную функции на шаге 5.',
     '5. Функция ' + P.bridge.name + ': среда ' + P.runtime + ', точка входа ' + P.entry + ', таймаут ' + P.bridge.timeout + ' секунд, память 256 МБ, сервисный аккаунт crm-server, публичный вызов (serverless.functions.invoker для allUsers). Код — ДВА файла в корне архива (без вложенной папки): ' + files(P.bridge) + '. Переменные окружения: BUCKET = имя бакета из шага 2; SECRET = случайная строка из 32 латинских букв и цифр (покажи её мне); S3_KEY_ID и S3_SECRET — из шага 4; FOLDER_ID = идентификатор каталога crm; UPDATE_URL = ' + D + '.',
     '6. Функция ' + P.collector.name + ': ' + P.runtime + ', ' + P.entry + ', таймаут ' + P.collector.timeout + ' секунд, 256 МБ, тот же сервисный аккаунт, публичный вызов. Код — ДВА файла в корне архива: ' + files(P.collector) + '. Переменные: BRIDGE_URL = ссылка для вызова функции crm-bridge; BRIDGE_SECRET = тот же SECRET; SECRET = ещё одна случайная строка из 32 знаков (покажи её); BUCKET = тот же бакет; PARALLEL = 3; UPDATE_URL = ' + D + '. Переменную NODE_TLS_REJECT_UNAUTHORIZED НЕ задавать (если она есть у прежней версии функции — убрать).',
-    '7. Создай таймер-триггер collector-timer для функции collector-sud с cron-выражением «30 4,12 ? * * *» (07:30 и 15:30 по Москве), сервисный аккаунт crm-server.',
+    '7. Создай таймер-триггер collector-timer для функции collector-sud с cron-выражением «30 4,12 ? * * *» (07:30 и 15:30 по Москве), сервисный аккаунт crm-server. Создай таймер-триггер crm-remind-timer для функции crm-bridge с cron-выражением «5 5 ? * * *» (08:05 по Москве), тот же сервисный аккаунт.',
     '8. Проверь запуск: открой ссылку для вызова crm-bridge — должен прийти ответ JSON с полем "ver" (номер версии сервера), а не «Unable to import index.handler module» и не «Cannot find module». Если ошибка — проверь, что оба файла лежат в корне версии и точка входа ' + P.entry + '.',
     // v190: строки итога с метками — их разбирает ycAiAnswerParse (поле «Ответ помощника» в программе)
     '9. В конце покажи итог ровно четырьмя строками, без кавычек и пояснений внутри строк:\nСЕРВЕР: <ссылка для вызова crm-bridge>\nКОД СЕРВЕРА: <SECRET функции crm-bridge>\nКОЛЛЕКТОР: <ссылка для вызова collector-sud>\nКОД КОЛЛЕКТОРА: <SECRET функции collector-sud>\nПосле них — ответ из шага 8. Если что-то не получилось — скажи, какой шаг и почему, и не пиши итоговые строки.'].join('\n');
@@ -12733,27 +12749,39 @@ async function ycRunWizard() {
   const cloudId = (document.getElementById('cloud-cloud') || {}).value, folderId = (document.getElementById('cloud-folder') || {}).value || '';
   if (!oauth || !cloudId) { fErr('Сначала шаг 1: «Подключиться к Облаку»'); return; }
   if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) { fErr('Имя бакета: от 3 до 63 знаков — латинские буквы в нижнем регистре, цифры и дефис; начинается и кончается буквой или цифрой'); return; }
+  // сборка 207: пароль шифрования — до развёртывания (ошибку набора ловит повтор); пустой — обмен включается потом в «Синхронизации»
+  const pass = fv('cloud-pass'), pass2 = fv('cloud-pass2');
+  if (pass || pass2) { if (pass.length < 12) { fErr('Пароль шифрования базы — не короче 12 знаков'); return; } if (pass !== pass2) { fErr('Пароли не совпадают — впишите один и тот же пароль дважды'); return; } }
+  const delKey = !!(document.getElementById('cloud-delkey') || {}).checked, keyId = ycKeyIdOf(YC_SESS.tok || oauth);
   const btn = document.getElementById('cloud-go'); if (btn) { if (btn.disabled) return; btn.disabled = true; }
   YC_SESS.log = []; YC_SESS.fail = ''; YC_SESS.res = null;
   const logEl = () => document.getElementById('cloud-log');
   const log = t => { YC_SESS.log.push(t); const el = logEl(); if (el) el.innerHTML = ycStepsHtml(); };
   try {
-    const res = await ycDeploy({ oauth: YC_SESS.tok || oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: false, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, distBase: YC_DIST() }, log);
+    const res = await ycDeploy({ oauth: YC_SESS.tok || oauth, iam: YC_SESS.iam, cloudId, folderId, folderName: 'crm', bucket, withGateway: false, withCollector: !!(document.getElementById('cloud-col') || {}).checked, withTimer: !!(document.getElementById('cloud-timer') || {}).checked, withRemind: !!(document.getElementById('cloud-remind') || {}).checked, distBase: YC_DIST() }, log);
     log('Записываю настройки в программу и проверяю связь…');
     const ok = await ycApply(res);
+    // сборка 207: ключ доступа к Облаку мастеру больше не нужен — удаляется им самим (IAM-токен, полученный по ключу, действует до 12 часов)
+    let keyDel = null;
+    if (delKey && keyId) { log('Удаляю ключ доступа к Облаку…'); try { await ycOp(await ycApi('DELETE', 'https://iam.api.cloud.yandex.net/iam/v1/keys/' + encodeURIComponent(keyId), YC_SESS.iam), YC_SESS.iam, 'удаление ключа'); keyDel = true; } catch (e) { logErr('yc:delkey', e); keyDel = String((e && e.message) || e); } }
+    // сборка 207: пароль вписан — обмен включается сразу (то же, что «Синхронизация» → «Включить обмен»)
+    let ex = null;
+    if (ok && pass && typeof syncEnableCore === 'function') { log('Включаю обмен: сверка, отправка базы, автообмен…'); CLOUD.pass = pass; const pf = document.getElementById('cloud-pass'), pf2 = document.getElementById('cloud-pass2'); if (pf) pf.value = ''; if (pf2) pf2.value = '';
+      try { ex = await syncEnableCore(); } catch (e) { logErr('yc:enable', e); ex = { ok: false, error: String((e && e.message) || e) }; } }
     // токен Облака после развёртывания больше не нужен — из памяти убирается: и IAM-токен, и вставленный ключ (v193, аудит 24.10.2026: прежде
     // оставался YC_SESS.tok), и само поле ввода — ключ на экране после развёртывания не нужен
     YC_SESS.res = res; YC_SESS.iam = null; YC_SESS.tok = null; const ta = document.getElementById('cloud-oauth'); if (ta) ta.value = '';
     const el = logEl(); if (el) el.innerHTML = ycStepsHtml();
     const out = document.getElementById('cloud-result');
-    if (out) out.innerHTML = `<div class="info-box${ok ? '' : ' warning'}" id="cloud-done">${ok ? 'Сервер работает.' : 'Сервер создан, но пока не отвечает — через минуту откройте «Синхронизация» и нажмите «Сохранить и проверить связь».'}
+    if (out) out.innerHTML = `<div class="info-box${ok ? '' : ' warning'}" id="cloud-done">${ok ? 'Сервер работает.' : 'Сервер создан, но пока не отвечает — через минуту откройте «Синхронизация» и нажмите «Сохранить и проверить связь».'}${ex ? (ex.ok ? ' <b id="cloud-ex-on">Обмен включён</b>: база этого устройства на сервере, дальше программа обменивается сама.' : ' <span id="cloud-ex-off">Обмен не включён: ' + esc(ex.error || '') + ' — «Синхронизация» → «Включить обмен».</span>') : ''}${res.remindTimer ? '<br>Таймер напоминаний в Telegram создан (08:05 по Москве).' : ''}
       <div class="small" style="margin-top:6px;word-break:break-all">Адрес сервера: ${esc(res.bridgeUrl)}${res.calUrl ? '<br>Лента календаря: ' + esc(res.calUrl) : ''}${res.collectorUrl ? '<br>Коллектор: ' + esc(res.collectorUrl) : ''}</div>${res.calUrl ? '<div class="small" style="margin-top:6px">Адрес ленты календаря — как ключ: кто его знает, видит ваши события. Не пересылайте его и не показывайте на снимках экрана. Публикация ленты включается в «Настройки → Лента календаря».</div>' : ''}</div>
       <div class="section-label">Что дальше</div><ol class="steps-list">
-        <li>«Синхронизация» → шаг 1: адрес и код уже вписаны — придумайте пароль шифрования (не короче 12 знаков), впишите его и нажмите «Сохранить и проверить связь».</li>
-        <li>Шаг 4 — «Отправить изменения на сервер»: база этого устройства уйдёт на сервер зашифрованной.</li>
+        ${ex && ex.ok ? '' : `<li>«Синхронизация» → шаг 1: адрес и код уже вписаны — ${pass ? 'пароль шифрования тоже' : 'придумайте пароль шифрования (не короче 12 знаков), впишите его'} и нажмите «Сохранить и проверить связь».</li>
+        <li>Вверху «Синхронизации» — «Включить обмен»: база этого устройства уйдёт на сервер зашифрованной, дальше обмен пойдёт сам.</li>`}
         <li>Телефон и планшет: после шагов 1–2 нажмите «Подключить телефон» — появится QR-код. На телефоне: «Синхронизация» → «Подключиться по QR-коду» → навести камеру → ввести пароль шифрования. Адрес и код вводить не нужно.</li>
         <li>Прежняя программа хранит свои настройки отдельно: если пользуетесь ею, впишите там те же адрес, код и пароль («Синхронизация» → «Личный сервер»).</li></ol>
-      <div class="info-box warning" id="cloud-cleanup"><b>Удалите ключ доступа к Облаку</b> — мастеру он больше не нужен, а с ним можно управлять всем облаком: console.yandex.cloud → «Сервисные аккаунты» → crm-admin → ключи → удалить (можно удалить и весь аккаунт crm-admin; сервер работает от своего аккаунта crm-server). Если ключ делал ИИ-помощник — удалите и его чат: значок истории вверху окна помощника → значок удаления у строки чата. Файл ключа, если скачивали, удалите с компьютера.</div>
+      ${keyDel === true ? `<div class="info-box" id="cloud-cleanup"><b>Ключ доступа к Облаку удалён мастером.</b> Сервисный аккаунт crm-admin остался без ключей — его можно удалить совсем: console.yandex.cloud → «Сервисные аккаунты» → crm-admin → «Удалить» (сервер работает от своего аккаунта crm-server). Если ключ делал ИИ-помощник — удалите его чат: в нём остался текст ключа (значок истории вверху окна помощника → значок удаления у строки чата). Файл ключа, если скачивали, удалите с компьютера.</div>`
+      : `<div class="info-box warning" id="cloud-cleanup"><b>Удалите ключ доступа к Облаку</b>${typeof keyDel === 'string' ? ' (мастер не смог: ' + esc(keyDel) + ')' : ''} — мастеру он больше не нужен, а с ним можно управлять всем облаком: console.yandex.cloud → «Сервисные аккаунты» → crm-admin → ключи → удалить (можно удалить и весь аккаунт crm-admin; сервер работает от своего аккаунта crm-server). Если ключ делал ИИ-помощник — удалите и его чат: значок истории вверху окна помощника → значок удаления у строки чата. Файл ключа, если скачивали, удалите с компьютера.</div>`}
       <div class="form-actions"><button type="button" class="button primary" id="cloud-to-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация</button><button type="button" class="button" id="cloud-pair-out" onclick="openPairOutSheet(true)">${icon('phone', 'icon-sm')}Подключить телефон</button><button type="button" class="button" id="cloud-copy-secret" onclick="ycCopySecret()">${icon('files', 'icon-sm')}Скопировать секретный код</button></div>`;
     toast(ok ? 'Сервер развёрнут и подключён' : 'Сервер развёрнут');
   } catch (e) {
@@ -14202,30 +14230,33 @@ function syncOneRender(done, cur, fail) {
   el.innerHTML = `<ol class="push-stages" aria-label="Включение обмена">${SY_ONE_STEPS.map(([k, t]) => { const st = done.includes(k) ? 'done' : k === cur ? (fail ? 'fail' : 'active') : 'wait';
     return `<li class="ps-${st}" data-stage="${k}">${icon(st === 'done' ? 'check' : st === 'fail' ? 'circle-alert' : st === 'active' ? 'refresh-cw' : 'clock-3', 'icon-sm')}<span><b>${esc(t)}</b>${st === 'fail' ? `<br><span class="small">${esc(fail)}</span>` : ''}</span></li>`; }).join('')}</ol>`;
 }
+// сборка 207 (O-74, этап 3): ядро включения обмена — общее для кнопки «Включить» и мастера сервера (sync/ycdeploy.js). on(k) — начало этапа.
+// Ответ: { ok } или { ok:false, step, error } или { ok:false, step:'size', decision:true, res } — нужно решение человека (лист отправки)
+async function syncEnableCore(on) {
+  on = on || (() => {});
+  on('check'); const c = await nextServerCheck(); if (!c.ok) return { ok: false, step: 'check', error: 'Связь не установлена: ' + c.error };
+  on('size'); const res = await nextMergePreview(); if (!res.ok) return { ok: false, step: 'size', error: 'Сверка не удалась: ' + res.error };
+  let size = res.size || null; if (!size) { try { size = await dbSizeNow(); } catch (e) { logErr('sync:one-size', e); } }
+  if (size && size.effective == null) dbSizeZip(size, null, false);
+  // решение человека: база больше предела; прежняя программа не справится с размером — обычный лист отправки с объяснением
+  if (size && (!size.fits || size.needOld > oldVerOk() || (size.snap && size.fitsFn === false && localStorage.getItem('crm_next_old_off') !== '1'))) { res.size = size; return { ok: false, step: 'size', decision: true, res, error: 'нужно ваше решение — откройте лист отправки' }; }
+  on('push'); const r = await nextServerPush(); if (!r.ok) return { ok: false, step: 'push', error: 'Не отправлено: ' + r.error + (r.unconfirmed ? ' (подтверждение от сервера не получено — повторите)' : '') };
+  on('auto'); if (!nextAutoSet(true)) return { ok: false, step: 'auto', error: 'автообмен не включился' };
+  return { ok: true };
+}
 async function syncEnableGo() {
   const b = document.getElementById('sy-enable-go'); if (b) { if (b.disabled) return; b.disabled = true; }
-  fErr(''); const done = [];
-  const stop = (k, text) => { syncOneRender(done, k, text); fErr(text + '. Исправьте причину и нажмите «Включить» снова — повтор ничего не задвоит.'); const bb = document.getElementById('sy-enable-go'); if (bb) bb.disabled = false; return { ok: false, step: k, error: text }; };
+  fErr(''); const done = []; let cur = '';
   try {
-    syncOneRender(done, 'check');
-    const c = await nextServerCheck(); if (!c.ok) return stop('check', 'Связь не установлена: ' + c.error);
-    done.push('check'); syncOneRender(done, 'size');
-    const res = await nextMergePreview(); if (!res.ok) return stop('size', 'Сверка не удалась: ' + res.error);
-    let size = res.size || null; if (!size) { try { size = await dbSizeNow(); } catch (e) { logErr('sync:one-size', e); } }
-    if (size && size.effective == null) dbSizeZip(size, null, false);
-    // решение человека: база больше предела; прежняя программа не справится с размером — обычный лист отправки с объяснением
-    if (size && (!size.fits || size.needOld > oldVerOk() || (size.snap && size.fitsFn === false && localStorage.getItem('crm_next_old_off') !== '1'))) {
-      syncOneRender(done, 'size', 'нужно ваше решение — открываю лист отправки'); toast('Нужно ваше решение — посмотрите лист отправки', true);
-      res.size = size; await openPushConfirm(res); return { ok: false, step: 'size', error: 'decision' };
-    }
-    done.push('size'); syncOneRender(done, 'push');
-    const r = await nextServerPush(); if (!r.ok) return stop('push', 'Не отправлено: ' + r.error + (r.unconfirmed ? ' (подтверждение от сервера не получено — повторите)' : ''));
-    done.push('push'); syncOneRender(done, 'auto');
-    if (!nextAutoSet(true)) return stop('auto', 'автообмен не включился');
-    done.push('auto'); syncOneRender(done, '');
-    sheetBack(true); openSyncSheet('replace', { text: 'Обмен включён: база объединена и отправлена, дальше программа обменивается сама.' });
-    return { ok: true };
-  } catch (e) { logErr('sync:one', e); return stop(done.length < SY_ONE_STEPS.length ? SY_ONE_STEPS[done.length][0] : 'auto', 'Сбой: ' + ((e && e.message) || e)); }
+    const r = await syncEnableCore(k => { if (cur) done.push(cur); cur = k; syncOneRender(done, k); });
+    if (r.ok) { sheetBack(true); openSyncSheet('replace', { text: 'Обмен включён: база объединена и отправлена, дальше программа обменивается сама.' }); return r; }
+    syncOneRender(done, r.step, r.error);
+    if (r.decision) { toast('Нужно ваше решение — посмотрите лист отправки', true); await openPushConfirm(r.res); return r; }
+    fErr(r.error + '. Исправьте причину и нажмите «Включить» снова — повтор ничего не задвоит.'); const bb = document.getElementById('sy-enable-go'); if (bb) bb.disabled = false; return r;
+  } catch (e) {
+    logErr('sync:one', e); const t = 'Сбой: ' + ((e && e.message) || e); syncOneRender(done, cur || 'check', t); fErr(t + '. Нажмите «Включить» снова.');
+    const bb = document.getElementById('sy-enable-go'); if (bb) bb.disabled = false; return { ok: false, step: cur, error: t };
+  }
 }
 async function syncSaveAndCheck() {
   const url = fv('sy-url'), secret = fv('sy-secret') || SRV.secret, pass = fv('sy-pass') || SRVDB.pass;
@@ -23747,7 +23778,7 @@ HFIG.wizard = { h: 236, title: 'Лист мастера «Свой сервер 
   s += hf.box(46, 122, 454, 30, { dash: true }) + hf.t(54, 136, 'Ответ ИИ-помощника целиком, содержимое файла ключа…', { fs: 10, fill: 'var(--text-muted)' }) + hf.t(54, 148, '{ "id": …, "service_account_id": …, "private_key": … }', { fs: 9, fill: 'var(--text-muted)', mono: true });
   s += hf.btn(46, 158, 140, 20, 'Подключиться к Облаку', true);
   s += hf.num(30, 192, 2) + hf.t(46, 196, 'Шаг 2. Облако и каталог — новый каталог «crm»', { bold: true, fs: 12 });
-  s += hf.num(30, 216, 3) + hf.t(46, 220, 'Шаг 3. Что создать — имя бакета, коллектор, расписание', { bold: true, fs: 12 }) + hf.btn(410, 206, 90, 20, 'Развернуть', true);
+  s += hf.num(30, 216, 3) + hf.t(46, 220, 'Шаг 3. Бакет, таймеры, пароль шифрования', { bold: true, fs: 12 }) + hf.btn(410, 206, 90, 20, 'Развернуть', true);
   return s; })() };
 // 4. Консоль Яндекс Облака: где облако и каталог, где кнопка ИИ-помощника (место условное)
 HFIG.console = { h: 236, title: 'Консоль Яндекс Облака — схема', caption: 'Схема, не снимок экрана. ① Вверху — выбор облака и каталога (нужен любой каталог, например default). ② Кнопка ИИ-помощника подписана <b>«AI-ассистент»</b> (в некоторых версиях консоли — «Чат с AI»); где именно она стоит, справка Облака не называет — на схеме место условное, ищите по подписи. Слева — сервисы каталога, которые встречаются в инструкции («Сервисные аккаунты» — внутри сервиса Identity and Access Management).', svg: (() => {
@@ -24043,9 +24074,9 @@ ${typeof helpFig === 'function' ? helpFig('assistant') : ''}
 <p class="small muted">Запрос для пути Б («весь сервер») длиннее и включает имя бакета из поля мастера — его копируйте из самого листа, раздел «Путь Б» → «Скопировать запрос».</p></details>
 <ol start="6"><li><b>Ответ помощника — в мастер.</b> В конце помощник покажет ключ — текст в фигурных скобках { … } с полями id, service_account_id и private_key. Выделите <b>весь его последний ответ</b>, скопируйте и вставьте в поле мастера «Ответ ИИ-помощника целиком, содержимое файла ключа, IAM-токен или строка y0_» — программа сама найдёт ключ среди пояснений. Если скопирован только закрытый ключ без идентификаторов, мастер покажет два поля для id и service_account_id — возьмите их из ответа помощника. Нажмите <b>«Подключиться к Облаку»</b>: в шаге 2 появятся ваше облако и каталог. Закрытый ключ — секрет: никому его не пересылайте, включая автора; после развёртывания он удаляется (п. 9).</li></ol>
 ${typeof helpFig === 'function' ? helpFig('key') : ''}
-<ol start="7"><li><b>Способ 2 (вместо помощника) — тот же ключ кнопками консоли:</b> в каталоге слева сервис «Identity and Access Management» → «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; вверху выберите само облако (не каталог) → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» (не API-ключ и не статический) → скачайте файл, откройте его в «Блокноте», скопируйте всё (Ctrl+A, Ctrl+C) и вставьте в поле мастера. Способы 3 и 4 (IAM-токен из yc CLI, прежняя строка y0_) — для тех, кто ими уже пользуется.</li>
-<li><b>Шаги 2 и 3 → «Развернуть».</b> Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и обе галочки («Коллектор судов», «Сбор с сайтов судов по расписанию») → <b>«Развернуть»</b>. Мастер создаёт сервисный аккаунт crm-server, бакет, функции crm-bridge и collector-sud и таймер; ход виден по шагам, обычно 3–7 минут. Если он остановился с ошибкой — исправьте причину (чаще всего платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова: созданное найдётся, ничего не задвоится.</li>
-<li><b>Итог.</b> Мастер пишет «Сервер работает», показывает адрес сервера и коллектора и <b>сам вписывает адрес и секретный код в «Синхронизацию»</b> этого приложения. Дальше: кнопка «Синхронизация» → шаг 1 — впишите пароль шифрования → «Сохранить и проверить связь» (должно ответить «Связь есть: сервер версии …») → шаг 4 «Отправить изменения на сервер». Затем <b>удалите ключ доступа</b>: консоль → «Сервисные аккаунты» → crm-admin → ключи → удалить (можно и весь аккаунт crm-admin — сервер работает от своего аккаунта crm-server). Если ключ делал ИИ-помощник — удалите и его чат: значок истории в правом верхнем углу окна помощника → удалить строку этого чата. Файл ключа, если скачивали, удалите с компьютера.</li>
+<ol start="7"><li><b>Способ 2 (вместо помощника) — тот же ключ кнопками консоли:</b> в каталоге слева сервис «Identity and Access Management» → «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; вверху выберите само облако (не каталог) → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» (не API-ключ и не статический) → скачайте файл, откройте его в «Блокноте», скопируйте всё (Ctrl+A, Ctrl+C) и вставьте в поле мастера. Способы 2–4 в мастере свёрнуты под «Другие способы получить ключ»; способы 3 и 4 (IAM-токен из yc CLI, прежняя строка y0_) — для тех, кто ими уже пользуется.</li>
+<li><b>Шаги 2 и 3 → «Развернуть».</b> Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки («Коллектор судов», «Сбор с сайтов судов по расписанию», «Напоминания в Telegram по расписанию», «После развёртывания удалить ключ доступа к Облаку»); впишите дважды <b>пароль шифрования базы</b> (не короче 12 знаков, запишите на бумаге; сервер уже работал — тот же пароль) → <b>«Развернуть»</b>. Мастер создаёт сервисный аккаунт crm-server, бакет, функции crm-bridge и collector-sud, таймер сбора с сайтов судов и таймер напоминаний (08:05 по Москве); ход виден по шагам, обычно 3–7 минут. Если он остановился с ошибкой — исправьте причину (чаще всего платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова: созданное найдётся, ничего не задвоится.</li>
+<li><b>Итог.</b> Мастер пишет «Сервер работает», показывает адрес сервера и коллектора, <b>сам вписывает адрес и секретный код в «Синхронизацию»</b> и, если пароль вписан, <b>сам включает обмен</b> — «Обмен включён»: база этого устройства уже на сервере, автообмен работает. Пароль не вписывали — «Синхронизация» → шаг 1 (впишите пароль, «Сохранить и проверить связь») → «Включить обмен». <b>Ключ доступа к Облаку мастер удаляет сам</b> (если вставляли файл ключа и галочка стояла) и пишет об этом; сервисный аккаунт crm-admin остаётся без ключей — его можно удалить: консоль → «Сервисные аккаунты» → crm-admin → «Удалить». Если удалить ключ не вышло или вставлялся IAM-токен — удалите ключ вручную там же. Если ключ делал ИИ-помощник — удалите и его чат: значок истории в правом верхнем углу окна помощника → удалить строку этого чата. Файл ключа, если скачивали, удалите с компьютера.</li>
 <li><b>Телефон и планшет</b> подключаются по QR-коду — кнопка «Подключить телефон» в итоге мастера или «Синхронизация» → «Подключить телефон или планшет — QR-код»; см. ниже.</li></ol>
 <h3>Путь Б. ИИ-помощник создаёт весь сервер — без компьютера (пробно)</h3>
 <p>Подходит, если компьютера под рукой нет: всё делается в браузере телефона или планшета. Способ новый и проверяется: помощнику нужно взять файлы программы по ссылкам с сайта — если он ответит, что не может, или остановится с ошибкой, используйте путь А и сообщите автору, на каком шаге он остановился.</p>
