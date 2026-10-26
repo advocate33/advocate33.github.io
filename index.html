@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="25.10.2026 21:46 · 3dfdf60">
-<meta name="build-no" content="203">
+<meta name="build" content="26.10.2026 10:25 · c3bf3ba">
+<meta name="build-no" content="204">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3418,7 +3418,8 @@ const BRAND_MASK = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEoAAABQCAQAAA
 // изготовления в полном объёме (ч. 2 ст. 176 АПК); начало «времени рассмотрения жалобы» по п. 9 Пленума № 17 — с подачи или с
 // поступления в кассационный суд. Оба места названы в паспорте срока.
 
-const NEXT_RULES_VER = '2026-10-14';
+// сборка 204 (26.10.2026): лист и расходы при апелляции, возврате жалобы, кассации, направлении на новое рассмотрение, определении ВС
+const NEXT_RULES_VER = '2026-10-26';
 
 // ── встроенный календарь: будние нерабочие дни и рабочие выходные; список пользователя (Справочники → Нерабочие дни) важнее ──
 const NEXT_CAL_OFF = new Set(['2026-01-01', '2026-01-02', '2026-01-05', '2026-01-06', '2026-01-07', '2026-01-08', '2026-01-09', '2026-02-23', '2026-03-09',
@@ -3439,6 +3440,10 @@ function isWorkdayISO(iso) {
 }
 
 // ── входные данные дела для расчёта ──
+// сборка 204: значение списка «Результат» (апелляция, кассация, ВС; ui/caseform.js) и разбора сайта суда (sync/monitor.js, crmResultMap)
+const NX_REMAND = 'Отменено, направлено на новое рассмотрение';
+// результат «жалоба не рассмотрена по существу» — решение остаётся в силе с первоначальной даты
+const NX_BACK = ['Жалоба возвращена', 'Оставлена без рассмотрения'];
 const nxIso = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : '';
 function nxDays(a, b) { const x = parseLocalDate(a), y = parseLocalDate(b); if (!x || !y || isNaN(x) || isNaN(y)) return 0; return Math.max(0, Math.round((y - x) / 86400000)); }
 function nextActInputs(c) {
@@ -3449,8 +3454,11 @@ function nextActInputs(c) {
   const dec = code === 'КоАП' ? { res: '', full: '', base: nxIso(c.koapServedDate || c.koapDate), served: !!c.koapServedDate }
     : { res: nxIso(c.i1DecisionDate || (code === 'УПК' ? c.crimVerdictDate : '')), full: nxIso(c.i1DecisionFullDate) };
   if (!dec.base) dec.base = dec.full || dec.res;
-  const ap = { adopt: nxIso(c.apDecisionDate), full: nxIso(c.apDecisionFullDate) }; ap.base = ap.adopt || ap.full;
-  const cs = { adopt: nxIso(c.csDecisionDate), full: nxIso(c.csDecisionFullDate), filed: nxIso(c.csFilingDate) }; cs.base = cs.adopt || cs.full;
+  // сборка 204: remand — вышестоящий суд отменил акт и направил дело на новое рассмотрение (результат в форме дела или с сайта суда);
+  // vs — дата определения (постановления) Верховного Суда, в том числе об отказе в передаче жалобы
+  const ap = { adopt: nxIso(c.apDecisionDate), full: nxIso(c.apDecisionFullDate), remand: c.apResult === NX_REMAND }; ap.base = ap.adopt || ap.full;
+  const cs = { adopt: nxIso(c.csDecisionDate), full: nxIso(c.csDecisionFullDate), filed: nxIso(c.csFilingDate), remand: c.csResult === NX_REMAND,
+    vs: nxIso(c.cs2DecisionDate), vsRemand: c.cs2Result === NX_REMAND }; cs.base = cs.adopt || cs.full;
   return { code, simple, mag, dec, ap, cs };
 }
 function nxHasBase(inp, act) { return !!(act === 'decision' ? inp.dec.base : act === 'appeal' ? inp.ap.base : inp.cs.base); }
@@ -3477,7 +3485,19 @@ const NX_WRIT_T = 'Заявление о выдаче исполнительно
 const NX_229 = 'ст. 21 Закона № 229-ФЗ — 3 года на предъявление листа';
 
 // ── сроки акта (decision | appeal | cass) по данным дела ──
+// сборка 204 (O-73): 1) акт, которым дело направлено на новое рассмотрение, рассмотрение не заканчивает — лист и расходы от него не
+// ставятся (появятся от нового итогового акта); 2) после кассации определение Верховного Суда (в том числе судьи ВС об отказе в передаче
+// жалобы) — последний судебный акт: срок расходов считается от него (ст. 103.1 ГПК, ч. 2 ст. 112 АПК, ст. 114.1 КАС; практика ВС —
+// определение по делу № 50-КГ21-7-К8, п. 30 постановления Пленума ВАС от 17.02.2011 № 12; сверить по КонсультантПлюс)
+const NX_COSTS_NORM = { 'ГПК': 'ст. 103.1 ГПК РФ', 'АПК': 'ч. 2 ст. 112 АПК РФ', 'КАС': 'ст. 114.1 КАС РФ' };
 function nextActRules(c, act) {
+  const inp = nextActInputs(c), all = nxActRulesAll(c, act);
+  if ((act === 'appeal' && inp.ap.remand) || (act === 'cass' && (inp.cs.remand || (inp.cs.vs && inp.cs.vsRemand)))) return all.filter(n => !/:(writ|costs)$/.test(n.autoKey));
+  if (act === 'cass' && inp.cs.vs && NX_COSTS_NORM[inp.code]) return all.map(n => !/:costs$/.test(n.autoKey) ? n : nxItem(act, 'costs', n.title, inp.cs.vs, 'Определение Верховного Суда от ' + fmtDate(inp.cs.vs), [{ m: 3 }],
+    NX_COSTS_NORM[inp.code] + ' — 3 месяца со дня вступления в законную силу последнего судебного акта, которым закончилось рассмотрение дела; после кассации это определение Верховного Суда, в том числе судьи ВС об отказе в передаче жалобы (практика ВС; сверить по КонсультантПлюс)'));
+  return all;
+}
+function nxActRulesAll(c, act) {
   const inp = nextActInputs(c), { code, simple, mag, dec, ap, cs } = inp, out = [];
   const lbl = cap1(actLabel(c.kind, act));
   if (act === 'decision') {
@@ -3625,6 +3645,58 @@ function dlAutoId(c, key) {
   const base = 'СР-' + nxHash(c.id + '|' + key), taken = new Set((Array.isArray(c.deadlines) ? c.deadlines : []).filter(Boolean).map(d => d.id).concat(Object.keys(c._delDl && typeof c._delDl === 'object' ? c._delDl : {})));
   let id = base, n = 1; while (taken.has(id)) id = base + '-' + (++n); return id;
 }
+// сборка 204 (O-73, замечание пользователя 26.10.2026 11:57): «дело в апелляции» — не только поле «Жалоба подана»: номер или ссылка дела
+// в апелляционном суде, стадия «Апелляция» и выше (её поднимают заседание в апелляционном суде и данные сайта суда). Жалоба возвращена или
+// оставлена без рассмотрения — признак не действует, решение в силе с первоначальной даты
+const NX_UP_STAGES = ['Апелляция', 'Кассация', 'Надзор'];
+function nxInAppeal(c) {
+  if (!c || NX_BACK.includes(String(c.apResult || ''))) return null;
+  const f = nxIso(c.apFilingDate);
+  if (f) return { why: 'подана апелляционная жалоба ' + fmtDate(f), date: f };
+  if (c.courtNoApp) return { why: 'дело в суде апелляционной инстанции (№ ' + c.courtNoApp + ')' };
+  if (c.linkApp) return { why: 'дело в суде апелляционной инстанции (ссылка на дело в форме)' };
+  if (NX_UP_STAGES.includes(c.stage)) return { why: 'стадия дела «' + c.stage + '»' };
+  return null;
+}
+// конец пометки — точка, за которой пробел или конец строки (в датах точка стоит перед цифрой)
+const NX_NEXT_NOTE_RE = /^Подана (?:кассационная жалоба|жалоба в Верховный Суд) \S+ — .*?\.(?:\s+|$)/;
+const NX_REOPEN_RE = /^Возвращён в работу: .*?\.(?:\s+|$)/;
+const NX_CLOSED_RE = /^Закрыт: .*?\.(?:\s+|$)/;
+// Сроки «если не обжалуют» и срок расходов по ходу обжалования — при каждом сохранении, после расчёта сроков (nextActDeadlinesApply).
+// Подтверждённый срок тоже закрывается и заменяется (подтверждение — проверка даты, а не запрет пересмотра), об этом — отдельная строка.
+// Ответ: { closed, reopened, confirmed, noted } — строки для сообщения и обзора «Правила сроков обновлены»
+function nxAppealFlow(obj, today) {
+  const r = { closed: [], reopened: [], confirmed: [], noted: [] }, inp = nextActInputs(obj), dls = Array.isArray(obj.deadlines) ? obj.deadlines : [];
+  const DEC = ['act:decision:writ', 'act:decision:costs'], APK = ['act:appeal:writ', 'act:appeal:costs'];
+  const close = (dl, why, at, kind) => { dl.done = true; dl.doneAt = at || today; dl.closedWhy = kind;
+    dl.note = (kind === 'superseded' ? 'Закрыт: заменён сроком от акта следующей инстанции (' + why + '). ' : 'Закрыт: ' + why + ' — решение в силу не вступило, сроки появятся от апелляционного акта. ') + String(dl.note || '').replace(NX_REOPEN_RE, '');
+    (dl.confirmedAt ? r.confirmed : r.closed).push(dl.title + ' — ' + why); };
+  const ap = nxInAppeal(obj);
+  for (const dl of dls) {
+    if (!dl || !dl.autoKey) continue;
+    // акт следующей инстанции есть — лист и расходы предыдущей заменены
+    if (!dl.done && DEC.includes(dl.autoKey) && inp.ap.base) { close(dl, 'есть ' + actLabel(obj.kind, 'appeal') + ' от ' + fmtDate(inp.ap.base), inp.ap.base, 'superseded'); continue; }
+    if (!dl.done && APK.includes(dl.autoKey) && inp.cs.base) { close(dl, 'есть ' + actLabel(obj.kind, 'cass') + ' от ' + fmtDate(inp.cs.base), inp.cs.base, 'superseded'); continue; }
+    if (DEC.includes(dl.autoKey) && !inp.ap.base) {
+      if (!dl.done && ap) { close(dl, ap.why, ap.date, 'closed'); continue; }
+      // признаков апелляции больше нет (жалоба возвращена, оставлена без рассмотрения, данные убраны) — закрытый программой срок возвращается
+      if (dl.done && dl.closedWhy === 'closed' && !ap) {
+        const why = NX_BACK.includes(String(obj.apResult || '')) ? 'апелляционная жалоба — «' + obj.apResult + '», решение в силе с первоначальной даты' : 'признаков апелляции в деле больше нет';
+        dl.done = false; delete dl.doneAt; delete dl.closedWhy;
+        dl.note = ('Возвращён в работу: ' + why + (dl.date && dl.date < today ? ' — срок прошёл ' + fmtDate(dl.date) + ', проверьте' : '') + '. ' + String(dl.note || '').replace(NX_CLOSED_RE, '')).trim();
+        r.reopened.push(dl.title + ' — ' + why); continue;
+      }
+    }
+    // срок расходов при поданной жалобе в следующую инстанцию — пометка (не закрытие: жалобу могут вернуть)
+    const nf = !dl.done && dl.autoKey === 'act:appeal:costs' && !inp.cs.base && inp.cs.filed && !NX_BACK.includes(String(obj.csResult || '')) ? ['кассационная жалоба', inp.cs.filed, 'кассационного определения']
+      : !dl.done && dl.autoKey === 'act:cass:costs' && !inp.cs.vs && nxIso(obj.cs2FilingDate) && !NX_BACK.includes(String(obj.cs2Result || '')) ? ['жалоба в Верховный Суд', nxIso(obj.cs2FilingDate), 'определения Верховного Суда'] : null;
+    if (nf && dl.nextFiled !== nf[1]) {
+      dl.nextFiled = nf[1]; dl.note = ('Подана ' + nf[0] + ' ' + fmtDate(nf[1]) + ' — если её рассмотрят по существу, срок будет считаться от ' + nf[2] + ' (последнего судебного акта). ' + String(dl.note || '').replace(NX_NEXT_NOTE_RE, '')).trim();
+      r.noted.push(dl.title + ' — подана ' + nf[0] + ' ' + fmtDate(nf[1]));
+    } else if (!nf && dl.nextFiled) { delete dl.nextFiled; dl.note = String(dl.note || '').replace(NX_NEXT_NOTE_RE, ''); }
+  }
+  return r;
+}
 // nowISO — «сегодня» для правила «срок уже прошёл» (урок 8: часы передаются параметром; по умолчанию — часы программы)
 function nextActDeadlinesApply(obj, prev, nowISO) {
   const msgs = [], rebased = [], filedDone = [], late = [];
@@ -3639,7 +3711,6 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
     if (filed) obj.deadlines.forEach(dl => {
       if (!dl || dl.done || !dl.autoKey) return;
       if (dl.autoKey === filed.key && filed.ours) { dl.done = true; dl.doneAt = filed.date; dl.closedWhy = 'filed'; dl.note = ('Исполнен: ' + filed.label + ' подана ' + fmtDate(filed.date) + '. ' + (dl.note || '')).trim(); filedDone.push(dl.title); }
-      else if (act === 'decision' && supersede.appeal.includes(dl.autoKey) && !dl.confirmedAt) { dl.done = true; dl.doneAt = filed.date; dl.closedWhy = 'closed'; dl.note = ('Закрыт: подана ' + filed.label + ' ' + fmtDate(filed.date) + ' — решение в силу не вступило, сроки появятся от апелляционного акта. ' + (dl.note || '')).trim(); filedDone.push(dl.title); }
     });
     if (!nxHasBase(ni, act)) {
       // аудит 14.10.2026 (A1): дата акта была и убрана — зависимые автосроки не остаются подтверждёнными молча: подтверждение снимается,
@@ -3657,6 +3728,7 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
     // исполняются; сверка — при каждом сохранении и при пустом наборе правил (урок 152)
     const list = nextActRules(obj, act), keys = new Set(list.map(n => n.autoKey));
     const whyOf = dl => act === 'decision' && ni.dec.full && /:motivated$/.test(dl.autoKey) ? 'мотивированное решение изготовлено, заявление о его составлении не требуется'
+      : /:(writ|costs)$/.test(dl.autoKey) && act !== 'decision' && (ni.ap.remand || ni.cs.remand || ni.cs.vsRemand) ? 'дело направлено на новое рассмотрение — лист и расходы считаются от нового итогового акта'
       : pi && pi.code !== ni.code ? 'сменился вид дела, по его правилам этот срок не возникает' : 'по нынешним данным дела (вид, порядок производства, суд, даты акта) этот срок не возникает';
     obj.deadlines.forEach(dl => {
       if (!dl || !dl.autoKey || dl.autoKey.indexOf(pre) !== 0 || keys.has(dl.autoKey) || dl.done || dl.ruleGone) return;
@@ -3668,9 +3740,6 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
     });
     if (pi && nxSig(ni, act) === nxSig(pi, act)) continue;
     if (!list.length) continue;
-    (supersede[act] || []).forEach(k => obj.deadlines.forEach(dl => {
-      if (dl && dl.autoKey === k && !dl.done && !dl.confirmedAt) { dl.done = true; dl.note = ((dl.note || '') + ' · заменён сроком от акта следующей инстанции').trim().replace(/^· /, ''); }
-    }));
     const made = [];
     for (const n of list) {
       const ex = obj.deadlines.find(dl => dl && dl.autoKey === n.autoKey);
@@ -3691,11 +3760,11 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
       } else {
         // v157 (1, 2): наша жалоба уже подана — срок на её подачу создаётся исполненным; дата срока уже прошла (дата акта записана поздно) —
         // срок создаётся исполненным с пометкой, в сообщении — отдельной строкой
-        const fil = filed && n.autoKey === filed.key, past = n.date < today, closed = filed && act === 'decision' && supersede.appeal.includes(n.autoKey);
+        const fil = filed && n.autoKey === filed.key, past = n.date < today, inAp = act === 'decision' && supersede.appeal.includes(n.autoKey) && !ni.ap.base ? nxInAppeal(obj) : null, closed = !!inAp;
         // v162: closedWhy — чем закрыт срок, созданный исполненным (ui/deadlines.js, dlDoneWhy)
         let done = false, doneAt = '', closedWhy = '', note = n.kind === 'control' ? 'рассчитан автоматически — дата, с которой можно действовать' : 'рассчитан автоматически — проверьте и подтвердите';
         if (fil && filed.ours) { done = true; doneAt = filed.date; closedWhy = 'filed'; note ='Исполнен: ' + filed.label + ' подана ' + fmtDate(filed.date); }
-        else if (closed) { done = true; doneAt = filed.date; closedWhy = 'closed'; note ='Закрыт: подана ' + filed.label + ' ' + fmtDate(filed.date) + ' — решение в силу не вступило, сроки появятся от апелляционного акта'; }
+        else if (closed) { done = true; doneAt = inAp.date || today; closedWhy = 'closed'; note ='Закрыт: ' + inAp.why + ' — решение в силу не вступило, сроки появятся от апелляционного акта'; }
         else if (past) { done = true; doneAt = today; closedWhy = 'late'; note =(n.kind === 'control' ? 'Дата наступила ' : 'Срок истёк ') + fmtDate(n.date) + ' до записи даты акта (' + fmtDate(today) + ') — отмечен исполненным; если действие ещё нужно, снимите отметку в карточке срока' + (fil ? '. ' + cap1(filed.label) + ' подана ' + fmtDate(filed.date) + (filed.by ? ' (' + filed.by.toLowerCase() + ')' : '') : ''); late.push(n.title + ' (' + fmtDate(n.date) + ')'); }
         obj.deadlines.push({ id: dlAutoId(obj, n.autoKey), title: n.title, date: n.date, note, done, doneAt: doneAt || undefined, ...(closedWhy ? { closedWhy } : {}),
           kind: n.kind, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, src: 'Судебный акт', autoKey: n.autoKey, confirmedAt: '', confirmedDate: '', createdAt: Date.now(), rulesVer: NEXT_RULES_VER, calc: n.calc });
@@ -3708,6 +3777,8 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
     const base = act === 'decision' ? ni.dec.base : act === 'appeal' ? ni.ap.base : ni.cs.base;
     if (made.length) msgs.push(`${cap1(actLabel(obj.kind, act))} от ${fmtDate(base)}: ${made.join('; ')}`);
   }
+  // сборка 204 (O-73): ход обжалования — после расчёта (новые сроки тоже проходят через правило)
+  const flow = nxAppealFlow(obj, today);
   obj.deadlines.sort((a, b) => ((a && a.date) || '').localeCompare((b && b.date) || ''));
   // предупреждения — первыми: сообщение показывается с обрезкой (toast в rulesReviewApply — 200 знаков), и они важнее перечня дат (урок 152)
   const warn = [];
@@ -3716,7 +3787,11 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
   if (ruleLost.length) warn.push('Срок больше не следует из данных дела — снимите его с контроля или удалите: ' + ruleLost.join(', '));
   // v157: истёкшие до записи даты акта — отмечены исполненными; исполненные подачей жалобы — названы
   if (late.length) warn.push('Дата акта записана поздно — сроки уже прошли и отмечены исполненными (снять отметку можно в карточке срока): ' + late.join(', '));
+  if (flow.confirmed.length) warn.push('Подтверждённые сроки закрыты (дело обжалуется или есть акт следующей инстанции): ' + flow.confirmed.join('; '));
+  if (flow.reopened.length) warn.push('Сроки снова в работе: ' + flow.reopened.join('; '));
   if (filedDone.length) msgs.push('Жалоба подана — исполнены (закрыты): ' + [...new Set(filedDone)].join(', '));
+  if (flow.closed.length) msgs.push('Закрыты: ' + flow.closed.join('; '));
+  if (flow.noted.length) msgs.push('Срок расходов — пометка: ' + flow.noted.join('; '));
   return warn.concat(msgs);
 }
 
@@ -9176,6 +9251,8 @@ function crmResultMap(text, inst) {
   // v157: оставление жалобы без рассмотрения по существу — отдельное значение списка
   if (/без рассмотрени/.test(t)) return 'Оставлена без рассмотрения';
   if (/оставлен\S* без изменени|без удовлетворени|оставлен\S* в силе/.test(t)) return 'Оставлено без изменения';
+  // сборка 204 (O-73): отмена с направлением на новое рассмотрение — своё значение (сроки листа и расходов от такого акта не ставятся)
+  if (/отмен/.test(t) && /нов\S* (рассмотрени|судебн\S* разбирательств)/.test(t) && !/в части|частично/.test(t)) return 'Отменено, направлено на новое рассмотрение';
   if (/отмен/.test(t)) return /в части|частично/.test(t) ? 'Отменено частично' : 'Отменено полностью';
   if (/без изменени/.test(t)) return 'Оставлено без изменения';
   if (/изменен/.test(t)) return 'Изменено';
@@ -15081,7 +15158,8 @@ const KAS_CATEGORIES = ['Оспаривание решений, действий
   'Госпитализация в недобровольном порядке (гл. 30)', 'Защита избирательных прав (гл. 24)', 'Присуждение компенсации за нарушение сроков (гл. 26)', 'Другое'];
 const APPEAL_BY = ['Наша жалоба', 'Жалоба оппонента', 'Обе стороны'];
 // v157 (решение пользователя 15.10.2026): «Оставлена без рассмотрения» — отдельное значение (жалоба оставлена без рассмотрения по существу)
-const AP_RESULTS = ['Рассматривается', 'Оставлено без изменения', 'Отменено полностью', 'Отменено частично', 'Изменено', 'Жалоба возвращена', 'Оставлена без рассмотрения'];
+// сборка 204 (O-73): «направлено на новое рассмотрение» — отдельно: от такого акта лист и расходы не считаются (next/acts.js, NX_REMAND)
+const AP_RESULTS = ['Рассматривается', 'Оставлено без изменения', 'Отменено полностью', 'Отменено, направлено на новое рассмотрение', 'Отменено частично', 'Изменено', 'Жалоба возвращена', 'Оставлена без рассмотрения'];
 const CS_RESULTS = [...AP_RESULTS, 'Отказано в передаче'];
 const I1_RESULTS = ['Рассматривается', 'Удовлетворено', 'Удовлетворено частично', 'Отказано', 'Оставлено без рассмотрения', 'Прекращено', 'Возвращено'];
 const I1_MODES = ['Общий порядок', 'Упрощённое производство', 'Заочное решение'];
@@ -15222,7 +15300,7 @@ function dlManual(d) { if (d && d.sideDone) delete d.sideDone; if (d && d.closed
 // v162 (модель состояния срока, пожелания аудитов сборок 157–160; решение пользователя 16.10.2026): исполненный срок говорит, ЧЕМ он закрыт —
 // отметкой пользователя («выполнен») или программой: снят при смене стороны жалобы (sideDone), истёк до того, как дата пришла с сайта суда,
 // исполнен подачей нашей жалобы, закрыт поданной апелляцией, снят по возвращённой жалобе. Прежние записи v157 без отметки узнаются по заметке
-const DL_CLOSED = { side: 'снят: сторона жалобы изменена', late: 'истёк до записи с сайта', filed: 'исполнен подачей жалобы', closed: 'закрыт: подана апелляция', back: 'снят: жалоба возвращена', sideUser: 'снят после смены стороны жалобы', rebindUser: 'снят после переноса жалобы' };
+const DL_CLOSED = { side: 'снят: сторона жалобы изменена', late: 'истёк до записи с сайта', filed: 'исполнен подачей жалобы', closed: 'закрыт: дело обжалуется', superseded: 'заменён сроком следующей инстанции', back: 'снят: жалоба возвращена', sideUser: 'снят после смены стороны жалобы', rebindUser: 'снят после переноса жалобы' };
 function dlDoneWhy(dl) { if (!dl || !dl.done) return ''; if (dl.sideDone) return 'side'; if (dl.closedWhy && DL_CLOSED[dl.closedWhy]) return dl.closedWhy; return /до записи даты акта|до получения сведений о жалобе/.test(dl.note || '') ? 'late' : ''; }
 function dlDoneLabel(dl) { const w = dlDoneWhy(dl); return w ? DL_CLOSED[w] : 'выполнен'; }
 // «фитиль» (разбор ЮрТопоса 03.10, п. 3; 21.10.2026 — везде, где срок показан строкой): доля прошедшего времени от даты основания
@@ -15280,12 +15358,18 @@ async function nextRulesReviewFind() {
       const changed = rules.filter(n => { const dl = dlOf(n); return dl && !dl.done && !dl.confirmedAt && dl.date !== n.date && (!sameVer(dl) || byCal(dl, n)); }).map(n => ({ title: n.title, from: dlOf(n).date, to: n.date, cal: sameVer(dlOf(n)) }));
       const marked = rules.filter(n => { const dl = dlOf(n); return dl && !dl.done && dl.confirmedAt && dl.date !== n.date && byCal(dl, n); }).map(n => ({ title: n.title, date: dlOf(n).date, cal: n.date }));
       const base = act === 'decision' ? inp.dec.base : act === 'appeal' ? inp.ap.base : inp.cs.base;
-      if (missing.length || changed.length || marked.length || orphan.length) out.push({ c: c0, act, base, missing, changed, marked, orphan }); } }
+      if (missing.length || changed.length || marked.length || orphan.length) out.push({ c: c0, act, base, missing, changed, marked, orphan }); }
+    // сборка 204 (O-73): ход обжалования — что закроет, вернёт или пометит «Пересчитать» (пробный расчёт на копии дела, база не меняется)
+    if (typeof nxAppealFlow === 'function') {
+      const f = nxAppealFlow(JSON.parse(JSON.stringify(c0)), todayISO()), flow = f.closed.map(x => 'закрыть: ' + x).concat(f.confirmed.map(x => 'закрыть подтверждённый: ' + x), f.reopened.map(x => 'вернуть в работу: ' + x), f.noted.map(x => 'пометить: ' + x));
+      if (flow.length) { const ex = out.find(r => r.c === c0); if (ex) ex.flow = flow; else out.push({ c: c0, act: 'decision', base: inp.dec.base, missing: [], changed: [], marked: [], orphan: [], flow }); }
+    } }
   return out;
 }
 // версия проверки прежних записей: поднимается, когда обзор начинает находить в них новое (урок 152: сроки без правила или основания), —
 // блок, скрытый «до следующего обновления» в прежней сборке, показывается снова, если ему есть что показать
-const NX_REVIEW_VER = 2;
+// 3 — сборка 204: ход обжалования (лист и расходы при апелляции, возврате жалобы, кассации)
+const NX_REVIEW_VER = 3;
 // отметка «Скрыть до следующего обновления»: версия правил, версия проверки и отпечаток календаря — новый календарь показывает блок снова
 function rulesReviewStamp() { return NEXT_RULES_VER + '|r' + NX_REVIEW_VER + (typeof prodcalStamp === 'function' ? '|' + prodcalStamp() : ''); }
 // ── лист срока: паспорт и действия ──
@@ -16197,12 +16281,13 @@ SCREENS.today = async function () {
   let review = []; try { if (localStorage.getItem('crm_rules_review_hide') !== revStamp) review = await nextRulesReviewFind(); } catch (e) { logErr('today:rules', e); }
   // урок 152: r.orphan — прежние автосроки без правила или основания (аудит сборки 151, A3); «Пересчитать» помечает их
   const revOrphan = r => r.orphan || [];
-  const revCalOnly = review.length && review.every(r => !r.missing.length && !revOrphan(r).length && r.changed.every(x => x.cal));
+  const revCalOnly = review.length && review.every(r => !r.missing.length && !revOrphan(r).length && !(r.flow || []).length && r.changed.every(x => x.cal));
   const revText = r => [r.missing.length ? 'нет сроков — ' + r.missing.map(n => n.title).join(', ') : '', r.changed.length ? (r.changed.every(x => x.cal) ? 'по календарю другая дата — ' : 'изменились — ') + r.changed.map(x => x.title + ': ' + fmtDate(x.from) + ' → ' + fmtDate(x.to)).join(', ') : '',
     (r.marked || []).length ? 'подтверждён, по календарю дата другая — ' + r.marked.map(x => x.title + ': ' + fmtDate(x.date) + ', по календарю ' + fmtDate(x.cal)).join(', ') + ' (проверьте в паспорте срока)' : '',
-    revOrphan(r).length ? (revOrphan(r).every(x => x.why === 'base') ? 'даты акта в деле нет, а сроки от неё остались — ' : 'не следуют из данных дела — ') + revOrphan(r).map(x => x.title + (x.date ? ' (' + fmtDate(x.date) + ')' : '')).join(', ') + ' (нажмите «Пересчитать»: срок получит пометку, снять с контроля или удалить — решаете вы)' : ''].filter(Boolean).join('; ');
+    revOrphan(r).length ? (revOrphan(r).every(x => x.why === 'base') ? 'даты акта в деле нет, а сроки от неё остались — ' : 'не следуют из данных дела — ') + revOrphan(r).map(x => x.title + (x.date ? ' (' + fmtDate(x.date) + ')' : '')).join(', ') + ' (нажмите «Пересчитать»: срок получит пометку, снять с контроля или удалить — решаете вы)' : '',
+    (r.flow || []).length ? 'ход обжалования — ' + r.flow.join('; ') : ''].filter(Boolean).join('; ');
   const reviewBox = review.length ? `<section class="panel t-review"><div class="panel-title"><h2>${revCalOnly ? 'Календарь нерабочих дней обновлён' : 'Правила сроков обновлены ' + badge(NEXT_RULES_VER, 'accent')}</h2><div class="panel-tools"><button type="button" class="text-button" onclick="rulesReviewHide()">Скрыть до следующего обновления</button></div></div>
-      ${review.slice(0, 8).map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.c.id)}')"><span class="task-title">${esc([r.c.number, r.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(actLabel(r.c.kind, r.act))}${r.base ? ' от ' + esc(fmtDate(r.base)) : ''}: ${esc(revText(r))}</span></button>${r.missing.length || r.changed.length || revOrphan(r).length ? `<div class="imp-done"><button type="button" class="button small-btn" onclick="rulesReviewApply('${jsq(r.c.id)}')">${icon('refresh-cw', 'icon-sm')}Пересчитать</button></div>` : ''}</div>`).join('')}${review.length > 8 ? `<p class="panel-foot">Ещё ${review.length - 8}</p>` : ''}</section>` : '';
+      ${review.slice(0, 8).map(r => `<div class="imp-row"><button type="button" class="imp-main" onclick="openCaseSheet('${jsq(r.c.id)}')"><span class="task-title">${esc([r.c.number, r.c.client].filter(Boolean).join(' · '))}</span><span class="task-sub">${esc(actLabel(r.c.kind, r.act))}${r.base ? ' от ' + esc(fmtDate(r.base)) : ''}: ${esc(revText(r))}</span></button>${r.missing.length || r.changed.length || revOrphan(r).length || (r.flow || []).length ? `<div class="imp-done"><button type="button" class="button small-btn" onclick="rulesReviewApply('${jsq(r.c.id)}')">${icon('refresh-cw', 'icon-sm')}Пересчитать</button></div>` : ''}</div>`).join('')}${review.length > 8 ? `<p class="panel-foot">Ещё ${review.length - 8}</p>` : ''}</section>` : '';
   // Б15 (11.10.2026): строку можно смахнуть вправо — то же действие, что кнопка в строке (ui/swipe.js)
   const swp = (fn, args, label) => typeof swipeAttrs === 'function' ? swipeAttrs(fn, args, label) : '';
   // 13.10.2026 (этап 5): у строки может быть своё действие (x.act: { fn, label, icon }) и своё «×» (x.dismiss — «Задача не нужна» вместо скрытия на 7 дней)
@@ -23715,6 +23800,20 @@ HFIG.procunify = { h: 176, title: 'Проверка перехода рассм�
   });
   s += hf.btn(20, 142, 130, 22, 'Скопировать итог', true) + hf.btn(158, 142, 120, 22, 'Проверить снова', false);
   return s; })() };
+// 12. Сборка 204 (O-73): срок на взыскание судебных расходов и лист по ходу обжалования (next/acts.js, nxAppealFlow); слова — как в программе
+HFIG.appealflow = { h: 236, title: 'Судебные расходы и исполнительный лист по ходу обжалования', caption: 'Срок расходов — 3 месяца от последнего акта, которым закончилось рассмотрение. Дело обжалуется — срок от решения закрывается, появится от апелляционного определения; затем — от кассационного, от определения Верховного Суда. Жалоба возвращена или оставлена без рассмотрения — срок от решения снова в работе. Направлено на новое рассмотрение — сроки появятся от нового итогового акта.', svg: (() => {
+  let s = hf.defs('appealflow');
+  const col = [['Решение', 'первой инстанции', '3 мес. со дня вступления', 'в силу; закрыт, если', 'дело обжалуется'], ['Апелляционное', 'определение', '3 мес. от определения;', 'подана кассационная', 'жалоба — пометка'], ['Кассационное', 'определение', '3 мес. от определения;', 'жалоба в Верховный Суд', '— пометка'], ['Определение', 'Верховного Суда', '3 мес. от определения,', 'в том числе об отказе', 'в передаче жалобы']];
+  col.forEach((c, i) => {
+    const x = 10 + i * 128;
+    s += hf.box(x, 12, 116, 42, i === 0 ? {} : { fill: 'var(--surface2)' }) + hf.t(x + 58, 29, c[0], { anchor: 'middle', fs: 10.5, bold: true }) + hf.t(x + 58, 44, c[1], { anchor: 'middle', fs: 10 });
+    if (i < 3) s += hf.arrow(x + 117, 33, x + 127, 33, 'appealflow');
+    s += hf.t(x + 58, 74, 'Расходы', { anchor: 'middle', fs: 9.5, fill: 'var(--text-muted)' });
+    s += hf.box(x, 80, 116, 54, { fill: 'var(--accent-soft)', stroke: 'var(--accent)' }) + hf.t(x + 5, 96, c[2], { fs: 8.5 }) + hf.t(x + 5, 110, c[3], { fs: 8.5 }) + hf.t(x + 5, 124, c[4], { fs: 8.5 });
+  });
+  s += hf.box(10, 146, 500, 38, { fill: 'var(--warn-bg)', stroke: 'var(--warn)' }) + hf.t(20, 162, '«Жалоба возвращена» или «Оставлена без рассмотрения» — решение в силе с первоначальной даты:', { fs: 9.5 }) + hf.t(20, 176, 'срок от решения снова в работе (прошёл — «проверьте»)', { fs: 9.5, bold: true });
+  s += hf.box(10, 192, 500, 38, { dash: true }) + hf.t(20, 208, '«Отменено, направлено на новое рассмотрение» — рассмотрение не закончено:', { fs: 9.5 }) + hf.t(20, 222, 'лист и расходы от этого акта не ставятся, появятся от нового итогового акта', { fs: 9.5, bold: true });
+  return s; })() };
 // Разметка рисунка для инструкции; незнакомое имя — пусто (инструкция не ломается). svg — строка или функция (схема, зависящая от тем)
 function helpFig(name) {
   const f = HFIG[name]; if (!f) return '';
@@ -23780,7 +23879,9 @@ ${typeof helpFig === 'function' ? helpFig('procunify') : ''}
 <p><b>Сводка</b> — дело одним листом для печати или PDF: «Досье» (служебное: сведения, движение дела, заседания, сроки, задачи, ордера, участники, расходы, счета, заметки) и «Отчёт доверителю» (без внутренних заметок, гонорара, задач, ордеров и контактов участников). «Скачать для Word» — тот же документ файлом, чтобы поправить текст перед отправкой.</p>
 <p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. В своих шаблонах есть фильтры ({{СуммаИска:прописью}}, {{ДатаРешения:словами}}, {{Дата:плюс_дней 10}}, {{Доверитель:кратко}}), условия ({{#если Оппонент}} … {{#иначе}} … {{/если}}) и повторы по спискам дела ({{#каждый расходы}} {{№}}. {{категория}} — {{сумма}} {{/каждый}}; списки: расходы, платежи, заседания, работы); «Проверить шаблон» в форме находит незакрытые блоки и незнакомые поля, прежние версии своего шаблона хранятся в его форме («Вернуть»). Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
 <p><b>Стадия</b> меняется нажатием на плашку в карточке. Она поднимается и сама, когда в деле появляются данные более высокой инстанции: номер или ссылка апелляции, кассации, Верховного Суда, заседание в апелляционном или кассационном суде. Если стадию вернули вручную, по тем же данным она не поднимается. Дела, где данные выше стадии, перечислены на «Сегодня» с кнопкой «Поднять».</p>
-<p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Исполненный срок показывает, чем он закрыт: «выполнен» — вашей отметкой; «истёк до записи с сайта», «исполнен подачей жалобы», «закрыт: подана апелляция», «снят: сторона жалобы изменена», «снят: жалоба возвращена» — программой (паспорт срока называет причину; если действие ещё нужно — «Вернуть в работу»). «Справочники» → «Проверка данных» перечисляет и то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта.Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё. Если дату акта из дела убрали, у зависимых сроков появляется отметка «основание удалено»; если по новым данным дела срок больше не возникает (например, изготовлено мотивированное решение — заявление о его составлении уже не нужно), отметка «правило не применяется» — такой срок программа не исполняет и не удаляет сама: снимите его с контроля или удалите. Обе проверки идут при каждом сохранении дела; сроки, оставшиеся в таком состоянии от прежних версий, «Сегодня» перечисляет в блоке «Правила сроков обновлены» — «Пересчитать» ставит им отметку. Дата акта записана поздно (с сайта суда или вручную), и срок уже прошёл — он создаётся исполненным с пометкой «срок истёк … до записи даты акта» и просроченным не показывается; если действие ещё нужно, снимите отметку в карточке срока. Подана наша жалоба (поле «Жалоба подана» с «Кто обжалует» — наша или обе стороны, или событие с сайта суда) — срок на её подачу исполнен; подана апелляционная жалоба любой стороны — сроки «если не обжалуют» (исполнительный лист, судебные расходы от решения) закрываются, как при появлении апелляционного акта.</p>
+<p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Исполненный срок показывает, чем он закрыт: «выполнен» — вашей отметкой; «истёк до записи с сайта», «исполнен подачей жалобы», «закрыт: дело обжалуется», «заменён сроком следующей инстанции», «снят: сторона жалобы изменена», «снят: жалоба возвращена» — программой (паспорт срока называет причину; если действие ещё нужно — «Вернуть в работу»). «Справочники» → «Проверка данных» перечисляет и то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта.Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё. Если дату акта из дела убрали, у зависимых сроков появляется отметка «основание удалено»; если по новым данным дела срок больше не возникает (например, изготовлено мотивированное решение — заявление о его составлении уже не нужно), отметка «правило не применяется» — такой срок программа не исполняет и не удаляет сама: снимите его с контроля или удалите. Обе проверки идут при каждом сохранении дела; сроки, оставшиеся в таком состоянии от прежних версий, «Сегодня» перечисляет в блоке «Правила сроков обновлены» — «Пересчитать» ставит им отметку. Дата акта записана поздно (с сайта суда или вручную), и срок уже прошёл — он создаётся исполненным с пометкой «срок истёк … до записи даты акта» и просроченным не показывается; если действие ещё нужно, снимите отметку в карточке срока. Подана наша жалоба (поле «Жалоба подана» с «Кто обжалует» — наша или обе стороны, или событие с сайта суда) — срок на её подачу исполнен; подана апелляционная жалоба любой стороны — сроки «если не обжалуют» (исполнительный лист, судебные расходы от решения) закрываются, как при появлении апелляционного акта.</p>
+<p><b>Лист и судебные расходы по ходу обжалования.</b> Срок на взыскание судебных расходов — 3 месяца со дня вступления в силу последнего судебного акта, которым закончилось рассмотрение дела (ст. 103.1 ГПК, ч. 2 ст. 112 АПК, ст. 114.1 КАС). Поэтому срок от решения первой инстанции и «Исполнительный лист — не ранее» закрываются, как только дело обжалуется: подана апелляционная жалоба, в форме дела есть номер или ссылка дела в апелляции либо стадия дела «Апелляция» и выше (её поднимают и заседание в апелляционном суде, и данные сайта суда). Закрываются и подтверждённые сроки — об этом отдельная строка при сохранении. Появилось апелляционное определение — сроки от решения заменяются сроками от него, кассационное — сроками от кассационного, определение Верховного Суда (в том числе об отказе в передаче жалобы) — срок расходов считается от него. Если жалоба возвращена или оставлена без рассмотрения, решение остаётся в силе с первоначальной даты: закрытый программой срок возвращается в работу с пометкой (а если он уже прошёл — «проверьте»). Подана кассационная жалоба или жалоба в Верховный Суд — срок расходов от прежнего акта не закрывается (жалобу могут вернуть), а получает пометку, что после рассмотрения по существу он будет считаться от нового определения. Результат «Отменено, направлено на новое рассмотрение» (в форме дела или с сайта суда) — от такого акта лист и расходы не ставятся: рассмотрение не закончено, сроки появятся от нового итогового акта. Дела, где сроки по этим правилам нужно закрыть, вернуть или пометить, «Сегодня» показывает в блоке «Правила сроков обновлены» — кнопка «Пересчитать».</p>
+${typeof helpFig === 'function' ? helpFig('appealflow') : ''}
 <p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение.</p>
 <p><b>Папка документов</b> — путь к папке дела на компьютере и ссылка на папку в облаке. Задаётся в форме дела (группа «Папка документов», видна сразу) или кнопкой «Папка документов» в карточке дела — она есть всегда. Папку называете и раскладываете как удобно. В приложении для компьютера: «Выбрать папку» открывает окно Windows, в карточке — список файлов папки (файл открывается программой, назначенной в Windows), «Открыть папку» — проводник, «Создать папку» — если её ещё нет. В браузере путь копируется — вставьте его в адресную строку проводника.</p>` },
   { id: 'people', title: 'Доверители, доверенности, обращения', html: `
