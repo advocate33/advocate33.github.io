@@ -10,6 +10,8 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v198: настройки Telegram и Почты — из программы (cfgget, cfgput, tgfind, tgtest); файл cfg-<storeId>.crypt в бакете, зашифрован ключом от
+//  SECRET; переменные функции важнее файла (O-74, этап 4)
 //  v197: напоминания — отметка прежнего сервера (дата) не скрывает изменённое напоминание (аудит сборки 201, R9)
 //  v196: напоминания — отметка версии и резерв отправки (аудит сборки 198, N6)
 //  v195: списки хранилища — целиком по страницам (файлы документов, изменения базы, история снимков; аудит сборки 194, 6.7)
@@ -56,6 +58,8 @@
 //    SECRET        — секретный код (тот же вводится в CRM)
 //    POCHTA_LOGIN  — логин API трекинга (tracking.pochta.ru)
 //    POCHTA_PASS   — пароль API трекинга
+//    TG_TOKEN, TG_CHAT — токен бота и номер чата для уведомлений
+//    (v198: POCHTA_* и TG_* можно не задавать — программа записывает их в файл настроек на сервере; переменная, если задана, важнее)
 //    BUCKET        — имя бакета Object Storage (для календарной ленты и событий)
 //    S3_KEY_ID     — идентификатор статического ключа сервисного аккаунта
 //    S3_SECRET     — секрет статического ключа
@@ -106,7 +110,7 @@ function secretOk(given) {
   return crypto.timingSafeEqual(a, b);
 }
 // v192: секретный код (и имена файлов от него, если STORE_ID не задан) не попадает в журнал функции и в ответы без кода
-function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
+function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID, cv('TG_TOKEN'), cv('POCHTA_PASS')]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
 // v192: адрес клиента для пределов публичных форм — тот, что видит платформа. В X-Forwarded-For первые адреса может прислать сам клиент,
 // настоящий платформа дописывает последним; без заголовка — общий предел для всех «без адреса», а не отсутствие предела
 function clientIp(event) {
@@ -123,7 +127,7 @@ function fitReply(r) { return r && jsonBytes(r) > 3600000 ? { ok: false, error: 
 // v192: Telegram — с пределом ожидания: медленный ответ не держит функцию и не превращает принятую заявку в «Нет связи» у клиента
 async function tgSend(text, ms) {
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), ms || 8000);
-  try { return await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }), signal: ctl.signal }); }
+  try { return await fetch(`https://api.telegram.org/bot${cv('TG_TOKEN')}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: cv('TG_CHAT'), text }), signal: ctl.signal }); }
   finally { clearTimeout(timer); }
 }
 // v192: вызов без HTTP — только похожий на сообщение таймера (у каждого сообщения — event_metadata; тип, если указан, — таймер)
@@ -131,11 +135,97 @@ function timerEventOk(e) {
   return !!e && Array.isArray(e.messages) && e.messages.length > 0 && e.messages.every(m => m && typeof m === 'object' && m.event_metadata && typeof m.event_metadata === 'object' && (!m.event_metadata.event_type || /TimerMessage$/.test(String(m.event_metadata.event_type))));
 }
 
+// v198 (O-74, этап 4): настройки Telegram и Почты — из программы. Файл cfg-<storeId>.crypt в бакете: AES-256-GCM, ключ — SHA-256 от
+// «crm-cfg|» + SECRET (без кода сервера файл не прочитать; код сменили — файл не расшифруется, настройки вписываются заново).
+// Переменная функции, если задана, важнее файла: прежняя настройка через консоль работает как раньше.
+const CFG_KEYS = ['TG_TOKEN', 'TG_CHAT', 'POCHTA_LOGIN', 'POCHTA_PASS'];
+let CFG = {}, cfgAt = 0;
+function cv(k) { return process.env[k] || CFG[k] || ''; }
+const cfgName = () => 'cfg-' + storeId() + '.crypt';
+const cfgKey = () => crypto.createHash('sha256').update('crm-cfg|' + process.env.SECRET, 'utf8').digest();
+function cfgSeal(obj) {
+  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', cfgKey(), iv);
+  const d = Buffer.concat([c.update(JSON.stringify(obj), 'utf8'), c.final()]);
+  return JSON.stringify({ v: 1, iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: d.toString('base64') });
+}
+function cfgOpen(txt) {
+  const o = JSON.parse(txt), dc = crypto.createDecipheriv('aes-256-gcm', cfgKey(), Buffer.from(o.iv, 'base64'));
+  dc.setAuthTag(Buffer.from(o.tag, 'base64'));
+  return JSON.parse(Buffer.concat([dc.update(Buffer.from(o.data, 'base64')), dc.final()]).toString('utf8'));
+}
+// чтение — не чаще раза в минуту у работающего экземпляра функции; сбой чтения оставляет прежние значения (переменные функции работают всегда)
+async function cfgLoad(force) {
+  if (!force && cfgAt && Date.now() - cfgAt < 60000) return { ok: true };
+  if (!process.env.SECRET || !process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) return { ok: false, error: 'хранилище сервера не настроено' };
+  try {
+    const r = await s3Get(cfgName());
+    if (r.status === 404) { CFG = {}; cfgAt = Date.now(); return { ok: true, exists: false }; }
+    if (!r.ok) return { ok: false, error: 'хранилище ответило ' + r.status };
+    let o;
+    try { o = cfgOpen(await r.text()); } catch (e) { CFG = {}; cfgAt = Date.now(); return { ok: false, corrupt: true, error: 'файл настроек на сервере не расшифровывается (сменили секретный код?) — впишите настройки заново' }; }
+    const n = {}; for (const k of CFG_KEYS) if (typeof o[k] === 'string' && o[k]) n[k] = o[k];
+    CFG = n; cfgAt = Date.now(); return { ok: true, exists: true };
+  } catch (e) { return { ok: false, error: scrub(e && e.message || e) }; }
+}
+// ответ о настройках: токен и пароль — только «задан / не задан»; env — какие заданы переменными функции (их программа не меняет)
+function cfgState(extra) {
+  const env = {}; for (const k of CFG_KEYS) env[k] = !!process.env[k];
+  return Object.assign({ ok: true, env, tgToken: !!cv('TG_TOKEN'), tgChat: cv('TG_CHAT'), pochtaLogin: cv('POCHTA_LOGIN'), pochtaPass: !!cv('POCHTA_PASS') }, extra || {});
+}
+async function cfgGet() { const l = await cfgLoad(true); return cfgState(l.ok ? null : { warn: l.error }); }
+const TG_TOKEN_RE = /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/;
+// set: { TG_TOKEN?, TG_CHAT?, POCHTA_LOGIN?, POCHTA_PASS? } — пустая строка удаляет значение, отсутствующий ключ оставляет прежнее
+async function cfgPut(body) {
+  needStorage();
+  const l = await cfgLoad(true); if (!l.ok && !l.corrupt) return { ok: false, error: 'не прочитаны прежние настройки: ' + l.error };
+  const set = (body && typeof body.set === 'object' && body.set) || {}, n = Object.assign({}, CFG);
+  for (const k of Object.keys(set)) {
+    if (!CFG_KEYS.includes(k)) return { ok: false, error: 'неизвестная настройка ' + k };
+    const v = set[k] == null ? '' : String(set[k]).trim();
+    if (v.length > 300) return { ok: false, error: 'слишком длинное значение ' + k };
+    if (k === 'TG_TOKEN' && v && !TG_TOKEN_RE.test(v)) return { ok: false, error: 'Токен бота — вида 123456789:AA…, его выдаёт @BotFather' };
+    if (k === 'TG_CHAT' && v && !/^-?\d{1,20}$/.test(v)) return { ok: false, error: 'Номер чата — только цифры (у группы — с минусом впереди)' };
+    if (v) n[k] = v; else delete n[k];
+  }
+  const r = await s3Put(cfgName(), cfgSeal(n), 'application/octet-stream');
+  if (!r.ok) return { ok: false, error: 'хранилище ответило ' + r.status };
+  CFG = n; cfgAt = Date.now();
+  return cfgState();
+}
+// номер чата — из последних сообщений боту (getUpdates): человек пишет боту «/start», сервер находит чат. Webhook у бота — Telegram откажет словами
+async function tgFind() {
+  await cfgLoad(true);
+  const tok = cv('TG_TOKEN'); if (!tok) return { ok: false, error: 'Сначала сохраните токен бота' };
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
+  let j;
+  try { const r = await fetch(`https://api.telegram.org/bot${tok}/getUpdates?limit=100`, { signal: ctl.signal }); j = await r.json(); }
+  catch (e) { return { ok: false, error: 'Telegram не ответил: ' + scrub(e && e.message || e) }; }
+  finally { clearTimeout(timer); }
+  if (!j || !j.ok) return { ok: false, error: 'Telegram: ' + scrub((j && j.description) || 'ошибка') };
+  const seen = new Map();
+  for (const u of j.result || []) {
+    const m = u.message || u.channel_post || u.edited_message || (u.my_chat_member) || null, c = m && m.chat;
+    if (!c || c.id == null) continue;
+    const name = c.title || [c.first_name, c.last_name].filter(Boolean).join(' ') || (c.username ? '@' + c.username : '');
+    seen.delete(String(c.id)); seen.set(String(c.id), { id: String(c.id), type: String(c.type || ''), name: String(name).slice(0, 80) });
+  }
+  return { ok: true, chats: Array.from(seen.values()).reverse() };
+}
+async function tgTest() {
+  await cfgLoad(true);
+  if (!cv('TG_TOKEN') || !cv('TG_CHAT')) return { ok: false, error: 'Не заданы токен бота и номер чата' };
+  try {
+    const r = await tgSend('CRM Адвоката: проверка связи. Напоминания и заявки будут приходить сюда.');
+    const j = await r.json().catch(() => null);
+    return j && j.ok ? { ok: true } : { ok: false, error: 'Telegram: ' + scrub((j && j.description) || ('ответ ' + r.status)) };
+  } catch (e) { return { ok: false, error: 'Telegram не ответил: ' + scrub(e && e.message || e) }; }
+}
+
 module.exports.handler = async function (event, context) {
   if (event && context) event._context = context; // v172: IAM-токен сервисного аккаунта
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, headers: JSON_HEADERS, body: '' };
-  if (!event.httpMethod && event.messages) { if (!timerEventOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
+  if (!event.httpMethod && event.messages) { if (!timerEventOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { await cfgLoad(); return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
 
   const q0 = event.queryStringParameters || {};
   // v187: лента календаря для подписки (Google, Яндекс, телефон) — без секрета, по метке; только чтение готового файла
@@ -163,8 +253,10 @@ module.exports.handler = async function (event, context) {
       } catch (err) { return reply({ ok: false, error: String(err && err.message || err) }, 500); }
     }
     if (bearer || q.secret) return reply({ ok: false, error: 'auth' }, 403);
+    // v198: «готовность» учитывает файл настроек
+    await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 197,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 198,
       ready: readiness()
     });
   }
@@ -177,6 +269,8 @@ module.exports.handler = async function (event, context) {
     body = JSON.parse(raw);
   } catch (e) { return reply({ ok: false, error: 'bad_json' }); }
 
+  // v198: уведомления о заявке и вопросе — токен и чат могут лежать в файле настроек
+  if (body && (body.action === 'askreq' || body.action === 'bookreq')) await cfgLoad();
   if (body && body.action === 'askreq') { try { return reply(await askRequest(body, event)); } catch (err) { return reply({ ok: false, error: scrub(err && err.message || err) }); } } // v190: вопрос с сайта, без секрета
   if (body && body.action === 'bookreq') { try { return reply(await bookRequest(body, event)); } catch (err) { return reply({ ok: false, error: scrub(err && err.message || err) }); } } // v174: заявка клиента, без секрета
   // v178: без переменной SECRET сервер не работает вовсе — и говорит об этом словами
@@ -184,7 +278,13 @@ module.exports.handler = async function (event, context) {
   if (!body || !secretOk(body.secret)) return reply({ ok: false, error: 'auth' });
 
   try {
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 197, cal: true, ask: true, ical: true });
+    // v198: настройки из программы — до действий, которым они нужны
+    if (/^(ping|track|remindput|remindtick)$/.test(String(body.action))) await cfgLoad();
+    if (body.action === 'cfgget') return reply(await cfgGet());
+    if (body.action === 'cfgput') return reply(await cfgPut(body));
+    if (body.action === 'tgfind') return reply(await tgFind());
+    if (body.action === 'tgtest') return reply(await tgTest());
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 198, cal: true, ask: true, ical: true, cfg: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -230,7 +330,8 @@ module.exports.handler = async function (event, context) {
 
 function readiness() {
   return {
-    pochta: !!(process.env.POCHTA_LOGIN && process.env.POCHTA_PASS),
+    pochta: !!(cv('POCHTA_LOGIN') && cv('POCHTA_PASS')),
+    tg: !!(cv('TG_TOKEN') && cv('TG_CHAT')),
     storage: !!(process.env.BUCKET && process.env.S3_KEY_ID && process.env.S3_SECRET),
     secret: !!process.env.SECRET,
     storeId: !!process.env.STORE_ID
@@ -251,8 +352,8 @@ function bearerOf(event) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function trackBarcodes(barcodes) {
-  if (!process.env.POCHTA_LOGIN || !process.env.POCHTA_PASS) {
-    return { ok: false, error: 'Не заполнены POCHTA_LOGIN / POCHTA_PASS в параметрах функции' };
+  if (!cv('POCHTA_LOGIN') || !cv('POCHTA_PASS')) {
+    return { ok: false, error: 'Не заданы логин и пароль API Почты (в программе: «Почта России» → «Доступ к API Почты» или переменные POCHTA_LOGIN / POCHTA_PASS функции)' };
   }
   const results = {}, errors = {};
   const list = (barcodes || []).slice(0, 30); // лимит бесплатного доступа ~100 запросов/день
@@ -286,8 +387,8 @@ async function trackOne(barcode) {
             '<data:Language>RUS</data:Language>' +
           '</data:OperationHistoryRequest>' +
           '<data:AuthorizationHeader soapenv:mustUnderstand="1">' +
-            '<data:login>' + process.env.POCHTA_LOGIN + '</data:login>' +
-            '<data:password>' + process.env.POCHTA_PASS + '</data:password>' +
+            '<data:login>' + cv('POCHTA_LOGIN') + '</data:login>' +
+            '<data:password>' + cv('POCHTA_PASS') + '</data:password>' +
           '</data:AuthorizationHeader>' +
         '</oper:getOperationHistory>' +
       '</soap:Body>' +
@@ -1188,7 +1289,7 @@ async function remindPut(body) { // список от CRM: [{ id, date (ГГГГ
     if (r.ok) break;
     if (!r.changed || i >= 4) throw new Error(r.changed ? 'список напоминаний меняется одновременно — повторите' : 's3 ' + r.status);
   }
-  return { ok: true, n: items.length, telegram: !!(process.env.TG_TOKEN && process.env.TG_CHAT) };
+  return { ok: true, n: items.length, telegram: !!(cv('TG_TOKEN') && cv('TG_CHAT')) };
 }
 function mskDateISO(offsetDays) { const d = new Date(Date.now() + 3 * 3600e3 + (offsetDays || 0) * 864e5); return d.toISOString().slice(0, 10); }
 // v196 (аудит сборки 198, N6-A): отметка «отправлено» — версия напоминания: дата и отпечаток времени, заголовка и текста. Отметка прежних
@@ -1229,7 +1330,7 @@ async function remindRelease(me, marks) {
   return w;
 }
 async function remindTick() { // сегодня и завтра — по одному сообщению
-  if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return { ok: true, sent: 0, error: 'нет TG_TOKEN/TG_CHAT' };
+  if (!cv('TG_TOKEN') || !cv('TG_CHAT')) return { ok: true, sent: 0, error: 'нет TG_TOKEN/TG_CHAT' };
   if (!process.env.BUCKET) return { ok: true, sent: 0, error: 'нет хранилища' };
   const today = mskDateISO(0), tomorrow = mskDateISO(1);
   const first = remindDue(await remindLoad(), today, tomorrow);
@@ -1426,7 +1527,7 @@ async function bookRequest(body, event) {
   return res;
 }
 async function bookNotify(pub, b) { // Telegram — если в переменных функции моста заданы TG_TOKEN и TG_CHAT
-  if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return;
+  if (!cv('TG_TOKEN') || !cv('TG_CHAT')) return;
   // v189: Telegram — зарубежный сервис: имя, телефон и вопрос — только если программа прислала notifyFull (отметка «Полные названия и имена в Telegram»)
   const full = !!(pub && pub.settings && pub.settings.notifyFull);
   const text = full ? `📅 Новая запись на приём\n${ruDate(b.date)} ${b.time} — ${b.name}\n📞 ${b.phone}${b.topic ? '\n' + b.topic : ''}${b.comment ? '\n' + b.comment.slice(0, 200) : ''}\nКод ${b.code}. Подтвердите в CRM.`
@@ -1604,13 +1705,13 @@ async function askRequest(body, event) {
   return res;
 }
 async function askNotify(pub, q) { // Telegram — если в переменных функции заданы TG_TOKEN и TG_CHAT
-  if (!process.env.TG_TOKEN || !process.env.TG_CHAT) return;
+  if (!cv('TG_TOKEN') || !cv('TG_CHAT')) return;
   // Telegram — зарубежный сервис: имя, контакты и вопрос — только если программа прислала notifyFull (как у записи с 189)
   const full = !!(pub && pub.settings && pub.settings.notifyFull);
   const text = full ? `Вопрос с сайта\n${q.name}${q.phone ? '\nТелефон: ' + q.phone : ''}${q.tg ? '\nTelegram: @' + q.tg : ''}\nКак связаться: ${ASK_METHODS[q.method] || q.method}\n${q.question.slice(0, 300)}${q.question.length > 300 ? '…' : ''}\nКод ${q.code}.`
     : `Новый вопрос с сайта\nКод ${q.code}. Имя, контакты и вопрос — в CRM.`;
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
-  try { await fetch(`https://api.telegram.org/bot${process.env.TG_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: process.env.TG_CHAT, text }), signal: ctl.signal }); }
+  try { await fetch(`https://api.telegram.org/bot${cv('TG_TOKEN')}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: cv('TG_CHAT'), text }), signal: ctl.signal }); }
   finally { clearTimeout(timer); }
 }
 async function askPage(q) {
