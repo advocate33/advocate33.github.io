@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="26.10.2026 17:15 · ac13b6d">
-<meta name="build-no" content="208">
+<meta name="build" content="26.10.2026 22:08 · bff12fd">
+<meta name="build-no" content="209">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3447,6 +3447,20 @@ const NX_REMAND = 'Отменено, направлено на новое рас
 // результат «жалоба не рассмотрена по существу» — решение остаётся в силе с первоначальной даты
 const NX_BACK = ['Жалоба возвращена', 'Оставлена без рассмотрения'];
 const nxIso = s => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '')) ? String(s) : '';
+// сборка 209 (аудит сборки 208 от 26.10.2026, R5–R7): результат акта вышестоящей инстанции — одной функцией для расчёта сроков, хода
+// обжалования и обзора «Правила сроков обновлены». 'back' — жалоба возвращена или оставлена без рассмотрения: акта по существу нет, дата
+// в поле — дата определения о возврате, а не основание сроков (прежде любая дата делала акт основанием: лист и расходы от решения
+// закрывались, сроки ставились от определения о возврате); 'remand' — отменено, направлено на новое рассмотрение; 'changed' — отменено
+// полностью или частично, изменено; 'upheld' — оставлено без изменения, отказано в передаче; 'unknown' — результат не указан или
+// «Рассматривается»: при указанной дате акт, как и прежде, считается принятым по существу
+function nxOutcome(result) {
+  const r = String(result || '');
+  if (NX_BACK.includes(r)) return 'back';
+  if (r === NX_REMAND) return 'remand';
+  if (r === 'Отменено полностью' || r === 'Отменено частично' || r === 'Изменено') return 'changed';
+  if (r === 'Оставлено без изменения' || r === 'Отказано в передаче') return 'upheld';
+  return 'unknown';
+}
 function nxDays(a, b) { const x = parseLocalDate(a), y = parseLocalDate(b); if (!x || !y || isNaN(x) || isNaN(y)) return 0; return Math.max(0, Math.round((y - x) / 86400000)); }
 function nextActInputs(c) {
   c = c || {};
@@ -3458,9 +3472,12 @@ function nextActInputs(c) {
   if (!dec.base) dec.base = dec.full || dec.res;
   // сборка 204: remand — вышестоящий суд отменил акт и направил дело на новое рассмотрение (результат в форме дела или с сайта суда);
   // vs — дата определения (постановления) Верховного Суда, в том числе об отказе в передаче жалобы
-  const ap = { adopt: nxIso(c.apDecisionDate), full: nxIso(c.apDecisionFullDate), remand: c.apResult === NX_REMAND }; ap.base = ap.adopt || ap.full;
-  const cs = { adopt: nxIso(c.csDecisionDate), full: nxIso(c.csDecisionFullDate), filed: nxIso(c.csFilingDate), remand: c.csResult === NX_REMAND,
-    vs: nxIso(c.cs2DecisionDate), vsRemand: c.cs2Result === NX_REMAND }; cs.base = cs.adopt || cs.full;
+  const ap = { adopt: nxIso(c.apDecisionDate), full: nxIso(c.apDecisionFullDate), remand: c.apResult === NX_REMAND, out: nxOutcome(c.apResult) }; ap.base = ap.adopt || ap.full;
+  // сборка 209 (R5): определение Верховного Суда по возвращённой жалобе — не последний акт по делу, срок расходов от него не считается
+  const cs = { adopt: nxIso(c.csDecisionDate), full: nxIso(c.csDecisionFullDate), filed: nxIso(c.csFilingDate), remand: c.csResult === NX_REMAND, out: nxOutcome(c.csResult),
+    vs: nxOutcome(c.cs2Result) === 'back' ? '' : nxIso(c.cs2DecisionDate), vsRemand: c.cs2Result === NX_REMAND }; cs.base = cs.adopt || cs.full;
+  // акт по существу: дата есть и жалоба не возвращена (не оставлена без рассмотрения)
+  ap.merits = !!ap.base && ap.out !== 'back'; cs.merits = !!cs.base && cs.out !== 'back';
   return { code, simple, mag, dec, ap, cs };
 }
 function nxHasBase(inp, act) { return !!(act === 'decision' ? inp.dec.base : act === 'appeal' ? inp.ap.base : inp.cs.base); }
@@ -3544,7 +3561,8 @@ function nxActRulesAll(c, act) {
     return out;
   }
   if (act === 'appeal') {
-    if (!ap.base) return out;
+    // сборка 209 (R5): определение о возврате жалобы (об оставлении без рассмотрения) — не акт по существу, сроков от него нет
+    if (!ap.base || ap.out === 'back') return out;
     const adoptEv = lbl + ' от ' + fmtDate(ap.base);
     if (code === 'ГПК') {
       if (mag) out.push(nxItem(act, 'cass', 'Кассационная жалоба в президиум областного суда (по делу мирового судьи)', ap.base, adoptEv, [{ m: 3 }],
@@ -3577,7 +3595,7 @@ function nxActRulesAll(c, act) {
     return out;
   }
   // кассация
-  if (!cs.base) return out;
+  if (!cs.base || cs.out === 'back') return out;
   const csEv = lbl + ' от ' + fmtDate(cs.base);
   if (code === 'ГПК') {
     const f = cs.full || cs.base;
@@ -3667,30 +3685,75 @@ const NX_CLOSED_RE = /^Закрыт: .*?\.(?:\s+|$)/;
 // Сроки «если не обжалуют» и срок расходов по ходу обжалования — при каждом сохранении, после расчёта сроков (nextActDeadlinesApply).
 // Подтверждённый срок тоже закрывается и заменяется (подтверждение — проверка даты, а не запрет пересмотра), об этом — отдельная строка.
 // Ответ: { closed, reopened, confirmed, noted } — строки для сообщения и обзора «Правила сроков обновлены»
+// сборка 209 (аудит сборки 208, R5–R7): заменяет ли акт следующей инстанции срок прежнего — одной функцией для хода обжалования и обзора.
+// Ответ: null — не заменяет; { why, repl } — закрыть: repl — ключ срока, который его заменяет (или '' — замены нет, акт отменён и дело
+// направлено на новое рассмотрение). Лист от апелляционного акта кассация не заменяет: у кассации нет своего срока листа, а «оставлено без
+// изменения» листа не отменяет (прежде лист закрывался как «заменённый» без замены — R7); отменённый кассацией с направлением на новое
+// рассмотрение акт — закрывает.
+const NX_REPL = { 'act:decision:writ': 'act:appeal:writ', 'act:decision:costs': 'act:appeal:costs', 'act:appeal:costs': 'act:cass:costs' };
+function nxSupersedeOf(obj, inp, key) {
+  const lab = act => actLabel(obj.kind, act);
+  if (key === 'act:decision:writ' || key === 'act:decision:costs') {
+    if (!inp.ap.merits) return null;
+    return inp.ap.out === 'remand' ? { why: 'решение отменено: ' + lab('appeal') + ' от ' + fmtDate(inp.ap.base) + ' — «' + NX_REMAND + '»; лист и расходы будут от нового итогового акта', repl: '' }
+      : { why: 'есть ' + lab('appeal') + ' от ' + fmtDate(inp.ap.base), repl: NX_REPL[key] };
+  }
+  if (key === 'act:appeal:costs') {
+    if (!inp.cs.merits) return null;
+    return inp.cs.out === 'remand' ? { why: lab('appeal') + ' отменено: ' + lab('cass') + ' от ' + fmtDate(inp.cs.base) + ' — «' + NX_REMAND + '»; расходы будут от нового итогового акта', repl: '' }
+      : { why: 'есть ' + lab('cass') + ' от ' + fmtDate(inp.cs.base), repl: NX_REPL[key] };
+  }
+  if (key === 'act:appeal:writ') return inp.cs.merits && inp.cs.out === 'remand' ? { why: lab('appeal') + ' отменено: ' + lab('cass') + ' от ' + fmtDate(inp.cs.base) + ' — «' + NX_REMAND + '»; лист будет от нового итогового акта', repl: '' } : null;
+  return null;
+}
+// пометка у листа от апелляционного акта, когда кассация его изменила или отменила (не закрытие: решает пользователь)
+const NX_CASS_CHK_RE = /^Кассация: «[^»]*» от \S+ — проверьте, нужен ли лист.*?\.(?:\s+|$)/;
 function nxAppealFlow(obj, today) {
   const r = { closed: [], reopened: [], confirmed: [], noted: [] }, inp = nextActInputs(obj), dls = Array.isArray(obj.deadlines) ? obj.deadlines : [];
-  const DEC = ['act:decision:writ', 'act:decision:costs'], APK = ['act:appeal:writ', 'act:appeal:costs'];
-  const close = (dl, why, at, kind) => { dl.done = true; dl.doneAt = at || today; dl.closedWhy = kind;
-    dl.note = (kind === 'superseded' ? 'Закрыт: заменён сроком от акта следующей инстанции (' + why + '). ' : 'Закрыт: ' + why + ' — решение в силу не вступило, сроки появятся от апелляционного акта. ') + String(dl.note || '').replace(NX_REOPEN_RE, '');
+  const DEC = ['act:decision:writ', 'act:decision:costs'];
+  const close = (dl, why, at, kind, repl) => { dl.done = true; dl.doneAt = at || today; dl.closedWhy = kind;
+    // «заменён» — только когда срок-замена действительно есть в деле (R7); его id — в replacedBy
+    const rep = repl ? dls.find(x => x && x.autoKey === repl && !x.ruleGone) : null;
+    if (rep) dl.replacedBy = rep.id; else delete dl.replacedBy;
+    dl.note = (kind === 'superseded' ? (rep ? 'Закрыт: заменён сроком от акта следующей инстанции (' + why + '). ' : 'Закрыт: ' + why + '. ') : 'Закрыт: ' + why + ' — решение в силу не вступило, сроки появятся от апелляционного акта. ') + String(dl.note || '').replace(NX_CASS_CHK_RE, '').replace(NX_REOPEN_RE, '');
     (dl.confirmedAt ? r.confirmed : r.closed).push(dl.title + ' — ' + why); };
+  const reopen = (dl, why) => { dl.done = false; delete dl.doneAt; delete dl.closedWhy; delete dl.replacedBy;
+    dl.note = ('Возвращён в работу: ' + why + (dl.date && dl.date < today ? ' — срок прошёл ' + fmtDate(dl.date) + ', проверьте' : '') + '. ' + String(dl.note || '').replace(NX_CLOSED_RE, '')).trim();
+    r.reopened.push(dl.title + ' — ' + why); };
+  // почему закрытие «заменён» больше не держится (R6): основание убрано, жалоба возвращена или кассация акт не отменяла
+  const whyBack = key => {
+    if (DEC.includes(key)) return !inp.ap.base ? 'апелляционного определения в деле больше нет' : inp.ap.out === 'back' ? 'апелляционная жалоба — «' + obj.apResult + '», решение в силе с первоначальной даты' : 'апелляционный акт по существу не принят';
+    if (!inp.cs.base) return 'кассационного определения в деле больше нет';
+    if (inp.cs.out === 'back') return 'кассационная жалоба — «' + obj.csResult + '», ' + actLabel(obj.kind, 'appeal') + ' в силе';
+    return key === 'act:appeal:writ' ? 'кассация не отменяла ' + actLabel(obj.kind, 'appeal') + ' — заявление о выдаче листа ничем не заменено' : 'по данным дела срок не заменён';
+  };
   const ap = nxInAppeal(obj);
   for (const dl of dls) {
     if (!dl || !dl.autoKey) continue;
-    // акт следующей инстанции есть — лист и расходы предыдущей заменены
-    if (!dl.done && DEC.includes(dl.autoKey) && inp.ap.base) { close(dl, 'есть ' + actLabel(obj.kind, 'appeal') + ' от ' + fmtDate(inp.ap.base), inp.ap.base, 'superseded'); continue; }
-    if (!dl.done && APK.includes(dl.autoKey) && inp.cs.base) { close(dl, 'есть ' + actLabel(obj.kind, 'cass') + ' от ' + fmtDate(inp.cs.base), inp.cs.base, 'superseded'); continue; }
-    if (DEC.includes(dl.autoKey) && !inp.ap.base) {
+    const sup = nxSupersedeOf(obj, inp, dl.autoKey);
+    // акт следующей инстанции есть — срок прежнего закрыт (заменён или отменён вместе с актом)
+    if (!dl.done && sup) { close(dl, sup.why, DEC.includes(dl.autoKey) ? inp.ap.base : inp.cs.base, 'superseded', sup.repl); continue; }
+    // сборка 209 (R6, R7): закрытие программой «заменён», основание которого исчезло, снимается; закрытое пользователем (closedWhy снят) не трогается
+    if (dl.done && dl.closedWhy === 'superseded' && !sup) {
+      if (DEC.includes(dl.autoKey) && ap) { close(dl, ap.why, ap.date, 'closed'); continue; }
+      reopen(dl, whyBack(dl.autoKey)); continue;
+    }
+    if (DEC.includes(dl.autoKey) && !inp.ap.merits) {
       if (!dl.done && ap) { close(dl, ap.why, ap.date, 'closed'); continue; }
       // признаков апелляции больше нет (жалоба возвращена, оставлена без рассмотрения, данные убраны) — закрытый программой срок возвращается
       if (dl.done && dl.closedWhy === 'closed' && !ap) {
-        const why = NX_BACK.includes(String(obj.apResult || '')) ? 'апелляционная жалоба — «' + obj.apResult + '», решение в силе с первоначальной даты' : 'признаков апелляции в деле больше нет';
-        dl.done = false; delete dl.doneAt; delete dl.closedWhy;
-        dl.note = ('Возвращён в работу: ' + why + (dl.date && dl.date < today ? ' — срок прошёл ' + fmtDate(dl.date) + ', проверьте' : '') + '. ' + String(dl.note || '').replace(NX_CLOSED_RE, '')).trim();
-        r.reopened.push(dl.title + ' — ' + why); continue;
+        reopen(dl, NX_BACK.includes(String(obj.apResult || '')) ? 'апелляционная жалоба — «' + obj.apResult + '», решение в силе с первоначальной даты' : 'признаков апелляции в деле больше нет'); continue;
       }
     }
+    // лист от апелляционного акта, который кассация изменила или отменила (без направления на новое рассмотрение) — пометка, решает пользователь
+    if (dl.autoKey === 'act:appeal:writ') {
+      const chk = !dl.done && inp.cs.merits && inp.cs.out === 'changed';
+      const txt = chk ? 'Кассация: «' + obj.csResult + '» от ' + fmtDate(inp.cs.base) + ' — проверьте, нужен ли лист по акту апелляции и в какой части.' : '';
+      if (chk && !String(dl.note || '').startsWith(txt)) { dl.note = (txt + ' ' + String(dl.note || '').replace(NX_CASS_CHK_RE, '')).trim(); r.noted.push(dl.title + ' — кассация: «' + obj.csResult + '», проверьте'); }
+      else if (!chk && NX_CASS_CHK_RE.test(String(dl.note || ''))) dl.note = String(dl.note || '').replace(NX_CASS_CHK_RE, '');
+    }
     // срок расходов при поданной жалобе в следующую инстанцию — пометка (не закрытие: жалобу могут вернуть)
-    const nf = !dl.done && dl.autoKey === 'act:appeal:costs' && !inp.cs.base && inp.cs.filed && !NX_BACK.includes(String(obj.csResult || '')) ? ['кассационная жалоба', inp.cs.filed, 'кассационного определения']
+    const nf = !dl.done && dl.autoKey === 'act:appeal:costs' && !inp.cs.merits && inp.cs.filed && !NX_BACK.includes(String(obj.csResult || '')) ? ['кассационная жалоба', inp.cs.filed, 'кассационного определения']
       : !dl.done && dl.autoKey === 'act:cass:costs' && !inp.cs.vs && nxIso(obj.cs2FilingDate) && !NX_BACK.includes(String(obj.cs2Result || '')) ? ['жалоба в Верховный Суд', nxIso(obj.cs2FilingDate), 'определения Верховного Суда'] : null;
     if (nf && dl.nextFiled !== nf[1]) {
       dl.nextFiled = nf[1]; dl.note = ('Подана ' + nf[0] + ' ' + fmtDate(nf[1]) + ' — если её рассмотрят по существу, срок будет считаться от ' + nf[2] + ' (последнего судебного акта). ' + String(dl.note || '').replace(NX_NEXT_NOTE_RE, '')).trim();
@@ -3729,7 +3792,9 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
     // A3 (урок 151): автосроки этого акта, которых по нынешним данным дела правила больше не дают, — помечаются, не удаляются и не
     // исполняются; сверка — при каждом сохранении и при пустом наборе правил (урок 152)
     const list = nextActRules(obj, act), keys = new Set(list.map(n => n.autoKey));
-    const whyOf = dl => act === 'decision' && ni.dec.full && /:motivated$/.test(dl.autoKey) ? 'мотивированное решение изготовлено, заявление о его составлении не требуется'
+    const whyOf = dl => act === 'appeal' && ni.ap.out === 'back' ? 'апелляционная жалоба — «' + obj.apResult + '»: акта по существу нет, решение в силе с первоначальной даты'
+      : act === 'cass' && ni.cs.out === 'back' ? 'кассационная жалоба — «' + obj.csResult + '»: кассационного акта по существу нет'
+      : act === 'decision' && ni.dec.full && /:motivated$/.test(dl.autoKey) ? 'мотивированное решение изготовлено, заявление о его составлении не требуется'
       : /:(writ|costs)$/.test(dl.autoKey) && act !== 'decision' && (ni.ap.remand || ni.cs.remand || ni.cs.vsRemand) ? 'дело направлено на новое рассмотрение — лист и расходы считаются от нового итогового акта'
       : pi && pi.code !== ni.code ? 'сменился вид дела, по его правилам этот срок не возникает' : 'по нынешним данным дела (вид, порядок производства, суд, даты акта) этот срок не возникает';
     obj.deadlines.forEach(dl => {
@@ -3762,7 +3827,7 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
       } else {
         // v157 (1, 2): наша жалоба уже подана — срок на её подачу создаётся исполненным; дата срока уже прошла (дата акта записана поздно) —
         // срок создаётся исполненным с пометкой, в сообщении — отдельной строкой
-        const fil = filed && n.autoKey === filed.key, past = n.date < today, inAp = act === 'decision' && supersede.appeal.includes(n.autoKey) && !ni.ap.base ? nxInAppeal(obj) : null, closed = !!inAp;
+        const fil = filed && n.autoKey === filed.key, past = n.date < today, inAp = act === 'decision' && supersede.appeal.includes(n.autoKey) && !ni.ap.merits ? nxInAppeal(obj) : null, closed = !!inAp;
         // v162: closedWhy — чем закрыт срок, созданный исполненным (ui/deadlines.js, dlDoneWhy)
         let done = false, doneAt = '', closedWhy = '', note = n.kind === 'control' ? 'рассчитан автоматически — дата, с которой можно действовать' : 'рассчитан автоматически — проверьте и подтвердите';
         if (fil && filed.ours) { done = true; doneAt = filed.date; closedWhy = 'filed'; note ='Исполнен: ' + filed.label + ' подана ' + fmtDate(filed.date); }
@@ -5942,13 +6007,14 @@ function openRemindSheet(sub, msg) {
       <li>BotFather пришлёт <b>токен</b> — строку вида «123456789:AA…». Это секрет: не пересылайте его и не показывайте на снимках экрана. Его вы вставите в шаге 2 — программа передаст его только на ваш сервер и у себя не сохранит.</li></ol>
     <div class="section-label step-label">Шаг 2. Записать бота на свой сервер</div>
     <div class="status-line" id="rm-tg" role="status">${icon('send')}<span>${srv ? 'Сервер: спрашиваю, задан ли бот…' : 'Сначала подключите свой сервер'}</span></div>
+    <div id="rm-cfg-reset"></div>
     <div class="form-grid">${wide(fInput('rm-token', 'Токен бота от BotFather', '', 'type="password" autocomplete="off" spellcheck="false" placeholder="123456789:AA…"'))}</div>
     <div class="form-actions"><button type="button" class="button primary" id="rm-token-save"${srv ? '' : ' disabled'} onclick="tgTokenSave()">${icon('shield-check')}Сохранить токен на сервере</button></div>
     <ol class="steps-list"><li>Откройте своего бота по ссылке от BotFather и нажмите «Start» (или напишите ему любое слово).</li>
       <li>Нажмите «Найти чат» — сервер спросит у Telegram, кто писал боту, и покажет чаты; выберите свой. Затем — «Пробное сообщение».</li></ol>
     <div class="form-actions"><button type="button" class="button" id="rm-find"${srv ? '' : ' disabled'} onclick="tgChatFind()">${icon('search')}Найти чат</button><button type="button" class="button" id="rm-test"${srv ? '' : ' disabled'} onclick="tgTestSend()">${icon('send')}Пробное сообщение</button></div>
     <div id="rm-chats"></div>
-    <p class="small muted">Токен и номер чата хранятся на вашем сервере в файле, зашифрованном его секретным кодом (сервер 198 и новее); программа их у себя не держит. Таймер 08:05 по Москве создаёт мастер «Свой сервер в Яндекс Облаке» (галочка «Напоминания в Telegram по расписанию»).</p>
+    <p class="small muted">Токен и номер чата хранятся на вашем сервере в файле, зашифрованном ключом, которого нет в самом хранилище (сервер 199 и новее); программа их у себя не держит. Таймер 08:05 по Москве создаёт мастер «Свой сервер в Яндекс Облаке» (галочка «Напоминания в Telegram по расписанию»).</p>
     <details class="help-text" id="rm-manual"><summary>Вручную, через консоль Облака (сервер старше 198, таймер)</summary>
       <p class="small muted"><b>Номер чата.</b></p>
       <ol class="steps-list"><li>Откройте своего бота по ссылке от BotFather и нажмите «Start» (или напишите ему любое слово).</li>
@@ -5957,7 +6023,7 @@ function openRemindSheet(sub, msg) {
       <p class="small muted"><b>Переменные функции и таймер.</b></p>
       <ol class="steps-list"><li>console.yandex.cloud → каталог с сервером → Cloud Functions → <b>crm-bridge</b> → «Редактор» → «Переменные окружения».</li>
         <li>Добавьте две переменные: <b>TG_TOKEN</b> — токен из шага 1, <b>TG_CHAT</b> — номер чата из шага 2 → «Создать версию».</li>
-        <li>Таймер 08:05 по Москве мастер «Свой сервер в Яндекс Облаке» создаёт сам (с сборки 207, галочка «Напоминания в Telegram по расписанию»). Сервер создан раньше — запустите мастер ещё раз: созданное найдётся, ничего не задвоится. Или вручную: Cloud Functions → crm-bridge → «Триггеры» → создать таймер, выражение cron <b>5 5 ? * * *</b>, функция crm-bridge, сервисный аккаунт crm-server.</li></ol>
+        <li>Таймер 08:05 по Москве мастер «Свой сервер в Яндекс Облаке» создаёт сам (с сборки 207, галочка «Напоминания в Telegram по расписанию»). Сервер создан раньше — запустите мастер ещё раз: созданное найдётся, ничего не задвоится, а код сервера, ключ хранилища и записанные настройки сохранятся (со сборки 209). Или вручную: Cloud Functions → crm-bridge → «Триггеры» → создать таймер, выражение cron <b>5 5 ? * * *</b>, функция crm-bridge, сервисный аккаунт crm-server.</li></ol>
     </details>
     <div class="section-label step-label">Шаг 3. Передавать список на сервер</div>
     <p class="small muted">На сервер уходят даты, номера дел, названия сроков (как вы их записали — не пишите в них фамилии), суд и зал заседаний, сроки задач и доверенностей на 14 дней вперёд, до 300 записей, и до 200 просроченных задач. Имена доверителей не передаются (доверенность приходит как «Доверенность по делу …»). Список обновляется сам через несколько секунд после правки срока, заседания или задачи.</p>
@@ -5974,6 +6040,8 @@ function openRemindSheet(sub, msg) {
 // только «задан / не задан». Номер чата сервер находит сам — по сообщениям боту.
 function tgCfgText(j) {
   const env = (j && j.env) || {}, envNote = env.TG_TOKEN || env.TG_CHAT ? ' (заданы и в переменных функции — они важнее)' : '';
+  // сборка 209 (аудит сборки 208, R4): файл настроек на сервере не читается — сказать словами; кнопка сброса — srvCfgResetShow
+  if (j.unreadable) return ['bad', 'Сервер: ' + (j.warn || 'файл настроек не читается')];
   if (j.tgToken && j.tgChat) return ['good', 'Сервер: бот и чат заданы' + envNote + ' — проверьте «Пробным сообщением»'];
   if (j.tgToken) return ['warn', 'Сервер: токен задан, номер чата — нет. Нажмите «Start» у бота и «Найти чат»'];
   return ['warn', 'Сервер: бот не задан — вставьте токен и «Сохранить токен на сервере»' + (j.warn ? '. ' + j.warn : '')];
@@ -5986,6 +6054,7 @@ async function tgCfgRefresh() {
   const j = await srvCfgCall('cfgget');
   if (!document.getElementById('rm-tg')) return j;
   if (!j.ok) tgCfgShow(j.old ? 'warn' : 'bad', j.error); else { const t = tgCfgText(j); tgCfgShow(t[0], t[1]); }
+  srvCfgResetShow('rm-cfg-reset', j);
   return j;
 }
 async function tgTokenSave() {
@@ -5995,7 +6064,7 @@ async function tgTokenSave() {
   const j = await srvCfgCall('cfgput', { set: { TG_TOKEN: v } });
   if (inp) inp.value = '';
   if (b) b.disabled = false;
-  if (!j.ok) { tgCfgShow('bad', 'Токен не сохранён: ' + j.error); return; }
+  if (!j.ok) { tgCfgShow('bad', 'Токен не сохранён: ' + j.error); srvCfgResetShow('rm-cfg-reset', j); return; }
   toast('Токен записан на ваш сервер');
   const t = tgCfgText(j); tgCfgShow(t[0], t[1]);
   if (!j.tgChat) await tgChatFind();
@@ -6013,7 +6082,7 @@ async function tgChatFind() {
 async function tgChatPick(id) {
   if (!/^-?\d{1,20}$/.test(String(id))) return;
   const j = await srvCfgCall('cfgput', { set: { TG_CHAT: String(id) } });
-  if (!j.ok) { tgCfgShow('bad', 'Номер чата не сохранён: ' + j.error); return; }
+  if (!j.ok) { tgCfgShow('bad', 'Номер чата не сохранён: ' + j.error); srvCfgResetShow('rm-cfg-reset', j); return; }
   const box = document.getElementById('rm-chats'); if (box) box.innerHTML = '';
   const t = tgCfgText(j); tgCfgShow(t[0], t[1]);
   await tgTestSend();
@@ -6028,7 +6097,7 @@ async function tgTestSend() {
 
 // ═══ сборка 208 (O-74, этап 4): настройки своего сервера из программы — бот Telegram, доступ к API Почты (сервер 198) ═══
 // Поручение пользователя 26.10.2026 14:08 «Сделай все этапы». Прежде токен бота, номер чата, логин и пароль API Почты вписывались в переменные
-// функции crm-bridge в консоли Облака. Сервер 198 хранит их в бакете в файле, зашифрованном своим секретным кодом; переменные функции важнее.
+// функции crm-bridge в консоли Облака. Сервер 198 хранит их в бакете в файле, зашифрованном своим секретным кодом (сервер 199 — ключом от S3_SECRET или CFG_KEY, аудит сборки 208, R2); переменные функции важнее.
 // Сторож (next/guard.js) пропускает cfgget, cfgput, tgfind, tgtest только пока идёт вызов отсюда.
 async function srvCfgCall(action, payload) {
   if (!(SRV.url && SRV.secret)) return { ok: false, error: 'сначала подключите свой сервер («Синхронизация», шаг 1)' };
@@ -6037,9 +6106,33 @@ async function srvCfgCall(action, payload) {
     const j = await srvCall(action, payload);
     if (j && j.ok) return j;
     if (j && j.error === 'unknown_action') return { ok: false, old: true, error: 'сервер старой версии — запись настроек из программы есть с сервера 198 (он обновляется сам в течение 10 минут после выхода); пока — «Вручную, через консоль Облака»' };
-    return { ok: false, error: nextSrvError(j) };
+    return srvCfgErr(j);
   } catch (e) { logErr('srvcfg:' + action, e); return { ok: false, error: String((e && e.message) || e).slice(0, 120) }; }
   finally { NEXT_CFG.on = false; }
+}
+// сборка 209 (аудит сборки 208, R4): кнопка сброса нечитаемого файла настроек — только когда сервер сказал, что файл не читается (сервер 199).
+// Сброс: сервер кладёт прежний файл копией (cfgbak-…), проверяет её чтением и записывает пустые настройки; токен, чат, логин и пароль
+// Почты вписываются заново. Переменные функции сброс не трогает.
+// отказ сервера словами; файл настроек не читается (сервер 199) — сервер его не меняет, пока вы не нажмёте «Сбросить настройки на сервере»
+function srvCfgErr(j) {
+  if (j && j.error === 'cfg_unreadable') return { ok: false, unreadable: true, error: String(j.note || 'файл настроек на сервере не читается').slice(0, 400) };
+  return { ok: false, error: nextSrvError(j) };
+}
+function srvCfgResetShow(boxId, j) {
+  const box = document.getElementById(boxId); if (!box) return;
+  box.innerHTML = j && j.unreadable ? `<div class="info-box warning" role="alert">Записанные на сервере настройки (бот Telegram, доступ к API Почты) не читаются. Сервер их не перезапишет, пока вы не решите: «Сбросить настройки на сервере» — прежний файл сохранится копией в хранилище, а настройки нужно будет записать заново.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button" id="${esc(boxId)}-btn" data-box="${esc(boxId)}" onclick="srvCfgResetAsk(this.dataset.box)">${icon('rotate-ccw', 'icon-sm')}Сбросить настройки на сервере</button></div></div>` : '';
+}
+// подтверждение — в самом листе (системные окна в новой версии не используются, урок 57)
+function srvCfgResetAsk(boxId) {
+  const box = document.getElementById(boxId); if (!box) return;
+  box.innerHTML = `<div class="info-box warning" role="alert"><b>Сбросить настройки на сервере?</b> Прежний файл сохранится копией в хранилище. Токен бота, номер чата, логин и пароль API Почты нужно будет записать заново.<div class="form-actions" style="margin:8px 0 0"><button type="button" class="button primary" id="${esc(boxId)}-go" onclick="srvCfgReset()">${icon('rotate-ccw', 'icon-sm')}Да, сбросить</button><button type="button" class="button" data-box="${esc(boxId)}" onclick="srvCfgResetShow(this.dataset.box, { unreadable: true })">Отмена</button></div></div>`;
+}
+async function srvCfgReset() {
+  const j = await srvCfgCall('cfgput', { set: {}, reset: true });
+  if (!j.ok) { toast('Не сброшено: ' + j.error, true); return; }
+  toast('Настройки на сервере сброшены — запишите их заново');
+  if (document.getElementById('rm-tg')) await tgCfgRefresh();
+  if (document.getElementById('pochta-cfg') && typeof pochtaCfgShow === 'function') await pochtaCfgShow();
 }
 
 // ▼▼▼ sync/calfeed.js
@@ -8401,6 +8494,7 @@ function openPochtaSheet(mode) {
     <div class="form-grid">${fInput('pochta-login', 'Логин API Почты', '', 'autocomplete="off" spellcheck="false"')}${fInput('pochta-pass', 'Пароль API Почты', '', 'type="password" autocomplete="off"')}</div>
     <div class="form-actions"><button type="button" class="button primary" id="pochta-save"${SRV.url ? '' : ' disabled'} onclick="pochtaKeysSave()">${icon('shield-check')}Сохранить на сервере</button></div>
     <p class="small muted" id="pochta-cfg" role="status"></p>
+    <div id="pochta-cfg-reset"></div>
     <details class="help-text" id="pochta-manual"><summary>Вручную, через консоль Облака (сервер старше 198)</summary><p class="small muted">В Яндекс Облаке откройте функцию <b>crm-bridge</b> → вкладка «Редактор» → внизу «Переменные окружения» → добавьте две переменные: <b>POCHTA_LOGIN</b> (логин API) и <b>POCHTA_PASS</b> (пароль API) → «Создать версию». Остальные переменные не меняйте. Если вы уже задавали их раньше, шаг 2 пропускается: переменные функции важнее записанного из программы.</p></details>
     <div class="info-box"><b>Шаг 3. Проверить.</b> После «Сохранить на сервере» программа сама спросит сервер; или нажмите «Проверить» ниже. Если всё в порядке, строка вверху станет зелёной. Затем на экране «Переписка» добавьте отправление с трек-номером и нажмите «Обновить статусы».</div>
     <div class="info-box">Если статусы не приходят: проверьте, что трек-номер введён без пробелов (14 цифр), что заявка на доступ к API одобрена (письмо от Почты), и что логин и пароль API вписаны без ошибок (сохраните их ещё раз). Статус всегда можно посмотреть и вручную на pochta.ru — ссылка есть в карточке отправления, а статус можно отметить одним нажатием.</div>
@@ -8412,7 +8506,8 @@ function openPochtaSheet(mode) {
 async function pochtaCfgShow() {
   const j = await srvCfgCall('cfgget'), el = document.getElementById('pochta-cfg'); if (!el) return;
   const env = (j && j.env) || {};
-  el.textContent = !j.ok ? j.error : j.pochtaLogin && j.pochtaPass ? 'На сервере записаны логин ' + j.pochtaLogin + ' и пароль' + (env.POCHTA_LOGIN || env.POCHTA_PASS ? ' (в переменных функции — они важнее)' : '') + '. Новые значения заменят прежние.' : 'На сервере логин и пароль API Почты не записаны.';
+  if (typeof srvCfgResetShow === 'function') srvCfgResetShow('pochta-cfg-reset', j);
+  el.textContent = !j.ok ? j.error : j.unreadable ? 'Сервер: ' + (j.warn || 'файл настроек не читается') : j.pochtaLogin && j.pochtaPass ? 'На сервере записаны логин ' + j.pochtaLogin + ' и пароль' + (env.POCHTA_LOGIN || env.POCHTA_PASS ? ' (в переменных функции — они важнее)' : '') + '. Новые значения заменят прежние.' : 'На сервере логин и пароль API Почты не записаны.';
 }
 async function pochtaKeysSave() {
   const l = document.getElementById('pochta-login'), p = document.getElementById('pochta-pass');
@@ -8422,7 +8517,7 @@ async function pochtaKeysSave() {
   const j = await srvCfgCall('cfgput', { set: { POCHTA_LOGIN: login, POCHTA_PASS: pass } });
   if (p) p.value = '';
   if (b) b.disabled = false;
-  if (!j.ok) { const el = document.getElementById('pochta-cfg'); if (el) el.textContent = 'Не сохранено: ' + j.error; toast('Не сохранено: ' + j.error, true); return; }
+  if (!j.ok) { const el = document.getElementById('pochta-cfg'); if (el) el.textContent = 'Не сохранено: ' + j.error; if (typeof srvCfgResetShow === 'function') srvCfgResetShow('pochta-cfg-reset', j); toast('Не сохранено: ' + j.error, true); return; }
   if (l) l.value = '';
   toast('Логин и пароль API Почты записаны на ваш сервер');
   await pochtaCheck();
@@ -12582,69 +12677,114 @@ async function ycDeploy(o, log) {
     for (const roleId of roles) { try { await ycOp(await ycApi('POST', YC.folders + '/' + folderId + ':updateAccessBindings', iam, { accessBindingDeltas: [{ action: 'ADD', accessBinding: { roleId, subject: { id: sa.id, type: 'serviceAccount' } } }] }), iam, 'права ' + roleId); done = true; break; } catch (e) { lastErr = e; if (/already exists|уже/i.test(e.message)) { done = true; break; } } }
     if (!done) throw lastErr;
   }
-  // 4. статический ключ для бакета
-  log('Ключ доступа к хранилищу…');
-  const key = await ycApi('POST', YC.keys, iam, { serviceAccountId: sa.id, description: 'CRM Адвоката: сервер' });
-  res.s3KeyId = key.accessKey && key.accessKey.keyId; const s3Secret = key.secret;
-  if (!res.s3KeyId || !s3Secret) throw new Error('ключ доступа не выдан');
-  // 5. бакет
-  log('Бакет ' + o.bucket + '…');
-  const hasBucket = (await ycList(YC.buckets + '?folderId=' + folderId, 'buckets', iam)).some(b => b.name === o.bucket);
-  if (!hasBucket) {
-    try { await ycOp(await ycApi('POST', YC.buckets, iam, { name: o.bucket, folderId, defaultStorageClass: 'STANDARD', maxSize: '5368709120', anonymousAccessFlags: { read: false, list: false, configRead: false } }), iam, 'бакет'); }
-    catch (e) { if (/exist|занят/i.test(e.message)) throw new Error('имя бакета «' + o.bucket + '» уже занято в Облаке — придумайте другое'); throw e; }
-    try { await ycOp(await ycApi('PATCH', YC.buckets + '/' + o.bucket, iam, { updateMask: 'versioning', versioning: 'VERSIONING_ENABLED' }), iam, 'версионирование'); } catch (e) { log('Версионирование бакета не включилось (' + e.message + ') — можно включить позже в консоли'); }
+  // сборка 209 (аудит сборки 208 от 26.10.2026, R1): установка уже есть (функция crm-bridge с версией) — мастер её не пересоздаёт. Прежде
+  // каждый запуск выдавал новый статический ключ, новый SECRET и новую версию с заново составленными переменными: STORE_ID, TG_*, POCHTA_*
+  // пропадали, другие устройства со старым кодом теряли доступ, а файлы базы (их имена — от прежнего кода) переставали быть видны серверу.
+  // Теперь переменные действующей версии читаются и переносятся целиком (и неизвестные мастеру, и секреты Lockbox); новый ключ и бакет не
+  // создаются; прочитать версию не удалось — остановка до любых изменений. Новый ключ при сбое новой установки — удаляется.
+  const fnFind = async name => (await ycList(YC.fns + '?folderId=' + folderId, 'functions', iam)).find(x => x.name === name) || null;
+  const verOf = async (fn, what) => {
+    if (!fn) return null;
+    try { return await ycApi('GET', YC.versions + ':byTag?functionId=' + encodeURIComponent(fn.id) + '&tag=' + encodeURIComponent('$latest'), iam); }
+    catch (e) { if (e.status === 404) return null; throw new Error(what + ': не удалось прочитать действующую версию (' + e.message + ') — мастер остановлен до изменений, чтобы не заменить код сервера, ключи и настройки'); }
+  };
+  log('Проверяю, есть ли уже сервер в каталоге…');
+  const bridge0 = await fnFind('crm-bridge'), prevB = await verOf(bridge0, 'функция crm-bridge');
+  const envB = prevB && prevB.environment && typeof prevB.environment === 'object' ? prevB.environment : null;
+  if (prevB) {
+    const miss = ['SECRET', 'BUCKET', 'S3_KEY_ID', 'S3_SECRET'].filter(k => !(envB && envB[k]));
+    if (miss.length) throw new Error('у функции crm-bridge в каталоге уже есть версия, но без переменных ' + miss.join(', ') + ' — мастер остановлен до изменений; проверьте функцию в консоли Облака («Редактор» → «Переменные окружения») или выберите другой каталог');
   }
-  res.bucket = o.bucket;
-  // 6. код функций из папки раздачи
-  log('Код сервера и коллектора из папки обновлений…');
-  const dist = o.distBase.replace(/\/+$/, '');
-  // v193 (аудит 24.10.2026): запрос к раздаче — с пределом ожидания (правило раздела 3: fetch без signal — дефект); раздача молчит — мастер не висит
-  const getText = async f => { const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 60000);
-    try { const r = await fetch(dist + '/' + f, { cache: 'no-store', signal: ac.signal }); if (!r.ok) throw new Error('нет файла ' + f + ' в папке обновлений (HTTP ' + r.status + ')'); return await r.text(); }
-    catch (e) { if (e && e.name === 'AbortError') throw new Error('папка обновлений не ответила за 60 секунд (файл ' + f + ') — проверьте связь и повторите «Развернуть»'); throw e; }
-    finally { clearTimeout(tm); } };
-  // v179 (А6): состав архива — из YC_PKG, того же описания, что запрос для ИИ-помощника
-  const pkgZip = async p => { const out = []; for (const f of p.files) out.push({ name: f.name, data: await getText(f.src) }); return b64u8(zipStore(out)); };
-  const bridgeZip = await pkgZip(YC_PKG.bridge);
-  const secret = ycRand(28); res.secret = secret;
-  // 7. функция личного сервера
-  const fnOf = async (name, desc) => { let f = (await ycList(YC.fns + '?folderId=' + folderId, 'functions', iam)).find(x => x.name === name); if (!f) f = (await ycOp(await ycApi('POST', YC.fns, iam, { folderId, name, description: desc }), iam, 'функция ' + name)).response; return f; };
-  log('Функция личного сервера…');
-  const bridge = await fnOf('crm-bridge', 'CRM Адвоката: личный сервер'); res.bridgeId = bridge.id;
-  await ycOp(await ycApi('POST', YC.versions, iam, { functionId: bridge.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: { memory: '268435456' }, executionTimeout: '300s', serviceAccountId: sa.id, content: bridgeZip,
-    environment: Object.assign({ SECRET: secret, BUCKET: o.bucket, S3_KEY_ID: res.s3KeyId, S3_SECRET: s3Secret, FOLDER_ID: folderId, UPDATE_URL: dist }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {}) }), iam, 'версия сервера'); // v275: с лицензией — обновления только по ключу
-  await ycOp(await ycApi('POST', YC.fns + '/' + bridge.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к серверу');
-  res.bridgeUrl = 'https://functions.yandexcloud.net/' + bridge.id;
-  // 8. лента календаря (13.10.2026, сервер 187 опубликован): сервер сам отдаёт ленту по ссылке «<адрес функции>?cal=<метка>»; метка —
-  // HMAC от секретного кода (sync/calfeed.js, calFeedToken), кода в ссылке нет. Прежний шлюз с маршрутом /cal/{secret} клал в адрес подписки
-  // сам секретный код сервера (урок 126) — мастер его больше не создаёт; o.withGateway не используется.
-  if (typeof calFeedToken === 'function') { try { res.calUrl = res.bridgeUrl + '?cal=' + await calFeedToken(secret); } catch (e) { logErr('yc:calurl', e); } }
-  // 8а. сборка 207 (O-74, этап 3): таймер напоминаний в Telegram — 08:05 по Москве (05:05 UTC), вызывает crm-bridge (remindTick); прежде его
-  // создавал пользователь вручную в консоли (лист «Напоминания в Telegram», шаг 3). Находится по имени — повтор не задваивает
-  if (o.withRemind) {
-    log('Таймер напоминаний в Telegram (08:05 по Москве)…');
-    const hasR = (await ycList(YC.triggers + '?folderId=' + folderId, 'triggers', iam)).some(t => t.name === 'crm-remind-timer');
-    if (!hasR) await ycOp(await ycApi('POST', YC.triggers, iam, { folderId, name: 'crm-remind-timer', description: 'CRM Адвоката: напоминания в Telegram', rule: { timer: { cronExpression: '5 5 ? * * *', invokeFunctionWithRetry: { functionId: bridge.id, functionTag: '$latest', serviceAccountId: sa.id } } } }), iam, 'таймер напоминаний');
-    res.remindTimer = true;
+  const reuse = !!prevB; res.reused = reuse;
+  let s3Secret, secret, newKey = null;
+  if (reuse) {
+    log('Сервер уже есть — его код, ключ хранилища, бакет и настройки сохраняются, обновляется только программа функции');
+    res.s3KeyId = envB.S3_KEY_ID; s3Secret = envB.S3_SECRET; secret = envB.SECRET; res.secret = secret;
+    if (envB.BUCKET !== o.bucket) log('Бакет — прежний: ' + envB.BUCKET + ' (имя из поля «Имя бакета» не используется)');
+    res.bucket = envB.BUCKET;
   }
-  // 9. коллектор судов
-  if (o.withCollector) {
-    log('Функция коллектора судов…');
-    const colZip = await pkgZip(YC_PKG.collector);
-    const colSecret = ycRand(28); res.collectorSecret = colSecret;
-    const col = await fnOf('collector-sud', 'CRM Адвоката: коллектор судов'); res.collectorId = col.id;
-    await ycOp(await ycApi('POST', YC.versions, iam, { functionId: col.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: { memory: '268435456' }, executionTimeout: '600s', serviceAccountId: sa.id, content: colZip,
+  try {
+    if (!reuse) {
+      // 4. статический ключ для бакета
+      log('Ключ доступа к хранилищу…');
+      const key = await ycApi('POST', YC.keys, iam, { serviceAccountId: sa.id, description: 'CRM Адвоката: сервер' });
+      newKey = key.accessKey && key.accessKey.id;
+      res.s3KeyId = key.accessKey && key.accessKey.keyId; s3Secret = key.secret;
+      if (!res.s3KeyId || !s3Secret) throw new Error('ключ доступа не выдан');
+      // 5. бакет
+      log('Бакет ' + o.bucket + '…');
+      const hasBucket = (await ycList(YC.buckets + '?folderId=' + folderId, 'buckets', iam)).some(b => b.name === o.bucket);
+      if (!hasBucket) {
+        try { await ycOp(await ycApi('POST', YC.buckets, iam, { name: o.bucket, folderId, defaultStorageClass: 'STANDARD', maxSize: '5368709120', anonymousAccessFlags: { read: false, list: false, configRead: false } }), iam, 'бакет'); }
+        catch (e) { if (/exist|занят/i.test(e.message)) throw new Error('имя бакета «' + o.bucket + '» уже занято в Облаке — придумайте другое'); throw e; }
+        try { await ycOp(await ycApi('PATCH', YC.buckets + '/' + o.bucket, iam, { updateMask: 'versioning', versioning: 'VERSIONING_ENABLED' }), iam, 'версионирование'); } catch (e) { log('Версионирование бакета не включилось (' + e.message + ') — можно включить позже в консоли'); }
+      }
+      res.bucket = o.bucket;
+      secret = ycRand(28); res.secret = secret;
+    }
+    // 6. код функций из папки раздачи
+    log('Код сервера и коллектора из папки обновлений…');
+    const dist = o.distBase.replace(/\/+$/, '');
+    // v193 (аудит 24.10.2026): запрос к раздаче — с пределом ожидания (правило раздела 3: fetch без signal — дефект); раздача молчит — мастер не висит
+    const getText = async f => { const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 60000);
+      try { const r = await fetch(dist + '/' + f, { cache: 'no-store', signal: ac.signal }); if (!r.ok) throw new Error('нет файла ' + f + ' в папке обновлений (HTTP ' + r.status + ')'); return await r.text(); }
+      catch (e) { if (e && e.name === 'AbortError') throw new Error('папка обновлений не ответила за 60 секунд (файл ' + f + ') — проверьте связь и повторите «Развернуть»'); throw e; }
+      finally { clearTimeout(tm); } };
+    // v179 (А6): состав архива — из YC_PKG, того же описания, что запрос для ИИ-помощника
+    const pkgZip = async p => { const out = []; for (const f of p.files) out.push({ name: f.name, data: await getText(f.src) }); return b64u8(zipStore(out)); };
+    const bridgeZip = await pkgZip(YC_PKG.bridge);
+    // 7. функция личного сервера
+    const fnOf = async (name, desc) => { let f = await fnFind(name); if (!f) f = (await ycOp(await ycApi('POST', YC.fns, iam, { folderId, name, description: desc }), iam, 'функция ' + name)).response; return f; };
+    log('Функция личного сервера…');
+    const bridge = bridge0 || await fnOf('crm-bridge', 'CRM Адвоката: личный сервер'); res.bridgeId = bridge.id;
+    // повтор: переменные действующей версии — целиком; недостающие мастеру (FOLDER_ID, UPDATE_URL) дописываются; ключ лицензии — по выбору
+    const envNew = reuse ? Object.assign({ FOLDER_ID: folderId, UPDATE_URL: dist }, envB, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {})
+      : Object.assign({ SECRET: secret, BUCKET: o.bucket, S3_KEY_ID: res.s3KeyId, S3_SECRET: s3Secret, FOLDER_ID: folderId, UPDATE_URL: dist }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {}); // v275: с лицензией — обновления только по ключу
+    await ycOp(await ycApi('POST', YC.versions, iam, Object.assign({ functionId: bridge.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: (reuse && prevB.resources) || { memory: '268435456' }, executionTimeout: (reuse && prevB.executionTimeout) || '300s', serviceAccountId: (reuse && prevB.serviceAccountId) || sa.id, content: bridgeZip,
+      environment: envNew }, reuse && Array.isArray(prevB.secrets) && prevB.secrets.length ? { secrets: prevB.secrets } : {})), iam, 'версия сервера');
+    newKey = null;
+    await ycOp(await ycApi('POST', YC.fns + '/' + bridge.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к серверу');
+    res.bridgeUrl = 'https://functions.yandexcloud.net/' + bridge.id;
+    // 8. лента календаря (13.10.2026, сервер 187 опубликован): сервер сам отдаёт ленту по ссылке «<адрес функции>?cal=<метка>»; метка —
+    // HMAC от секретного кода (sync/calfeed.js, calFeedToken), кода в ссылке нет. Прежний шлюз с маршрутом /cal/{secret} клал в адрес подписки
+    // сам секретный код сервера (урок 126) — мастер его больше не создаёт; o.withGateway не используется.
+    if (typeof calFeedToken === 'function') { try { res.calUrl = res.bridgeUrl + '?cal=' + await calFeedToken(secret); } catch (e) { logErr('yc:calurl', e); } }
+    // 8а. сборка 207 (O-74, этап 3): таймер напоминаний в Telegram — 08:05 по Москве (05:05 UTC), вызывает crm-bridge (remindTick); прежде его
+    // создавал пользователь вручную в консоли (лист «Напоминания в Telegram», шаг 3). Находится по имени — повтор не задваивает
+    if (o.withRemind) {
+      log('Таймер напоминаний в Telegram (08:05 по Москве)…');
+      const hasR = (await ycList(YC.triggers + '?folderId=' + folderId, 'triggers', iam)).some(t => t.name === 'crm-remind-timer');
+      if (!hasR) await ycOp(await ycApi('POST', YC.triggers, iam, { folderId, name: 'crm-remind-timer', description: 'CRM Адвоката: напоминания в Telegram', rule: { timer: { cronExpression: '5 5 ? * * *', invokeFunctionWithRetry: { functionId: bridge.id, functionTag: '$latest', serviceAccountId: sa.id } } } }), iam, 'таймер напоминаний');
+      res.remindTimer = true;
+    }
+    // 9. коллектор судов
+    if (o.withCollector) {
+      log('Функция коллектора судов…');
+      const col0 = await fnFind('collector-sud'), prevC = await verOf(col0, 'функция collector-sud');
+      const envC = prevC && prevC.environment && typeof prevC.environment === 'object' ? prevC.environment : null;
+      const colZip = await pkgZip(YC_PKG.collector);
+      // повтор: прежний код коллектора (его знает программа на других устройствах) и прежние переменные; адрес и код сервера — нынешние
+      const colSecret = (envC && envC.SECRET) || ycRand(28); res.collectorSecret = colSecret;
+      if (envC && envC.SECRET) log('Коллектор уже есть — его код и переменные сохраняются');
+      const col = col0 || await fnOf('collector-sud', 'CRM Адвоката: коллектор судов'); res.collectorId = col.id;
       // v189 (аудит сборки 188, R6): NODE_TLS_REJECT_UNAUTHORIZED больше не задаётся — коллектор 3.27 проверяет сертификаты сервера,
       // хранилища и обновлений, послабления TLS — только у сайтов судов *.sudrf.ru внутри него самого
-      environment: Object.assign({ SECRET: colSecret, BRIDGE_URL: res.bridgeUrl, BRIDGE_SECRET: secret, BUCKET: o.bucket, PARALLEL: '3', UPDATE_URL: dist }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {}) }), iam, 'версия коллектора');
-    await ycOp(await ycApi('POST', YC.fns + '/' + col.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к коллектору');
-    res.collectorUrl = 'https://functions.yandexcloud.net/' + col.id;
-    if (o.withTimer) {
-      log('Таймер коллектора (07:30 и 15:30 по Москве)…');
-      const has = (await ycList(YC.triggers + '?folderId=' + folderId, 'triggers', iam)).some(t => t.name === 'collector-timer');
-      if (!has) await ycOp(await ycApi('POST', YC.triggers, iam, { folderId, name: 'collector-timer', description: 'CRM Адвоката: сбор с сайтов судов', rule: { timer: { cronExpression: '30 4,12 ? * * *', invokeFunctionWithRetry: { functionId: col.id, functionTag: '$latest', serviceAccountId: sa.id } } } }), iam, 'таймер');
+      const envColNew = Object.assign({ BUCKET: res.bucket, PARALLEL: '3', UPDATE_URL: dist }, envC || {}, { SECRET: colSecret, BRIDGE_URL: res.bridgeUrl, BRIDGE_SECRET: secret }, o.licKey ? { UPDATE_URL: o.licServer, LICENSE_KEY: o.licKey } : {});
+      delete envColNew.NODE_TLS_REJECT_UNAUTHORIZED;
+      await ycOp(await ycApi('POST', YC.versions, iam, Object.assign({ functionId: col.id, runtime: 'nodejs22', entrypoint: 'index.handler', resources: (prevC && prevC.resources) || { memory: '268435456' }, executionTimeout: (prevC && prevC.executionTimeout) || '600s', serviceAccountId: (prevC && prevC.serviceAccountId) || sa.id, content: colZip,
+        environment: envColNew }, prevC && Array.isArray(prevC.secrets) && prevC.secrets.length ? { secrets: prevC.secrets } : {})), iam, 'версия коллектора');
+      await ycOp(await ycApi('POST', YC.fns + '/' + col.id + ':setAccessBindings', iam, { accessBindings: [{ roleId: 'serverless.functions.invoker', subject: { id: 'allUsers', type: 'system' } }] }), iam, 'публичный доступ к коллектору');
+      res.collectorUrl = 'https://functions.yandexcloud.net/' + col.id;
+      if (o.withTimer) {
+        log('Таймер коллектора (07:30 и 15:30 по Москве)…');
+        const has = (await ycList(YC.triggers + '?folderId=' + folderId, 'triggers', iam)).some(t => t.name === 'collector-timer');
+        if (!has) await ycOp(await ycApi('POST', YC.triggers, iam, { folderId, name: 'collector-timer', description: 'CRM Адвоката: сбор с сайтов судов', rule: { timer: { cronExpression: '30 4,12 ? * * *', invokeFunctionWithRetry: { functionId: col.id, functionTag: '$latest', serviceAccountId: sa.id } } } }), iam, 'таймер');
+      }
     }
+  } catch (e) {
+    // ключ хранилища, выданный этим запуском, ни в одну версию не попал — удаляется, чтобы повторы не копили рабочие ключи
+    if (newKey) { try { await ycApi('DELETE', YC.keys + '/' + encodeURIComponent(newKey), iam); log('Выданный этим запуском ключ хранилища удалён'); } catch (e2) { logErr('yc:keydel', e2); log('Выданный этим запуском ключ хранилища удалить не удалось — его можно удалить в консоли (сервисный аккаунт crm-server → ключи)'); } }
+    throw e;
   }
   log('Готово.');
   return res;
@@ -12684,7 +12824,7 @@ function openYcSetupSheet(sub) {
         <li>Выберите «новый каталог «crm»», оставьте предложенное имя бакета и все галочки → «Развернуть». Мастер работает 3–7 минут и пишет, что делает. В конце — «Сервер работает» и адреса.</li>
         <li>Вернитесь сюда: «Синхронизация» → шаг 1 — впишите адрес сервера и секретный код (мастер показывает их в конце; код — кнопка «Скопировать секретный код») и пароль шифрования → «Сохранить и проверить связь». Должно ответить: «Связь есть: сервер версии …».</li>
         <li>Шаг 4 «Отправить изменения на сервер» — база этого устройства уйдёт на сервер зашифрованной. Затем на компьютере «Синхронизация» → «Подключить телефон» — по QR-коду телефон подключится сам, останется ввести пароль шифрования.</li></ol>
-      <p class="small muted">Если мастер остановился с ошибкой: исправьте причину (чаще всего — платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова — созданное найдётся, ничего не задвоится. Не получилось — «Журнал ошибок» → «Скопировать» и пришлите текст.</p>
+      <p class="small muted">Если мастер остановился с ошибкой: исправьте причину (чаще всего — платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова — созданное найдётся, ничего не задвоится; если сервер уже работал, его код, ключ хранилища и настройки сохранятся. Не получилось — «Журнал ошибок» → «Скопировать» и пришлите текст.</p>
       <div class="form-actions"><button type="button" class="button primary" id="cloud-sync" onclick="openSyncSheet()">${icon('refresh-cw')}Синхронизация — ввести адрес и код</button></div>
       ${ycPathBHtml(true)}`, sub);
     return;
@@ -12886,7 +13026,7 @@ async function ycRunWizard() {
     YC_SESS.res = res; YC_SESS.iam = null; YC_SESS.tok = null; const ta = document.getElementById('cloud-oauth'); if (ta) ta.value = '';
     const el = logEl(); if (el) el.innerHTML = ycStepsHtml();
     const out = document.getElementById('cloud-result');
-    if (out) out.innerHTML = `<div class="info-box${ok ? '' : ' warning'}" id="cloud-done">${ok ? 'Сервер работает.' : 'Сервер создан, но пока не отвечает — через минуту откройте «Синхронизация» и нажмите «Сохранить и проверить связь».'}${ex ? (ex.ok ? ' <b id="cloud-ex-on">Обмен включён</b>: база этого устройства на сервере, дальше программа обменивается сама.' : ' <span id="cloud-ex-off">Обмен не включён: ' + esc(ex.error || '') + ' — «Синхронизация» → «Включить обмен».</span>') : ''}${res.remindTimer ? '<br>Таймер напоминаний в Telegram создан (08:05 по Москве).' : ''}
+    if (out) out.innerHTML = `<div class="info-box${ok ? '' : ' warning'}" id="cloud-done">${ok ? (res.reused ? 'Сервер работает. Он уже был — его код, ключ хранилища и настройки сохранены, обновлена программа функции.' : 'Сервер работает.') : 'Сервер создан, но пока не отвечает — через минуту откройте «Синхронизация» и нажмите «Сохранить и проверить связь».'}${ex ? (ex.ok ? ' <b id="cloud-ex-on">Обмен включён</b>: база этого устройства на сервере, дальше программа обменивается сама.' : ' <span id="cloud-ex-off">Обмен не включён: ' + esc(ex.error || '') + ' — «Синхронизация» → «Включить обмен».</span>') : ''}${res.remindTimer ? '<br>Таймер напоминаний в Telegram создан (08:05 по Москве).' : ''}
       <div class="small" style="margin-top:6px;word-break:break-all">Адрес сервера: ${esc(res.bridgeUrl)}${res.calUrl ? '<br>Лента календаря: ' + esc(res.calUrl) : ''}${res.collectorUrl ? '<br>Коллектор: ' + esc(res.collectorUrl) : ''}</div>${res.calUrl ? '<div class="small" style="margin-top:6px">Адрес ленты календаря — как ключ: кто его знает, видит ваши события. Не пересылайте его и не показывайте на снимках экрана. Публикация ленты включается в «Настройки → Лента календаря».</div>' : ''}</div>
       <div class="section-label">Что дальше</div><ol class="steps-list">
         ${ex && ex.ok ? '' : `<li>«Синхронизация» → шаг 1: адрес и код уже вписаны — ${pass ? 'пароль шифрования тоже' : 'придумайте пароль шифрования (не короче 12 знаков), впишите его'} и нажмите «Сохранить и проверить связь».</li>
@@ -12899,7 +13039,7 @@ async function ycRunWizard() {
     toast(ok ? 'Сервер развёрнут и подключён' : 'Сервер развёрнут');
   } catch (e) {
     logErr('yc:deploy', e); YC_SESS.fail = String((e && e.message) || e); const el = logEl(); if (el) el.innerHTML = ycStepsHtml();
-    fErr('Развёртывание остановилось: ' + YC_SESS.fail + '. Исправьте причину и нажмите «Развернуть» снова — уже созданное найдётся, ничего не задвоится.');
+    fErr('Развёртывание остановилось: ' + YC_SESS.fail + '. Исправьте причину и нажмите «Развернуть» снова — уже созданное найдётся, ничего не задвоится; код и настройки работающего сервера сохранятся.');
   } finally { if (btn) btn.disabled = false; }
 }
 // Записать адреса и коды в новую версию и проверить связь (пинг — без пароля шифрования; базу программа не трогает)
@@ -15556,8 +15696,8 @@ async function nextRulesReviewFind() {
         if (orphan.length) out.push({ c: c0, act, base: '', missing: [], changed: [], marked: [], orphan });
         continue;
       }
-      const next = act === 'decision' ? 'appeal' : act === 'appeal' ? 'cass' : '';
-      const all = nextActRules(c0, act), rules = all.filter(n => !(next && nxHasBase(inp, next) && /:(writ|costs)$/.test(n.autoKey)));
+      // сборка 209 (аудит сборки 208, R5–R7): какие сроки заменяет акт следующей инстанции — та же функция, что при сохранении (nxSupersedeOf)
+      const all = nextActRules(c0, act), rules = all.filter(n => !(typeof nxSupersedeOf === 'function' ? nxSupersedeOf(c0, inp, n.autoKey) : false));
       const orphan = live.filter(dl => !all.some(n => n.autoKey === dl.autoKey)).map(dl => ({ title: dl.title, date: dl.date, why: 'rule' }));
       const missing = rules.filter(n => !dls.some(dl => dl && dl.autoKey === n.autoKey));
       // 14.10.2026 (производственный календарь, next/prodcal.js): при тех же правилах дата другая только из-за календаря — срок предлагается
@@ -15579,7 +15719,8 @@ async function nextRulesReviewFind() {
 // версия проверки прежних записей: поднимается, когда обзор начинает находить в них новое (урок 152: сроки без правила или основания), —
 // блок, скрытый «до следующего обновления» в прежней сборке, показывается снова, если ему есть что показать
 // 3 — сборка 204: ход обжалования (лист и расходы при апелляции, возврате жалобы, кассации)
-const NX_REVIEW_VER = 3;
+// 4 — сборка 209 (аудит сборки 208, R5–R7): возврат жалобы с датой, снятие «заменён» без основания, лист после кассации
+const NX_REVIEW_VER = 4;
 // отметка «Скрыть до следующего обновления»: версия правил, версия проверки и отпечаток календаря — новый календарь показывает блок снова
 function rulesReviewStamp() { return NEXT_RULES_VER + '|r' + NX_REVIEW_VER + (typeof prodcalStamp === 'function' ? '|' + prodcalStamp() : ''); }
 // ── лист срока: паспорт и действия ──
@@ -24011,7 +24152,7 @@ HFIG.procunify = { h: 176, title: 'Проверка перехода рассм�
   s += hf.btn(20, 142, 130, 22, 'Скопировать итог', true) + hf.btn(158, 142, 120, 22, 'Проверить снова', false);
   return s; })() };
 // 12. Сборка 204 (O-73): срок на взыскание судебных расходов и лист по ходу обжалования (next/acts.js, nxAppealFlow); слова — как в программе
-HFIG.appealflow = { h: 236, title: 'Судебные расходы и исполнительный лист по ходу обжалования', caption: 'Срок расходов — 3 месяца от последнего акта, которым закончилось рассмотрение. Дело обжалуется — срок от решения закрывается, появится от апелляционного определения; затем — от кассационного, от определения Верховного Суда. Жалоба возвращена или оставлена без рассмотрения — срок от решения снова в работе. Направлено на новое рассмотрение — сроки появятся от нового итогового акта.', svg: (() => {
+HFIG.appealflow = { h: 236, title: 'Судебные расходы и исполнительный лист по ходу обжалования', caption: 'Срок расходов — 3 месяца от последнего акта, которым закончилось рассмотрение. Дело обжалуется — срок от решения закрывается, появится от апелляционного определения; затем — от кассационного, от определения Верховного Суда. Жалоба возвращена или оставлена без рассмотрения — срок от решения снова в работе, даже если записана дата определения о возврате. Лист по апелляционному акту кассация «Оставлено без изменения» не закрывает. Направлено на новое рассмотрение — сроки появятся от нового итогового акта.', svg: (() => {
   let s = hf.defs('appealflow');
   const col = [['Решение', 'первой инстанции', '3 мес. со дня вступления', 'в силу; закрыт, если', 'дело обжалуется'], ['Апелляционное', 'определение', '3 мес. от определения;', 'подана кассационная', 'жалоба — пометка'], ['Кассационное', 'определение', '3 мес. от определения;', 'жалоба в Верховный Суд', '— пометка'], ['Определение', 'Верховного Суда', '3 мес. от определения,', 'в том числе об отказе', 'в передаче жалобы']];
   col.forEach((c, i) => {
@@ -24128,7 +24269,7 @@ ${typeof helpFig === 'function' ? helpFig('procunify') : ''}
 <p><b>Документы</b> (кнопка в карточке дела; у доверителя и обращения — «Документ по шаблону») — претензия, ходатайство, заявление об ознакомлении с материалами дела, апелляционная жалоба, заявление о взыскании судебных расходов, сопроводительное письмо, акт об оказании юридической помощи, соглашение и доверенность, а также свои шаблоны. Сведения подставляются из дела, доверителя, участников, расходов, учёта времени и реквизитов адвоката («Настройки» → «Реквизиты адвоката»); ФИО и процессуальное положение склоняются. В своих шаблонах есть фильтры ({{СуммаИска:прописью}}, {{ДатаРешения:словами}}, {{Дата:плюс_дней 10}}, {{Доверитель:кратко}}), условия ({{#если Оппонент}} … {{#иначе}} … {{/если}}) и повторы по спискам дела ({{#каждый расходы}} {{№}}. {{категория}} — {{сумма}} {{/каждый}}; списки: расходы, платежи, заседания, работы); «Проверить шаблон» в форме находит незакрытые блоки и незнакомые поля, прежние версии своего шаблона хранятся в его форме («Вернуть»). Чего нет в данных — на этом месте «[УКАЗАТЬ: …]» с жёлтой отметкой, вверху листа — перечень того, что заполнить до подписания. Нормы подставляются по виду дела (ГПК, АПК, КАС) — проверьте их по действующей редакции. Текст правится прямо в листе; дальше — «Скачать .docx» (Word и редакторы на телефоне), «Печать или PDF», «В документы дела» и «Отправление с этим документом» (запись в «Переписке» с адресатом и приложенным файлом). Свои шаблоны — «Настройки» → «Шаблоны документов»: готовый шаблон можно взять копией и поправить; свои шаблоны общие с прежней программой.</p>
 <p><b>Стадия</b> меняется нажатием на плашку в карточке. Она поднимается и сама, когда в деле появляются данные более высокой инстанции: номер или ссылка апелляции, кассации, Верховного Суда, заседание в апелляционном или кассационном суде. Если стадию вернули вручную, по тем же данным она не поднимается. Дела, где данные выше стадии, перечислены на «Сегодня» с кнопкой «Поднять».</p>
 <p><b>Сроки</b> — «Задачи и сроки» и карточка дела. Исполненный срок показывает, чем он закрыт: «выполнен» — вашей отметкой; «истёк до записи с сайта», «исполнен подачей жалобы», «закрыт: дело обжалуется», «заменён сроком следующей инстанции», «снят: сторона жалобы изменена», «снят: жалоба возвращена» — программой (паспорт срока называет причину; если действие ещё нужно — «Вернуть в работу»). «Справочники» → «Проверка данных» перечисляет и то, что накопили прежние выпуски: сроки, ждущие вашего решения, сроки обеих сторон по одной жалобе, «Проведено» без результата по данным суда, повторяющиеся этапы счёта.Срок, посчитанный программой по судебному акту, справочный: проверьте основание и подтвердите. Когда появляется дата мотивированного акта, срок пересчитывается от неё. Если дату акта из дела убрали, у зависимых сроков появляется отметка «основание удалено»; если по новым данным дела срок больше не возникает (например, изготовлено мотивированное решение — заявление о его составлении уже не нужно), отметка «правило не применяется» — такой срок программа не исполняет и не удаляет сама: снимите его с контроля или удалите. Обе проверки идут при каждом сохранении дела; сроки, оставшиеся в таком состоянии от прежних версий, «Сегодня» перечисляет в блоке «Правила сроков обновлены» — «Пересчитать» ставит им отметку. Дата акта записана поздно (с сайта суда или вручную), и срок уже прошёл — он создаётся исполненным с пометкой «срок истёк … до записи даты акта» и просроченным не показывается; если действие ещё нужно, снимите отметку в карточке срока. Подана наша жалоба (поле «Жалоба подана» с «Кто обжалует» — наша или обе стороны, или событие с сайта суда) — срок на её подачу исполнен; подана апелляционная жалоба любой стороны — сроки «если не обжалуют» (исполнительный лист, судебные расходы от решения) закрываются, как при появлении апелляционного акта.</p>
-<p><b>Лист и судебные расходы по ходу обжалования.</b> Срок на взыскание судебных расходов — 3 месяца со дня вступления в силу последнего судебного акта, которым закончилось рассмотрение дела (ст. 103.1 ГПК, ч. 2 ст. 112 АПК, ст. 114.1 КАС). Поэтому срок от решения первой инстанции и «Исполнительный лист — не ранее» закрываются, как только дело обжалуется: подана апелляционная жалоба, в форме дела есть номер или ссылка дела в апелляции либо стадия дела «Апелляция» и выше (её поднимают и заседание в апелляционном суде, и данные сайта суда). Закрываются и подтверждённые сроки — об этом отдельная строка при сохранении. Появилось апелляционное определение — сроки от решения заменяются сроками от него, кассационное — сроками от кассационного, определение Верховного Суда (в том числе об отказе в передаче жалобы) — срок расходов считается от него. Если жалоба возвращена или оставлена без рассмотрения, решение остаётся в силе с первоначальной даты: закрытый программой срок возвращается в работу с пометкой (а если он уже прошёл — «проверьте»). Подана кассационная жалоба или жалоба в Верховный Суд — срок расходов от прежнего акта не закрывается (жалобу могут вернуть), а получает пометку, что после рассмотрения по существу он будет считаться от нового определения. Результат «Отменено, направлено на новое рассмотрение» (в форме дела или с сайта суда) — от такого акта лист и расходы не ставятся: рассмотрение не закончено, сроки появятся от нового итогового акта. Дела, где сроки по этим правилам нужно закрыть, вернуть или пометить, «Сегодня» показывает в блоке «Правила сроков обновлены» — кнопка «Пересчитать».</p>
+<p><b>Лист и судебные расходы по ходу обжалования.</b> Срок на взыскание судебных расходов — 3 месяца со дня вступления в силу последнего судебного акта, которым закончилось рассмотрение дела (ст. 103.1 ГПК, ч. 2 ст. 112 АПК, ст. 114.1 КАС). Поэтому срок от решения первой инстанции и «Исполнительный лист — не ранее» закрываются, как только дело обжалуется: подана апелляционная жалоба, в форме дела есть номер или ссылка дела в апелляции либо стадия дела «Апелляция» и выше (её поднимают и заседание в апелляционном суде, и данные сайта суда). Закрываются и подтверждённые сроки — об этом отдельная строка при сохранении. Появилось апелляционное определение — сроки от решения заменяются сроками от него, кассационное — сроками от кассационного, определение Верховного Суда (в том числе об отказе в передаче жалобы) — срок расходов считается от него. Если жалоба возвращена или оставлена без рассмотрения, решение остаётся в силе с первоначальной даты: закрытый программой срок возвращается в работу с пометкой (а если он уже прошёл — «проверьте»). Это так и тогда, когда в поле даты апелляционного (кассационного) определения записана дата определения о возврате: при результате «Жалоба возвращена» или «Оставлена без рассмотрения» сроки от этой даты не ставятся, а уже поставленные помечаются «правило больше не применяется» (сборка 209). Если акт следующей инстанции внесён по ошибке и потом убран (или исправлен результат), сроки, закрытые программой как «заменённые», возвращаются в работу; срок, который вы отметили выполненным сами, так и остаётся выполненным. Заявление о выдаче исполнительного листа по апелляционному акту кассация «Оставлено без изменения» не закрывает — оно остаётся на контроле, пока вы его не отметите; при «Отменено частично», «Отменено полностью» или «Изменено» у него появляется пометка «проверьте, нужен ли лист», а закрывается он, только если кассация отменила акт и направила дело на новое рассмотрение. Слово «заменён» в заметке закрытого срока пишется, только когда в деле есть срок, который его заменил. Подана кассационная жалоба или жалоба в Верховный Суд — срок расходов от прежнего акта не закрывается (жалобу могут вернуть), а получает пометку, что после рассмотрения по существу он будет считаться от нового определения. Результат «Отменено, направлено на новое рассмотрение» (в форме дела или с сайта суда) — от такого акта лист и расходы не ставятся: рассмотрение не закончено, сроки появятся от нового итогового акта. Дела, где сроки по этим правилам нужно закрыть, вернуть или пометить, «Сегодня» показывает в блоке «Правила сроков обновлены» — кнопка «Пересчитать».</p>
 ${typeof helpFig === 'function' ? helpFig('appealflow') : ''}
 <p><b>Полная форма дела</b> — «Изменить» → «Все поля»: вкладки по виду дела (ГПК, АПК, КАС, УПК, КоАП), инстанции с адресами судов (адрес подставляется из карточки суда в справочнике, вписанный вручную держится), соглашение.</p>
 <p><b>Папка документов</b> — путь к папке дела на компьютере и ссылка на папку в облаке. Задаётся в форме дела (группа «Папка документов», видна сразу) или кнопкой «Папка документов» в карточке дела — она есть всегда. Папку называете и раскладываете как удобно. В приложении для компьютера: «Выбрать папку» открывает окно Windows, в карточке — список файлов папки (файл открывается программой, назначенной в Windows), «Открыть папку» — проводник, «Создать папку» — если её ещё нет. В браузере путь копируется — вставьте его в адресную строку проводника.</p>` },
@@ -24202,7 +24343,7 @@ ${typeof helpFig === 'function' ? helpFig('assistant') : ''}
 <ol start="6"><li><b>Ответ помощника — в мастер.</b> В конце помощник покажет ключ — текст в фигурных скобках { … } с полями id, service_account_id и private_key. Выделите <b>весь его последний ответ</b>, скопируйте и вставьте в поле мастера «Ответ ИИ-помощника целиком, содержимое файла ключа, IAM-токен или строка y0_» — программа сама найдёт ключ среди пояснений. Если скопирован только закрытый ключ без идентификаторов, мастер покажет два поля для id и service_account_id — возьмите их из ответа помощника. Нажмите <b>«Подключиться к Облаку»</b>: в шаге 2 появятся ваше облако и каталог. Закрытый ключ — секрет: никому его не пересылайте, включая автора; после развёртывания он удаляется (п. 9).</li></ol>
 ${typeof helpFig === 'function' ? helpFig('key') : ''}
 <ol start="7"><li><b>Способ 2 (вместо помощника) — тот же ключ кнопками консоли:</b> в каталоге слева сервис «Identity and Access Management» → «Сервисные аккаунты» → «Создать» → имя <b>crm-admin</b>; вверху выберите само облако (не каталог) → «Права доступа» → «Назначить роли» → crm-admin → роль <b>admin</b>; снова crm-admin → «Создать новый ключ» → «Создать авторизованный ключ» (не API-ключ и не статический) → скачайте файл, откройте его в «Блокноте», скопируйте всё (Ctrl+A, Ctrl+C) и вставьте в поле мастера. Способы 2–4 в мастере свёрнуты под «Другие способы получить ключ»; способы 3 и 4 (IAM-токен из yc CLI, прежняя строка y0_) — для тех, кто ими уже пользуется.</li>
-<li><b>Шаги 2 и 3 → «Развернуть».</b> Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки («Коллектор судов», «Сбор с сайтов судов по расписанию», «Напоминания в Telegram по расписанию», «После развёртывания удалить ключ доступа к Облаку»); впишите дважды <b>пароль шифрования базы</b> (не короче 12 знаков, запишите на бумаге; сервер уже работал — тот же пароль) → <b>«Развернуть»</b>. Мастер создаёт сервисный аккаунт crm-server, бакет, функции crm-bridge и collector-sud, таймер сбора с сайтов судов и таймер напоминаний (08:05 по Москве); ход виден по шагам, обычно 3–7 минут. Если он остановился с ошибкой — исправьте причину (чаще всего платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова: созданное найдётся, ничего не задвоится.</li>
+<li><b>Шаги 2 и 3 → «Развернуть».</b> Шаг 2 — оставьте «новый каталог «crm»». Шаг 3 — предложенное имя бакета и все галочки («Коллектор судов», «Сбор с сайтов судов по расписанию», «Напоминания в Telegram по расписанию», «После развёртывания удалить ключ доступа к Облаку»); впишите дважды <b>пароль шифрования базы</b> (не короче 12 знаков, запишите на бумаге; сервер уже работал — тот же пароль) → <b>«Развернуть»</b>. Мастер создаёт сервисный аккаунт crm-server, бакет, функции crm-bridge и collector-sud, таймер сбора с сайтов судов и таймер напоминаний (08:05 по Москве); ход виден по шагам, обычно 3–7 минут. Если он остановился с ошибкой — исправьте причину (чаще всего платёжный аккаунт ещё не активен или имя бакета занято) и нажмите «Развернуть» снова: созданное найдётся, ничего не задвоится. Мастер можно запускать и на уже работающем сервере (например, чтобы добавить таймер напоминаний или коллектор): со сборки 209 он сохраняет код сервера, ключ хранилища, бакет и все переменные функции, в том числе записанные настройки Telegram и Почты, и обновляет только программу функции; если прочитать действующую версию функции не удалось, мастер останавливается, ничего не меняя.</li>
 <li><b>Итог.</b> Мастер пишет «Сервер работает», показывает адрес сервера и коллектора, <b>сам вписывает адрес и секретный код в «Синхронизацию»</b> и, если пароль вписан, <b>сам включает обмен</b> — «Обмен включён»: база этого устройства уже на сервере, автообмен работает. Пароль не вписывали — «Синхронизация» → шаг 1 (впишите пароль, «Сохранить и проверить связь») → «Включить обмен». <b>Ключ доступа к Облаку мастер удаляет сам</b> (если вставляли файл ключа и галочка стояла) и пишет об этом; сервисный аккаунт crm-admin остаётся без ключей — его можно удалить: консоль → «Сервисные аккаунты» → crm-admin → «Удалить». Если удалить ключ не вышло или вставлялся IAM-токен — удалите ключ вручную там же. Если ключ делал ИИ-помощник — удалите и его чат: значок истории в правом верхнем углу окна помощника → удалить строку этого чата. Файл ключа, если скачивали, удалите с компьютера.</li>
 <li><b>Телефон и планшет</b> подключаются по QR-коду — кнопка «Подключить телефон» в итоге мастера или «Синхронизация» → «Подключить телефон или планшет — QR-код»; см. ниже.</li></ol>
 <h3>Путь Б. ИИ-помощник создаёт весь сервер — без компьютера (пробно)</h3>
@@ -24272,7 +24413,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p>«Переписка» — входящие и исходящие письма по делам: канал (почта, курьер, электронно), дата, срок ответа, отметка «нужно действие». У отправления с трек-номером Почты России программа сама узнаёт статус: принято, в пути, прибыло в место вручения, вручено, возврат.</p>
 <h3>Как подключить отслеживание (один раз)</h3>
 <ol><li>Доступ к API отслеживания: откройте <b>tracking.pochta.ru</b> → войдите или зарегистрируйтесь (обычная учётная запись Почты России) → раздел «Доступ к API» → «Получить доступ» → заполните заявку. Почта пришлёт на электронную почту <b>логин и пароль API</b> — это отдельная пара, не пароль от личного кабинета. Обычно в течение рабочего дня.</li>
-<li>Запишите их на свой сервер: Настройки → «Почта России — отслеживание» → шаг 2 — впишите логин и пароль API → <b>«Сохранить на сервере»</b>. Программа передаёт их только на ваш сервер (сервер 198 и новее) и у себя не хранит; сервер держит их в файле, зашифрованном своим секретным кодом. Сервер старше 198 — «Вручную, через консоль Облака» в том же листе: функция <b>crm-bridge</b> → «Редактор» → «Переменные окружения» → <b>POCHTA_LOGIN</b> и <b>POCHTA_PASS</b> → «Создать версию» (переменные функции, если заданы, важнее записанного из программы).</li>
+<li>Запишите их на свой сервер: Настройки → «Почта России — отслеживание» → шаг 2 — впишите логин и пароль API → <b>«Сохранить на сервере»</b>. Программа передаёт их только на ваш сервер (сервер 198 и новее) и у себя не хранит; сервер держит их в файле, зашифрованном ключом, которого нет в самом хранилище (с сервера 199 — от ключа хранилища функции; смена секретного кода сервера записанное не теряет). Сервер старше 198 — «Вручную, через консоль Облака» в том же листе: функция <b>crm-bridge</b> → «Редактор» → «Переменные окружения» → <b>POCHTA_LOGIN</b> и <b>POCHTA_PASS</b> → «Создать версию» (переменные функции, если заданы, важнее записанного из программы).</li>
 <li>После «Сохранить на сервере» программа сама спрашивает сервер (или нажмите «Проверить»): он должен подтвердить, что видит логин и пароль — строка вверху станет зелёной.</li>
 <li>Добавьте отправление: «Переписка» → «Отправление» → трек-номер (14 цифр без пробелов или вида RA123456789RU) → «Сохранить». Пока программа открыта, статусы обновляются сами: каждое отправление — не чаще раза в 6 часов, с одного устройства — не больше 40 запросов в день (выключается в листе «Почта России — отслеживание»). «Обновить статусы» — сразу все отправления; вручённые повторно не запрашиваются, чтобы не тратить дневной лимит (около 100 запросов в день на бесплатном доступе). Что и когда обновлялось — «Настройки» → «Автоматизация».</li></ol>
 <h3>Срок ответа</h3>
@@ -24287,7 +24428,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <p>Ваш сервер раз в день (08:05 по Москве) присылает в Telegram сроки, заседания и задачи на сегодня и завтра, с сервера 189 — и число просроченных задач. На сервер уходит список без имён доверителей — только номера дел, суды, даты; задача приходит как «Задача по делу …». Полные названия задач и имена в уведомлении о записи на приём — по отметке «Полные названия задач и имена в Telegram» в том же листе (Telegram — зарубежный сервис).</p>
 <ol><li>Создайте бота: в Telegram найдите <b>@BotFather</b> (с синей галочкой) → «Start» → команда <b>/newbot</b> → имя (любое) → имя пользователя (латиницей, заканчивается на bot). BotFather пришлёт <b>токен</b> вида 123456:ABC… — скопируйте его. Токен — секрет, никому не показывайте.</li>
 <li>Откройте своего бота по ссылке от BotFather и нажмите «Start» (или напишите ему любое слово) — иначе бот не сможет вам писать.</li>
-<li>В программе: Настройки → «Напоминания в Telegram» → шаг 2 — вставьте токен → <b>«Сохранить токен на сервере»</b>. Программа сама спросит Telegram, кто писал боту, и покажет чаты — нажмите свой; придёт пробное сообщение. Токен уходит только на ваш сервер (сервер 198 и новее) и хранится там в файле, зашифрованном секретным кодом сервера; в программе его нет. Таймер 08:05 по Москве создаёт мастер «Свой сервер в Яндекс Облаке». Сервер старше 198 — «Вручную, через консоль Облака» в том же листе: номер чата — по адресу https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates, переменные <b>TG_TOKEN</b> и <b>TG_CHAT</b> функции crm-bridge, таймер — «Триггеры» функции.</li>
+<li>В программе: Настройки → «Напоминания в Telegram» → шаг 2 — вставьте токен → <b>«Сохранить токен на сервере»</b>. Программа сама спросит Telegram, кто писал боту, и покажет чаты — нажмите свой; придёт пробное сообщение. Токен уходит только на ваш сервер (сервер 198 и новее) и хранится там в файле, зашифрованном ключом, которого нет в самом хранилище (с сервера 199); в программе его нет. Если файл на сервере перестал читаться (сменили ключ хранилища функции или он повреждён), строка в шаге 2 скажет об этом и предложит «Сбросить настройки на сервере»: прежний файл сохранится копией, токен и чат нужно будет записать заново. Таймер 08:05 по Москве создаёт мастер «Свой сервер в Яндекс Облаке». Сервер старше 198 — «Вручную, через консоль Облака» в том же листе: номер чата — по адресу https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates, переменные <b>TG_TOKEN</b> и <b>TG_CHAT</b> функции crm-bridge, таймер — «Триггеры» функции.</li>
 <li>В программе: Настройки → «Напоминания в Telegram» → включите → «Передать сейчас»: в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Дальше список обновляется сам после каждой правки.</li></ol>
 ${typeof helpFig === 'function' ? helpFig('tgbot') : ''}
 <p>Если пишет «не заданы бот и чат» — повторите шаг 3. Если бот молчит в назначенное время — проверьте, что нажали «Start» у бота и что таймер есть: мастер сервера создаёт его сам, вручную — «Триггеры» функции crm-bridge.</p>
