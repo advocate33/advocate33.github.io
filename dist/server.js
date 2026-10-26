@@ -10,6 +10,8 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v199: файл настроек — ключ не от SECRET (тот стоит в именах файлов бакета), а от CFG_KEY или S3_SECRET; запись условная по ETag;
+//  нечитаемый файл обычной записью не заменяется — только сбросом с проверенной копией (аудит сборки 208, R2–R4)
 //  v198: настройки Telegram и Почты — из программы (cfgget, cfgput, tgfind, tgtest); файл cfg-<storeId>.crypt в бакете, зашифрован ключом от
 //  SECRET; переменные функции важнее файла (O-74, этап 4)
 //  v197: напоминания — отметка прежнего сервера (дата) не скрывает изменённое напоминание (аудит сборки 201, R9)
@@ -135,36 +137,75 @@ function timerEventOk(e) {
   return !!e && Array.isArray(e.messages) && e.messages.length > 0 && e.messages.every(m => m && typeof m === 'object' && m.event_metadata && typeof m.event_metadata === 'object' && (!m.event_metadata.event_type || /TimerMessage$/.test(String(m.event_metadata.event_type))));
 }
 
-// v198 (O-74, этап 4): настройки Telegram и Почты — из программы. Файл cfg-<storeId>.crypt в бакете: AES-256-GCM, ключ — SHA-256 от
-// «crm-cfg|» + SECRET (без кода сервера файл не прочитать; код сменили — файл не расшифруется, настройки вписываются заново).
+// v198 (O-74, этап 4): настройки Telegram и Почты — из программы. Файл cfg-<storeId>.crypt в бакете, AES-256-GCM.
 // Переменная функции, если задана, важнее файла: прежняя настройка через консоль работает как раньше.
+// v199 (аудит сборки 208 от 26.10.2026, R2): в 198 ключ был SHA-256 от «crm-cfg|» + SECRET, а при стандартной установке (STORE_ID не задан)
+// SECRET стоит в имени каждого файла бакета — ключ вычислял любой, кто прочитал бакет. Теперь ключ — от переменной CFG_KEY, если она задана,
+// иначе от S3_SECRET (секретной части статического ключа хранилища): её нет ни в именах, ни в содержимом объектов. Смена кода сервера
+// (SECRET) настройки больше не теряет. Файл v1 читается прежним ключом и переписывается в v2 условной записью (миграция).
+// R3: запись — условная по ETag прочитанного (If-Match; файла не было — If-None-Match: *); конфликт — перечитать и применить только
+// присланные поля. R4: файл не расшифровывается — обычная запись его не заменяет (cfg_unreadable); замена — только сбросом (reset), перед
+// ним прежние байты кладутся копией cfgbak-…, копия проверяется чтением.
 const CFG_KEYS = ['TG_TOKEN', 'TG_CHAT', 'POCHTA_LOGIN', 'POCHTA_PASS'];
 let CFG = {}, cfgAt = 0;
 function cv(k) { return process.env[k] || CFG[k] || ''; }
 const cfgName = () => 'cfg-' + storeId() + '.crypt';
-const cfgKey = () => crypto.createHash('sha256').update('crm-cfg|' + process.env.SECRET, 'utf8').digest();
+const cfgMaterial = () => process.env.CFG_KEY || process.env.S3_SECRET || '';
+const cfgKey2 = () => crypto.createHash('sha256').update('crm-cfg2|' + cfgMaterial(), 'utf8').digest();
+// отпечаток ключа в файле: отличает «ключ сменился» от «файл испорчен»; из отпечатка ключ не получить
+const cfgKid = () => crypto.createHash('sha256').update('crm-cfg-kid|' + cfgMaterial(), 'utf8').digest('hex').slice(0, 12);
+const cfgKey1 = () => crypto.createHash('sha256').update('crm-cfg|' + process.env.SECRET, 'utf8').digest();
 function cfgSeal(obj) {
-  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', cfgKey(), iv);
+  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', cfgKey2(), iv);
   const d = Buffer.concat([c.update(JSON.stringify(obj), 'utf8'), c.final()]);
-  return JSON.stringify({ v: 1, iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: d.toString('base64') });
+  return JSON.stringify({ v: 2, kid: cfgKid(), iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: d.toString('base64') });
 }
-function cfgOpen(txt) {
-  const o = JSON.parse(txt), dc = crypto.createDecipheriv('aes-256-gcm', cfgKey(), Buffer.from(o.iv, 'base64'));
+function cfgDecrypt(o, key) {
+  const dc = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(o.iv, 'base64'));
   dc.setAuthTag(Buffer.from(o.tag, 'base64'));
   return JSON.parse(Buffer.concat([dc.update(Buffer.from(o.data, 'base64')), dc.final()]).toString('utf8'));
 }
-// чтение — не чаще раза в минуту у работающего экземпляра функции; сбой чтения оставляет прежние значения (переменные функции работают всегда)
-async function cfgLoad(force) {
-  if (!force && cfgAt && Date.now() - cfgAt < 60000) return { ok: true };
+const cfgPick = o => { const n = {}; for (const k of CFG_KEYS) if (o && typeof o[k] === 'string' && o[k]) n[k] = o[k]; return n; };
+// разбор содержимого: { vals, fmt } или { unreadable, why } — 'key' (зашифрован другим ключом) или 'corrupt'
+function cfgParse(txt) {
+  let o; try { o = JSON.parse(txt); } catch (e) { return { unreadable: true, why: 'corrupt' }; }
+  if (!o || typeof o !== 'object' || !o.iv || !o.tag || !o.data) return { unreadable: true, why: 'corrupt' };
+  if (o.v === 2) {
+    if (o.kid && o.kid !== cfgKid()) return { unreadable: true, why: 'key' };
+    try { return { vals: cfgPick(cfgDecrypt(o, cfgKey2())), fmt: 2 }; } catch (e) { return { unreadable: true, why: 'corrupt' }; }
+  }
+  // v1 (сервер 198): ключ от SECRET — код сменили, файл не прочитать
+  try { return { vals: cfgPick(cfgDecrypt(o, cfgKey1())), fmt: 1 }; } catch (e) { return { unreadable: true, why: 'key' }; }
+}
+const CFG_UNREADABLE = { key: 'файл настроек на сервере зашифрован другим ключом (сменили ключ хранилища или код сервера до сервера 199)', corrupt: 'файл настроек на сервере повреждён' };
+// чтение файла как есть: { ok, exists, etag, text, vals, fmt, unreadable, why } — сбой хранилища: { ok:false, error }
+async function cfgRead() {
   if (!process.env.SECRET || !process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) return { ok: false, error: 'хранилище сервера не настроено' };
+  const r = await s3Get(cfgName());
+  if (r.status === 404) return { ok: true, exists: false, etag: '', vals: {} };
+  if (!r.ok) return { ok: false, error: 'хранилище ответило ' + r.status };
+  const etag = (r.headers && r.headers.get && r.headers.get('etag')) || '', text = await r.text();
+  return Object.assign({ ok: true, exists: true, etag, text }, cfgParse(text));
+}
+// условная запись поверх прочитанного; конфликт — { changed:true }
+async function cfgWrite(cur, vals) {
+  const body = cfgSeal(vals), CT = 'application/octet-stream', cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
+  let r = cond ? await s3PutIf(cfgName(), body, CT, cond) : await s3Put(cfgName(), body, CT);
+  if (cond && condFailed(r)) return { ok: false, changed: true };
+  if (cond && condUnsupported(r)) { console.log('cfg: условная запись не поддерживается (501) — запись без условия'); r = await s3Put(cfgName(), body, CT); }
+  return r.ok ? { ok: true, etag: (r.headers && r.headers.get && r.headers.get('etag')) || '' } : { ok: false, error: 'хранилище ответило ' + r.status };
+}
+// чтение — не чаще раза в минуту у работающего экземпляра функции; сбой хранилища оставляет прежние значения (переменные функции работают
+// всегда); нечитаемый файл — значения пусты, ответ называет причину. migrate — переписать файл v1 в v2 (только с кодом сервера или таймером)
+async function cfgLoad(force, migrate) {
+  if (!force && cfgAt && Date.now() - cfgAt < 60000) return { ok: true };
   try {
-    const r = await s3Get(cfgName());
-    if (r.status === 404) { CFG = {}; cfgAt = Date.now(); return { ok: true, exists: false }; }
-    if (!r.ok) return { ok: false, error: 'хранилище ответило ' + r.status };
-    let o;
-    try { o = cfgOpen(await r.text()); } catch (e) { CFG = {}; cfgAt = Date.now(); return { ok: false, corrupt: true, error: 'файл настроек на сервере не расшифровывается (сменили секретный код?) — впишите настройки заново' }; }
-    const n = {}; for (const k of CFG_KEYS) if (typeof o[k] === 'string' && o[k]) n[k] = o[k];
-    CFG = n; cfgAt = Date.now(); return { ok: true, exists: true };
+    const r = await cfgRead();
+    if (!r.ok) return { ok: false, error: r.error };
+    if (r.unreadable) { CFG = {}; cfgAt = Date.now(); return { ok: false, unreadable: true, why: r.why, error: CFG_UNREADABLE[r.why] + ' — настройки не читаются; их можно записать заново кнопкой «Сбросить настройки на сервере» (прежний файл сохранится копией)' }; }
+    CFG = r.vals; cfgAt = Date.now();
+    if (r.fmt === 1 && migrate) { try { const w = await cfgWrite(r, r.vals); if (!w.ok && !w.changed) console.log('cfg: перевод на новый ключ не записан: ' + w.error); } catch (e) { console.log('cfg: перевод на новый ключ: ' + scrub(e && e.message || e)); } }
+    return { ok: true, exists: r.exists };
   } catch (e) { return { ok: false, error: scrub(e && e.message || e) }; }
 }
 // ответ о настройках: токен и пароль — только «задан / не задан»; env — какие заданы переменными функции (их программа не меняет)
@@ -172,25 +213,46 @@ function cfgState(extra) {
   const env = {}; for (const k of CFG_KEYS) env[k] = !!process.env[k];
   return Object.assign({ ok: true, env, tgToken: !!cv('TG_TOKEN'), tgChat: cv('TG_CHAT'), pochtaLogin: cv('POCHTA_LOGIN'), pochtaPass: !!cv('POCHTA_PASS') }, extra || {});
 }
-async function cfgGet() { const l = await cfgLoad(true); return cfgState(l.ok ? null : { warn: l.error }); }
+async function cfgGet() { const l = await cfgLoad(true, true); return cfgState(l.ok ? null : Object.assign({ warn: l.error }, l.unreadable ? { unreadable: true } : {})); }
 const TG_TOKEN_RE = /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/;
-// set: { TG_TOKEN?, TG_CHAT?, POCHTA_LOGIN?, POCHTA_PASS? } — пустая строка удаляет значение, отсутствующий ключ оставляет прежнее
+// копия нечитаемого файла перед сбросом: новое имя (If-None-Match: *), проверка — чтением тех же байтов
+async function cfgBackup(cur) {
+  const key = 'cfgbak-' + storeId() + '-' + Date.now() + '.crypt';
+  const w = await s3PutIf(key, cur.text, 'application/octet-stream', { 'If-None-Match': '*' });
+  if (!w.ok && !condUnsupported(w)) return { ok: false, error: 'копия прежнего файла настроек не записана (хранилище ответило ' + w.status + ')' };
+  if (!w.ok) { const w2 = await s3Put(key, cur.text, 'application/octet-stream'); if (!w2.ok) return { ok: false, error: 'копия прежнего файла настроек не записана (' + w2.status + ')' }; }
+  const g = await s3Get(key); const back = g.ok ? await g.text() : null;
+  if (back !== cur.text) return { ok: false, error: 'копия прежнего файла настроек не подтвердилась чтением — настройки не сброшены' };
+  return { ok: true, key };
+}
+// set: { TG_TOKEN?, TG_CHAT?, POCHTA_LOGIN?, POCHTA_PASS? } — пустая строка удаляет значение, отсутствующий ключ оставляет прежнее.
+// reset: true — файл не читается и пользователь решил записать настройки заново (прежние байты — в копию cfgbak-…)
 async function cfgPut(body) {
   needStorage();
-  const l = await cfgLoad(true); if (!l.ok && !l.corrupt) return { ok: false, error: 'не прочитаны прежние настройки: ' + l.error };
-  const set = (body && typeof body.set === 'object' && body.set) || {}, n = Object.assign({}, CFG);
+  const set = (body && typeof body.set === 'object' && body.set) || {}, patch = {};
   for (const k of Object.keys(set)) {
     if (!CFG_KEYS.includes(k)) return { ok: false, error: 'неизвестная настройка ' + k };
     const v = set[k] == null ? '' : String(set[k]).trim();
     if (v.length > 300) return { ok: false, error: 'слишком длинное значение ' + k };
     if (k === 'TG_TOKEN' && v && !TG_TOKEN_RE.test(v)) return { ok: false, error: 'Токен бота — вида 123456789:AA…, его выдаёт @BotFather' };
     if (k === 'TG_CHAT' && v && !/^-?\d{1,20}$/.test(v)) return { ok: false, error: 'Номер чата — только цифры (у группы — с минусом впереди)' };
-    if (v) n[k] = v; else delete n[k];
+    patch[k] = v;
   }
-  const r = await s3Put(cfgName(), cfgSeal(n), 'application/octet-stream');
-  if (!r.ok) return { ok: false, error: 'хранилище ответило ' + r.status };
-  CFG = n; cfgAt = Date.now();
-  return cfgState();
+  const reset = !!(body && body.reset === true);
+  let backup = '';
+  for (let i = 0; i < 5; i++) {
+    const cur = await cfgRead(); if (!cur.ok) return { ok: false, error: 'не прочитаны прежние настройки: ' + cur.error };
+    if (cur.unreadable && !reset) { CFG = {}; cfgAt = Date.now(); return { ok: false, error: 'cfg_unreadable', unreadable: true, why: cur.why, note: CFG_UNREADABLE[cur.why] + '. Обычное сохранение его не меняет; чтобы записать настройки заново, нажмите «Сбросить настройки на сервере» — прежний файл сохранится копией' }; }
+    if (cur.unreadable && !backup) { const b = await cfgBackup(cur); if (!b.ok) return { ok: false, error: b.error }; backup = b.key; }
+    const n = Object.assign({}, cur.unreadable ? {} : cur.vals);
+    for (const k of Object.keys(patch)) { if (patch[k]) n[k] = patch[k]; else delete n[k]; }
+    const w = await cfgWrite(cur, n);
+    if (w.changed) continue;
+    if (!w.ok) return { ok: false, error: w.error };
+    CFG = n; cfgAt = Date.now();
+    return cfgState(backup ? { reset: true, backup: true } : null);
+  }
+  return { ok: false, error: 'настройки на сервере меняются одновременно с другого устройства — повторите' };
 }
 // номер чата — из последних сообщений боту (getUpdates): человек пишет боту «/start», сервер находит чат. Webhook у бота — Telegram откажет словами
 async function tgFind() {
@@ -225,7 +287,7 @@ module.exports.handler = async function (event, context) {
   if (event && context) event._context = context; // v172: IAM-токен сервисного аккаунта
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, headers: JSON_HEADERS, body: '' };
-  if (!event.httpMethod && event.messages) { if (!timerEventOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { await cfgLoad(); return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
+  if (!event.httpMethod && event.messages) { if (!timerEventOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { await cfgLoad(false, true); return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
 
   const q0 = event.queryStringParameters || {};
   // v187: лента календаря для подписки (Google, Яндекс, телефон) — без секрета, по метке; только чтение готового файла
@@ -256,7 +318,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 198,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 199,
       ready: readiness()
     });
   }
@@ -279,12 +341,13 @@ module.exports.handler = async function (event, context) {
 
   try {
     // v198: настройки из программы — до действий, которым они нужны
-    if (/^(ping|track|remindput|remindtick)$/.test(String(body.action))) await cfgLoad();
+    // v199: с кодом сервера — и перевод файла v1 на новый ключ
+    if (/^(ping|track|remindput|remindtick)$/.test(String(body.action))) await cfgLoad(false, true);
     if (body.action === 'cfgget') return reply(await cfgGet());
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 198, cal: true, ask: true, ical: true, cfg: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 199, cal: true, ask: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
