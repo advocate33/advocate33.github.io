@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="28.10.2026 04:58 · d84e39e">
-<meta name="build-no" content="219">
+<meta name="build" content="28.10.2026 19:21 · d6a6e77">
+<meta name="build-no" content="220">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -2252,7 +2252,8 @@ function applyIncomingSettings(incoming, allowSecrets) {
     // WebAuthn остаётся локальным. При переносе PIN на новое устройство
     // биометрию можно включить заново в настройках этого устройства.
   }
-  if (changed) { try { applyTheme(localStorage.getItem('crm_theme') || 'dark'); applyFontSettings(); } catch (e) { if (typeof logErr === "function") logErr("", e); } }
+  // сборка 220 (Д-68): тема не выбрана — не записывать «тёмную» (значение прежней программы); applyTheme без аргумента ничего не сохраняет
+  if (changed) { try { applyTheme(localStorage.getItem('crm_theme') || undefined); applyFontSettings(); } catch (e) { if (typeof logErr === "function") logErr("", e); } }
   return { changed, secretsChanged, upd, purgedMerged };
 }
 
@@ -2750,7 +2751,9 @@ function caseActDeadlinesApply(obj, prev) {
   const msgs = [];
   obj.deadlines = Array.isArray(obj.deadlines) ? obj.deadlines : [];
   const decBase = c => c.kind === 'КоАП' ? (c.koapServedDate || c.koapDate || '') // v214: КоАП — от вручения копии
-    : (c.i1DecisionFullDate || c.i1DecisionDate || (c.kind === 'Уголовное' ? c.crimVerdictDate : ''));
+    // сборка 220 (Д-09): по УПК — дата приговора раньше полей мотивированного решения (ст. 389.4 УПК РФ)
+    : c.kind === 'Уголовное' ? (c.crimVerdictDate || c.i1DecisionDate || '')
+    : (c.i1DecisionFullDate || c.i1DecisionDate || '');
   const acts = [
     ['decision', decBase(obj), prev ? decBase(prev) : ''],
     ['appeal', obj.apDecisionDate || '', prev ? (prev.apDecisionDate || '') : ''],
@@ -3519,7 +3522,10 @@ function nextActInputs(c) {
   const simple = c.i1Mode === 'Упрощённое производство' && (code === 'ГПК' || code === 'АПК' || code === 'КАС');
   const mag = code === 'ГПК' && isMagistrateCourt(c.court);
   const dec = code === 'КоАП' ? { res: '', full: '', base: nxIso(c.koapServedDate || c.koapDate), served: !!c.koapServedDate }
-    : { res: nxIso(c.i1DecisionDate || (code === 'УПК' ? c.crimVerdictDate : '')), full: nxIso(c.i1DecisionFullDate) };
+    // сборка 220 (Д-09): по УПК срок апелляции — со дня постановления приговора (ст. 389.4 УПК РФ); поля «Резолютивная часть» и
+    // «Мотивированное решение изготовлено» вкладки «Первая инстанция» его не вытесняют
+    : code === 'УПК' ? { res: nxIso(c.crimVerdictDate || c.i1DecisionDate), full: '' }
+    : { res: nxIso(c.i1DecisionDate), full: nxIso(c.i1DecisionFullDate) };
   if (!dec.base) dec.base = dec.full || dec.res;
   // сборка 204: remand — вышестоящий суд отменил акт и направил дело на новое рассмотрение (результат в форме дела или с сайта суда);
   // vs — дата определения (постановления) Верховного Суда, в том числе об отказе в передаче жалобы
@@ -8474,6 +8480,8 @@ const mailIsPostal = m => !!m && (!m.channel || m.channel === 'Почта Рос
 function mailStatusKind(m) {
   if (!mailIsPostal(m)) return m.needsAction ? 'action' : 'done';
   const s = (m.status || '') + ' ' + ((m.history || []).map(h => h.oper).join(' '));
+  // сборка 220 (Д-42): «Вручение — Вручение отправителю» — возврат, адресат письмо не получил
+  if (/вручен[а-яё]*\s+отправителю|возврат/i.test(m.status || '')) return 'problem';
   if (/Вручение|Получено адресатом|Вручено/i.test(m.status || '')) return 'delivered';
   if (/Неудачная|Возврат|Уничтожен|Утрачен|Истек срок/i.test(s)) return 'problem';
   if (m.status) return 'transit';
@@ -8736,7 +8744,8 @@ async function crmMonNormalizeRows(rows,source){
   const cases=await getAll('cases'),out=[];for(const raw of rows){const title=String(crmMonField(raw,['title','event','subject','событие','тема'])||'Новое внешнее событие').trim();const courtNo=String(crmMonField(raw,['courtNo','caseNumber','case_number','номер дела','дело'])).trim();const caseUid=String(crmMonField(raw,['caseUid','uid','уид'])).trim();const date=crmMonIsoDate(crmMonField(raw,['date','eventDate','event_date','дата'])||String(raw.raw||''));const externalId=String(crmMonField(raw,['externalId','id','messageId','event_id'])).trim();const type=String(crmMonField(raw,['eventType','type','вид'])||'notice').trim();const rawText=typeof raw==='string'?raw:JSON.stringify(raw);const hash=await crmMonHash([source,externalId,title,date,courtNo,caseUid].join('|'));const crmNumber=String(crmMonField(raw,['crmNumber','crm_number'])).trim();const evCourt=String(crmMonField(raw,['court','суд'])).trim();/* v253: суд страницы */
     /* v238: порядок привязки — 1) УИД дела (если у дела он записан), 2) номер дела CRM от коллектора, 3) номер в суде (единственное совпадение; при нескольких — предпочесть дело с номером CRM, иначе неоднозначно).
        Если у события есть УИД, а дело по номеру имеет другой УИД — конфликт: ссылка в деле ведёт на чужое дело, не привязываем. */
-    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,ambiguous,uidConflict,...(m.idConflict?{idConflict:true,conflictWith:m.conflictWith}:{}),raw:raw.raw||rawText,hash,...(raw&&raw.actText?{actText:String(raw.actText).slice(0,30000)}:{}),...(crmMonSrcPid(raw,externalId)?{srcPid:crmMonSrcPid(raw,externalId)}:{}),caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:((type==='caseflow'||type==='judgeday')&&match)?'flow':'new',receivedAt:Date.now()});}return out;
+    // сборка 220 (Д-27): судья из события коллектора сохраняется (расписание судьи, судья нового заседания при пустом поле)
+    const m=crmMonBind(cases,{caseUid,crmNumber,courtNo});const match=m.match,ambiguous=m.ambiguous,uidConflict=m.uidConflict;out.push({id:uid('МОN'),source,externalId,eventType:type,title,date,courtNo,caseUid,crmNumber,court:evCourt,...(raw&&raw.judge?{judge:String(raw.judge).replace(/\s+/g,' ').trim().slice(0,120)}:{}),ambiguous,uidConflict,...(m.idConflict?{idConflict:true,conflictWith:m.conflictWith}:{}),raw:raw.raw||rawText,hash,...(raw&&raw.actText?{actText:String(raw.actText).slice(0,30000)}:{}),...(crmMonSrcPid(raw,externalId)?{srcPid:crmMonSrcPid(raw,externalId)}:{}),caseId:match?.id||'',caseNum:match?.number||'',matchScore:match?100:0,status:((type==='caseflow'||type==='judgeday')&&match)?'flow':'new',receivedAt:Date.now()});}return out;
 }
 // v163 (аудит сборки 162, R4): по УИД бралось первое дело из списка — при двух делах с одним УИД (импорт, объединение, отдельные карточки
 // по одному спору) событие привязывалось к случайному по порядку массива, даже когда номер CRM в событии указывал на другое. Теперь
@@ -14747,7 +14756,9 @@ const TASK_PRIORITIES = ['Низкий', 'Средний', 'Высокий'];
 
 // ── строительные блоки формы ──
 function fInput(id, label, val, attrs, list) { return `<label class="field"><span>${esc(label)}</span><input id="${id}" value="${esc(val == null ? '' : val)}" ${attrs || ''}${list ? ` list="${id}-list"` : ''}>${list ? `<datalist id="${id}-list">${list.map(v => `<option value="${esc(v)}">`).join('')}</datalist>` : ''}</label>`; }
-function fSelect(id, label, val, opts, allowEmpty) { return `<label class="field"><span>${esc(label)}</span><select id="${id}">${allowEmpty ? `<option value="">—</option>` : ''}${opts.map(o => { const [v, t] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}"${v === val ? ' selected' : ''}>${esc(t)}</option>`; }).join('')}</select></label>`; }
+// сборка 220 (Д-03): значение записи, которого нет в списке (прежняя программа, удалённое из справочника), остаётся выбранным — иначе
+// сохранение формы молча стирало бы его
+function fSelect(id, label, val, opts, allowEmpty) { const cur = val == null ? '' : String(val), has = !cur || (opts || []).some(o => String(Array.isArray(o) ? o[0] : o) === cur); return `<label class="field"><span>${esc(label)}</span><select id="${id}">${allowEmpty ? `<option value="">—</option>` : ''}${has ? '' : `<option value="${esc(cur)}" selected>${esc(cur)}</option>`}${opts.map(o => { const [v, t] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}"${v === val ? ' selected' : ''}>${esc(t)}</option>`; }).join('')}</select></label>`; }
 // поле на всю ширину формы; и у полей с дополнительным классом (строка с поиском — «field combo»), очередь 03.10.2026
 function wide(html) { return html.replace(/class="field(?=[ "])/, 'class="field wide'); }
 function fText(id, label, val, rows) { return `<label class="field wide"><span>${esc(label)}</span><textarea id="${id}" rows="${rows || 3}">${esc(val || '')}</textarea></label>`; }
@@ -14942,7 +14953,9 @@ async function openCaseForm(id, full) {
   if (!prev && typeof nextCaseNo === 'function') { const all = typeof numberingCases === 'function' ? await numberingCases() : await getAll('cases'); c.number = nextCaseNo(all, await orphanCaseNums(all)); c.agreementNo = nextAgreementNo(all); c.agreementDate = c.agreementDate || todayISO(); }
   if (full === undefined) full = id ? localStorage.getItem(CASE_FORM_BRIEF_KEY) === '0' : false;
   const opp = caseOpponentOf(c);
-  const cl = clients.find(x => x && (x.id === c.clientId || x.name === c.client)) || {};
+  // сборка 220 (Д-04): сначала по id доверителя дела; по имени — только если id нет и однофамильца нет (иначе реквизиты чужой карточки
+  // показывались бы и при сохранении записывались в карточку настоящего доверителя)
+  const cl = (c.clientId ? clients.find(x => x && x.id === c.clientId) : null) || (() => { const byName = clients.filter(x => x && !x._deleted && c.client && x.name === c.client); return !c.clientId && byName.length === 1 ? byName[0] : null; })() || {};
   // подсказки для противной стороны — участники всех дел и реестр; при выборе известного лица его реквизиты подставляются
   FORM_PARTIES = {}; for (const x of (await getAll('cases'))) for (const p of (x.participants || [])) if (p && p.name && !FORM_PARTIES[p.name]) FORM_PARTIES[p.name] = { inn: p.inn || '', addr: p.addr || '', ogrn: p.ogrn || '', kpp: p.kpp || '' };
   FORM_CLIENTS = {}; FORM_CLIENTS_BY_ID = {}; for (const x of clients) if (x && x.name && !x._deleted) { FORM_CLIENTS[x.name] = x; FORM_CLIENTS_BY_ID[x.id] = x; }
@@ -17619,6 +17632,8 @@ async function caseFeedReload(caseId) { const c = await getOne('cases', caseId);
 // точкой — не час (это «часть статьи»). noteParse — чистая функция: текст и «сейчас» параметрами.
 const NOTE_MONTHS = { января: 1, февраля: 2, марта: 3, апреля: 4, мая: 5, июня: 6, июля: 7, августа: 8, сентября: 9, октября: 10, ноября: 11, декабря: 12 };
 const NOTE_WD = [['воскресень', 0], ['понедельник', 1], ['вторник', 2], ['сред', 3], ['четверг', 4], ['пятниц', 5], ['суббот', 6]];
+// сборка 220 (Д-28): перед числом «12.8» стоит обозначение статьи, пункта, части, главы — это ссылка на норму, а не дата
+function noteLegalRefAt(s, m) { const at = m.index + Math.max(0, m[0].search(/\d/)); return /(?:^|[\s(])(?:ст|стат[а-яё]*|п|пп|подп|подпункт[а-яё]*|пункт[а-яё]*|ч|част[а-яё]*|гл|глав[а-яё]*|абз|разд|раздел[а-яё]*|прил|приложени[а-яё]*)\.?\s*$/i.test(s.slice(0, at)); }
 const NOTE_END = '(?=$|[\\s,.;:!?])', NOTE_PRE = '(?:^|\\s)(?:до|к|ко|в|во|на)?\\s*', NOTE_END_NODOT = '(?=$|[\\s,;:!?])';
 const NOTE_PREFIX = { 'задача': 'task', 'задачу': 'task', 'заседание': 'hearing', 'срок': 'deadline', 'встреча': 'meeting', 'заметка': 'note', 'запись': 'note', 'расход': 'expense', 'платёж': 'payment', 'платеж': 'payment', 'оплата': 'payment', 'время': 'time' };
 const NOTE_EXP_CATS = [[/пошлин/i, 'Госпошлина'], [/эксперт/i, 'Экспертиза'], [/почт|курьер|конверт|марк[аи]/i, 'Почтовые расходы'], [/такси|проезд|бензин|транспорт|поезд|билет|парковк/i, 'Транспортные расходы'], [/нотариус|нотариальн|копи|ксерокс|печат|распечат|заверен/i, 'Копирование и нотариус'], [/представител/i, 'Услуги представителя']];
@@ -17652,7 +17667,8 @@ function noteParse(text, now) {
   else if ((m = new RegExp('(?:^|\\s)через\\s+(\\d{1,3})\\s+(день|дня|дней|неделю|недели|недель|месяц|месяца|месяцев|мес\\.?)' + NOTE_END, 'i').exec(s))) { due = /^мес/i.test(m[2]) ? addM(+m[1]) : add(+m[1] * (/^нед/i.test(m[2]) ? 7 : 1)); cut(m[0]); }
   else if ((m = new RegExp(NOTE_PRE + '(понедельник[аи]?|вторник[аи]?|сред[ауы]|четверг[аи]?|пятниц[ауы]|суббот[ауы]|воскресень[еяю])' + NOTE_END, 'i').exec(s))) {
     const w = NOTE_WD.find(([p]) => m[1].toLowerCase().startsWith(p)); let delta = (w[1] - base.getDay() + 7) % 7; if (delta === 0) delta = 7; due = add(delta); cut(m[0]); }
-  else if ((m = new RegExp(NOTE_PRE + '(\\d{1,2})\\.(\\d{1,2})(?:\\.(\\d{2}|\\d{4}))?' + NOTE_END).exec(s))) {
+  // сборка 220 (Д-28): «ст. 12.8», «п. 2.1», «ч. 3.1» — номер статьи или пункта, не дата
+  else if ((m = new RegExp(NOTE_PRE + '(\\d{1,2})\\.(\\d{1,2})(?:\\.(\\d{2}|\\d{4}))?' + NOTE_END).exec(s)) && !noteLegalRefAt(s, m)) {
     let y = m[3] ? (m[3].length === 2 ? 2000 + +m[3] : +m[3]) : base.getFullYear(), v = ymd(y, +m[2], +m[1]);
     if (v && !m[3] && v < localISO(base)) v = ymd(y + 1, +m[2], +m[1]);
     if (v) { due = v; cut(m[0]); } }
@@ -18065,7 +18081,8 @@ function caseHintsModel(c, d, journal, today, hidden) {
   const last = caseLastActivity(c, d, journal, today), idle = last ? todayDayDiff(today, last) : null;
   if (idle !== null && idle >= STALE_DAYS) out.push({ key: 'stale:' + c.id, k: 'info', date: last, title: 'Без движения ' + ago(idle), sub: 'последняя запись ' + fmtDate(last) + ' — проверьте, не потерялось ли дело; «×» скрывает на ' + STALE_DAYS + ' дней', act: null });
   // сборка 213 (Ш-1): «Следующий шаг» — правила по стадии и событиям (ui/nextstep.js)
-  if (typeof nextStepHints === 'function') nextStepHints(c, d, today).forEach(h => out.push(h));
+  // сборка 220 (урок 224): сбой одного источника подсказок не роняет «Сегодня» и карточку дела
+  if (typeof nextStepHints === 'function') { try { nextStepHints(c, d, today).forEach(h => out.push(h)); } catch (e) { logErr('hints:nextstep', e); } }
   // «Следующий шаг» — после срочного и предупреждений (просроченная задача, долг), но раньше справочных строк
   const w = { hot: 0, warn: 1, step: 1.5, info: 2 };
   return out.filter(h => !hidden[h.key]).sort((a, b) => w[a.k] - w[b.k] || String(a.date).localeCompare(String(b.date))).slice(0, HINTS_MAX);
@@ -18242,7 +18259,8 @@ function nextStepHints(c, d, today) {
   const court = String(c.court || c.courtNo || '').trim();
   if (!court && (!c.stage || /досудеб/i.test(c.stage))) {
     const pr = (d.mail || []).filter(mine).filter(x => x.dir !== 'in' && /претенз/i.test(String(x.title || '')) && x.date).sort((a, b) => b.date.localeCompare(a.date))[0];
-    const k = pr ? age(pr.date) : null, done = (d.tasks || []).filter(mine).some(t => /иск/i.test(String(t.title || '')) && (!t.done || (t.doneAt && hintISO(t.doneAt) >= pr.date)));
+    // сборка 220 (Д-05): без претензии строки нет — к pr.date не обращаемся (TypeError ронял «Сегодня» и карточку дела)
+    const k = pr ? age(pr.date) : null, done = !pr || (d.tasks || []).filter(mine).some(t => /иск/i.test(String(t.title || '')) && (!t.done || (t.doneAt && hintISO(t.doneAt) >= pr.date)));
     if (k !== null && k >= STEP_CLAIM_DAYS && !done) out.push({ key: 'step:claim:' + c.id + ':' + pr.date, k: 'step', date: pr.date, title: 'Следующий шаг: готовить исковое заявление',
       sub: 'претензия отправлена ' + fmtDate(pr.date) + ' · ' + days(k) + ' назад; суд в деле не указан',
       act: { fn: `stepTask('${q(c.id)}', 'Подготовить исковое заявление', 3)`, label: 'Поставить задачу', icon: 'list-checks' } });
@@ -22564,7 +22582,9 @@ const TPL_KEY_RE = /^\s*([^:|{}]+?)\s*((?::\s*[^:|{}]+?\s*)*)(?:\|([^{}]*))?$/i;
 const TPL_FILTERS = ['прописью', 'словами', 'верхний', 'нижний', 'кратко', 'число', 'плюс_дней', 'дней_до'];
 const TPL_LIST_KEYS = ['расходы', 'платежи', 'заседания', 'работы'];
 const TPL_ITEM_FIELDS = { 'расходы': ['категория', 'сумма', 'сумма_число', 'дата', 'примечание', 'возмещается'], 'платежи': ['сумма', 'сумма_число', 'дата', 'примечание', 'способ', 'счёт'], 'заседания': ['дата', 'время', 'суд', 'зал', 'судья', 'статус', 'результат'], 'работы': ['дата', 'содержание', 'время', 'минуты', 'сумма'] };
-const tplNumOf = v => { const m = /-?\d[\d\s\u00A0]*(?:[.,]\d+)?/.exec(String(v || '')); return m ? Number(m[0].replace(/[\s\u00A0]/g, '').replace(',', '.')) : NaN; };
+// \u0441\u0431\u043E\u0440\u043A\u0430 220 (\u0414-36): \u0441\u0443\u043C\u043C\u0430, \u0443\u0436\u0435 \u0437\u0430\u043F\u0438\u0441\u0430\u043D\u043D\u0430\u044F \u043A\u0430\u043A \u00AB15 000 \u0440\u0443\u0431. 50 \u043A\u043E\u043F.\u00BB, \u0447\u0438\u0442\u0430\u0435\u0442\u0441\u044F \u0441 \u043A\u043E\u043F\u0435\u0439\u043A\u0430\u043C\u0438 (\u0444\u0438\u043B\u044C\u0442\u0440\u044B \u00AB\u043F\u0440\u043E\u043F\u0438\u0441\u044C\u044E\u00BB \u0438 \u00AB\u0447\u0438\u0441\u043B\u043E\u00BB)
+const tplNumOf = v => { const s = String(v || ''), m = /-?\d[\d\s\u00A0]*(?:[.,]\d+)?/.exec(s); if (!m) return NaN; let n = Number(m[0].replace(/[\s\u00A0]/g, '').replace(',', '.'));
+  const k = /(\d{1,2})\s*\u043A\u043E\u043F/i.exec(s.slice(m.index + m[0].length)); if (k && Number.isFinite(n) && Number.isInteger(n)) n = n + (n < 0 ? -1 : 1) * Number(k[1]) / 100; return n; };
 const tplIsoOf = v => { const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(String(v || '').trim()); return m ? m[3] + '-' + m[2] + '-' + m[1] : (/^\d{4}-\d{2}-\d{2}$/.test(String(v || '').trim()) ? String(v).trim() : ''); };
 // фильтр над значением; today — ГГГГ-ММ-ДД (для «дней_до»)
 function tplApplyFilter(v, name, arg, today) {
@@ -23272,7 +23292,9 @@ function appointRate(c, kind) {
   const r = APPOINT_RATES[appointCatKey(c)] || APPOINT_RATES.d; return kind === 'night' ? r[0] : kind === 'off' ? r[1] : r[2];
 }
 // вид дня по дате: нерабочий день — «выходной или праздничный»; ночное время — только отметкой пользователя
-function appointKindOf(iso, night) { if (night) return 'night'; return typeof isWorkdayISO === 'function' && !isWorkdayISO(iso) ? 'off' : 'day'; }
+// сборка 220 (Д-35): выходной или нерабочий праздничный день — своя ставка «включая ночное время» (п. 22(1) постановления № 1240), она
+// выше ночной; отметка «ночное время» в такой день ставку не снижает (сверить по КонсультантПлюс)
+function appointKindOf(iso, night) { if (typeof isWorkdayISO === 'function' && !isWorkdayISO(iso)) return 'off'; return night ? 'night' : 'day'; }
 function appointSum(c, days) { return Math.round((days || appointDaysOf(c)).reduce((a, x) => a + appointRate(c, x.kind), 0) * 100) / 100; }
 // предложения дней: проведённые заседания дела, которых ещё нет в списке
 function appointSuggest(c, hearings) {
@@ -23585,13 +23607,25 @@ const CPAGE_FIELDS = [['stage', 'Вид дела, стадия и состоян
 // отметка записи NEXT_CASEPAGE — в next/guard.js (защита записи на сервер)
 function cpageToken() { return Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'[b % 57]).join(''); }
 function cpageCfg(c) { const p = (c && c.clientPage && typeof c.clientPage === 'object') ? c.clientPage : {}; return { token: p.token || '', on: !!p.on, f: Object.assign({ stage: true, court: true, next: true, filed: true, lawyer: true }, p.f || {}), note: String(p.note || ''), pubAt: Number(p.pubAt) || 0 }; }
+const CPAGE_KIND_TITLE = { 'Гражданское': 'Гражданское дело', 'Арбитраж': 'Арбитражное дело', 'КАС': 'Административное дело', 'Уголовное': 'Уголовное дело', 'КоАП': 'Дело об административном правонарушении' };
+// сборка 220 (Д-70): названия документов часто содержат фамилии («Иск Иванова к …») — имена доверителя, противной стороны и участников
+// дела (полностью и по фамилии) заменяются многоточием; название без букв после замены — «документ»
+function cpageScrub(text, c) {
+  const names = [c.client, c.opponent, ...((c.participants || []).map(p => p && p.name))].filter(Boolean).map(String);
+  const parts = new Set(); for (const n of names) { parts.add(n.trim()); for (const w of n.split(/[\s,«»"()]+/)) if (w.length >= 4 && /^[А-ЯЁA-Z]/.test(w)) parts.add(w.slice(0, Math.max(4, w.length - 2))); }
+  let s = String(text || '');
+  for (const p of [...parts].filter(Boolean).sort((a, b) => b.length - a.length)) { const re = new RegExp('(^|[^а-яёa-z])' + p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[а-яёa-z]*', 'gi'); s = s.replace(re, '$1…'); }
+  s = s.replace(/(…\s*){2,}/g, '… ').replace(/\s+/g, ' ').trim();
+  return /[а-яёa-z]{3}/i.test(s.replace(/…/g, '')) ? s : 'документ';
+}
 // данные страницы: только отмеченные поля; ФИО и суммы в модель не входят вообще
 function cpageData(c, hearings, docs, prof, cfg, today) {
   const f = cfg.f, mine = x => x && !x._deleted && (x.caseId ? x.caseId === c.id : (!!c.number && x.caseNum === c.number)), out = {};
-  if (f.stage) { out.title = [c.kind ? c.kind.toLowerCase() + ' дело' : 'дело', c.category || ''].filter(Boolean).join(' · ').replace(/^./, s => s.toUpperCase()); out.stage = c.stage || ''; out.status = c.status || ''; }
+  // сборка 220 (A8-8): вид дела — словами («Арбитражное дело», а не «Арбитраж дело»)
+  if (f.stage) { out.title = [CPAGE_KIND_TITLE[c.kind] || 'Дело', c.category || ''].filter(Boolean).join(' · ').replace(/^./, s => s.toUpperCase()); out.stage = c.stage || ''; out.status = c.status || ''; }
   if (f.court) { out.court = c.court || ''; out.courtNo = c.courtNo || ''; }
   if (f.next) { const h = (hearings || []).filter(mine).filter(x => x.date >= today && x.status !== 'Отменено' && x.status !== 'Проведено').sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))[0]; if (h) out.next = { date: h.date, time: h.time || '', court: (typeof hearingCourtOf === 'function' ? hearingCourtOf(h, c) : h.court) || '', room: h.room || '' }; }
-  if (f.filed) out.filed = (docs || []).filter(mine).map(d => ({ d, fl: d.filing || {} })).filter(x => x.fl.state === 'filed' && x.fl.date).sort((a, b) => a.fl.date.localeCompare(b.fl.date)).map(x => ({ date: x.fl.date, title: String(x.d.title || x.d.fileName || 'документ').replace(/\.(docx?|pdf)$/i, '') }));
+  if (f.filed) out.filed = (docs || []).filter(mine).map(d => ({ d, fl: d.filing || {} })).filter(x => x.fl.state === 'filed' && x.fl.date).sort((a, b) => a.fl.date.localeCompare(b.fl.date)).map(x => ({ date: x.fl.date, title: cpageScrub(String(x.d.title || x.d.fileName || 'документ').replace(/\.(docx?|pdf)$/i, ''), c) }));
   if (cfg.note) out.note = cfg.note;
   if (f.lawyer) { out.lawyer = (prof && prof.name) || ''; out.phone = (prof && prof.phone) || ''; }
   return out;
@@ -23602,7 +23636,7 @@ async function openClientPageSheet(caseId) {
   const c = await getOne('cases', caseId); if (!c || c._deleted) { toast('Дело не найдено', true); return null; }
   const cfg = cpageCfg(c), url = cfg.on ? cpageUrl(cfg.token) : '';
   const ck = ([k, t]) => `<label class="check"><input type="checkbox" class="cp-f" value="${k}"${cfg.f[k] ? ' checked' : ''}><span>${esc(t)}</span></label>`;
-  openSheet('Ход дела для доверителя', `<p class="small muted">Страница на вашем личном сервере: доверитель открывает ссылку и видит, как идёт дело. Отправляется только отмеченное ниже — ФИО, противная сторона и суммы не отправляются никогда. Страница сама не обновляется — после заседания или подачи нажмите «Обновить». Любой, у кого есть ссылка, увидит эти сведения: давайте её только доверителю.</p>
+  openSheet('Ход дела для доверителя', `<p class="small muted">Страница на вашем личном сервере: доверитель открывает ссылку и видит, как идёт дело. Отправляется только отмеченное ниже — поля ФИО, противной стороны и суммы не отправляются никогда, а из названий поданных документов программа убирает имена участников дела (проверьте страницу по ссылке перед отправкой). Строку для доверителя пишете вы — не указывайте в ней чужие имена. Страница сама не обновляется — после заседания или подачи нажмите «Обновить». Любой, у кого есть ссылка, увидит эти сведения: давайте её только доверителю.</p>
     ${!SRV.url ? '<div class="info-box warning" id="cp-nosrv">Нужен личный сервер версии 200 или новее: «Синхронизация» → «Подключить сервер».</div>' : ''}
     ${url ? `<div class="info-box" id="cp-url">Страница включена${cfg.pubAt ? ', обновлена ' + esc(fmtDate(localISO(new Date(cfg.pubAt)))) : ''}: <span class="addr">${esc(url)}</span></div>` : '<p class="small" id="cp-off">Страница выключена.</p>'}
     <div class="field"><span class="small muted">Что показать доверителю</span>${CPAGE_FIELDS.map(ck).join('')}</div>
@@ -25663,7 +25697,7 @@ ${typeof helpFig === 'function' ? helpFig('settings') : ''}
 <p>На компьютере все разделы — в боковой панели слева. На телефоне внизу «Сегодня», «Дела», «Календарь» и «Ещё»: в «Ещё» остальные разделы, «Справочники», «Синхронизация», «Настройки» и эта инструкция. Вверху — поиск по делам, доверителям, судам и судьям (и по номеру телефона) и переключатель темы.</p>
 <p><b>Оформление</b> (Настройки → «Оформление»: тема, размер текста, начертание) — настройка каждого устройства: на планшете может быть тёмная тема, на телефоне светлая, и обмен базой это не меняет. Остальные настройки (пояс заседаний, напоминания, справочники) по-прежнему общие для всех устройств.</p>
 <p><b>Знак программы</b> (сборка 210): в левом верхнем углу — значок «папка дела с отметкой» и надпись «CRM»; на телефоне — тот же значок в шапке, цветом выбранной темы. Тот же знак белым на синем поле — значок программы на экране «Домой» телефона и во вкладке браузера; если программа уже установлена на экран «Домой», новый значок появится после того, как вы удалите ярлык и добавите его снова (телефон хранит прежнюю картинку). У установленных приложений для Android и для компьютера значок на рабочем столе пока прежний.</p>
-<p><b>Защита входа</b> (Настройки → «Защита входа», на каждом устройстве отдельно): «Установить PIN-код» — шесть цифр, которые программа спрашивает при открытии на этом устройстве; где есть отпечаток или распознавание лица, можно входить ими. Это блокировка экрана, а не шифрование базы на устройстве — поэтому включите и блокировку самого устройства (пароль Windows, блокировка экрана Android и iPhone). Отметка «Закрыть PIN-кодом и секреты» дополнительно закрывает код сервера, пароль шифрования и ключи. Без PIN-кода программу на этом устройстве не открыть, но данные на сервере и в копиях останутся: на другом устройстве они доступны по паролю шифрования.</p>
+<p><b>Защита входа</b> (Настройки → «Защита входа», на каждом устройстве отдельно): «Установить PIN-код» — шесть цифр, которые программа спрашивает при открытии на этом устройстве; где есть отпечаток или распознавание лица, можно входить ими. Это блокировка экрана, а не шифрование базы на устройстве — поэтому включите и блокировку самого устройства (пароль Windows, блокировка экрана Android и iPhone). Отметка «Закрыть PIN-кодом и секреты» дополнительно закрывает код сервера, пароль шифрования и ключи. Без PIN-кода программу на этом устройстве не открыть, но данные на сервере и в копиях останутся: на другом устройстве они доступны по паролю шифрования. Окно PIN-кода не закрывается клавишей Esc и не пропускает нажатия клавиш в программу под ним; вход по отпечатку сбрасывает счётчик неверных PIN-кодов.</p>
 <p><b>Реквизиты адвоката</b> (Настройки → «Реквизиты адвоката»): ФИО, регистрационный номер и реестр, адвокатское образование и палата, адрес для документов, телефон, почта, город составления — подставляются в документы по шаблонам (поля {{Адвокат}}, {{АдвокатКратко}}, {{АдвокатскоеОбразование}}, {{АдвокатскаяПалата}} и другие); общие для всех устройств.</p>
 <h3>Справочники</h3>
 <p>Суды, судьи, виды и категории дел, услуги, роли участников, категории расходов — «Справочники» (боковая панель или «Ещё»). Поле «Дело» в формах заседания, задачи, встречи, счёта, расхода, отправления, ордера, денег на расходы, калькулятора и в карточке события суда — строка с поиском: вводите часть номера, фамилию доверителя или противной стороны, суд, № в суде — и выбирайте из списка (стрелки и Enter с клавиатуры; пустая строка — без дела). Значение можно добавить прямо из формы («Добавить … в справочник») или в списке: «Добавить», «Переименовать» (новое написание подставится во все дела и заседания; совпало с существующим — списки объединятся), «Удалить» (записи не изменятся). У суда есть карточка — адрес, телефон, сайт, почта, часы работы, заметка (добавочный, как пройти), откуда контакты и когда проверены; у судьи — суд, кабинет, секретарь, помощник, телефоны: они показываются в «Контактах суда» по делу. «Нерабочие дни» — производственный календарь для расчёта сроков: праздники по ст. 112 ТК РФ программа учитывает сама, а переносы выходных по постановлению Правительства загружает с сайта программы (календарь собирается из двух источников и публикуется, только если они совпали); там же видно, откуда взят каждый год, есть «Проверить сейчас», и можно вписать свои даты — они важнее календаря. Для года без постановления расчёт предварительный — об этом сказано в паспорте срока, в калькуляторе и на «Сегодня». «Проверка данных» ищет дубли доверителей, записи со ссылкой на удалённое дело, записи, привязанные сразу к двум делам, переплаты, сроки без даты — и ничего не меняет сама: у записи, привязанной к двум делам, вы выбираете верное дело. Если номер дела изменить в форме дела, его задачи, заседания, счета и доверенности переходят на новый номер сами.</p>
@@ -25713,7 +25747,7 @@ ${typeof helpFig === 'function' ? helpFig('filing') : ''}
 <p><b>Сравнить редакции</b> («Документы» → «Сравнить редакции»): выберите два файла .docx — было и стало (например, ваш проект и версию оппонента). Файлы читаются на устройстве и никуда не отправляются. Программа покажет, сколько абзацев изменено, удалено и добавлено; в изменённом абзаце удалённые слова зачёркнуты, добавленные подчёркнуты. «Только изменения» прячет совпадающие абзацы, «Печать» — протокол сравнения. Сравнивается только текст — жирный шрифт и отступы не учитываются.</p>
 ${typeof helpFig === 'function' ? helpFig('docdiff') : ''}
 <p><b>Дела по назначению</b> (ст. 51 УПК РФ, ст. 50 ГПК РФ). «Изменить» → «Все поля» → «Соглашение»: «Участие по назначению», категория оплаты (п. 22(1) постановления Правительства РФ № 1240) и, если нужно, своя ставка за день — с коэффициентами вашего региона (своя ставка важнее таблицы). В карточке такого дела — кнопка «По назначению»: дни участия (дата, что делалось; выходной или праздничный день программа узнаёт по календарю, ночное время — флажком), проведённые заседания предлагаются одной кнопкой; «Заявление об оплате» — файл .docx с перечнем дней, ставками, суммой и реквизитами для перечисления из «Реквизитов адвоката» (группа «Для оплаты по QR»; укажите там счёт адвокатского образования). «Отчёты» → «По назначению» — сводка за месяц по всем делам с печатью. Ставки в программе — базовые суммы с 01.10.2025 без районных коэффициентов и надбавок; перед подачей сверьте их и нормы по КонсультантПлюс.</p>
-<p><b>Ход дела для доверителя</b> (кнопка в карточке дела; нужен личный сервер 200 или новее). Включается для каждого дела отдельно: отметьте, что показать, — вид дела, стадию и состояние, суд и номер, ближайшее заседание, поданные документы (из журнала подачи), ваши имя и телефон, своя строка для доверителя — и нажмите «Включить страницу». Программа отправит на ваш сервер только отмеченное; ФИО, противная сторона и суммы не отправляются никогда. «Скопировать ссылку» — отправьте её доверителю сами. Страница сама не обновляется: после заседания или подачи нажмите «Обновить». «Отключить» удаляет страницу с сервера — ссылка перестаёт открываться; при новом включении ссылка будет другой. По ссылке страницу увидит любой, у кого она есть, — давайте её только доверителю.</p>
+<p><b>Ход дела для доверителя</b> (кнопка в карточке дела; нужен личный сервер 200 или новее). Включается для каждого дела отдельно: отметьте, что показать, — вид дела, стадию и состояние, суд и номер, ближайшее заседание, поданные документы (из журнала подачи), ваши имя и телефон, своя строка для доверителя — и нажмите «Включить страницу». Программа отправит на ваш сервер только отмеченное; поля ФИО, противной стороны и суммы не отправляются никогда, а из названий поданных документов программа убирает имена участников дела — откройте ссылку и проверьте страницу перед отправкой; в своей строке для доверителя не указывайте чужие имена. «Скопировать ссылку» — отправьте её доверителю сами. Страница сама не обновляется: после заседания или подачи нажмите «Обновить». «Отключить» удаляет страницу с сервера — ссылка перестаёт открываться; при новом включении ссылка будет другой. По ссылке страницу увидит любой, у кого она есть, — давайте её только доверителю.</p>
 <p><b>Посмотреть пример.</b> Настройки → «О программе» → «демонстрация с вымышленными делами» (или адрес программы с «?demo=1») открывает отдельную демонстрационную базу: шесть вымышленных дел разных видов со сроками, заседаниями, задачами, счетами, перепиской и обращениями. Ваша база и настройки в демонстрации не открываются и не меняются; сервер и обмен там не подключены. Вверху — полоса «Демонстрация»; «Выйти из демонстрации» возвращает к вашей базе. Ссылку можно дать коллеге, чтобы он посмотрел программу без своих данных.</p>
 <p><b>Поиск по документам.</b> Строка поиска в шапке (и Ctrl+K) ищет и в документах дел: по названию и по тексту файлов .docx — вложений писем и документов по шаблонам, которые есть на этом устройстве. Найденное — блоком «В документах» с кусочком текста вокруг совпадения; нажатие открывает лист документа. Текст читается на устройстве и держится только в памяти открытой программы. Сканы (PDF, фото) не распознаются — по ним ищется название.</p>
 <p><b>Хронология дела</b> (кнопка «Хронология» в карточке дела) — таблица «дата — событие — подробности» из ленты дела: заседания и их итоги, сроки, события с сайта суда, переписка, заметки, а по выбору — задачи, деньги и журнал. Сначала отмечены строки суда, переписки и заметок, которые уже наступили; отметку можно снять или поставить у любой строки, а нажатие на группу («Суд», «Деньги»…) отмечает или снимает все её строки. «Скачать .docx» — файл для Word (приложение к пояснениям, отчёт доверителю, передача дела коллеге); «Печать или PDF» — окно печати.</p>
@@ -25888,7 +25922,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <li>В программе: Настройки → «Напоминания в Telegram» → шаг 2 — вставьте токен → <b>«Сохранить токен на сервере»</b>. Программа сама спросит Telegram, кто писал боту, и покажет чаты — нажмите свой; придёт пробное сообщение. Токен уходит только на ваш сервер (сервер 198 и новее) и хранится там в файле, зашифрованном ключом, которого нет в самом хранилище (с сервера 199); в программе его нет. Если файл на сервере перестал читаться (сменили ключ хранилища функции или он повреждён), строка в шаге 2 скажет об этом и предложит «Сбросить настройки на сервере»: прежний файл сохранится копией, токен и чат нужно будет записать заново. Таймер 08:05 по Москве создаёт мастер «Свой сервер в Яндекс Облаке». Сервер старше 198 — «Вручную, через консоль Облака» в том же листе: номер чата — по адресу https://api.telegram.org/bot&lt;ТОКЕН&gt;/getUpdates, переменные <b>TG_TOKEN</b> и <b>TG_CHAT</b> функции crm-bridge, таймер — «Триггеры» функции.</li>
 <li>В программе: Настройки → «Напоминания в Telegram» → включите → «Передать сейчас»: в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Дальше список обновляется сам после каждой правки.</li></ol>
 ${typeof helpFig === 'function' ? helpFig('tgbot') : ''}
-<p>Если пишет «не заданы бот и чат» — повторите шаг 3. Если бот молчит в назначенное время — проверьте, что нажали «Start» у бота и что таймер есть: мастер сервера создаёт его сам, вручную — «Триггеры» функции crm-bridge.</p>
+<p>Если пишет «не заданы бот и чат» — повторите шаг 3. Если бот молчит в назначенное время — проверьте, что нажали «Start» у бота и что таймер есть: мастер сервера создаёт его сам, вручную — «Триггеры» функции crm-bridge. С сервера 201 вызов таймера принимается только с 07:30 до 10:00 по Москве (защита от чужого вызова функции): если ваш таймер стоит на другое время, задайте функции переменную TIMER_WINDOW, например 18:00-19:00, или переменную TIMER_KEY и то же значение в поле «Payload» таймера.</p>
 <h3>Где настройки календаря и что выбрать</h3>
 <p>Все настройки календаря — «Настройки» (на телефоне — «Ещё» → «Настройки»), группа «Уведомления и календарь»: «Лента календаря», «Google Календарь», «События из календаря». Нерабочие дни для расчёта сроков — «Справочники» → «Нерабочие дни». У отдельной записи — кнопка «В календарь» в её карточке.</p>
 <ul><li><b>iPhone, iPad, Mac</b> — «Лента календаря» (подписка в приложении «Календарь», нужен личный сервер). Без сервера — «В календарь» у отдельной записи (файл .ics, копия без обновления). «Google Календарь» на iPhone недоступен: он работает только в приложении «CRM Адвоката» для Android.</li>
@@ -26369,8 +26403,22 @@ function lockEl() {
   let d = document.getElementById('lockScreen'); if (d) return d;
   d = document.createElement('dialog'); d.id = 'lockScreen'; d.className = 'lock-screen'; d.setAttribute('aria-label', 'Вход по PIN-коду');
   d.innerHTML = '<div class="lock-box"><div class="lock-title">CRM Адвоката</div><div class="lock-sub" id="lockSub"></div><div class="lock-dots" id="lockDots"></div><div class="lock-pad" id="lockPad"></div><div class="lock-err" id="lockErr" role="alert"></div></div>';
-  d.addEventListener('cancel', e => e.preventDefault()); document.body.appendChild(d); return d;
+  d.addEventListener('cancel', e => e.preventDefault());
+  // сборка 220 (Д-66): в Chrome/Edge 120+ модальное окно закрывается Esc/«Назад» и без события cancel (close watcher) — пока экран
+  // заблокирован, закрытое окно открывается снова
+  d.addEventListener('close', () => { if (LOCK_UI.locked) setTimeout(() => { if (LOCK_UI.locked && !d.open) { try { d.showModal(); } catch (e) { logErr('lock:reopen', e); } } }, 0); });
+  document.body.appendChild(d); return d;
 }
+// сборка 220 (Д-66, A8): при заблокированном экране клавиши не доходят до программы (Esc, сочетания N, «/» и др.); цифры и Backspace —
+// ввод PIN с клавиатуры компьютера
+function lockKeyGuard(e) {
+  if (!LOCK_UI.locked || e.key === 'Tab') return;
+  e.preventDefault(); e.stopPropagation();
+  if (e.type !== 'keydown') return;
+  if (/^[0-9]$/.test(e.key)) lockPress(e.key).catch(err => logErr('lock:key', err));
+  else if (e.key === 'Backspace') lockPress('del').catch(err => logErr('lock:key', err));
+}
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') { window.addEventListener('keydown', lockKeyGuard, true); window.addEventListener('keyup', lockKeyGuard, true); }
 function lockDots() { const el = document.getElementById('lockDots'); if (el) el.innerHTML = Array.from({ length: LOCK.length }, (_, i) => `<span class="lock-dot${i < LOCK_UI.buf.length ? ' on' : ''}"></span>`).join(''); }
 function lockErrShow(msg) { const el = document.getElementById('lockErr'); if (el) el.textContent = msg || ''; }
 function lockShow() {
@@ -26421,7 +26469,8 @@ async function bioVerify() {
   const id = localStorage.getItem('crm_lock_bio_id'); if (!id) return false;
   try { return !!(await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: 'public-key', id: b64ToBuf(id) }], userVerification: 'required', timeout: 30000 } })); } catch (e) { return false; }
 }
-async function lockTryBio() { if (!LOCK.bio || !LOCK_UI.locked) return; const sub = document.getElementById('lockSub'); if (sub) sub.textContent = 'Подтвердите вход…'; if (await bioVerify()) lockOpenNow(); else if (sub) sub.textContent = `Введите PIN-код (${LOCK.length} цифр)`; }
+// сборка 220 (A8-10): вход по отпечатку снимает и счётчик ошибок PIN
+async function lockTryBio() { if (!LOCK.bio || !LOCK_UI.locked) return; const sub = document.getElementById('lockSub'); if (sub) sub.textContent = 'Подтвердите вход…'; if (await bioVerify()) { localStorage.removeItem('crm_lock_fails'); localStorage.removeItem('crm_lock_blocked'); lockOpenNow(); } else if (sub) sub.textContent = `Введите PIN-код (${LOCK.length} цифр)`; }
 // ── повторная блокировка: минута в фоне; бездействие дольше выбранного ──
 function lockArm() {
   clearTimeout(LOCK_UI.autoT); const min = Number(localStorage.getItem('crm_autolock_min') || 0);
@@ -26433,7 +26482,8 @@ function lockStart() {
     if (document.visibilityState === 'hidden') LOCK_UI.bgAt = Date.now();
     else if (LOCK_UI.bgAt && Date.now() - LOCK_UI.bgAt > 60000 && !LOCK_UI.locked) lockShow();
   });
-  ['pointerdown', 'keydown', 'touchstart'].forEach(ev => document.addEventListener(ev, () => { if (!LOCK_UI.locked) lockArm(); }, { passive: true }));
+  // сборка 220 (A8): чтение с прокруткой колесом — тоже действие пользователя
+  ['pointerdown', 'keydown', 'touchstart', 'wheel'].forEach(ev => document.addEventListener(ev, () => { if (!LOCK_UI.locked) lockArm(); }, { passive: true }));
   if (LOCK.enabled) lockShow(); else lockArm();
 }
 // лист, открытый при заблокированном экране (соглашение, сообщение обмена), не перекрывает экран блокировки
@@ -26499,7 +26549,8 @@ async function openSecuritySheet(mode, msg) {
       <div class="form-grid">${fSelect('lock-auto', 'Автоблокировка при бездействии', String(auto), [['0', 'Выключена'], ['1', 'Через 1 минуту'], ['3', 'Через 3 минуты'], ['5', 'Через 5 минут'], ['10', 'Через 10 минут']])}</div>
       <div class="form-actions"><button type="button" class="button" id="lock-change" onclick="openPinSetup()">${icon('pencil')}Изменить PIN-код</button><button type="button" class="button danger push-right" id="lock-off" onclick="lockOffAsk()">${icon('x')}Отключить защиту</button></div>`
     : `<div class="form-actions"><button type="button" class="button primary" id="lock-set" onclick="openPinSetup()">${icon('shield-check')}Установить PIN-код</button></div>`}`, mode || (sheetIsOpen() ? true : undefined));
-  const sel = document.getElementById('lock-auto'); if (sel) sel.addEventListener('change', () => { localStorage.setItem('crm_autolock_min', sel.value); lockArm(); toast(sel.value === '0' ? 'Автоблокировка выключена' : 'Автоблокировка: через ' + sel.value + ' мин бездействия'); });
+  // сборка 220 (Д-72): общая настройка — метка настроек сдвигается, иначе снимок другого устройства молча вернёт прежнее значение
+  const sel = document.getElementById('lock-auto'); if (sel) sel.addEventListener('change', () => { localStorage.setItem('crm_autolock_min', sel.value); if (typeof bumpSettings === 'function') bumpSettings(); lockArm(); toast(sel.value === '0' ? 'Автоблокировка выключена' : 'Автоблокировка: через ' + sel.value + ' мин бездействия'); });
 }
 function openPinSetup(first) {
   openSheet(first ? 'Повторите PIN-код' : 'Придумайте PIN-код', `<p class="small muted">${first ? 'Введите тот же PIN-код ещё раз.' : 'Ровно 6 цифр. Запомните его: без PIN-кода программу на этом устройстве не открыть (данные на сервере и в копии — останутся).'}</p>
@@ -26998,14 +27049,21 @@ async function courtSearchGo() {
   if (!picked.length) { toast('Отметьте хотя бы один суд', true); return null; }
   if (picked.length > 8) { toast('Не больше 8 судов за один поиск', true); return null; }
   const out = document.getElementById('cs-out'); if (out) { out.innerHTML = '<p class="small muted">Ищу на сайтах судов… это может занять минуту.</p>'; out.scrollIntoView({ block: 'start' }); }
-  const r = typeof crmCollectorCall === 'function' ? await crmCollectorCall({ action: 'courtsearch', name, sites: picked.map(s => s.site) }, 120000) : null;
+  // сборка 220 (Д-06): crmCollectorCall (sync/monitor.js) возвращает обёртку { http, j } или { err } — ответ коллектора в j
+  const w = typeof crmCollectorCall === 'function' ? await crmCollectorCall({ action: 'courtsearch', name, sites: picked.map(s => s.site) }, 200000) : null;
+  const r = courtSearchUnwrap(w);
   CSEARCH.res = r; courtSearchRender(r, picked); return r;
+}
+function courtSearchUnwrap(w) {
+  if (!w) return null;
+  if (w.err) return { ok: false, error: String(w.err) };
+  return w.j && typeof w.j === 'object' ? w.j : { ok: false, error: 'ответ коллектора не прочитан (HTTP ' + (w.http || '?') + ')' };
 }
 function courtSearchRender(r, picked) {
   const out = document.getElementById('cs-out'); if (!out) return;
-  if (!r || !r.ok) { out.innerHTML = `<div class="info-box warning" id="cs-err">${esc(!r ? 'Коллектор не ответил.' : /unknown_action/.test(String(r.error || '')) ? 'Коллектор старой версии — обновите его до 3.28 (функция берёт обновление сама раз в 10 минут после выкладки).' : 'Поиск не выполнен: ' + (r.error || 'ошибка'))}</div>`; return; }
+  if (!r || !r.ok) { out.innerHTML = `<div class="info-box warning" id="cs-err">${esc(!r ? 'Коллектор не ответил.' : /unknown_action/.test(String(r.error || '')) ? 'Коллектор старой версии — обновите его до 3.29 (функция берёт обновление сама раз в 10 минут после выкладки).' : 'Поиск не выполнен: ' + (r.error || 'ошибка'))}</div>`; return; }
   const name = h => { try { const host = new URL(h.site.includes('://') ? h.site : 'https://' + h.site).hostname; const p = (picked || []).find(x => x.site.includes(host)); return p ? p.name : host; } catch (e) { return h.site; } };
-  const rows = (r.results || []).map(x => `<div><span class="muted">${esc(x.date || '')}</span><span>${x.url ? `<a class="contact" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.no)}</a>` : esc(x.no)} · ${esc(name(x))}${x.info ? ' · ' + esc(x.info) : ''}</span></div>`).join('');
+  const rows = (r.results || []).map(x => `<div><span class="muted">${esc(x.date || '')}</span><span>${x.url && safeExternalUrl(x.url) ? `<a class="contact" href="${esc(safeExternalUrl(x.url))}" target="_blank" rel="noopener noreferrer">${esc(x.no)}</a>` : esc(x.no)} · ${esc(name(x))}${x.info ? ' · ' + esc(x.info) : ''}</span></div>`).join('');
   out.innerHTML = `<div class="section-label">Найдено · ${(r.results || []).length}</div>${rows ? `<div class="list-rows" id="cs-res">${rows}</div>` : '<p class="small" id="cs-none">Дел не найдено.</p>'}${(r.errors || []).length ? `<div class="info-box warning" id="cs-errs">Не ответили: ${esc(r.errors.map(e => name(e) + ' — ' + e.err).join('; '))}</div>` : ''}`;
   // результат ниже длинного списка судов — показать его, не заставляя листать
   out.scrollIntoView({ block: 'start' });
