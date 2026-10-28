@@ -24,6 +24,13 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.29: разбор кода 28.10.2026 — зал в расписании (не «№ п/п»), тексты актов и у ссылок рассмотрений, расписание судьи — событие на
+//         каждое дело, судья — по фамилии и инициалам, транспорт судов и на «холодном» процессе, доставка пачками по байтам, тексты и
+//         списки дня — с повтором по http и проверкой на капчу, поиск по судам — параллельно с бюджетом 90 с; нужен личный сервер 201
+//  v3.28: текст опубликованного судебного акта — в событие (actText, до 30 000 знаков; нужен личный сервер 200); расписание судьи на день
+//         ближайшего заседания — событие judgeday (другие дела того же судьи, время, зал); действие courtsearch — поиск дел по фамилии на
+//         сайтах судов ГАС «Правосудие» (программа Ш, решение пользователя 28.10.2026). Разбор проверен на образцах страниц, на настоящих
+//         сайтах судов из песочницы разработчика — нет.
 //  v3.27: проверка сертификатов TLS у процесса включена: личный сервер, хранилище, Telegram, API и обновления проверяются; послабления —
 //         только у запросов к сайтам судов *.sudrf.ru через отдельный транспорт (аудит сборки 188 от 22.10.2026, R6).
 //  v3.26: «Подготовка дела к рассмотрению» (КоАП, движение дела) — не заседание; беседа и собеседование — заседания (19.10.2026).
@@ -88,7 +95,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.27';
+const COLLECTOR_VER = '3.29';
 // v3.27 (аудит сборки 188, R6): сетевые послабления (самоподписанные и просроченные сертификаты, устаревший TLS у многих *.sudrf.ru) —
 // ТОЛЬКО у запросов к сайтам судов ГАС «Правосудие» и только через отдельный транспорт (courtDispatcher). Процесс целиком их больше не
 // получает: личный сервер (с кодом), хранилище (с IAM-токеном), Telegram, API Assist, СУДиДЕЛО и загрузка обновлений проверяют сертификаты.
@@ -103,8 +110,12 @@ let COURT_DISPATCHER = null, COURT_DISPATCHER_ERR = '';
 function courtDispatcher() {
   if (COURT_DISPATCHER || COURT_DISPATCHER_ERR) return COURT_DISPATCHER;
   try {
-    const g = globalThis[Symbol.for('undici.globalDispatcher.1')], Agent = g && g.constructor;
-    if (typeof Agent !== 'function') throw new Error('undici Agent недоступен');
+    // v3.29 (Д-54): undici загружается лениво — до первого fetch глобального диспетчера нет; new Headers() загружает его без запроса.
+    // Недоступность класса не запоминается: следующий запрос попробует снова
+    const sym = Symbol.for('undici.globalDispatcher.1');
+    if (!globalThis[sym]) { try { new Headers(); } catch (e) { /* штатно: проверка ниже */ } }
+    const g = globalThis[sym], Agent = g && g.constructor;
+    if (typeof Agent !== 'function') { console.log('транспорт для сайтов судов пока не создан: undici Agent недоступен'); return null; }
     COURT_DISPATCHER = new Agent({ connect: { rejectUnauthorized: false, minVersion: 'TLSv1', ciphers: tls.DEFAULT_CIPHERS + ':@SECLEVEL=0' } });
   } catch (e) { COURT_DISPATCHER_ERR = (e && e.message) || String(e); console.log('транспорт для сайтов судов не создан: ' + COURT_DISPATCHER_ERR + ' — сертификаты судов проверяются строго'); }
   return COURT_DISPATCHER;
@@ -210,7 +221,7 @@ function cellsOf(html) {
 }
 // v3.8: сущности HTML в тексте карточки (&rarr; → «→», &laquo; и числовые)
 const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raquo: '»', rarr: '→', larr: '←', ndash: '–', mdash: '—', hellip: '…', apos: "'" };
-function decodeEntities(t) { return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
+function decodeEntities(t) { return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) && code >= 0 && code <= 0x10FFFF ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
 const CARD_LABELS = {
   number: /^(номер дела( ?[~(\/].{0,20})?|№ дела|дело №|номер дела в суде|номер материала)\s*:?$/i, uid: /^(уникальный идентификатор дела|уид)\s*:?$/i, // v3.12: «Номер дела ~ материала» (ГАС «Правосудие»)
   judge: /^(судья|председательствующий судья|судья, рассматривающий дело|судья-докладчик|судья докладчик)\s*:?$/i, registered: /^(дата поступления|дата регистрации|дата поступления в суд)\s*:?$/i,
@@ -783,10 +794,15 @@ async function fetchT(url, opt, ms) {
   } finally { clearTimeout(timer); }
 }
 const jsonOf = t => { try { return JSON.parse(t); } catch (e) { return null; } };
+const SEND_MAX_BYTES = 1800000;
 async function sendEvents(cfg, events) {
   let sent = 0, added = 0, updated = 0;
-  for (let i = 0; i < events.length; i += 300) {
-    const chunk = events.slice(i, i + 300);
+  // v3.29 (Д-55): пачка — не больше 300 событий и SEND_MAX_BYTES байт: тело text/plain облако кодирует в base64 (предел ≈2,75 МБ),
+  // а событие акта с текстом — до ≈60 КБ
+  const chunks = []; let cur = [], size = 0;
+  for (const e of events) { const b = Buffer.byteLength(JSON.stringify(e), 'utf8') + 1; if (cur.length && (cur.length >= 300 || size + b > SEND_MAX_BYTES)) { chunks.push(cur); cur = []; size = 0; } cur.push(e); size += b; }
+  if (cur.length) chunks.push(cur);
+  for (const chunk of chunks) {
     // v3.19: доставка пачки — с пределом ожидания (SEND_TIMEOUT_MS, по умолчанию 45 с)
     const r = await fetchT(cfg.bridge, {
       method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -806,7 +822,8 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
   const delay = Number(cfg.delayMs) || 2500;
   const sinceDays = Number(cfg.sinceDays) || 45;
   const parallel = Math.max(1, Math.min(6, Number(cfg.parallel) || 3)); // v3.4: разных судов одновременно
-  const byId = new Map();
+  // v3.29 (Д-53): список дня — один запрос на суд и день (в нём все судьи), событие «расписание судьи» — на каждое дело
+  const byId = new Map(), JD_LISTS = new Map();
   const stats = { cases: pack.cases.length, pages: 0, blocked: 0, kadSkipped: 0, unparsed: 0, failed: 0, flowRows: 0, errors: [], partial: false };
   // задачи сгруппированы по хосту: внутри суда — по очереди с паузой, разные суды — параллельно
   const groups = new Map();
@@ -845,6 +862,35 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
       else logf(`✓ ${c.number} (${l.stage}${via ? ', ' + via : ''}): заседаний ${page.hearings.length}, актов ${page.acts.length}, движение ${flow.length}${cmpEv.length ? ', жалоб ' + cmpEv.length : ''}${uidOnPage ? ', УИД ✓' : ''}`);
       return !empty;
     };
+    // v3.28: тексты свежих актов (до ACT_TEXT_PER_CASE на ссылку) и расписание судьи на день ближайшего заседания (до JD_PER_RUN за прогон)
+    // v3.29 (Д-56): ссылки на тексты и список дня — от адреса, по которому страница открылась (после повтора по http или переадресации)
+    const extras = async (html, page, cardP, pageUrl) => {
+      const no = l.courtNo || c.courtNo || '', today = todayISO(), base = pageUrl || l.url;
+      // v3.29 (Д-52): у ссылки рассмотрения ключ события несёт хвост «|p:<id>» (pidMark); (мелочь 15) предел — после отбора своих событий
+      const evOf = a => { const k = `sud|${no || c.number || l.url}|${isoOf(a.date)}|-|act`, p = String(l.pid || '').trim(); return byId.get(k) || (p ? byId.get(k + '|p:' + p) : null); };
+      const todo = parseActLinks(html, base).filter(x => isoOf(x.date) && isoOf(x.date) >= shiftISO(today, -ACT_TEXT_DAYS)).map(a => ({ a, ev: evOf(a) })).filter(x => x.ev && !x.ev.actText).slice(0, ACT_TEXT_PER_CASE);
+      for (const { a, ev } of todo) {
+        try { await sleep(Math.min(delay, 1500)); const t = await fetchPageSmart(a.url, cfg.timeoutMs, logf);
+          // v3.29 (Д-56): капча, блокировка и «текст не опубликован» — не текст акта
+          if (t.status >= 400 || BLOCK_RE.test(t.text.slice(0, 6000))) { stats.actTextErrors = (stats.actTextErrors || 0) + 1; logf(`   текст акта ${a.date}: сайт не отдал страницу (HTTP ${t.status}${BLOCK_RE.test(t.text.slice(0, 6000)) ? ', похоже на капчу/блокировку' : ''})`); continue; }
+          const txt = actTextOf(t.text); if (txt.length > 200 && !ACT_NOTEXT_RE.test(txt)) { ev.actText = txt; stats.actTexts = (stats.actTexts || 0) + 1; } }
+        catch (e) { stats.actTextErrors = (stats.actTextErrors || 0) + 1; logf(`   текст акта ${a.date}: ${errText(e)}`); }
+      }
+      const judge = page.judge || cardP.judge || ''; if (!judge) return;
+      for (const h of page.hearings) {
+        const d = isoOf(h.date); if (!d || d < today || d > shiftISO(today, JD_AHEAD_DAYS)) continue;
+        const k = hostOf(base) + '|' + d; let list = JD_LISTS.get(k);
+        if (list === undefined) {
+          if (JD_LISTS.size >= JD_PER_RUN) continue; JD_LISTS.set(k, null); list = null;
+          try { await sleep(Math.min(delay, 1500)); const t = await fetchPageSmart(dayListUrl(base, d), cfg.timeoutMs, logf);
+            if (t.status < 400 && !BLOCK_RE.test(t.text.slice(0, 6000))) list = parseDayList(t.text); else logf(`   расписание судьи ${h.date}: сайт не отдал страницу (HTTP ${t.status})`); }
+          catch (e) { logf(`   расписание судьи ${h.date}: ${errText(e)}`); }
+          JD_LISTS.set(k, list);
+        }
+        if (!list) continue;
+        const ev = judgeDayEvent(list, { judge, date: d, url: base, courtNo: no, number: c.number, court: cardP.court || '' }); if (ev) { pidMark(ev, l.pid, l.cpid); byId.set(ev.externalId, ev); stats.judgeDays = (stats.judgeDays || 0) + 1; }
+      }
+    };
     const tryAA = async (why) => { // v3.13: карточка через API Assist
       if (!(kind === 'sudrf' && aaEnabled())) return false;
       try { const m = aaToPage(await aaFetchCase(l.url, cfg.timeoutMs)); stats.apiAssist = (stats.apiAssist || 0) + 1; if (why) logf(`   ${why} — карточка через API Assist`); apply(m.page, m.flow, m.card, m.card.uid || c.uid || '', 'API Assist'); return true; }
@@ -870,6 +916,7 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
         const page = parseCasePage(r.text), flow = parseFlow(r.text), cardP = parseCaseCard(r.text), cmpP = parseComplaints(r.text); // v3.11: суд страницы (из title) — в события
         if (!page.hearings.length && !page.acts.length && !flow.length && AA.mode !== 'primary' && await tryAA('таблицы не распознаны')) return;
         apply(page, flow, cardP, parseUid(r.text) || c.uid || '', '', cmpP);
+        if (kind === 'sudrf') await extras(r.text, page, cardP, r.url);
       }
     } catch (e) {
       if (await tryAA(`сайт суда: ${errText(e)}`)) return;
@@ -891,6 +938,114 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
   stats.errors = stats.errors.slice(0, 20);
   if (aaEnabled()) logf(`API Assist (${AA.mode}): запросов ${AA.used}, ошибок ${AA.errors}${AA.lastError ? ' (последняя: ' + AA.lastError + ')' : ''}`); // v3.13
   return { events: [...byId.values()], stats };
+}
+
+
+// ── v3.28: текст акта, расписание судьи, поиск по фамилии (программа Ш) ─────────────
+// v3.29 (Д-56): окно текстов — 30 дней от даты акта (тексты публикуют с задержкой)
+const ACT_NOTEXT_RE = /текст[а-я]* (документа|акта|решения)? ?(ещё |пока )?не (опубликован|размещ)/i;
+const ACT_TEXT_MAX = 30000, ACT_TEXT_DAYS = 30, ACT_TEXT_PER_CASE = 2, JD_PER_RUN = 3, JD_AHEAD_DAYS = 2, CS_MAX_SITES = 8, CS_PARALLEL = 4, CS_BUDGET_MS = 90000;
+// ссылки на тексты актов страницы дела (ГАС «Правосудие»: …name_op=doc…): строка таблицы с датой → { date (ДД.ММ.ГГГГ), url }
+function parseActLinks(html, baseUrl) {
+  const out = [];
+  for (const m of String(html || '').matchAll(/<tr[\s\S]*?<\/tr>/gi)) {
+    const tr = m[0], href = (tr.match(/href\s*=\s*["']([^"']*name_op=doc[^"']*)["']/i) || [])[1]; if (!href) continue;
+    const dm = stripTags(tr).match(RE_DATE); if (!dm) continue;
+    let url = ''; try { url = new URL(decodeEntities(href), baseUrl).href; } catch (e) { continue; }
+    if (!sameCourtSite(url, baseUrl)) continue;
+    out.push({ date: dm[1], url });
+  }
+  return out;
+}
+// текст акта со страницы: без разметки, абзацы — переводами строк, не длиннее ACT_TEXT_MAX
+function actTextOf(html) {
+  const t = String(html || '').replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<\/(p|div|tr|li|h\d)>|<br\s*\/?>/gi, '\n');
+  return decodeEntities(t.replace(/<[^>]+>/g, ' ')).split('\n').map(x => x.replace(/[ \t ]+/g, ' ').trim()).filter(Boolean).join('\n').slice(0, ACT_TEXT_MAX);
+}
+// адрес списка дел, назначенных к слушанию, на дату (ГАС «Правосудие»)
+function dayListUrl(caseUrl, iso) { try { const u = new URL(caseUrl), sn = /^\d{1,2}$/.test(u.searchParams.get('srv_num') || '') ? u.searchParams.get('srv_num') : '1'; const [y, m, d] = iso.split('-'); return u.origin + '/modules.php?name=sud_delo&srv_num=' + sn + '&H_date=' + d + '.' + m + '.' + y; } catch (e) { return ''; } }
+const jdNorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^а-яa-z]/g, '');
+const JD_NAME_RE = /^[А-ЯЁ][а-яё-]+\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.?$/;
+// v3.29 (Д-57): судья — фамилия и инициалы («Петрова Е. В.» и «Петрова Елена Викторовна» — одно лицо; «Петрова А. С.» — другое)
+function jdKey(s) { const w = String(s || '').replace(/[ёЁ]/g, 'е').trim().split(/[\s.]+/).filter(Boolean); return { fam: jdNorm(w[0]), ini: w.slice(1, 3).map(x => x[0].toLowerCase()).join('') }; }
+function jdSame(a, b) { return !!a.fam && a.fam === b.fam && (!a.ini || !b.ini || a.ini.startsWith(b.ini) || b.ini.startsWith(a.ini)); }
+function catClean(s) { return String(s || '').split(/(?:^|[\s:;,(])(?:истец|ответчик|заявитель|должник|взыскатель|лицо|потерпевш|обвиняем|подсудим|третье|сторон)/i)[0].replace(/[А-ЯЁ][а-яё-]+\s+[А-ЯЁ]\.\s*([А-ЯЁ]\.?)?/g, '…').replace(/\s+/g, ' ').trim(); }
+// строки списка дел на день: { time, no, cat, judge, room } — только строки с номером дела
+function parseDayList(html) {
+  const out = [];
+  for (const cells of rowsOf(html)) {
+    const joined = cells.join(' | '), no = (joined.match(/\b(\d{1,2}[а-яa-z]{0,2}-\d{1,6}\/\d{4}|[А-ЯA-Z]\d{2}-\d{1,7}\/\d{4})\b/i) || [])[1]; if (!no) continue;
+    // v3.29 (Д-57): все ячейки вида «Фамилия И. О.» (судья и, в уголовных списках, лицо) — судья выбирается при сравнении
+    const names = cells.map(x => String(x).trim()).filter(x => JD_NAME_RE.test(x)), tm = joined.match(RE_TIME), judge = names[names.length - 1] || '';
+    // v3.29 (Д-51): первая ячейка — «№ п/п»; зал — ячейка «зал …» или число не в первой ячейке
+    const room = (cells.find(x => /^(зал|каб)/i.test(String(x).trim())) || cells.slice(1).find(x => /^\d{1,4}$/.test(String(x).trim())) || '').trim();
+    // v3.29 (недостаток 4): из «категории» убираются стороны чужих дел — они уходят в открытую часть сервера и на экран
+    const cat = catClean((cells.filter(x => x && x.length > 12 && !RE_DATE.test(x) && !String(x).includes(no) && !names.includes(String(x).trim())).sort((a, b) => b.length - a.length)[0] || '')).slice(0, 160);
+    out.push({ time: tm ? tm[0] : '', no, cat, judge: judge.trim(), room, names });
+  }
+  return out;
+}
+// событие «расписание судьи»: дела того же судьи (по фамилии) на дату, по времени
+function judgeDayEvent(list, ctx) {
+  const key = jdKey(ctx.judge), fam = key.fam; if (!fam || fam.length < 3) return null;
+  const mine = list.filter(x => (x.names && x.names.length ? x.names : [x.judge]).some(nm => jdSame(jdKey(nm), key))).sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99')).slice(0, 60);
+  if (!mine.length) return null;
+  // v3.29 (Д-53): событие на каждое дело — у второго дела того же судьи в тот же день расписание тоже есть
+  return { externalId: 'jd|' + hostOf(ctx.url) + '|' + ctx.date + '|' + fam + '|' + String(ctx.number || ctx.courtNo || ''), title: 'Расписание судьи ' + ctx.judge + ' на ' + ctx.date.split('-').reverse().join('.') + ': дел ' + mine.length, date: ctx.date,
+    eventType: 'judgeday', courtNo: ctx.courtNo || '', judge: ctx.judge, source: 'Коллектор судов', crmNumber: ctx.number || '', court: ctx.court || '',
+    raw: JSON.stringify({ judgeday: 1, date: ctx.date, list: mine.map(x => ({ t: x.time, n: x.no, c: x.cat, r: x.room })) }) };
+}
+// поиск по фамилии: windows-1251 в адресе (сайты ГАС «Правосудие» ждут эту кодировку)
+function cp1251Url(s) {
+  let out = '';
+  for (const ch of String(s || '')) {
+    const c = ch.charCodeAt(0);
+    if (/[A-Za-z0-9\-_.]/.test(ch)) out += ch; else if (ch === ' ') out += '+';
+    else if (c >= 0x410 && c <= 0x44f) out += '%' + (c - 0x410 + 0xC0).toString(16).toUpperCase();
+    else if (c === 0x401) out += '%A8'; else if (c === 0x451) out += '%B8';
+    else if (c < 128) out += '%' + c.toString(16).toUpperCase().padStart(2, '0');
+  }
+  return out;
+}
+// адрес поиска гражданских дел первой инстанции по участнику на сайте суда (параметры ГАС «Правосудие»)
+function courtSearchUrl(site, name) {
+  let o = ''; try { o = new URL(site).origin; } catch (e) { return ''; }
+  return o + '/modules.php?name=sud_delo&srv_num=1&name_op=r&delo_id=1540005&case_type=0&new=0&delo_table=g1_case&G1_PARTS__NAMESS=' + cp1251Url(name);
+}
+// строки результатов поиска: { no, date, info, url }
+function parseSearchResults(html, baseUrl) {
+  const out = [];
+  for (const m of String(html || '').matchAll(/<tr[\s\S]*?<\/tr>/gi)) {
+    const tr = m[0], text = stripTags(tr), no = (text.match(/\b(\d{1,2}[а-яa-z]{0,2}-\d{1,6}\/\d{4}|[А-ЯA-Z]\d{2}-\d{1,7}\/\d{4})\b/i) || [])[1]; if (!no) continue;
+    const href = (tr.match(/href\s*=\s*["']([^"']*name_op=case[^"']*)["']/i) || [])[1]; let url = '';
+    if (href) { try { url = new URL(decodeEntities(href), baseUrl).href; if (!sameCourtSite(url, baseUrl)) url = ''; } catch (e) { url = ''; } }
+    const dm = text.match(RE_DATE);
+    out.push({ no, date: dm ? dm[1] : '', info: text.replace(no, '').replace(/\s+/g, ' ').trim().slice(0, 300), url });
+  }
+  return out.slice(0, 50);
+}
+async function courtSearch(body) {
+  const name = String(body.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  if (name.length < 3 || !/^[А-Яа-яЁё\- ]+$/.test(name)) return { ok: false, error: 'фамилия — русскими буквами, от 3 знаков' };
+  const sites = [...new Set((Array.isArray(body.sites) ? body.sites : []).map(String))].filter(u => hostKind(u) === 'sudrf').slice(0, CS_MAX_SITES);
+  if (!sites.length) return { ok: false, error: 'нет сайтов судов ГАС «Правосудие» (*.sudrf.ru)' };
+  // v3.29 (Д-56): суды — разные сайты, опрашиваются до CS_PARALLEL одновременно, с повтором по http и общим бюджетом CS_BUDGET_MS
+  // (программа ждёт ответа 200 с); не успели — названы в ошибках
+  const results = [], errors = [], started = Date.now(), budget = Number(process.env.CS_BUDGET_MS) || CS_BUDGET_MS, queue = sites.slice();
+  async function worker() {
+    while (queue.length) {
+      const site = queue.shift(), left = budget - (Date.now() - started);
+      if (left < 3000) { errors.push({ site, err: 'не опрошен — время поиска истекло, повторите для этого суда' }); continue; }
+      const url = courtSearchUrl(site, name);
+      try { const r = await fetchPageSmart(url, Math.min(20000, left)); const blocked = BLOCK_RE.test(r.text.slice(0, 6000));
+        // мелочь 12: страница капчи приходит с кодом 200 — так и сказано
+        if (r.status >= 400 || blocked) { errors.push({ site, err: blocked ? 'похоже на капчу/блокировку' : 'сайт не отдал страницу (HTTP ' + r.status + ')' }); continue; }
+        for (const x of parseSearchResults(r.text, r.url || url)) results.push(Object.assign({ site: new URL(site).hostname }, x)); }
+      catch (e) { errors.push({ site, err: errText(e) }); }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CS_PARALLEL, sites.length) }, () => worker()));
+  return { ok: true, name, results: results.slice(0, 200), errors, ver: COLLECTOR_VER };
 }
 
 // ── основной сценарий ────────────────────────────────────────────────
@@ -1389,6 +1544,7 @@ async function cloudCollect(context, reason) {
     collectorVer: COLLECTOR_VER, cases: stats.cases, pages: stats.pages, flowRows: stats.flowRows,
     events: events.length, sent: res.sent, added: res.added, updated: res.updated,
     blocked: stats.blocked, kadSkipped: stats.kadSkipped, kadViaSudodelo: stats.kadViaSudodelo || 0, kadCreated: stats.kadCreated || 0, linkMismatch: stats.linkMismatch || 0, unparsed: stats.unparsed,
+    actTexts: stats.actTexts || 0, actTextErrors: stats.actTextErrors || 0, judgeDays: stats.judgeDays || 0, // v3.29 (мелочь 14)
     failedCount: stats.failed, failed: stats.errors, partial: stats.partial,
     changes: diffCount(diff), changesList: changesText(diff).slice(0, 20), // v3.4
     error: sendErr || undefined };
@@ -1524,6 +1680,7 @@ export async function handler(event, context) {
       if (d.action === 'collect') return fnResp(200, await cloudCollect(context, 'manual'));
       if (d.action === 'collectone') return fnResp(200, await collectOne(d.body)); // v3.7
       if (d.action === 'bridgecheck') return fnResp(200, await bridgeCheck(d.body)); // v3.15
+      if (d.action === 'courtsearch') return fnResp(200, await courtSearch(d.body)); // v3.28
       return fnResp(400, { ok: false, error: 'unknown_action' });
     }
     return fnResp(200, await cloudCollect(context, 'timer'));

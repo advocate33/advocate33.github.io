@@ -10,6 +10,12 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v201: разбор кода 28.10.2026 — текст акта в отпечатке события (Д-07), обновлённые события в конце списка и предел текстов актов
+//  (Д-48), вызов без HTTP — только с TIMER_KEY или в окне утреннего таймера (Д-49), кодирование префикса листинга и пути (Д-50), адрес
+//  посетителя не уходит в программу, экранирование логина Почты, «Ход дела» — 502 при сбое хранилища
+//  v200: «Задать вопрос» — вопросы по категории спора (askpub cats, ответы a0…a7 в вопросе, Ш-15); страница «Ход дела» для доверителя —
+//  GET ?case=<метка> без секрета, casepub/caseunpub для программы (Ш-14; осознанно открытая часть: стадия, ближайшее заседание, поданные
+//  документы — без ФИО и сумм)
 //  v199: файл настроек — ключ не от SECRET (тот стоит в именах файлов бакета), а от CFG_KEY или S3_SECRET; запись условная по ETag;
 //  нечитаемый файл обычной записью не заменяется — только сбросом с проверенной копией (аудит сборки 208, R2–R4)
 //  v198: настройки Telegram и Почты — из программы (cfgget, cfgput, tgfind, tgtest); файл cfg-<storeId>.crypt в бакете, зашифрован ключом от
@@ -112,7 +118,7 @@ function secretOk(given) {
   return crypto.timingSafeEqual(a, b);
 }
 // v192: секретный код (и имена файлов от него, если STORE_ID не задан) не попадает в журнал функции и в ответы без кода
-function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID, cv('TG_TOKEN'), cv('POCHTA_PASS')]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
+function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID, process.env.S3_SECRET, process.env.CFG_KEY, cv('TG_TOKEN'), cv('POCHTA_PASS')]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
 // v192: адрес клиента для пределов публичных форм — тот, что видит платформа. В X-Forwarded-For первые адреса может прислать сам клиент,
 // настоящий платформа дописывает последним; без заголовка — общий предел для всех «без адреса», а не отсутствие предела
 function clientIp(event) {
@@ -133,6 +139,25 @@ async function tgSend(text, ms) {
   finally { clearTimeout(timer); }
 }
 // v192: вызов без HTTP — только похожий на сообщение таймера (у каждого сообщения — event_metadata; тип, если указан, — таймер)
+// v201 (Д-49): тело вызова с ?integration=raw доходит до обработчика как есть — по форме таймер не отличить. Поэтому: если у функции задана
+// переменная TIMER_KEY, сообщение таймера должно нести её в поле payload триггера; если не задана — вызов без HTTP принимается только в окне
+// утреннего таймера 07:30–10:00 по Москве (таймер мастера — 08:05; другое окно — TIMER_WINDOW), а напоминания и так уходят один раз.
+// v201 (A11-7): логин и пароль Почты — в SOAP-XML с экранированием (пароль с «&» ломал запрос)
+function xmlEsc(v) { return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function timerWindowOk(e, now) {
+  const key = process.env.TIMER_KEY;
+  if (typeof key === 'string' && key.length) {
+    const pl = e.messages.map(m => m && m.details && typeof m.details.payload === 'string' ? m.details.payload : '');
+    const eq = p => { const a = crypto.createHash('sha256').update(p, 'utf8').digest(), b = crypto.createHash('sha256').update(key, 'utf8').digest(); return crypto.timingSafeEqual(a, b); };
+    return pl.every(p => p && eq(p));
+  }
+  // окно — переменная TIMER_WINDOW «ЧЧ:ММ-ЧЧ:ММ» по Москве (таймер в другое время), «any» — без окна (как до 201)
+  const w = String(process.env.TIMER_WINDOW || '07:30-10:00').trim();
+  if (/^any$/i.test(w)) return true;
+  const m = w.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/), from = m ? +m[1] * 60 + +m[2] : 450, to = m ? +m[3] * 60 + +m[4] : 600;
+  const d = now || new Date(), msk = (d.getUTCHours() * 60 + d.getUTCMinutes() + 180) % 1440;
+  return from <= to ? msk >= from && msk <= to : msk >= from || msk <= to;
+}
 function timerEventOk(e) {
   return !!e && Array.isArray(e.messages) && e.messages.length > 0 && e.messages.every(m => m && typeof m === 'object' && m.event_metadata && typeof m.event_metadata === 'object' && (!m.event_metadata.event_type || /TimerMessage$/.test(String(m.event_metadata.event_type))));
 }
@@ -287,13 +312,17 @@ module.exports.handler = async function (event, context) {
   if (event && context) event._context = context; // v172: IAM-токен сервисного аккаунта
   const method = (event.httpMethod || 'GET').toUpperCase();
   if (method === 'OPTIONS') return { statusCode: 204, headers: JSON_HEADERS, body: '' };
-  if (!event.httpMethod && event.messages) { if (!timerEventOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { await cfgLoad(false, true); return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
+  if (!event.httpMethod && event.messages) { if (!timerEventOk(event) || !timerWindowOk(event)) return reply({ ok: false, error: 'forbidden' }, 403); try { await cfgLoad(false, true); return reply(await remindTick()); } catch (e) { return reply({ ok: false, error: String(e && e.message || e) }, 500); } } // v177: вызов таймером
 
   const q0 = event.queryStringParameters || {};
   // v187: лента календаря для подписки (Google, Яндекс, телефон) — без секрета, по метке; только чтение готового файла
   if (q0.cal !== undefined) {
     try { return method === 'GET' || method === 'HEAD' ? await calServe(String(q0.cal), method === 'HEAD') : reply({ ok: false, error: 'method' }, 405); }
     catch (err) { return { statusCode: 500, headers: CAL_TEXT, body: 'Ошибка: ' + scrub(err && err.message || err) }; }
+  }
+  if (q0.case) { // v200: страница «Ход дела» для доверителя (без секрета, по метке)
+    try { return method === 'GET' ? await casePage(q0) : reply({ ok: false, error: 'method' }, 405); }
+    catch (err) { return { statusCode: 500, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: 'Ошибка: ' + scrub(err && err.message || err) }; }
   }
   if (q0.ask) { // v190: публичная страница «Задать вопрос» (без секрета)
     try { return method === 'GET' ? await askPage(q0) : reply({ ok: false, error: 'method' }, 405); }
@@ -318,7 +347,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 199,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 201,
       ready: readiness()
     });
   }
@@ -347,7 +376,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 199, cal: true, ask: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 201, cal: true, ask: true, askCats: true, casePage: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -378,6 +407,8 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'askpub')   return reply(await askPublish(body));   // v190
     if (body.action === 'askget')   return reply(await askGet());
     if (body.action === 'askack')   return reply(await askAck(body));
+    if (body.action === 'casepub')  return reply(await casePublish(body));   // v200
+    if (body.action === 'caseunpub') return reply(await caseUnpublish(body)); // v200
     if (body.action === 'icalget')  return reply(await icalGet(body));       // v191
     if (body.action === 'remindput') return reply(await remindPut(body)); // v177
     if (body.action === 'remindtick') return reply(await remindTick());
@@ -450,8 +481,8 @@ async function trackOne(barcode) {
             '<data:Language>RUS</data:Language>' +
           '</data:OperationHistoryRequest>' +
           '<data:AuthorizationHeader soapenv:mustUnderstand="1">' +
-            '<data:login>' + cv('POCHTA_LOGIN') + '</data:login>' +
-            '<data:password>' + cv('POCHTA_PASS') + '</data:password>' +
+            '<data:login>' + xmlEsc(cv('POCHTA_LOGIN')) + '</data:login>' +
+            '<data:password>' + xmlEsc(cv('POCHTA_PASS')) + '</data:password>' +
           '</data:AuthorizationHeader>' +
         '</oper:getOperationHistory>' +
       '</soap:Body>' +
@@ -577,7 +608,7 @@ async function s3Put(key, bodyStr, contentType) {
   const host = 'storage.yandexcloud.net';
   const region = 'ru-central1';
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, ''); // YYYYMMDDTHHMMSSZ
-  const canonicalUri = '/' + process.env.BUCKET + '/' + encodeURIComponent(key).replace(/%2F/g, '/');
+  const canonicalUri = '/' + process.env.BUCKET + '/' + s3PathEnc(key);
   const payloadHash = sha256hex(bodyStr);
   const sig = sigV4('PUT', host, canonicalUri, payloadHash, contentType, amzDate,
     region, 's3', process.env.S3_KEY_ID, process.env.S3_SECRET);
@@ -593,6 +624,8 @@ async function s3Put(key, bodyStr, contentType) {
   });
 }
 
+// v201 (Д-50): путь объекта — как требует SigV4: кодируются и !'()*, «/» остаётся
+function s3PathEnc(key) { return encodeURIComponent(String(key)).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase()).replace(/%2F/g, '/'); }
 async function s3Get(key) {
   const host = 'storage.yandexcloud.net';
   const region = 'ru-central1';
@@ -614,7 +647,7 @@ async function s3Get(key) {
     const auth = 'AWS4-HMAC-SHA256 Credential=' + process.env.S3_KEY_ID + '/' + scope + ', SignedHeaders=' + signedHeaders + ', Signature=' + signature;
     return fetch('https://' + host + canonicalUri + '?' + cq, { method: 'GET', headers: { 'X-Amz-Content-Sha256': payloadHash, 'X-Amz-Date': amzDate, 'Authorization': auth } });
   }
-  const canonicalUri = '/' + process.env.BUCKET + '/' + encodeURIComponent(key).replace(/%2F/g, '/');
+  const canonicalUri = '/' + process.env.BUCKET + '/' + s3PathEnc(key);
   const sig = sigV4('GET', host, canonicalUri, payloadHash, null, amzDate,
     region, 's3', process.env.S3_KEY_ID, process.env.S3_SECRET);
   return fetch('https://' + host + canonicalUri, {
@@ -629,7 +662,7 @@ async function s3Get(key) {
 async function s3ListAll(prefix, maxObjects) {
   const limit = maxObjects || 100000; let token = '', parts = [], n = 0;
   for (let page = 0; page < 1000; page++) {
-    const r = await s3Get('?list-type=2&prefix=' + prefix + '&max-keys=1000' + (token ? '&continuation-token=' + encodeURIComponent(token) : ''));
+    const r = await s3Get('?list-type=2&prefix=' + encodeURIComponent(prefix) + '&max-keys=1000' + (token ? '&continuation-token=' + encodeURIComponent(token) : ''));
     if (!r.ok) return { ok: false, status: r.status, text: async () => '' };
     const xml = await r.text(), items = xml.match(/<Contents>[\s\S]*?<\/Contents>/g) || [];
     parts.push(items.join('')); n += items.length;
@@ -786,13 +819,13 @@ async function dbGet() {
 function eventsKey() { return 'events-' + storeId() + '.json'; }
 const EV_MAX = 5000, EV_MAX_AGE_DAYS = 400;
 // v193: proceedingId — id рассмотрения дела, с чьей ссылки собрано событие (коллектор 3.24+)
-const EV_FIELDS = ['externalId', 'title', 'date', 'eventType', 'courtNo', 'caseUid', 'judge', 'source', 'raw', 'crmNumber', 'court', 'proceedingId']; // v173: crmNumber; v175: court — суд страницы (коллектор v3.11)
+const EV_FIELDS = ['externalId', 'title', 'date', 'eventType', 'courtNo', 'caseUid', 'judge', 'source', 'raw', 'crmNumber', 'court', 'proceedingId', 'actText']; // v173: crmNumber; v175: court — суд страницы (коллектор v3.11)
 
 function evNormalize(e) { // только известные поля, строки, разумной длины
   if (!e || typeof e !== 'object') return null;
   const out = {};
   // v192: карточка суда (JSON в raw) — до 16 000 знаков: обрезанный JSON не применялся
-  for (const f of EV_FIELDS) { const v = e[f]; if (v !== undefined && v !== null) { const t = String(v); out[f] = t.slice(0, f === 'raw' ? (/^\s*\{/.test(t) ? 16000 : 4000) : 400); } }
+  for (const f of EV_FIELDS) { const v = e[f]; if (v !== undefined && v !== null) { const t = String(v); out[f] = t.slice(0, f === 'raw' ? (/^\s*\{/.test(t) ? 16000 : 4000) : f === 'actText' ? 30000 : 400); } } // v200: actText — текст акта (коллектор 3.28, Ш-18)
   if (!out.externalId || !out.date) return null;
   // v193: id рассмотрения — только вид id программы; чужое значение отбрасывается, событие принимается без него
   if (out.proceedingId !== undefined && !/^[A-Za-z0-9_-]{1,80}$/.test(out.proceedingId)) delete out.proceedingId;
@@ -802,7 +835,10 @@ function evNormalize(e) { // только известные поля, стро�
 }
 const evId = e => (e.source || '') + '|' + e.externalId;
 // v193: id рассмотрения входит в сравнение — повтор события с добавленным id обновляет запись
-const evSig = e => [e.title, e.date, e.eventType, e.courtNo, e.caseUid, e.judge, e.raw, e.proceedingId].map(x => x || '').join('\u0001');
+// v201 (Д-07): текст акта — часть отпечатка: событие, лежавшее без текста, обновляется, когда текст пришёл
+const evSig = e => [e.title, e.date, e.eventType, e.courtNo, e.caseUid, e.judge, e.raw, e.proceedingId, e.actText].map(x => x || '').join('\u0001');
+// v201 (Д-48): тексты актов хранятся только у EV_ACT_KEEP последних событий (≈60 КБ на текст; ответ функции — до 3 МБ); у прочих — actCut
+const EV_ACT_KEEP = 40;
 
 async function eventsLoad() {
   if (!process.env.BUCKET || !process.env.S3_KEY_ID || !process.env.S3_SECRET) {
@@ -831,17 +867,25 @@ async function eventsSave(st, cur) {
 }
 function eventsMerge(existing, incoming, mode) { // чистая функция — для тестов
   const list = mode === 'replace' ? [] : existing.slice();
-  const idx = new Map(list.map((e, i) => [evId(e), i]));
+  const idx = new Map(list.map((e, i) => [evId(e), i])), moved = new Set();
   let added = 0, updated = 0, skipped = 0;
   for (const raw of incoming) {
     const e = evNormalize(raw); if (!e) { skipped++; continue; }
     const k = evId(e), i = idx.get(k);
-    if (i === undefined) { idx.set(k, list.length); list.push(e); added++; }
-    else if (evSig(list[i]) !== evSig(e)) { list[i] = e; updated++; }
+    if (i === undefined) { idx.set(k, list.length); list.push(e); added++; continue; }
+    // v201 (Д-07): доставка без текста не стирает сохранённый текст; текст, снятый по объёму (actCut), не возвращается
+    const prev = list[i];
+    if (!e.actText && prev.actText) e.actText = prev.actText;
+    if (prev.actCut && e.actText && !prev.actText) { delete e.actText; e.actCut = 1; }
+    if (evSig(prev) !== evSig(e)) { list[i] = e; moved.add(k); updated++; }
   }
+  // v201 (Д-48): обновлённые — в конец списка: выдача идёт с конца, обновление старого события не теряется за пределом ответа
+  const order = moved.size ? list.filter(e => !moved.has(evId(e))).concat(list.filter(e => moved.has(evId(e)))) : list;
   const cutoff = new Date(Date.now() - EV_MAX_AGE_DAYS * 864e5).toISOString().slice(0, 10);
-  let kept = list.filter(e => (e.date || '') >= cutoff);
+  let kept = order.filter(e => (e.date || '') >= cutoff);
   if (kept.length > EV_MAX) kept = kept.sort((a, b) => (a.date || '').localeCompare(b.date || '')).slice(-EV_MAX);
+  let acts = 0;
+  for (let j = kept.length - 1; j >= 0; j--) if (kept[j].actText && ++acts > EV_ACT_KEEP) { kept[j] = Object.assign({}, kept[j], { actCut: 1 }); delete kept[j].actText; }
   return { events: kept, added, updated, skipped };
 }
 // v184: объединение и запись событий — под своим замком; занято — повтор через случайную паузу, не дольше EV_LOCK_WAIT
@@ -891,7 +935,7 @@ function presign(method, key, expires, contentType) {
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
   const dateStamp = amzDate.slice(0, 8);
   const scope = dateStamp + '/' + S3_REGION + '/s3/aws4_request';
-  const canonicalUri = '/' + process.env.BUCKET + '/' + encodeURIComponent(key).replace(/%2F/g, '/');
+  const canonicalUri = '/' + process.env.BUCKET + '/' + s3PathEnc(key);
   const enc = v => encodeURIComponent(v).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase());
   const q = { 'X-Amz-Algorithm': 'AWS4-HMAC-SHA256', 'X-Amz-Credential': process.env.S3_KEY_ID + '/' + scope, 'X-Amz-Date': amzDate, 'X-Amz-Expires': String(expires || 3600), 'X-Amz-SignedHeaders': 'host' };
   const canonicalQuery = Object.keys(q).sort().map(k => enc(k) + '=' + enc(q[k])).join('&');
@@ -1041,7 +1085,7 @@ async function dictDelete(body) {
 async function s3Delete(key) {
   const host = S3_HOST, region = S3_REGION;
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-  const canonicalUri = '/' + process.env.BUCKET + '/' + encodeURIComponent(key).replace(/%2F/g, '/');
+  const canonicalUri = '/' + process.env.BUCKET + '/' + s3PathEnc(key);
   const payloadHash = sha256hex('');
   const sig = sigV4('DELETE', host, canonicalUri, payloadHash, null, amzDate, region, 's3', process.env.S3_KEY_ID, process.env.S3_SECRET);
   return fetch('https://' + host + canonicalUri, { method: 'DELETE', headers: { 'X-Amz-Content-Sha256': payloadHash, 'X-Amz-Date': amzDate, 'Authorization': sig.authorization } });
@@ -1060,7 +1104,7 @@ const SNAP_TOKEN_RE = /^[a-f0-9]{32}$/;
 function s3Signed(method, key, extraHeaders, bodyStr, contentType) {
   const host = S3_HOST, region = S3_REGION;
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, '');
-  const canonicalUri = '/' + process.env.BUCKET + '/' + encodeURIComponent(key || '').replace(/%2F/g, '/');
+  const canonicalUri = '/' + process.env.BUCKET + '/' + s3PathEnc(key || '');
   const sub = key && String(key).startsWith('?') ? String(key) : '';
   const uri = sub ? '/' + process.env.BUCKET + '/' : canonicalUri;
   const payloadHash = sha256hex(bodyStr || '');
@@ -1153,7 +1197,7 @@ async function lockAcquire(pfx) {
   const token = crypto.randomBytes(8).toString('hex'), ts = Date.now(), mine = pfx + String(ts).padStart(14, '0') + '-' + token;
   const w = await s3Put(mine, '1', 'text/plain');
   if (!w.ok) return { ok: false, error: 's3 lock ' + w.status };
-  const r = await s3Get('?list-type=2&prefix=' + pfx + '&max-keys=1000');
+  const r = await s3Get('?list-type=2&prefix=' + encodeURIComponent(pfx) + '&max-keys=1000');
   if (!r.ok) { await s3Delete(mine).catch(() => {}); return { ok: false, error: 's3 lock list ' + r.status }; }
   const keys = [...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]).filter(k => k.startsWith(pfx));
   const alive = keys.filter(k => { const t = Number(k.slice(pfx.length, pfx.length + 14)); return t && ts - t < LOCK_TTL; });
@@ -1169,7 +1213,7 @@ async function lockHeld(lock, pfx) {
   if (!lock || !lock.key) return false;
   pfx = pfx || lock.pfx || lockPrefix();
   if (Date.now() - Number(lock.ts || 0) >= LOCK_TTL) return false;
-  const r = await s3Get('?list-type=2&prefix=' + pfx + '&max-keys=1000'); if (!r.ok) return false;
+  const r = await s3Get('?list-type=2&prefix=' + encodeURIComponent(pfx) + '&max-keys=1000'); if (!r.ok) return false;
   const now = Date.now(), keys = [...(await r.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(m => m[1]).filter(k => k.startsWith(pfx));
   if (!keys.includes(lock.key)) return false;
   return !keys.some(k => k !== lock.key && now - Number(k.slice(pfx.length, pfx.length + 14)) < LOCK_TTL);
@@ -1542,7 +1586,8 @@ async function bookGet(body) {
   if (st.corrupt) return { ok: false, error: 'bookings_corrupt', note: 'файл заявок на сервере повреждён — при следующей заявке он будет сохранён копией и начат заново' };
   // v192: от ранних изменений к поздним и в пределах ответа — программа продолжит с последней полученной (more: есть ещё)
   const list = st.items.filter(b => (b.updatedAt || b.createdAt || 0) > since).sort((a, b) => (a.updatedAt || a.createdAt || 0) - (b.updatedAt || b.createdAt || 0));
-  const f = fitList(list, { ok: true, total: st.items.length, more: true });
+  // v201 (A11-5): адрес посетителя нужен только для предела «5 заявок с адреса в час» — программе он не отдаётся
+  const f = fitList(list.map(x => { const o = Object.assign({}, x); delete o.ip; delete o.nonce; return o; }), { ok: true, total: st.items.length, more: true });
   return { ok: true, items: f.items, total: st.items.length, more: f.cut > 0 };
 }
 async function bookSet(body) {
@@ -1626,7 +1671,7 @@ async function bookPage(q) {
 <form id="f" style="display:none"><div class="pick">Выбрано: <b id="pick"></b></div><label>Ваше имя<input name="name" required maxlength="120"></label><label>Телефон<input name="phone" required inputmode="tel" placeholder="+7 900 000-00-00"></label>${topics}<label>Комментарий<textarea name="comment" rows="3" maxlength="1000"></textarea></label><input name="site" style="display:none" tabindex="-1" autocomplete="off"><label class="ck"><input type="checkbox" name="consent" id="ck"><span>Даю согласие на обработку моих персональных данных на условиях <a href="?book=${esc(pid)}&consent=${esc(cver)}" target="_blank" rel="noopener">текста согласия</a></span></label><input type="hidden" name="consentVer" value="${esc(cver)}"><button type="submit" class="go" disabled>Записаться</button><p class="fine">Без согласия заявку отправить нельзя. Текст согласия открывается отдельной страницей.</p></form><div id="out"></div>
 <script>(function(){var d='',t='';var f=document.getElementById('f'),out=document.getElementById('out'),ck=document.getElementById('ck'),go=f.querySelector('.go');ck.onchange=function(){go.disabled=!ck.checked;};document.querySelectorAll('.slot').forEach(function(b){b.onclick=function(){document.querySelectorAll('.slot').forEach(function(x){x.classList.remove('on')});b.classList.add('on');d=b.dataset.d;t=b.dataset.t;document.getElementById('pick').textContent=b.closest('.day').querySelector('.dh').textContent+' '+t;f.style.display='block';f.scrollIntoView({behavior:'smooth'});};});
 f.onsubmit=function(e){e.preventDefault();var fd=new FormData(f);var body={book:${JSON.stringify(pid)},action:'bookreq',date:d,time:t};fd.forEach(function(v,k){body[k]=v;});var btn=f.querySelector('.go');btn.disabled=true;btn.textContent='Отправляю…';
-fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(j){if(j.ok){f.style.display='none';out.innerHTML='<div class="ok">Заявка принята: '+j.date.split('-').reverse().join('.')+' в '+j.time+'.<br>Код заявки <b>'+j.code+'</b> — по нему можно проверить статус: <a href="?book=${pid}&code='+j.code+'">открыть</a>.<br>Приём состоится после подтверждения; при изменениях с вами свяжутся по телефону.</div>';}else{out.innerHTML='<div class="err">'+(j.error||'Ошибка')+'</div>';btn.disabled=!ck.checked;btn.textContent='Записаться';}}).catch(function(){out.innerHTML='<div class="err">Нет связи — попробуйте ещё раз</div>';btn.disabled=!ck.checked;btn.textContent='Записаться';});};})();</script>`;
+fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(j){if(j.ok){f.style.display='none';out.innerHTML='<div class="ok">Заявка принята: '+j.date.split('-').reverse().join('.')+' в '+j.time+'.<br>Код заявки <b>'+j.code+'</b> — по нему можно проверить статус: <a href="?book=${pid}&code='+j.code+'">открыть</a>.<br>Приём состоится после подтверждения; при изменениях с вами свяжутся по телефону.</div>';}else{out.innerHTML='<div class="err">'+String(j.error||'Ошибка').replace(/[<>&]/g,'')+'</div>';btn.disabled=!ck.checked;btn.textContent='Записаться';}}).catch(function(){out.innerHTML='<div class="err">Нет связи — попробуйте ещё раз</div>';btn.disabled=!ck.checked;btn.textContent='Записаться';});};})();</script>`;
   return html(bookShell(S.title, body));
 }
 function bookShell(title, body) {
@@ -1662,6 +1707,12 @@ function askConsentOf(S) {
     + (S.phone ? ' (телефон ' + S.phone + ')' : '') + ', на обработку моих имени, номера телефона, имени пользователя Telegram и сведений, указанных в поле «Вопрос», для ответа на мой вопрос и связи со мной по нему.'
     + (S.notifyFull ? ' Уведомление о вопросе с моими именем, контактами и текстом вопроса направляется адвокату через мессенджер Telegram, серверы которого могут находиться за пределами Российской Федерации.' : '')
     + '\n\nСогласие действует до достижения цели обработки либо до его отзыва; отозвать согласие можно, сообщив об этом адвокату по указанному телефону.';
+}
+// v200 (Ш-15): категории анкеты — [{ id, title, hint, qs: [вопрос] }]; лишнее и пустое отбрасывается
+function askCatsClean(cats) {
+  return (Array.isArray(cats) ? cats : []).map(c => ({ id: String(c && c.id || '').replace(/[^a-z0-9_-]/gi, '').slice(0, 24), title: String(c && c.title || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+    hint: String(c && c.hint || '').trim().slice(0, 600), qs: (Array.isArray(c && c.qs) ? c.qs : []).map(q => String(q || '').replace(/\s+/g, ' ').trim().slice(0, 160)).filter(Boolean).slice(0, 8) }))
+    .filter(c => c.id && c.title).slice(0, 12);
 }
 async function askLoadPublic(pid) { if (!PID_RE.test(pid)) return null; const r = await s3Get(askKey(pid)); if (!r.ok) return null; try { return JSON.parse(await r.text()); } catch (e) { return null; } }
 // файл вопросов — как файл заявок (v185): чтение с ETag, условная запись, повреждённый файл сохраняется копией
@@ -1701,6 +1752,8 @@ async function askPublish(body) {
   const S = { title: String(g.title || 'Задать вопрос адвокату').slice(0, 120), intro: String(g.intro || '').slice(0, 1000), phone: String(g.phone || '').slice(0, 40),
     methods: (Array.isArray(g.methods) ? g.methods : []).filter(m => ASK_METHODS[m]).slice(0, 4), off: !!g.off };
   if (!S.methods.length) S.methods = ['call', 'tg'];
+  // v200 (Ш-15): категории спора — вопросы и подсказка «что взять с собой»; не больше 12 категорий по 8 вопросов
+  S.cats = askCatsClean(g.cats);
   // текст согласия и вид уведомления не присланы — остаются прежние (как у записи с 189)
   S.consentText = String(('consentText' in g ? g.consentText : ps.consentText) || '').slice(0, 8000); if (!S.consentText) delete S.consentText;
   S.notifyFull = !!('notifyFull' in g ? g.notifyFull : ps.notifyFull);
@@ -1752,7 +1805,11 @@ async function askRequest(body, event) {
   const ip = clientIp(event);
   const nonce = /^[a-z0-9]{8,40}$/i.test(String(body.nonce || '')) ? String(body.nonce) : '';
   const now = Date.now(), id = 'q' + now.toString(36) + crypto.randomBytes(3).toString('hex'), code = String(1000 + crypto.randomInt(9000));
+  // v200 (Ш-15): категория и ответы на её вопросы — парами «вопрос — ответ», пустые ответы не хранятся
+  const cat = (Array.isArray(S.cats) ? S.cats : []).find(c => c.id === String(body.cat || '')) || null;
+  const answers = cat ? cat.qs.map((q, i) => [q, String(body['a' + i] || '').replace(/\s+/g, ' ').trim().slice(0, 300)]).filter(x => x[1]) : [];
   const item = { id, code, publicId: pid, name, phone, tg, method, question, createdAt: now, updatedAt: now, ip, nonce, consentAt: now, consentVer: cver };
+  if (cat) { item.cat = cat.title; item.answers = answers; }
   let fresh = false;
   const res = await asksTx(st => {
     st.items = asksPrune(st.items, now);
@@ -1764,14 +1821,14 @@ async function askRequest(body, event) {
     st.items.push(item); fresh = true;
     return { save: true, reply: { ok: true, code, method } };
   });
-  if (res && res.ok && fresh && !res.repeat) await askNotify(pub, item).catch(e => console.log('ask notify: ' + (e && e.message || e)));
+  if (res && res.ok && fresh && !res.repeat) await askNotify(pub, item).catch(e => console.log('ask notify: ' + scrub(e && e.message || e)));
   return res;
 }
 async function askNotify(pub, q) { // Telegram — если в переменных функции заданы TG_TOKEN и TG_CHAT
   if (!cv('TG_TOKEN') || !cv('TG_CHAT')) return;
   // Telegram — зарубежный сервис: имя, контакты и вопрос — только если программа прислала notifyFull (как у записи с 189)
   const full = !!(pub && pub.settings && pub.settings.notifyFull);
-  const text = full ? `Вопрос с сайта\n${q.name}${q.phone ? '\nТелефон: ' + q.phone : ''}${q.tg ? '\nTelegram: @' + q.tg : ''}\nКак связаться: ${ASK_METHODS[q.method] || q.method}\n${q.question.slice(0, 300)}${q.question.length > 300 ? '…' : ''}\nКод ${q.code}.`
+  const text = full ? `Вопрос с сайта\n${q.name}${q.phone ? '\nТелефон: ' + q.phone : ''}${q.tg ? '\nTelegram: @' + q.tg : ''}\nКак связаться: ${ASK_METHODS[q.method] || q.method}${q.cat ? '\nКатегория: ' + q.cat : ''}\n${q.question.slice(0, 300)}${q.question.length > 300 ? '…' : ''}\nКод ${q.code}.`
     : `Новый вопрос с сайта\nКод ${q.code}. Имя, контакты и вопрос — в CRM.`;
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 8000);
   try { await fetch(`https://api.telegram.org/bot${cv('TG_TOKEN')}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: cv('TG_CHAT'), text }), signal: ctl.signal }); }
@@ -1793,12 +1850,64 @@ async function askPage(q) {
   const tel = S.phone ? `<p class="note">Телефон: <a href="tel:${esc(String(S.phone).replace(/[^\d+]/g, ''))}">${esc(S.phone)}</a></p>` : '';
   if (S.off) return html(bookShell(title, '<p>Сейчас вопросы через эту страницу не принимаются.</p>' + tel));
   const methods = (Array.isArray(S.methods) && S.methods.length ? S.methods : ['call', 'tg']).filter(m => ASK_METHODS[m]);
+  const cats = askCatsClean(S.cats);
+  // v200 (Ш-15): вопросы выбранной категории — полями a0…a7 и подсказка «что подготовить»; данные — JSON без «<» (вставка в <script>)
+  const catJs = JSON.stringify(cats).replace(/</g, '\\u003c');
   const body = `${S.intro ? `<p class="note">${esc(S.intro)}</p>` : ''}${tel}
-<form id="f"><label>Ваше имя<input name="name" required maxlength="120" autocomplete="name"></label><label>Телефон<input name="phone" inputmode="tel" autocomplete="tel" placeholder="+7 900 000-00-00"></label><label>Telegram — имя пользователя, если удобнее писать туда<input name="tg" autocomplete="off" placeholder="@имя_пользователя"></label><label>Как с вами связаться<select name="method">${methods.map(m => `<option value="${m}">${ASK_METHODS[m].charAt(0).toUpperCase() + ASK_METHODS[m].slice(1)}</option>`).join('')}</select></label><label>Ваш вопрос<textarea name="question" rows="5" maxlength="2000" required></textarea></label><p class="fine">Документы прикладывать не нужно — адвокат уточнит подробности, когда свяжется с вами.</p><input name="site" style="display:none" tabindex="-1" autocomplete="off"><input type="hidden" name="nonce" id="nonce"><label class="ck"><input type="checkbox" name="consent" id="ck"><span>Даю согласие на обработку моих персональных данных на условиях <a href="?ask=${esc(pid)}&consent=${esc(cur)}" target="_blank" rel="noopener">текста согласия</a></span></label><input type="hidden" name="consentVer" value="${esc(cur)}"><button type="submit" class="go" disabled>Отправить вопрос</button><p class="fine">Укажите телефон или Telegram. Без согласия вопрос отправить нельзя. Текст согласия открывается отдельной страницей.</p></form><div id="out"></div>
-<script>(function(){var f=document.getElementById('f'),out=document.getElementById('out'),ck=document.getElementById('ck'),go=f.querySelector('.go');document.getElementById('nonce').value=(Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,30);ck.onchange=function(){go.disabled=!ck.checked;};
+<form id="f"><label>Ваше имя<input name="name" required maxlength="120" autocomplete="name"></label><label>Телефон<input name="phone" inputmode="tel" autocomplete="tel" placeholder="+7 900 000-00-00"></label><label>Telegram — имя пользователя, если удобнее писать туда<input name="tg" autocomplete="off" placeholder="@имя_пользователя"></label><label>Как с вами связаться<select name="method">${methods.map(m => `<option value="${m}">${ASK_METHODS[m].charAt(0).toUpperCase() + ASK_METHODS[m].slice(1)}</option>`).join('')}</select></label>${cats.length ? `<label>О чём вопрос<select name="cat" id="cat"><option value="">— другое —</option>${cats.map(c => `<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('')}</select></label><div id="catq"></div>` : ''}<label>Ваш вопрос<textarea name="question" rows="5" maxlength="2000" required></textarea></label><p class="fine">Документы прикладывать не нужно — адвокат уточнит подробности, когда свяжется с вами.</p><input name="site" style="display:none" tabindex="-1" autocomplete="off"><input type="hidden" name="nonce" id="nonce"><label class="ck"><input type="checkbox" name="consent" id="ck"><span>Даю согласие на обработку моих персональных данных на условиях <a href="?ask=${esc(pid)}&consent=${esc(cur)}" target="_blank" rel="noopener">текста согласия</a></span></label><input type="hidden" name="consentVer" value="${esc(cur)}"><button type="submit" class="go" disabled>Отправить вопрос</button><p class="fine">Укажите телефон или Telegram. Без согласия вопрос отправить нельзя. Текст согласия открывается отдельной страницей.</p></form><div id="out"></div>
+<script>(function(){var CATS=${catJs},cs=document.getElementById('cat'),cq=document.getElementById('catq');function E(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}if(cs)cs.onchange=function(){var c=null;for(var i=0;i<CATS.length;i++)if(CATS[i].id===cs.value)c=CATS[i];cq.innerHTML=c?c.qs.map(function(q,i){return '<label>'+E(q)+'<input name="a'+i+'" maxlength="300" autocomplete="off"></label>';}).join('')+(c.hint?'<p class="note">'+E(c.hint)+'</p>':''):'';};
+var f=document.getElementById('f'),out=document.getElementById('out'),ck=document.getElementById('ck'),go=f.querySelector('.go');document.getElementById('nonce').value=(Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,30);ck.onchange=function(){go.disabled=!ck.checked;};
 f.onsubmit=function(e){e.preventDefault();var fd=new FormData(f);var body={ask:${JSON.stringify(pid)},action:'askreq'};fd.forEach(function(v,k){body[k]=v;});go.disabled=true;go.textContent='Отправляю…';
 fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(j){if(j.ok){f.style.display='none';var how={call:'позвонит',tg:'напишет в Telegram',wa:'напишет в WhatsApp',sms:'напишет SMS'}[j.method]||'свяжется с вами';out.innerHTML='<div class="ok">Вопрос отправлен. Номер обращения <b>'+j.code+'</b>.<br>Адвокат '+how+', как только сможет.</div>';}else{out.innerHTML='<div class="err">'+String(j.error||'Ошибка').replace(/[<>&]/g,'')+'</div>';go.disabled=!ck.checked;go.textContent='Отправить вопрос';}}).catch(function(){out.innerHTML='<div class="err">Нет связи — попробуйте ещё раз</div>';go.disabled=!ck.checked;go.textContent='Отправить вопрос';});};})();</script>`;
   return html(bookShell(title, body));
+}
+
+// ════════════════════════════════════════════════════════════
+//  v200: «ХОД ДЕЛА» ДЛЯ ДОВЕРИТЕЛЯ (Ш-14, программа Ш без ИИ)
+// ════════════════════════════════════════════════════════════
+// Осознанно открытая часть (раздел 1 п. 6 правил): программа сама присылает только отмеченное адвокатом — название дела без ФИО, стадию,
+// ближайшее заседание (дата, время, суд, зал), поданные документы (дата и название), строку «обновлено». Сумм, ФИО, телефонов в ней нет —
+// программа их не присылает, сервер отбрасывает всё, чего нет в списке полей. Метка — 24+ знака из программы (случайная); страница —
+// GET ?case=<метка>; caseunpub удаляет файл — ссылка перестаёт работать. Объект: casepage-<метка>.json.
+const CASE_TOKEN_RE = /^[A-Za-z0-9_-]{24,64}$/;
+const casePageKey = t => 'casepage-' + t + '.json';
+const caseStr = (v, n) => String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n);
+function casePageClean(d) {
+  d = d || {}; const iso = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) ? String(v) : '', hm = v => /^\d{2}:\d{2}$/.test(String(v || '')) ? String(v) : '';
+  const h = d.next && iso(d.next.date) ? { date: iso(d.next.date), time: hm(d.next.time), court: caseStr(d.next.court, 160), room: caseStr(d.next.room, 20) } : null;
+  return { title: caseStr(d.title, 160), stage: caseStr(d.stage, 80), status: caseStr(d.status, 80), court: caseStr(d.court, 160), courtNo: caseStr(d.courtNo, 60), next: h,
+    filed: (Array.isArray(d.filed) ? d.filed : []).map(x => ({ date: iso(x && x.date), title: caseStr(x && x.title, 160) })).filter(x => x.date && x.title).slice(0, 30),
+    note: caseStr(d.note, 600), lawyer: caseStr(d.lawyer, 120), phone: caseStr(d.phone, 40) };
+}
+async function casePublish(body) {
+  needStorage();
+  const t = String(body.token || ''); if (!CASE_TOKEN_RE.test(t)) return { ok: false, error: 'bad_token' };
+  const data = casePageClean(body.data), r = await s3Put(casePageKey(t), JSON.stringify({ data, updatedAt: Date.now() }), 'application/json; charset=utf-8');
+  if (!r.ok) return { ok: false, error: 's3 ' + r.status };
+  return { ok: true, url: '?case=' + t };
+}
+async function caseUnpublish(body) {
+  needStorage();
+  const t = String(body.token || ''); if (!CASE_TOKEN_RE.test(t)) return { ok: false, error: 'bad_token' };
+  const r = await s3Delete(casePageKey(t));
+  if (!r.ok && r.status !== 404) return { ok: false, error: 's3 ' + r.status };
+  return { ok: true };
+}
+async function casePage(q) {
+  const html = (h, st) => ({ statusCode: st || 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }, body: h });
+  const t = String(q.case || ''); const gone = () => html(bookShell('Ход дела', '<p>Страница не найдена или адвокат её отключил.</p>'), 404);
+  if (!CASE_TOKEN_RE.test(t)) return gone();
+  // v201 (A11-8): сбой хранилища — не «страница отключена», а временная ошибка
+  const r = await s3Get(casePageKey(t)); if (r.status === 404) return gone(); if (!r.ok) return html(bookShell('Ход дела', '<p>Страница временно недоступна — попробуйте позже.</p>'), 502);
+  let j; try { j = JSON.parse(await r.text()); } catch (e) { return gone(); }
+  const d = casePageClean(j.data), dt = v => v ? v.split('-').reverse().join('.') : '';
+  const upd = j.updatedAt ? new Date(Number(j.updatedAt) + 3 * 3600e3).toISOString().slice(0, 16).replace('T', ' ').split(' ').map((x, i) => i ? x : dt(x)).join(' ') : '';
+  const row = (k, v) => v ? `<p><span class="fine">${esc(k)}</span><br>${esc(v)}</p>` : '';
+  const body = `${d.title ? `<p class="note">${esc(d.title)}</p>` : ''}${row('Суд', [d.court, d.courtNo ? '№ ' + d.courtNo : ''].filter(Boolean).join(', '))}${row('Стадия', d.stage)}${row('Состояние', d.status)}
+${d.next ? `<div class="ok"><b>Ближайшее заседание</b><br>${esc(dt(d.next.date))}${d.next.time ? ' в ' + esc(d.next.time) : ''}${d.next.court ? '<br>' + esc(d.next.court) : ''}${d.next.room ? ', зал ' + esc(d.next.room) : ''}</div>` : '<p class="fine">Ближайшее заседание пока не назначено.</p>'}
+${d.filed.length ? `<p><b>Подано</b></p><ul>${d.filed.map(x => `<li>${esc(dt(x.date))} — ${esc(x.title)}</li>`).join('')}</ul>` : ''}${d.note ? `<p class="note">${esc(d.note)}</p>` : ''}
+${d.lawyer || d.phone ? `<p class="fine">Адвокат: ${esc(d.lawyer)}${d.phone ? ` · <a href="tel:${esc(d.phone.replace(/[^\d+]/g, ''))}">${esc(d.phone)}</a>` : ''}</p>` : ''}${upd ? `<p class="fine">Обновлено ${esc(upd)} (МСК)</p>` : ''}`;
+  return html(bookShell('Ход дела', body));
 }
 
 // ════════════════════════════════════════════════════════════
