@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="28.10.2026 19:57 · c790dc7">
-<meta name="build-no" content="221">
+<meta name="build" content="28.10.2026 20:38 · 73b21c5">
+<meta name="build-no" content="222">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -852,6 +852,9 @@ window.addEventListener('error', ev => { const e = ev && (ev.error || ev.message
 window.addEventListener('unhandledrejection', ev => { const r = ev && ev.reason; const m = r && (r.message || String(r)); logErr('promise', r); if (!/failed to fetch|network|aborterror|load failed/i.test(String(m))) errNotify(m); });
 
 // ▼▼▼ core/util.js
+// сборка 224 (Д-39): действие с записью — одно за раз (двойное нажатие «Импортировать», «Добавить день», «В документы дела»)
+const BUSY_ONCE = new Set();
+async function busyOnce(key, fn) { if (BUSY_ONCE.has(key)) return null; BUSY_ONCE.add(key); try { return await fn(); } finally { BUSY_ONCE.delete(key); } }
 // ═══ core/util.js — перенесено из v310 без изменений (этап 1а); порядок кусков — исходный ═══
 // УТИЛИТЫ
 const uid = p => {
@@ -1546,7 +1549,8 @@ async function del(store, id) {
 async function undelete(store, id) {
   const rec = (await getAllRaw(store)).find(r => r && r.id === id);
   if (!rec) return false;
-  const obj = { ...rec }; delete obj._deleted; delete obj._deletedAt;
+  // сборка 222 (Д-10): отметка возврата — при слиянии восстановленная запись побеждает более раннее удаление
+  const obj = { ...rec }; delete obj._deleted; delete obj._deletedAt; obj._restoredAt = Date.now();
   return put(store, obj);
 }
 // Окончательно удалить запись (стереть из базы)
@@ -1558,7 +1562,7 @@ function purgedAdd(id, at) { const p = purgedList(); const lim = Date.now() - 18
 // v161 (аудит сборки 160, D2, D3): удаление по реестру — проверка версии и удаление в ОДНОЙ транзакции (purgeRaw с before: запись,
 // изменённая после отметки удаления, не удаляется); успех — только по завершении транзакции (откат — не успех); сбои чтения и удаления
 // считаются (purgedApply.lastFailed) — слияние не ставит метку полного успеха, повторный обмен доделает
-async function purgedApply() { const p = purgedList(); const ids = Object.keys(p); purgedApply.lastFailed = 0; if (!ids.length) return 0; let n = 0, failed = 0; for (const st of STORES) { let rows; try { rows = await getAllRaw(st); } catch (e) { failed++; continue; } for (const r of rows) if (r && p[r.id] && (r._upd || 0) < p[r.id]) { const ok = await purgeRaw(st, r.id, p[r.id]); if (ok === true) n++; else if (ok === false) failed++; } } purgedApply.lastFailed = failed; return n; }
+async function purgedApply() { const p = purgedList(); const ids = Object.keys(p); purgedApply.lastFailed = 0; if (!ids.length) return 0; let n = 0, failed = 0; for (const st of STORES) { let rows; try { /* сборка 222 (Д-16): хранилища файлов — только ключи (версию проверяет транзакция purgeRaw) */ rows = (st === 'docBlobs' || st === 'docVersions') && typeof getAllKeys === 'function' ? (await getAllKeys(st)).map(id => ({ id, _upd: 0 })) : await getAllRaw(st); } catch (e) { failed++; continue; } for (const r of rows) if (r && p[r.id] && (r._upd || 0) < p[r.id]) { const ok = await purgeRaw(st, r.id, p[r.id]); if (ok === true) n++; else if (ok === false) failed++; } } purgedApply.lastFailed = failed; return n; }
 // v164 (N1): отметка ставится в той же транзакции, что удаление, после чтения записи — по её версии (mark)
 function purge(store, id) { return purgeRaw(store, id, null, true); }
 // before — отметка удаления из реестра: запись удаляется, только если её версия (_upd) всё ещё меньше (ответ 'kept' — запись новее, не тронута)
@@ -1879,7 +1883,9 @@ function mergeCaseRecords(cur, rec, base, events) {
   // поля по журналу: последняя правка каждого поля после базы
   const last = {};
   (events || []).forEach(e => { if (!e || e.caseId !== m.id || !(e.ts > base)) return; const f = CASE_MERGE_FIELDS[e.field]; if (!f) return; if (!last[f] || e.ts > last[f].ts) last[f] = e; });
-  Object.values(last).forEach(e => { const f = CASE_MERGE_FIELDS[e.field]; m[f] = e.to || ''; });
+  // сборка 222 (Д-01): событие журнала не перекрывает правку поля, сделанную позже (метка _ch любой из версий новее события) — форма дела
+  // правит даты и ссылки без события журнала; такое поле решает обычное сравнение меток ниже
+  Object.values(last).forEach(e => { const f = CASE_MERGE_FIELDS[e.field], t = Math.max(Number((newer._ch || {})[f] || 0), Number((older._ch || {})[f] || 0)); if (t > Number(e.ts || 0)) { delete last[f]; return; } m[f] = e.to || ''; });
   // списки — объединение по идентификаторам (при совпадении — из более новой записи)
   const unionBy = (a, b, key) => { const out = []; const seen = new Set(); [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])].forEach(x => { const k = key(x); if (k == null || seen.has(k)) return; seen.add(k); out.push(x); }); return out; };
   m._delDl = {}; for (const src of [older._delDl, newer._delDl]) if (src) for (const id of Object.keys(src)) m._delDl[id] = Math.max(Number(m._delDl[id] || 0), Number(src[id] || 0)); // v294/v299: по максимуму
@@ -1995,7 +2001,15 @@ async function mergeIncoming(parsed, allowSecrets, opts) {
         // сборка 199 (аудит сборки 198, N3-A): общей истории обмена нет (base = 0: первый обмен, перенос через файл без сервера) — это не
         // «конфликта нет», а «неизвестно, кто правил»: обе версии сливаются по полям и элементам (рассмотрения, сроки, платежи — по id), а не
         // заменяются целиком; слияние записывается в журнал коллизий
-        const both = base ? (curT > base && newT > base) : true, noHist = !base;
+        // сборка 222 (Д-10): надгробие против живой версии — удаление побеждает, если живая версия не восстановлена из корзины позже
+        // (_restoredAt); иначе автоматическая правка устройства, не видевшего удаления (статус «Дата прошла» при запуске), возвращала запись
+        { const dead = cur._deleted && !rec._deleted ? cur : rec._deleted && !cur._deleted ? rec : null;
+          if (dead) { const live = dead === cur ? rec : cur, D = Number(dead._deletedAt || 0);
+            if (D && !(Number(live._restoredAt || 0) > D)) { if (dead === cur) { skipped++; continue; } if (!dry) { if (await writeRaw(s, rec)) { updated++; CLOUD.dirty = true; } } else updated++; continue; } } }
+        // сборка 222 (Д-08): у обеих версий есть метки полей — слияние по полям, даже если одна из них старше базы коллизий (правка другого
+        // устройства, сделанная до моего обмена, а пришедшая позже, не заменяется целиком)
+        const fieldsBoth = !!(cur._ch && rec._ch && typeof cur._ch === 'object' && typeof rec._ch === 'object');
+        const both = (base ? (curT > base && newT > base) : true) || fieldsBoth, noHist = !base;
         if (s === 'cases' && both) { // v252
           if (!caseEventsAll) { const loc = await getAllRaw('caseEvents'); const inc = parsed.data.caseEvents || []; const ids = new Set(loc.map(e => e && e.id)); caseEventsAll = loc.concat(inc.filter(e => e && !ids.has(e.id))); }
           const merged = mergeCaseRecords(cur, rec, base, caseEventsAll);
@@ -2094,7 +2108,7 @@ async function collectAll() {
 }
 
 // ── Синхронизация пользовательских настроек ──
-const SYNC_SETTINGS_KEYS = ['crm_purged', 'crm_srv_remind', 'crm_eula', 'crm_docroot', 'crm_docpat', 'crm_snap_on', 'crm_notif_lead', 'crm_ics_anon', 'crm_book', 'crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_notif', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox'];
+const SYNC_SETTINGS_KEYS = ['crm_purged', 'crm_srv_remind', 'crm_eula', 'crm_docroot', 'crm_docpat', 'crm_snap_on', 'crm_notif_lead', 'crm_ics_anon', 'crm_book', 'crm_mon_auto', 'crm_theme', 'crm_fontfam', 'crm_fontsize', 'crm_calview', 'crm_tg_digest', 'crm_prices', 'crm_checklists', 'crm_autolock_min', 'crm_srvdb_on', 'crm_case_saved_views', 'crm_holidays_ru', 'crm_monitor_url', 'crm_ai_endpoint', 'crm_ai_model', 'crm_ai_zdr', 'crm_inbox', 'crm_inbox_del'];
 
 // Секреты переносятся только внутри зашифрованного контейнера .crm. PIN
 // хранится и переносится как PBKDF2-хэш с солью, а не как исходные цифры.
@@ -2112,7 +2126,38 @@ function nextLocalStamp(key) {
 function settingsSyncTouch() {
   Promise.resolve().then(() => { try { if (typeof cloudTouch === 'function') cloudTouch(); } catch (e) { if (typeof logErr === "function") logErr("", e); } });
 }
-function bumpSettings() { const stamp = nextLocalStamp('crm_settings_upd'); settingsSyncTouch(); return stamp; }
+// сборка 222 (Д-02): у каждого ключа настроек — своя метка изменения (crm_settings_stamps). Изменение замечается по отпечатку значения
+// (crm_settings_seen) при каждой метке настроек и при сборе снимка; при первом запуске метки ключей — общая метка настроек (поведение не
+// меняется, пока оба устройства не обновятся). Входящий снимок применяется по ключам: новее — входящее, новее здесь — остаётся и уходит
+// с этого устройства. Быстрые записи (crm_inbox) объединяются по записям, удалённые не возвращаются (crm_inbox_del).
+const SETTINGS_STAMPS = 'crm_settings_stamps', SETTINGS_SEEN = 'crm_settings_seen';
+function settingsHash(v) { const s = v == null ? '\u0000' : String(v); let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ':' + s.length; }
+function settingsStampsRefresh() {
+  let st = null, seen = null; try { st = JSON.parse(localStorage.getItem(SETTINGS_STAMPS) || 'null'); seen = JSON.parse(localStorage.getItem(SETTINGS_SEEN) || 'null'); } catch (e) { st = null; }
+  const first = !st || typeof st !== 'object' || Array.isArray(st) || !seen || typeof seen !== 'object' || Array.isArray(seen);
+  if (first) { st = {}; seen = {}; }
+  const base = Number(localStorage.getItem('crm_settings_upd') || 0), now = Date.now(); let ch = first;
+  for (const k of SYNC_SETTINGS_KEYS) { const h = settingsHash(localStorage.getItem(k)); if (seen[k] === h) continue; seen[k] = h; st[k] = first ? base : Math.max(now, Number(st[k] || 0) + 1); ch = true; }
+  if (ch) { try { localStorage.setItem(SETTINGS_STAMPS, JSON.stringify(st)); localStorage.setItem(SETTINGS_SEEN, JSON.stringify(seen)); } catch (e) { if (typeof logErr === 'function') logErr('settings:stamps', e); } }
+  return st;
+}
+function settingsSeenSet(k, v) { try { const seen = JSON.parse(localStorage.getItem(SETTINGS_SEEN) || '{}') || {}; seen[k] = settingsHash(v); localStorage.setItem(SETTINGS_SEEN, JSON.stringify(seen)); } catch (e) { if (typeof logErr === 'function') logErr('settings:seen', e); } }
+// быстрые записи двух устройств: объединение по id без удалённых; local — есть то, чего нет во входящих (нужно отправить)
+function inboxMergeIncoming(theirsRaw, theirsDelRaw) {
+  const parse = (v, d) => { try { const x = JSON.parse(v); return x && typeof x === 'object' ? x : d; } catch (e) { return d; } };
+  const mine = (lsJSON('crm_inbox', []) || []).filter(x => x && x.id), theirs = (theirsRaw == null ? [] : parse(theirsRaw, [])).filter(x => x && x.id);
+  const del = Object.assign({}, lsJSON('crm_inbox_del', {}) || {}), td = theirsDelRaw == null ? {} : parse(theirsDelRaw, {});
+  let local = false; for (const id of Object.keys(del)) if (!(Number(td[id] || 0) >= Number(del[id] || 0))) local = true;
+  for (const id of Object.keys(td)) del[id] = Math.max(Number(del[id] || 0), Number(td[id] || 0));
+  const lim = Date.now() - 180 * 864e5; for (const id of Object.keys(del)) if (del[id] < lim) delete del[id];
+  const tIds = new Set(theirs.map(x => x.id)), seen = new Set(), out = [];
+  for (const x of [...mine, ...theirs]) { if (seen.has(x.id) || del[x.id]) continue; seen.add(x.id); out.push(x); if (!tIds.has(x.id)) local = true; }
+  out.sort((a, b) => Number(b.at || 0) - Number(a.at || 0));
+  const val = JSON.stringify(out.slice(0, 200)), delVal = JSON.stringify(del), changed = val !== (localStorage.getItem('crm_inbox') || '[]') || delVal !== (localStorage.getItem('crm_inbox_del') || '{}');
+  if (changed) { localStorage.setItem('crm_inbox', val); localStorage.setItem('crm_inbox_del', delVal); settingsSeenSet('crm_inbox', val); settingsSeenSet('crm_inbox_del', delVal); }
+  return { changed, local };
+}
+function bumpSettings() { try { settingsStampsRefresh(); } catch (e) { if (typeof logErr === 'function') logErr('settings:stamps', e); } const stamp = nextLocalStamp('crm_settings_upd'); settingsSyncTouch(); return stamp; }
 function secretStampsGet() {
   try {
     const o = JSON.parse(localStorage.getItem('crm_secret_stamps') || '{}');
@@ -2149,8 +2194,10 @@ function collectSettings() {
     localStorage.setItem('crm_secrets_upd', String(secretsUpd));
     secretStampsSave(secretStamps);
   }
+  let stamps = {}; try { stamps = settingsStampsRefresh(); } catch (e) { if (typeof logErr === 'function') logErr('settings:stamps', e); }
   const s = {
     _upd: Number(localStorage.getItem('crm_settings_upd') || 0),
+    _stamps: stamps,
     _secretsIncluded: true,
     _secretsUpd: secretsUpd,
     _secrets: {},
@@ -2182,11 +2229,30 @@ function applyIncomingSettings(incoming, allowSecrets) {
   }
   // «Чистый» браузер (mine=0) принимает настройки всегда — включая старые
   // файлы без метки. На настроенном устройстве побеждает более новая версия.
-  if (fresher) {
+  const tSt = incoming._stamps && typeof incoming._stamps === 'object' && !Array.isArray(incoming._stamps) ? incoming._stamps : null;
+  // быстрые записи — всегда объединением (и от устройств без меток ключей)
+  if (incoming.crm_inbox !== undefined || incoming.crm_inbox_del !== undefined) {
+    try { const ib = inboxMergeIncoming(incoming.crm_inbox, incoming.crm_inbox_del); if (ib.changed) changed = true; if (ib.local) { if (typeof bumpSettings === 'function') bumpSettings(); purgedMerged = true; } } catch (e) { logErr('inbox:merge', e); }
+  }
+  if (tSt) {
+    // сборка 222 (Д-02): по ключам — значение с более поздней меткой
+    let mySt = {}; try { mySt = settingsStampsRefresh(); } catch (e) { mySt = {}; }
+    let localNewer = false;
+    for (const k of SYNC_SETTINGS_KEYS) {
+      if (k === 'crm_purged' || k === 'crm_inbox' || k === 'crm_inbox_del') continue;
+      const t = Number(tSt[k] || 0), mn = Number(mySt[k] || 0), tv = incoming[k] === undefined ? null : incoming[k], lv = localStorage.getItem(k);
+      if (tv === lv) { if (t > mn) mySt[k] = t; continue; }
+      if (t > mn || (!mn && !t && fresher)) { if (tv === null) localStorage.removeItem(k); else localStorage.setItem(k, tv); mySt[k] = t; settingsSeenSet(k, tv); changed = true; }
+      else localNewer = true;
+    }
+    try { localStorage.setItem(SETTINGS_STAMPS, JSON.stringify(mySt)); } catch (e) { logErr('settings:stamps', e); }
+    if (localNewer) { if (typeof bumpSettings === 'function') bumpSettings(); purgedMerged = true; }
+    else { upd = String(theirs); localStorage.setItem('crm_settings_upd', String(theirs)); }
+  } else if (fresher) {
     SYNC_SETTINGS_KEYS.forEach(k => {
-      if (k === 'crm_purged') return;
+      if (k === 'crm_purged' || k === 'crm_inbox' || k === 'crm_inbox_del') return;
       if (incoming[k] !== undefined && incoming[k] !== localStorage.getItem(k)) {
-        localStorage.setItem(k, incoming[k]); changed = true;
+        localStorage.setItem(k, incoming[k]); changed = true; settingsSeenSet(k, incoming[k]);
       }
     });
     // аудит 14.10.2026: метка принятых настроек (upd) — новая версия ставит её в отметку «синхронизировано»: метка сдвигается и без смены
@@ -2872,7 +2938,8 @@ function syncRevision() {
 function cloudTouch() {
   // Ошибка одного транспорта не должна мешать завершению записи в IndexedDB.
   try {
-    if (CLOUD.token) {
+    // сборка 223 (мелочь A2-8): отправка на Яндекс.Диск прежней программы в новой версии не объявлена — без ReferenceError в журнале
+    if (CLOUD.token && typeof cloudPushTimer !== 'undefined') {
       CLOUD.dirty = true;
       clearTimeout(cloudPushTimer);
       cloudPushTimer = setTimeout(() => pushCloud().catch(()=>{}), 4000);
@@ -3062,12 +3129,15 @@ async function dataInit() {
   // Миграция: виды дел КАС и КоАП
   {
     const needKinds = ['КАС', 'КоАП'];
-    if (needKinds.some(k => !(REF.caseKind || []).includes(k))) await saveRef('caseKind', [...new Set([...(REF.caseKind || []), ...needKinds])]);
+    // сборка 222 (мелочь A1-12): миграция — один раз; удалённое пользователем из справочника не возвращается при каждом запуске
+    if (!localStorage.getItem('crm_mig_kinds') && needKinds.some(k => !(REF.caseKind || []).includes(k))) await saveRef('caseKind', [...new Set([...(REF.caseKind || []), ...needKinds])]);
+    localStorage.setItem('crm_mig_kinds', '1');
   }
   // Миграция: составные роли доверителя (Истец/Ответчик/Третье лицо)
   {
     const needRoles = ['Доверитель (Истец)', 'Доверитель (Ответчик)', 'Доверитель (Третье лицо)'];
-    if (needRoles.some(r => !(REF.clientRole || []).includes(r))) await saveRef('clientRole', [...new Set([...(REF.clientRole || []), ...needRoles])]);
+    if (!localStorage.getItem('crm_mig_roles') && needRoles.some(r => !(REF.clientRole || []).includes(r))) await saveRef('clientRole', [...new Set([...(REF.clientRole || []), ...needRoles])]);
+    localStorage.setItem('crm_mig_roles', '1');
   }
 }
 
@@ -3286,10 +3356,12 @@ function putChecked(store, obj, expectUpd) { return putMany([[store, obj]], { ex
 const CASE_EVENTS_BATCH = { list: null };
 if (typeof addCaseHistoryEvent === 'function') {
   const addCaseHistoryEventPlain = addCaseHistoryEvent;
-  addCaseHistoryEvent = function (obj, field, from, to, source) {
-    if (!CASE_EVENTS_BATCH.list) return addCaseHistoryEventPlain(obj, field, from, to, source);
+  // сборка 222 (мелочь A1-6): шестой аргумент (extra — снимок при объединении рассмотрений) передаётся и в пакет, и в прямой вызов
+  addCaseHistoryEvent = function (obj, field, from, to, source, extra) {
+    if (!CASE_EVENTS_BATCH.list) return addCaseHistoryEventPlain(obj, field, from, to, source, extra);
     if (!obj || from === to) return;
     const ev = { id: uid('СБ'), caseId: obj.id || '', caseNum: obj.number || '', ts: Date.now(), field: field || '', from: from || '', to: to || '', source: source || 'form' };
+    if (extra && typeof extra === 'object') for (const k of Object.keys(extra)) if (!(k in ev)) ev[k] = extra[k];
     if (field === 'status') { obj.history = Array.isArray(obj.history) ? obj.history.slice() : []; obj.history.push({ id: ev.id, at: ev.ts, field, from: ev.from, to: ev.to, source: ev.source }); if (obj.history.length > 500) obj.history = obj.history.slice(-500); }
     CASE_EVENTS_BATCH.list.push(ev);
   };
@@ -4243,7 +4315,8 @@ function secMemLine() { return !_sec.ready ? 'проверяется' : _sec.ok 
 // с учётом записей-сирот (заседания, счета, задачи, ордера, привязанные к уже удалённому делу, — чтобы новое дело их не
 // унаследовало); номер соглашения «N/ГГГГ» — максимум года + 1. Дело в корзине держит свои номера (его можно вернуть). Номера подставляются в новую форму дела, их можно править;
 // при сохранении номер дела и номер соглашения проверяются на занятость другим делом. Чистые функции — для тестов.
-const CASE_NO_RE = /^Д-(\d+)\s*\/\s*(\d{4})$/, AGREEMENT_NO_RE = /^(\d+)\s*\/\s*(\d{4})$/;
+// сборка 222 (мелочь A1-8): «д-5/2026» и «Д- 5/2026» тоже занимают номер — как при проверке занятости (numberingNorm)
+const CASE_NO_RE = /^Д-\s*(\d+)\s*\/\s*(\d{4})$/i, AGREEMENT_NO_RE = /^(\d+)\s*\/\s*(\d{4})$/;
 function numberingYear(now) { return (now ? new Date(now) : new Date()).getFullYear(); }
 // cases — записи дел; orphans — номера дел из связанных записей (caseNum); year — год (для тестов)
 function nextCaseNo(cases, orphans, year) {
@@ -4929,7 +5002,8 @@ async function nextServerPull(slot) {
     if (!g || !g.ok) { const msg = nextSrvError(g); note('err', msg); return { ok: false, error: msg }; }
     const r = pm ? pm.r : await srvdbMergeSnapshot(g, true, slot);
     if (!r.ok) { const msg = nextSrvError(r); note('err', msg); return { ok: false, error: msg }; }
-    if (r.empty) { (slot ? SRVDB2 : SRVDB).lastErr = null; return r; }
+    // сборка 223 (Д-15): база на устройстве уже такая, как на сервере, — загрузка состоялась (отметка «Последняя загрузка»)
+    if (r.empty) { (slot ? SRVDB2 : SRVDB).lastErr = null; if (r.upToDate) note('pull'); return r; }
     if (r.failed) { const msg = (typeof mergeFailText === 'function' ? mergeFailText(r, 'не записано записей: ' + r.failed) : 'не записано записей: ' + r.failed) + ' — повторите загрузку'; note('err', msg); return { ...r, ok: false, error: msg }; }
     if (!hadLocal) localStorage.setItem(sk('crm_next_pull_rev'), syncRevisionAfterPull(revBefore, r));
     localStorage.setItem(sk('crm_next_pull_res'), JSON.stringify({ added: r.added, updated: r.updated, conflicts: r.conflicts || 0 }));
@@ -5077,8 +5151,11 @@ const nextLocalChanges = slot => { const D = slot ? SRVDB2 : SRVDB, sk = k => sl
 // получает свою (более позднюю) метку — и остаётся неотправленной
 function syncRevisionAfterPull(before, merged) { const a = String(before || '').split(':'), b = syncRevision().split(':'), m = merged || {}; return [a[0] || '0', (m.settingsUpd != null ? m.settingsUpd : m.settingsChanged ? b[1] : a[1]) || '0', (m.secretsChanged ? b[2] : a[2]) || '0'].join(':'); }
 // Отключить сервер в новой версии: адрес, код, пароль и отметки удаляются; база на устройстве остаётся
+// сборка 223 (Д-13): всё, что программа хранит об обмене с основным сервером (кроме адреса, кода и пароля)
+const NEXT_SRV_STATE_KEYS = ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_next_push_at', 'crm_next_preview_at', 'crm_srvdb_lastpull', 'crm_srvdb_lastpush', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver', 'crm_next_snap_srv', 'crm_next_delta_last', 'crm_next_delta_srv', 'crm_merge_base', 'crm_next_fwd'];
 function nextServerForget() {
   SRV.url = ''; SRV.secret = ''; CLOUD.pass = '';
+  for (const k of NEXT_SRV_STATE_KEYS) localStorage.removeItem(k);
   for (const k of ['crm_next_srv_checked', 'crm_next_pull_rev', 'crm_next_pull_res', 'crm_next_push_at', 'crm_next_preview_at', 'crm_srvdb_lastpull', 'crm_srvdb_lastpush', 'crm_srvdb_lasterr', 'crm_srvdb_lastat', 'crm_srvdb_ver', 'crm_next_auto', 'crm_next_fwd']) localStorage.removeItem(k);
   syncStatusRender();
 }
@@ -5373,7 +5450,9 @@ async function dbSizeNow() {
   let z = null; if (encCanZip()) { try { z = (await encZip(new TextEncoder().encode(JSON.stringify(d)), false)).length; } catch (e) { logErr('dbsize:zip', e); } }
   return dbSizeZip(m, z, encZipOn());
 }
-const oldVerOk = () => Number(localStorage.getItem('crm_next_oldver') || (localStorage.getItem('crm_next_old313') === '1' ? 313 : 0));
+// сборка 223 (Д-12): база на сервере уже сжата (это устройство её расшифровало — crm_enc_v3) или прежней программой больше не пользуются —
+// подтверждение версии прежней программы дало другое устройство, автообмен здесь не останавливается
+const oldVerOk = () => (localStorage.getItem('crm_next_old_off') === '1' || localStorage.getItem('crm_enc_v3') === '1') ? 9999 : Number(localStorage.getItem('crm_next_oldver') || (localStorage.getItem('crm_next_old313') === '1' ? 313 : 0));
 const mbText = b => (Math.round(b / 10485.76) / 100).toLocaleString('ru-RU') + ' МБ';
 function dbSizeText(m, now) {
   const lines = ['Размер базы ' + new Date(now || Date.now()).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) + ' (сборка ' + (typeof BUILD_ID === 'string' ? BUILD_ID : '') + ')',
@@ -5429,7 +5508,9 @@ async function openPushConfirm(res) {
   if (size && !size.fits) { openSheet('Отправка на сервер', `<div class="info-box warning" id="push-toobig">База больше, чем принимает сервер: ${esc(mbText(size.effective))} из ${esc(mbText(size.limit))}${size.zipRequest == null ? '' : ', даже со сжатием'}. Отправка не начата. Что занимает место — в листе «Размер базы».</div><div class="form-actions"><button type="button" class="button" onclick="openDbSizeSheet()">Размер базы</button><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   // сжатие включено, а база на сервере ещё несжатая — отправка заменит её сжатой, даже когда новых данных нет
   const recompress = !!(size && size.willZip && res.srvFmt && res.srvFmt < 3);
-  if (!res.empty && !toS && !recompress) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
+  // сборка 223 (Д-14): изменились только настройки или реестр окончательных удалений — записей нет, но отправить есть что
+  const settingsOnly = !toS && typeof nextLocalChanges === 'function' && nextLocalChanges();
+  if (!res.empty && !toS && !recompress && !settingsOnly) { openSheet('Отправка на сервер', `<div class="info-box" id="push-nothing">Отправлять нечего: на сервере уже есть всё, что есть на этом устройстве.${toD ? ' На сервере есть данные новее — нажмите «Загрузить базу с сервера».' : ''}</div><div class="form-actions"><button type="button" class="button" onclick="sheetBack()">Закрыть</button></div>`, sheetIsOpen() ? true : undefined); return res; }
   const oldRisk = !!(size && size.needOld > oldVerOk());
   // разбор GPT 03.10.2026: версия 314 не гарантирует, что прежняя программа справится с размером — она получает и отправляет базу через
   // функцию (предел 3,5 МБ); новая версия с сервером 180 работает и с большей
@@ -7431,6 +7512,8 @@ function snapRbFields(store, cur, snap) {
 function snapRbRecord(store, cur, snap, now) {
   const c = cur || {}, o = snapRbClone(snap);
   for (const k of ['_deleted', '_deletedAt', '_deletedWith', '_ch', '_upd', '_device']) delete o[k];
+  // сборка 222 (Д-10): запись возвращается из корзины откатом — отметка возврата побеждает при слиянии прежнее удаление
+  if (c._deleted) o._restoredAt = now;
   const after = t => Math.max(now, (Number(t) || 0) + 1);
   // надгробия обеих версий — по максимуму (как при слиянии)
   const dels = {};
@@ -7903,8 +7986,12 @@ async function fsyncWriteMain(h, fillMs) {
   const fill = fillMs ? await fsyncFilesFill(fillMs) : { fetched: 0, err: '' };
   const revAt = syncRevision(), at = Date.now(); localStorage.removeItem(FS_K.fwd);
   try {
+    // сборка 223 (мелочь A2-7): незавершённая запись — поток отменяется (иначе в папке облака остаётся временный .crswap); отметка «пишу»
+    // переживает закрытие страницы посреди записи — при следующем запуске файл будет записан
+    localStorage.setItem(FS_K.fwd + '_w', '1');
     const b = await fsyncBuild({ err: fill.err }), fh = await fsyncMainHandle(h, true), w = await fh.createWritable();
-    await w.write(b.text); await w.close();
+    try { await w.write(b.text); await w.close(); } catch (e) { try { await w.abort(); } catch (x) { /* штатно: поток уже закрыт */ } throw e; }
+    localStorage.removeItem(FS_K.fwd + '_w');
     const f = await fh.getFile();
     // база коллизий файла — время сборки записанного файла: всё, что правилось до него, в файле есть
     if (at > Number(localStorage.getItem(FS_K.base) || 0)) localStorage.setItem(FS_K.base, String(at));
@@ -7969,6 +8056,7 @@ function fsyncTouch() { if (!fsyncBound() || !fsyncSupported()) return; clearTim
 // запуск: дескриптор, разрешение (только проверка), проверка раз в 2 минуты и при возврате в программу
 async function fsyncStart() {
   if (!fsyncBound() || !fsyncSupported()) return false;
+  if (localStorage.getItem(FS_K.fwd + '_w')) { localStorage.setItem(FS_K.fwd, '1'); localStorage.removeItem(FS_K.fwd + '_w'); }
   FSYNC.handle = await fsyncHandleGet();
   if (!FSYNC.handle) { fsyncNote('err', (fsyncKind() === 'file' ? 'привязанный файл облака не найден' : 'папка облака не найдена') + ' на этом устройстве — выберите заново'); return false; }
   FSYNC.perm = await fsyncPerm(FSYNC.handle, false); try { syncStatusRender(); } catch (e) { logErr('syncStatus', e); }
@@ -8331,7 +8419,8 @@ function addrSuggest(input) {
   }, 220);
 }
 if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
-  document.addEventListener('input', e => { const t = e.target; if (t && t.matches && t.matches('input[data-addr]')) addrSuggest(t); });
+  // сборка 224 (Д-41): подсказки — только на набор пользователем; «Заполнить форму» и восстановление черновика адрес в DaData не отправляют
+  document.addEventListener('input', e => { const t = e.target; if (e.isTrusted && t && t.matches && t.matches('input[data-addr]')) addrSuggest(t); });
 }
 // лист настроек: ключ DaData
 function openDadataSheet() {
@@ -10289,6 +10378,14 @@ async function hearingDedupe() {
   let hearings, cases, events;
   try { hearings = await getAllRaw('hearings'); cases = await getAllRaw('cases'); events = await getAllRaw('monitorEvents'); } catch (e) { logErr('heardup:read', e); return { n: 0, manual: 0 }; }
   const plan = hearingDupPlan(hearings, cases, events); let n = 0, manual = 0;
+  // сборка 223 (Д-17): все одинаковые группы — одной транзакцией (прежде — транзакция с чтением всей базы на каждую группу: секунды на
+  // сотнях групп); сбой общей — по группам, как раньше
+  const auto = plan.filter(p => p.auto);
+  if (auto.length > 1) {
+    try { const r = await heardupTx((H, E, C) => { let k = 0, ch = 0; for (const p of auto) { const x = hearingDupApplyIn(H, E, C, p.key, p.sig, null, true); if (x && x.ok) k += x.n; else if (x && x.error === 'changed') ch++; } return { ok: true, n: k, changed: ch }; });
+      if (r && r.ok) { n = r.n; manual = plan.length - auto.length + r.changed; if (n && typeof icsTouch === 'function') { try { icsTouch(); } catch (e) { /* штатно: ленты может не быть */ } } return { n, manual }; } }
+    catch (e) { logErr('heardup:batch', e); }
+  }
   for (const p of plan) {
     if (!p.auto) { manual++; continue; }
     try { const r = await heardupTx((H, E, C) => hearingDupApplyIn(H, E, C, p.key, p.sig, null, true)); if (r && r.ok) n += r.n; else if (r && r.error === 'changed') manual++; } catch (e) { logErr('heardup:apply', e); }
@@ -11340,13 +11437,22 @@ async function bookPublish(quiet, force) {
   // сервер 189: текст согласия и вид уведомления в Telegram (сервер 188 эти поля не читает); пустой текст не шлётся — сервер оставит прежний
   const full = typeof srvRemindFull === 'function' && srvRemindFull(), consent = bookConsentText(cfg, full);
   settings.notifyFull = !!full; if (consent) settings.consentText = consent;
-  const hash = JSON.stringify([cfg.publicId, settings, days]);
+  // сборка 224 (Д-46): адрес сервера — в отпечатке: на новом сервере страница публикуется заново сама
+  const hash = JSON.stringify([SRV.url, cfg.publicId, settings, days]);
   if (!force && quiet && localStorage.getItem(BOOK_HASH_KEY) === hash) return { ok: true, same: true };
   const j = await bookSrv('bookpub', { publicId: cfg.publicId, settings, days }, true);
   // время публикации — на устройстве (BOOK_PUB_AT), а не в общих настройках crm_book: запись в них уходит на другие устройства и
   // запускала бы обмен базой после каждой публикации (урок 138)
   if (j && j.ok) { bookNote('pub', ''); localStorage.setItem(BOOK_PUB_AT, String(Date.now())); localStorage.setItem(BOOK_HASH_KEY, hash); if (!quiet) toast('Опубликовано окон: ' + j.slots + ' на ' + j.days + ' ' + plural(j.days, 'день', 'дня', 'дней')); }
   else { bookNote('pub', 'окна не опубликованы: ' + bookWhy(j)); if (!quiet) toast('Окна не опубликованы: ' + bookWhy(j), true); }
+  return j;
+}
+// страница записи без окон (выключение): сервер отвечает на заявку «время недоступно»
+async function bookPublishOff(cfg) {
+  if (!cfg || !cfg.publicId || !SRV.url || !SRV.secret) return null;
+  const settings = { title: cfg.title, address: cfg.address, phone: cfg.phone, note: 'Сейчас запись через эту страницу не ведётся' + (cfg.phone ? ' — позвоните: ' + cfg.phone : '') + '.', durationMin: Number(cfg.durationMin) || 60, topics: [] };
+  const j = await bookSrv('bookpub', { publicId: cfg.publicId, settings, days: [] }, true);
+  if (j && j.ok) localStorage.removeItem(BOOK_HASH_KEY);
   return j;
 }
 // итоги для листа «Автоматизация»: время последнего удачного получения заявок и публикации окон, последняя ошибка {at, kind, msg}
@@ -11516,7 +11622,8 @@ async function bookSaveSettings() {
   const r = bookSettingsModel(v, bookCfg()); if (r.error) { fErr(r.error); return; }
   if (r.obj.enabled && !r.obj.publicId) r.obj.publicId = bookNewId();
   bookCfgSave(r.obj);
-  if (!r.obj.enabled) { toast('Онлайн-запись выключена: заявки больше не забираются; страница записи остаётся, новые окна на ней не появятся'); closeSheet(); return; }
+  // сборка 224 (Д-45): выключение снимает окна со страницы — новые заявки сервер не принимает (прежде окна оставались, заявки копились)
+  if (!r.obj.enabled) { const j = await bookPublishOff(r.obj); toast(j && j.ok ? 'Онлайн-запись выключена: окна сняты со страницы, новые заявки не принимаются' : 'Онлайн-запись выключена, но окна со страницы не сняты: ' + bookWhy(j) + ' — включите и выключите ещё раз при связи', j && j.ok ? false : 'after'); closeSheet(); return; }
   const j = await bookPublish(false, true);
   if (j && j.ok) openBookSheet('replace'); else fErr('Настройки сохранены, но окна не опубликованы: ' + bookWhy(j) + '. Проверьте связь в «Синхронизации».');
 }
@@ -11667,7 +11774,8 @@ function askPubSettings(c) {
 async function askPublish(quiet, force) {
   const c = askCfg(); if (!c.publicId) return null;
   if (!SRV.url || !SRV.secret) { if (!quiet) toast('Подключите личный сервер: «Синхронизация» → «Подключить сервер»', true); return null; }
-  const settings = askPubSettings(c), hash = JSON.stringify([c.publicId, settings]);
+  // сборка 224 (Д-46): адрес сервера — в отпечатке: после смены сервера страница публикуется заново сама
+  const settings = askPubSettings(c), hash = JSON.stringify([SRV.url, c.publicId, settings]);
   if (!force && localStorage.getItem(ASK_HASH_KEY) === hash) return { ok: true, same: true };
   const j = await askSrv('askpub', { publicId: c.publicId, settings }, true);
   if (j && j.ok) { askNote('pub', ''); localStorage.setItem(ASK_PUB_AT, String(Date.now())); localStorage.setItem(ASK_HASH_KEY, hash); }
@@ -12440,7 +12548,7 @@ function calImpResText(n, applied) {
   if (n.maybe) parts.push('из них, возможно, уже есть в программе (проверьте): ' + n.maybe);
   if (n.same) parts.push('из них похожи на события, разобранные из другого календаря (подтвердите в «Неразобранных»): ' + n.same);
   if (n.stale) parts.push('календарь ещё показывает прежнее время (или название, место, отмену — другой календарь позже сообщил нынешнее): ' + n.stale);
-  if (n.moved) parts.push('перенесено в календаре: ' + n.moved); if (n.changed) parts.push('изменено название или место: ' + n.changed); if (n.back) parts.push('в календаре вернули на прежнее время: ' + n.back); if (n.cancelled) parts.push('отменено: ' + n.cancelled); if (n.gone) parts.push('удалено из календаря: ' + n.gone);
+  if (n.moved) parts.push('перенесено в календаре: ' + n.moved); if (n.changed) parts.push('изменено название или место: ' + n.changed); if (n.back) parts.push('в календаре вернули на прежнее время: ' + n.back); if (n.cancelled) parts.push('отменено: ' + n.cancelled); if (n.gone) parts.push('нет в календаре (удалено или перенесено дальше проверяемых дат): ' + n.gone);
   if (n.absent) parts.push('нет в одном из календарей, в другом есть (проверьте, где верно): ' + n.absent);
   if (n.exists) parts.push('уже есть в программе: ' + n.exists); if (n.dup) parts.push('уже в «Неразобранных»: ' + n.dup); if (n.known) parts.push('переносились раньше: ' + n.known);
   if (n.filtered) parts.push('не похожи на дела: ' + n.filtered); if (n.rec) parts.push('повторяющихся (не переносятся): ' + n.rec); if (n.cxSkip) parts.push('отменённых в календаре (не переносятся): ' + n.cxSkip); if (n.own) parts.push('события самой программы: ' + n.own);
@@ -12450,7 +12558,7 @@ function calImpResText(n, applied) {
 }
 // ── строки на «Сегодня»: перенос, отмена, удаление уже разобранного события ──
 function calImpTodayItems(today) {
-  const label = { moved: 'В календаре перенесено: ', cancelled: 'В календаре отменено: ', gone: 'Удалено из календаря: ', changed: 'В календаре изменено: ', absent: 'Нет в одном из календарей: ' };
+  const label = { moved: 'В календаре перенесено: ', cancelled: 'В календаре отменено: ', gone: 'Нет в календаре (удалено или перенесено дальше проверяемых дат): ', changed: 'В календаре изменено: ', absent: 'Нет в одном из календарей: ' };
   const q = v => '«' + (String(v || '').length > 60 ? String(v).slice(0, 59) + '…' : String(v || '')) + '»';
   // аудит 14.10.2026: события прочитаны, а записать не удалось — строкой с «Повторить», пока чтение не пройдёт (урок 144)
   const err = lsJSON(CALIMP.keyErr, null), errRow = err && err.save ? [{ key: 'ci:err:' + (err.at || 0), kind: 'calimp', pr: 0, date: '', title: 'События из календаря прочитаны, но не записаны', sub: err.msg || '', when: 'из календаря', badges: [['Не сохранено', 'bad']],
@@ -12491,7 +12599,8 @@ async function calImpAutoTick() {
 }
 function calImpStart() {
   if (typeof window !== 'object' || typeof setInterval !== 'function' || CALIMP.loop) return;
-  const tick = () => calImpAutoTick().catch(e => logErr('calimp:tick', e));
+  // сборка 224 (Д-44): пока не введён PIN (секреты закрыты), проверка не идёт — иначе ложная ошибка «нужен сервер» и пауза на 6 часов
+  const tick = () => { if ((typeof LOCK_UI === 'object' && LOCK_UI && LOCK_UI.locked) || (typeof _sec === 'object' && _sec && _sec.pending)) { if (!CALIMP.pinWait) CALIMP.pinWait = setTimeout(() => { CALIMP.pinWait = 0; tick(); }, 60000); return; } calImpAutoTick().catch(e => logErr('calimp:tick', e)); };
   CALIMP.loop = setInterval(tick, 30 * 60000); setTimeout(tick, 9000);
   if (typeof document === 'object' && document.addEventListener) document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
 }
@@ -13363,7 +13472,9 @@ async function openPairOutSheet(sub, msg) {
       <div class="form-actions">${btn('Синхронизация', 'openSyncSheet()', 'primary', 'refresh-cw')}</div>`, sub);
     return;
   }
-  if (!PAIR_OUT.code || Date.now() - PAIR_OUT.at > PAIR_TTL - 3600 * 1000) { try { PAIR_OUT.code = await pairPack(pairSecretsNow(), SRVDB.pass); PAIR_OUT.at = Date.now(); } catch (e) { logErr('pair:pack', e); PAIR_OUT.code = ''; } }
+  // сборка 224 (Д-47): код готовится заново и при смене сервера, кода или пароля (отпечаток), не только по времени
+  const pairSig = (() => { const s = JSON.stringify([pairSecretsNow(), SRVDB.pass]); let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36); })();
+  if (!PAIR_OUT.code || PAIR_OUT.sig !== pairSig || Date.now() - PAIR_OUT.at > PAIR_TTL - 3600 * 1000) { try { PAIR_OUT.code = await pairPack(pairSecretsNow(), SRVDB.pass); PAIR_OUT.at = Date.now(); PAIR_OUT.sig = pairSig; } catch (e) { logErr('pair:pack', e); PAIR_OUT.code = ''; } }
   if (!PAIR_OUT.code) { openSheet('Подключить телефон или планшет', `<div class="info-box warning">Не удалось подготовить код: браузер не дал шифрование. Пришлите «Журнал ошибок».</div>`, sub); return; }
   const link = pairLinkBase() + '#pair=' + PAIR_OUT.code;
   let qr = ''; try { qr = qrSvg(qrEncode(link), 300); } catch (e) { logErr('pair:qr', e); }
@@ -14059,8 +14170,9 @@ function closeSheet(force, byUser) { if (!force && typeof guardBeforeClose === '
 // ── сообщение внизу экрана ──
 let _toastTimer = 0;
 function toast(msg, warn) {
-  // сообщение об ошибке во время записи формы — запись не удалась, защита формы остаётся
-  if (warn && typeof guardSaveFailed === 'function') guardSaveFailed();
+  // сообщение об ошибке во время записи формы — запись не удалась, защита формы остаётся; сборка 224 (Д-30): warn === 'after' —
+  // предупреждение после удачной записи (запись сделана, черновик формы снимается как обычно)
+  if (warn && warn !== 'after' && typeof guardSaveFailed === 'function') guardSaveFailed();
   const t = document.getElementById('toast'); if (!t) return;
   t.textContent = String(msg || ''); t.className = 'visible' + (warn ? ' error' : ''); t.setAttribute('role', warn ? 'alert' : 'status');
   // сообщение — в верхнем слое браузера (popover), иначе открытый лист <dialog> его закрывает (снимок пользователя 03.10.2026);
@@ -14639,7 +14751,9 @@ async function syncSaveAndCheck() {
 // применить новое подключение и проверить связь; moveRes — итог переноса файлов (null — переноса не было)
 async function syncApplyConnection(next, moveRes) {
   const { url, secret, pass } = next, stranded = moveRes ? 0 : (next.stranded || 0);
-  if (url !== SRV.url) localStorage.removeItem('crm_next_srv_checked');
+  // сборка 223 (Д-13): другой адрес основного сервера — всё состояние обмена с прежним забывается (как у запасного, sync/srv2.js):
+  // иначе ревизия «отправлена» прежнему и база на новый сервер не уходила до первой правки
+  if (url !== SRV.url) { for (const k of (typeof NEXT_SRV_STATE_KEYS !== 'undefined' ? NEXT_SRV_STATE_KEYS : ['crm_next_srv_checked'])) localStorage.removeItem(k); }
   // Д6: другой сервер или пароль — изменения прежнего не применяются: следующее получение — снимком целиком
   if (url !== SRV.url || pass !== SRVDB.pass) SRVDB.ver = 0;
   // пароль общий для обоих серверов: сменили — и у запасного следующее получение снимком целиком (sync/srv2.js)
@@ -14654,6 +14768,7 @@ async function syncPullNow() {
   const b = document.getElementById('sy-pull'); if (b) b.disabled = true;
   const r = await nextServerPull();
   openSyncSheet('replace', !r.ok ? { text: 'База не загружена: ' + r.error + '.', bad: true }
+    : r.upToDate ? { text: 'База на устройстве уже совпадает с базой на сервере — новых данных нет.' }
     : r.empty ? { text: 'На сервере базы пока нет — загружать нечего.' }
     : { text: 'База загружена: новых записей — ' + r.added + ', обновлено — ' + r.updated + (r.conflicts ? ', коллизий — ' + r.conflicts : '') + '.' });
 }
@@ -14949,6 +15064,8 @@ function formModelHearing(v, prev) {
   if (v.time && !/^\d{1,2}:\d{2}$/.test(v.time)) return { error: 'Время — в формате ЧЧ:ММ' };
   return { obj: { ...(prev || {}), id: prev ? prev.id : uid('С'), createdAt: (prev && prev.createdAt) || Date.now(), ...formCaseLink(v.caseNum, prev), date: v.date, time: v.time || '',
     room: v.room || '', court: v.court || '', judge: v.judge || '', status: HEARING_STATUSES.includes(v.status) ? v.status : 'Назначено',
+    // сборка 222 (Д-11): статус, выбранный в форме, — не «автоотметка»: при запуске программа его больше не меняет
+    autoDone: prev && prev.autoDone && prev.status === (HEARING_STATUSES.includes(v.status) ? v.status : 'Назначено') ? prev.autoDone : undefined,
     result: v.status === 'Проведено' ? (v.result || '') : ((prev && prev.result) || ''), comment: v.comment || '',
     ...(hearingAttendedOf(v, prev) === undefined ? {} : { attended: hearingAttendedOf(v, prev) }),
     participation: HEARING_PARTICIPATION.includes(v.participation) ? v.participation : '', prep: String(v.prep || '').trim(), prepDays: v.prepDays === '' || v.prepDays == null ? PREP_DAYS_DEFAULT : Math.max(0, Math.min(30, Number(v.prepDays) || 0)), prepDone: String(v.prep || '').trim() === String((prev && prev.prep) || '').trim() ? ((prev && prev.prepDone) || '') : '',
@@ -15175,7 +15292,7 @@ async function saveCaseForm(id) {
   } catch (e) { CASE_EVENTS_BATCH.list = null; logErr('form:case', e); fErr(((e && e.message) || 'Не удалось сохранить') + (clientSaved ? '. Карточка доверителя уже записана — нажмите «Сохранить» ещё раз, дело привяжется к ней' : '')); return; }
   await refreshCasesCache();
   // п. 8 аудита 11.10.2026: номер дела изменён — связанные записи переходят на новый номер
-  let relinked = 0; if (prev && prev.number && r.obj.number && prev.number !== r.obj.number) { try { relinked = await caseRelinkRenamed(r.obj.id, prev.number, r.obj.number); } catch (e) { logErr('case:relink', e); toast('Дело сохранено, но связанные записи не переведены на новый номер: ' + ((e && e.message) || e) + '. Сохраните дело ещё раз', true); } }
+  let relinked = 0; if (prev && prev.number && r.obj.number && prev.number !== r.obj.number) { try { relinked = await caseRelinkRenamed(r.obj.id, prev.number, r.obj.number); } catch (e) { logErr('case:relink', e); toast('Дело сохранено, но связанные записи не переведены на новый номер: ' + ((e && e.message) || e) + '. Сохраните дело ещё раз', 'after'); } }
   // Б3 (11.10.2026): «Номер ордера» в форме дела — в журнал ордеров, если такого номера там ещё нет (ui/depord.js)
   let ordMade = null; if (typeof orderFromCase === 'function') { try { ordMade = await orderFromCase(r.obj, prev); } catch (e) { logErr('case:order', e); } }
   toast((id ? 'Дело сохранено' : 'Дело создано') + (relinked ? ' · записей переведено на новый номер: ' + relinked : '') + (ordMade ? ' · ордер № ' + ordMade.num + ' записан в журнал' : '') + (stageUp ? ' · стадия «' + stageUp.to + '» — ' + stageUp.why : '') + (dlWarn.length ? '. ' + dlWarn.join('; ') : ''), dlWarn.length > 0);
@@ -16262,7 +16379,8 @@ function deletePlan(store, rec, d) {
 function deleteMark(rec, at, withId) { const o = { ...rec, _deleted: true, _deletedAt: at }; if (withId) o._deletedWith = withId; return o; }
 // Что восстановить: сама запись и то, что ушло в корзину вместе с ней. Возвращает [[хранилище, запись без отметок удаления], …]
 function restoreSet(store, id, raw) {
-  const clean = r => { const o = { ...r }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; return o; };
+  // сборка 222 (Д-10): отметка восстановления — при слиянии восстановленная запись побеждает более раннее удаление
+  const clean = r => { const o = { ...r }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; o._restoredAt = Date.now(); return o; };
   const rec = (raw[store] || []).find(r => r && r.id === id && r._deleted); if (!rec) return [];
   const out = [[store, clean(rec)]];
   if (store === 'cases') for (const st of DELETE_LINKED) for (const r of (raw[st] || [])) if (r && r._deleted && r._deletedWith === id) out.push([st, clean(r)]);
@@ -16316,7 +16434,7 @@ async function openTrashSheet(sub) {
 }
 async function trashRestore(store, id) {
   const raw = await trashRaw(), set = restoreSet(store, id, raw); if (!set.length) { toast('Запись не найдена', true); return; }
-  try { if (typeof putMany === 'function') await putMany(set.map(([st, rec]) => [st, { id: rec.id }, cur => { const o = { ...cur }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; return o; }])); else for (const [st, rec] of set) await put(st, rec); } catch (e) { logErr('trash:restore', e); toast('Не удалось вернуть: ' + ((e && e.message) || 'сбой записи'), true); return; }
+  try { if (typeof putMany === 'function') await putMany(set.map(([st, rec]) => [st, { id: rec.id }, cur => { const o = { ...cur }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; o._restoredAt = Date.now(); return o; }])); else for (const [st, rec] of set) await put(st, rec); } catch (e) { logErr('trash:restore', e); toast('Не удалось вернуть: ' + ((e && e.message) || 'сбой записи'), true); return; }
   await refreshCasesCache();
   const rec = set[0][1], twin = store === 'cases' && rec.number ? (await getAll('cases')).find(c => c.id !== rec.id && c.number === rec.number) : null;
   toast(twin ? 'Возвращено. Номер ' + rec.number + ' есть ещё у одного дела — проверьте' : 'Возвращено' + (set.length > 1 ? ': запись и связанных с ней — ' + (set.length - 1) : ''), !!twin);
@@ -16429,6 +16547,8 @@ async function licSave() {
   if (!key) { fErr('Вставьте пропуск — строку из письма автора'); return; }
   const v = await licVerifyKey(key, localISO(new Date()));
   if (!v) { fErr('Пропуск не подлинный или скопирован не целиком: проверьте, что вставлена вся строка, с точкой посередине'); return; }
+  // сборка 224 (Д-69): новый пропуск — отказ сервера по прежнему пропуску к нему не относится
+  if (localStorage.getItem(LIC_STORE_KEY) !== key && typeof licBlockSave === 'function') licBlockSave(null);
   localStorage.setItem(LIC_STORE_KEY, key); LIC_CACHE = null;
   // А6: действующий пропуск — регистрация этого устройства на сервере лицензий; без связи — при следующей проверке
   let dev = ''; if (!v.expired && typeof licDevActivate === 'function') { const m = await licDevActivate(key);
@@ -18084,14 +18204,15 @@ function caseHintsModel(c, d, journal, today, hidden) {
   const paidOf = f => Array.isArray(f.payments) && f.payments.length ? f.payments.reduce((a, p) => a + Number(p.sum || 0), 0) : Number(f.paid || 0);
   const debt = Math.round(fin.reduce((a, f) => a + Math.max(0, Number(f.amount || 0) - paidOf(f)), 0) * 100) / 100;
   if (debt > 0) {
-    let lastPay = '', firstBill = '';
+    // сборка 224 (Д-29): давность — от последней оплаты или от самого раннего НЕОПЛАЧЕННОГО счёта, что позже (вчерашний счёт — не долг полугода)
+    let lastPay = '', firstBill = '', firstUnpaid = '';
     fin.forEach(f => { (Array.isArray(f.payments) ? f.payments : []).forEach(p => { const iso = hintISO(p.at || p.date); if (iso > lastPay) lastPay = iso; }); if (!f.payments && f.paidAt && Number(f.paid || 0) > 0 && hintISO(f.paidAt) > lastPay) lastPay = hintISO(f.paidAt);
-      const b = f.date || hintISO(f.createdAt); if (b && (!firstBill || b < firstBill)) firstBill = b; });
-    const since = lastPay || firstBill, k = since ? todayDayDiff(today, since) : null;
+      const b = f.date || hintISO(f.createdAt); if (b && (!firstBill || b < firstBill)) firstBill = b; if (b && Number(f.amount || 0) - paidOf(f) > 0 && (!firstUnpaid || b < firstUnpaid)) firstUnpaid = b; });
+    const since = [lastPay, firstUnpaid || firstBill].filter(Boolean).sort().pop() || '', k = since ? todayDayDiff(today, since) : null;
     const reminded = journal.some(j => j && !j._deleted && j.field === 'note' && HINT_REMIND_RE.test(String(j.to || '')) && j.ts && todayDayDiff(today, hintISO(j.ts)) < HINT_DEBT_NOTE_DAYS);
     if (k !== null && k >= HINT_DEBT_DAYS && !reminded) {
       const fn = c.clientId && typeof openContactSheet === 'function' ? `openContactSheet('${jsq(c.clientId)}')` : (fin[0] ? `openFinanceSheet('${jsq(fin[0].id)}')` : '');
-      out.push({ key: 'debt:' + c.id, k: 'warn', date: since, title: 'Долг ' + fmtMoney(debt) + ' — напоминания не было', sub: (lastPay ? 'последняя оплата ' + fmtDate(lastPay) : 'оплат не было, счёт от ' + fmtDate(firstBill)) + ' · ' + ago(k) + ' назад; заметка со словом «напомнил» в ленте снимает подсказку на ' + HINT_DEBT_NOTE_DAYS + ' дней',
+      out.push({ key: 'debt:' + c.id, k: 'warn', date: since, title: 'Долг ' + fmtMoney(debt) + ' — напоминания не было', sub: (lastPay && since === lastPay ? 'последняя оплата ' + fmtDate(lastPay) : (lastPay ? 'неоплаченный счёт от ' : 'оплат не было, счёт от ') + fmtDate(since)) + ' · ' + ago(k) + ' назад; заметка со словом «напомнил» в ленте снимает подсказку на ' + HINT_DEBT_NOTE_DAYS + ' дней',
         act: fn ? { fn, label: 'Связаться', icon: 'phone' } : null });
     }
   }
@@ -18929,7 +19050,9 @@ async function saveClientForm(id) {
   if (typeof clientConflictGate === 'function' && !clientConflictGate(r.obj, prev, await getAll('cases'))) return;
   await comboRememberAll(document.getElementById('sheetContent'));
   const cases = clientRenamePlan(prev, r.obj, await getAll('cases'));
-  try { await put('clients', r.obj); for (const x of cases) { x.client = r.obj.name; x.clientId = r.obj.id; await put('cases', x); } } catch (e) { logErr('form:client', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  // сборка 224 (Д-33): новое имя — и в счетах этого доверителя (по связи или по прежнему имени без связи)
+  const bills = prev && prev.name !== r.obj.name ? (await getAll('finance')).filter(f => f && !f._deleted && (f.clientId === prev.id || (!f.clientId && clientKey(f.client) === clientKey(prev.name)))) : [];
+  try { await put('clients', r.obj); for (const x of cases) { x.client = r.obj.name; x.clientId = r.obj.id; await put('cases', x); } for (const f of bills) { f.client = r.obj.name; f.clientId = r.obj.id; await put('finance', f); } } catch (e) { logErr('form:client', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   if (cases.length) await refreshCasesCache();
   toast(id ? 'Доверитель сохранён' + (cases.length ? ' · имя обновлено в делах: ' + cases.length : '') : 'Доверитель добавлен'); closeSheet(); await nav(UI.screen); openClientSheet(r.obj.id);
 }
@@ -19009,7 +19132,11 @@ function importQp(s) {
   return importDecode(new Uint8Array(bytes));
 }
 function importParseVcf(text) {
-  const src = String(text || '').replace(/\r\n?/g, '\n').replace(/=\n/g, '=\n').replace(/\n[ \t]/g, '');
+  // сборка 224 (Д-37): мягкий перенос quoted-printable («=» в конце строки) склеивается только у свойств с QUOTED-PRINTABLE (у base64 «=» — это
+  // выравнивание, следующая строка — другое свойство)
+  const raw0 = String(text || '').replace(/\r\n?/g, '\n').split('\n'), joined = [];
+  for (let i = 0; i < raw0.length; i++) { let l = raw0[i]; if (/QUOTED-PRINTABLE/i.test(l.split(':')[0])) while (/=$/.test(l) && i + 1 < raw0.length) l = l.slice(0, -1) + raw0[++i]; joined.push(l); }
+  const src = joined.join('\n').replace(/\n[ \t]/g, '');
   const cards = src.split(/BEGIN:VCARD/i).slice(1), rows = [];
   for (const card of cards) {
     const c = { name: '', n: '', phone: '', email: '', addr: '', org: '', bday: '', note: '' };
@@ -19098,9 +19225,11 @@ function importGuess(headers, target) {
 // дата из текста: ДД.ММ.ГГГГ, ГГГГ-ММ-ДД, ДД/ММ/ГГГГ, число Excel (дни с 1900 года)
 function importDate(v) {
   const s = String(v || '').trim(); if (!s) return '';
-  let m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/.exec(s); if (m) { const y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; return y + '-' + String(+m[2]).padStart(2, '0') + '-' + String(+m[1]).padStart(2, '0'); }
+  // сборка 224 (Д-38): двузначный год больше текущего — прошлый век (дата рождения «12.05.48» — 1948)
+  let m = /^(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})$/.exec(s); if (m) { const y = m[3].length === 2 ? (+m[3] > new Date().getFullYear() % 100 ? 1900 : 2000) + +m[3] : +m[3]; return y + '-' + String(+m[2]).padStart(2, '0') + '-' + String(+m[1]).padStart(2, '0'); }
   m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s); if (m) return m[1] + '-' + m[2] + '-' + m[3];
-  if (/^\d{4,5}(\.\d+)?$/.test(s) && +s > 20000 && +s < 80000) { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(+s) * 864e5); return d.toISOString().slice(0, 10); }
+  // сборка 224 (Д-38): число Excel — с 1901 года; четыре цифры 1900–2100 — это год, а не дата
+  if (/^\d{3,5}(\.\d+)?$/.test(s) && +s > 366 && +s < 80000 && !(+s >= 1900 && +s <= 2100)) { const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(+s) * 864e5); return d.toISOString().slice(0, 10); }
   return '';
 }
 function importRows(rows, map, target, hasHeader) {
@@ -19215,7 +19344,8 @@ async function importRender() {
 }
 async function importMapSet(col, key) { const I = IMPORT; if (!I) return; for (const k of Object.keys(I.map)) if (I.map[k] === col) delete I.map[k]; if (key) { for (const k of Object.keys(I.map)) if (k === key) delete I.map[k]; I.map[key] = col; } I.done = null; await importRender(); }
 async function importHeaderSet(on) { const I = IMPORT; if (!I) return; I.hasHeader = !!on; I.map = on ? importGuess(I.rows[0], I.target) : I.map; I.done = null; await importRender(); }
-async function importApply() {
+async function importApply() { return typeof busyOnce === 'function' ? busyOnce('importApply', importApplyRun) : importApplyRun(); }
+async function importApplyRun() {
   const I = IMPORT; if (!I || !I.plan || !I.plan.add.length) return null;
   const p = await importPlanNow(); let n = 0, nc = 0, stopped = '';
   try {
@@ -19671,7 +19801,8 @@ function formModelFinance(v, prev, ctx) {
   // разбор GPT 04.10.2026 (вечер), п. 3: плательщик — по выбранной карточке (id из списка), затем по прежней связи при том же ФИО; однофамильцы
   // без выбора — отказ (как в форме дела), а не первый попавшийся
   const p = prev || {}, client = String(v.client || '').trim(), live = (ctx.clients || []).filter(c => c && !c._deleted), same = client ? live.filter(c => clientKey(c.name) === clientKey(client)) : [];
-  let clientRec = (v.clientId && same.find(c => c.id === v.clientId)) || (p.clientId && clientKey(p.client) === clientKey(client) && same.find(c => c.id === p.clientId)) || null;
+  // сборка 224 (Д-33): имя в счёте прежнее, а доверитель переименован — связь по id сохраняется
+  let clientRec = (v.clientId && same.find(c => c.id === v.clientId)) || (p.clientId && clientKey(p.client) === clientKey(client) && (same.find(c => c.id === p.clientId) || live.find(c => c.id === p.clientId))) || null;
   if (!clientRec && same.length > 1) return { error: 'Доверителей с ФИО «' + client + '» несколько (' + same.length + '). Выберите нужного в списке поля «Плательщик» — рядом с ФИО указан телефон или ИНН' };
   if (!clientRec) clientRec = same[0] || null;
   const caseRec = v.caseNum ? (ctx.cases || []).find(c => c && c.number === v.caseNum) : null;
@@ -19766,8 +19897,10 @@ async function finActivate(id) { if (await finSave(id, f => { f.pending = false;
 // шаблоном (названия и суммы, новые id, не выполнены, без дат выполнения), надгробия удалённых этапов и платежей (_delItems), метки
 // изменений (_ch, _upd) и отметки выставления не переносятся — новый период начинается с нуля отработанного. Чистая функция для тестов
 function finRetainerNextModel(f, root, period, now) {
-  const obj = { ...f, retainerOf: root, id: root + '@' + period, paid: 0, status: 'Не оплачено', payments: [], plan: undefined, createdAt: f.nextDue || addMonthsLocalISO(f.createdAt || todayISO(), 1), paidAt: '', dueDate: f.dueDate ? addMonthsLocalISO(f.dueDate, 1) : '' };
-  obj.nextDue = addMonthsLocalISO(obj.createdAt, 1);
+  // сборка 224 (Д-34): периоды считаются от даты первого счёта (31.01 → 28.02 → 31.03), а не от предыдущего (31.01 → 28.02 → 28.03)
+  const start = f.retainerStart || f.createdAt || todayISO(), n = Number(f.retainerN || 0) + 1, dueStart = f.retainerDueStart || f.dueDate || '';
+  const obj = { ...f, retainerOf: root, id: root + '@' + period, paid: 0, status: 'Не оплачено', payments: [], plan: undefined, createdAt: f.nextDue || addMonthsLocalISO(start, n), paidAt: '', dueDate: dueStart ? addMonthsLocalISO(dueStart, n) : '', retainerStart: start, retainerN: n, ...(dueStart ? { retainerDueStart: dueStart } : {}) };
+  obj.nextDue = addMonthsLocalISO(start, n + 1);
   // v159 (аудит сборки 158, R6): id перенесённого этапа — устойчивый («счёт периода + исходный этап»): два устройства, создавшие один и тот
   // же счёт за период независимо, после слияния получают один комплект этапов, а не два; связь с исходным этапом — fromStage
   obj.stages = finStagesOf(f).map(s => ({ id: obj.id + '/' + s.id, fromStage: s.id, name: s.name, sum: s.sum, done: '', createdAt: now, updatedAt: now }));
@@ -20360,8 +20493,10 @@ const KEY_RATES_CBR = [['2025-12-22', 16], ['2026-02-16', 15.5], ['2026-03-23', 
 const KEY_RATES_CHECKED = '2026-10-04';
 function calcKeyRates() {
   const own = (typeof KEY_RATES !== 'undefined' && Array.isArray(KEY_RATES) ? KEY_RATES : []).slice().sort((a, b) => a.from.localeCompare(b.from));
-  const last = own.length ? own[own.length - 1].from : '';
-  return own.concat(KEY_RATES_CBR.filter(([from]) => from > last).map(([from, rate]) => ({ from, rate, cbr: true })));
+  // сборка 222 (Д-32): после последней записи справочника добавляются и решения встроенной таблицы (справочник, сохранённый до лета 2025,
+  // получал только решения с 22.12.2025 — без решений 2025 года); записи справочника не затираются
+  const last = own.length ? own[own.length - 1].from : '', seed = typeof KEY_RATES_SEED !== 'undefined' && Array.isArray(KEY_RATES_SEED) ? KEY_RATES_SEED : [], seen = new Set();
+  return own.concat(seed.concat(KEY_RATES_CBR).filter(([from]) => from > last && !seen.has(from) && (seen.add(from) || true)).sort((a, b) => a[0].localeCompare(b[0])).map(([from, rate]) => ({ from, rate, cbr: true })));
 }
 const clcDaysInYear = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 366 : 365;
 const clcDays = (a, b) => Math.round((parseLocalDate(b) - parseLocalDate(a)) / 864e5) + 1;
@@ -20649,7 +20784,8 @@ const INBOX_KEY = 'crm_inbox';
 const INBOX_TYPES = { hearing: ['Заседание', 'gavel'], deadline: ['Срок в деле', 'clock-3'], task: ['Задача', 'list-checks'], meeting: ['Встреча', 'handshake'], expense: ['Расход', 'wallet'], time: ['Учёт времени', 'clock-3'], note: ['Заметка в ленту дела', 'notebook-pen'] };
 let INBOX_PENDING = null, INBOX_UNDO = null;
 function inboxItems() { const a = lsJSON(INBOX_KEY, []); return Array.isArray(a) ? a.filter(x => x && x.id && x.text) : []; }
-function inboxSave(list) { localStorage.setItem(INBOX_KEY, JSON.stringify((list || []).slice(0, 200))); if (typeof bumpSettings === 'function') bumpSettings(); }
+// сборка 222 (Д-02): убранные записи запоминаются (crm_inbox_del) — при обмене они не возвращаются с другого устройства
+function inboxSave(list) { try { const keep = new Set((list || []).map(x => x && x.id)), gone = inboxItems().filter(x => !keep.has(x.id)); if (gone.length) { const d = lsJSON('crm_inbox_del', {}) || {}, t = Date.now(); for (const x of gone) d[x.id] = t; localStorage.setItem('crm_inbox_del', JSON.stringify(d)); } } catch (e) { logErr('inbox:del', e); } localStorage.setItem(INBOX_KEY, JSON.stringify((list || []).slice(0, 200))); if (typeof bumpSettings === 'function') bumpSettings(); }
 function inboxAdd(text) { const it = { id: uid('ИБ'), text: String(text).trim().slice(0, 2000), at: Date.now() }; inboxSave([it, ...inboxItems()]); return it; }
 function inboxRemove(id) { inboxSave(inboxItems().filter(x => x.id !== id)); }
 // поле ввода и подсказка — внутри активного места (открытый лист или экран): закрытый лист хранит свою разметку, и поиск по всей
@@ -20708,7 +20844,7 @@ function inboxRowHtml(x, i, cases, now) {
   const r = inboxParseX(x, now, cases), [label, ico] = INBOX_TYPES[r.type];
   // из календаря: пометка источника, перенос и отмена в календаре — словами (sync/calimp.js)
   // урок 151: cal.absent — в одном из календарей события нет, в другом есть (не «удалено»)
-  const k = x.cal, calNote = k ? ' <span class="muted">из календаря' + (k.cancelled ? ' · отменено в календаре' : k.gone ? ' · удалено из календаря' : k.absent ? ' · нет в одном из календарей' : k.moved ? ' · перенесено (было ' + esc(k.moved) + ')' : '') + (k.changed && !k.cancelled && !k.gone ? ' · изменено в календаре' : '') + '</span>' : '';
+  const k = x.cal, calNote = k ? ' <span class="muted">из календаря' + (k.cancelled ? ' · отменено в календаре' : k.gone ? ' · нет в календаре' : k.absent ? ' · нет в одном из календарей' : k.moved ? ' · перенесено (было ' + esc(k.moved) + ')' : '') + (k.changed && !k.cancelled && !k.gone ? ' · изменено в календаре' : '') + '</span>' : '';
   // урок 144 (аудит GPT 13.10.2026): неполное совпадение с записью программы — событие не отброшено, а показано с найденной записью; решает
   // пользователь: «Открыть запись» — посмотреть, «×» — не нужно (о событии больше не спрашивать), «Так и есть» — это другое событие
   // предложение 1 по аудиту 14.10.2026: похоже на событие, уже разобранное из другого календаря (тот же день, час и название), — решает
@@ -21141,7 +21277,7 @@ function caseSummaryHtml(c, d, mode, today) {
   if (mov.length) h += `<h2>Движение дела</h2><p>${mov.map(prEsc).join('<br>')}</p>`;
   // заседания — все, по дате
   const hs = live(d.hearings).filter(mine).sort((a, b) => (String(a.date || '') + (a.time || '')).localeCompare(String(b.date || '') + (b.time || '')));
-  if (hs.length) h += `<h2>Судебные заседания (${hs.length})</h2><table><thead><tr><th>Дата</th><th>Время</th><th>Суд, зал</th><th>Статус</th><th>Результат</th>${full ? '<th>Участие</th>' : ''}</tr></thead><tbody>${hs.map(x => `<tr><td>${prEsc(date(x.date))}</td><td>${prEsc(x.time || '')}</td><td>${prEsc([x.court || c.court || '', x.room ? 'зал ' + x.room : ''].filter(Boolean).join(', '))}</td><td>${prEsc(x.status || '')}</td><td>${prEsc(x.result || '')}</td>${full ? `<td>${prEsc(x.participation || (x.attended === true ? 'лично' : ''))}</td>` : ''}</tr>`).join('')}</tbody></table>`;
+  if (hs.length) h += `<h2>Судебные заседания (${hs.length})</h2><table><thead><tr><th>Дата</th><th>Время</th><th>Суд, зал</th><th>Статус</th><th>Результат</th>${full ? '<th>Участие</th>' : ''}</tr></thead><tbody>${hs.map(x => `<tr><td>${prEsc(date(x.date))}</td><td>${prEsc(x.time || '')}</td><td>${prEsc([(typeof hearingCourtOf === 'function' ? hearingCourtOf(x, c) : (x.court || c.court)) || '', x.room ? 'зал ' + x.room : ''].filter(Boolean).join(', '))}</td><td>${prEsc(x.status || '')}</td><td>${prEsc(x.result || '')}</td>${full ? `<td>${prEsc(x.participation || (x.attended === true ? 'лично' : ''))}</td>` : ''}</tr>`).join('')}</tbody></table>`;
   // сроки дела (неисполненные) и задачи (служебное)
   const dls = (Array.isArray(c.deadlines) ? c.deadlines : []).filter(x => x && !x.done && x.date).sort((a, b) => String(a.date).localeCompare(String(b.date)));
   if (dls.length) h += `<h2>Сроки (${dls.length})</h2><table><thead><tr><th>Срок</th><th>Что</th><th>Основание</th></tr></thead><tbody>${dls.map(x => `<tr><td>${prEsc(date(x.date))}</td><td>${prEsc(x.title || x.kind || '')}</td><td>${prEsc(x.norm || '')}${x.confirmedAt ? '' : '<br><small>не подтверждён</small>'}</td></tr>`).join('')}</tbody></table>`;
@@ -22178,7 +22314,9 @@ async function mailFileOpen(docId) {
       if (typeof fileDeskApp === 'function' && fileDeskApp()) { try { const p = await fileDeskSave(name, mime, b64); toast(p ? 'Файл сохранён: ' + p : 'Файл не открыт (' + String((e && e.message) || e).slice(0, 80) + '), окно сохранения закрыто', !p); } catch (e2) { logErr('mail:file:desktop', e2); toast('Файл не открыт и не сохранён: ' + String((e2 && e2.message) || e2).slice(0, 100), true); } return; }
     }
   }
-  const blob = nextDataUrlToBlob(data); if (!blob) { toast('Файл повреждён', true); return; }
+  // сборка 224 (Д-40): тип файла — тот, что проверен (mime записи), а не из самих данных: чужой «PDF» с data:text/html не откроется страницей
+  const blob0 = nextDataUrlToBlob(data); if (!blob0) { toast('Файл повреждён', true); return; }
+  const blob = blob0.type === mime ? blob0 : new Blob([blob0], { type: mime });
   const url = URL.createObjectURL(blob); let w = null;
   // аудит 14.10.2026: с 'noopener' window.open по стандарту HTML всегда возвращает null — файл открывался и тут же скачивался второй раз;
   // окно открывается без него, связь с программой снимается вручную
@@ -23065,7 +23203,8 @@ function tplPrint() {
   return html;
 }
 // файл .docx — в документы дела (как вложения писем: documents + docVersions, файл — в docBlobs и на сервер с файлами документов)
-async function tplSaveDoc(quiet) {
+async function tplSaveDoc(quiet) { return typeof busyOnce === 'function' ? busyOnce('tplSaveDoc', () => tplSaveDocRun(quiet)) : tplSaveDocRun(quiet); }
+async function tplSaveDocRun(quiet) {
   const D = DOCTPL; if (!D || (D.kind !== 'case' && D.kind !== 'lead')) return null;
   let bytes = null; try { bytes = tplDocxBuild(); } catch (e) { logErr('doctpl:save:docx', e); toast('Файл .docx не собран: ' + ((e && e.message) || e), true); return null; }
   if (!bytes) return null;
@@ -23355,7 +23494,8 @@ async function appointWrite(caseId, mutate) {
   const upd = typeof recUpdate === 'function' ? recUpdate : async (store, id, fn) => { const r = await getOne(store, id); if (!r || fn(r) === false) return null; await put(store, r); return r; };
   return upd('cases', caseId, mutate);
 }
-async function appointDayAdd(caseId, date, what) {
+async function appointDayAdd(caseId, date, what) { return typeof busyOnce === 'function' ? busyOnce('appointDayAdd', () => appointDayAddRun(caseId, date, what)) : appointDayAddRun(caseId, date, what); }
+async function appointDayAddRun(caseId, date, what) {
   const d = date || fv('ap-date'), w = what !== undefined ? what : String(fv('ap-what') || '').replace(/\s+/g, ' ').trim(), night = !date && !!(document.getElementById('ap-night') || {}).checked;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(d || ''))) { toast('Укажите дату дня участия', true); return null; }
   let added = null;
@@ -25745,6 +25885,7 @@ ${typeof helpFig === 'function' ? helpFig('todaycolor') : ''}
 <p><b>Наложение по времени.</b> Форма заседания и встречи при сохранении предупреждает «Время занято»: в одном суде между заседаниями нужно не менее 30 минут, в разных судах — время на дорогу (задаётся в карточке суда, по умолчанию час до каждого суда), между встречей и заседанием — 30 минут и дорога до суда, между встречами — большая из длительностей. Повторное «Сохранить» записывает всё равно. Записи, пришедшие не через форму (с сайта суда, из карточки КАД, с другого устройства, из онлайн-записи), «Сегодня» проверяет само на 60 дней вперёд и показывает строку «Наложение по времени»; «Не ошибка» убирает её, пока не изменится время одной из записей.</p>
 <h3>Быстрая запись</h3>
 <p>«Создать» → «Быстрая запись» (или раздел «Быстрые записи»): одна фраза, как в блокноте. Программа предложит, что это:</p>
+<p>Неразобранные быстрые записи расходятся между устройствами вместе с настройками: записи, сделанные на телефоне и на компьютере независимо, после обмена есть на обоих, а разобранная или удалённая запись не возвращается с другого устройства. Настройки (тема, прайс, чек-листы и другие) при обмене сравниваются по каждой отдельно — правка на одном устройстве не затирает другую правку на другом.</p>
 <ul><li>дата и «заседание» — заседание (откроется форма с заполненными полями);</li><li>«до 15.10 …» — срок в деле;</li><li>«встреча», «консультация» — встреча;</li><li>другая дата («завтра», «в пятницу», «через 3 дня», «12.10», «5 октября», «в 10:30») — задача;</li><li>без даты — заметка в ленту дела.</li></ul>
 <p>Дело программа ищет по номеру, номеру в суде или фамилии доверителя. Если подходит несколько дел или ни одного — нажмите «Выбрать дело». «Так и есть» записывает сразу, «Отменить» возвращает запись. Некогда — «В неразобранные».</p>` },
   { id: 'cases', title: 'Дела, сроки, стадии', html: `
@@ -25808,7 +25949,7 @@ ${typeof helpFig === 'function' ? helpFig('clientmsg') : ''}
 <ol><li>Настройки → «Онлайн-запись на консультацию» → «Включить онлайн-запись»; укажите дни и часы приёма, перерыв, длительность, адрес и телефон, которые увидит доверитель.</li>
 <li>«Сохранить и опубликовать» — на сервер уходят только свободные окна и подписи страницы, без имён и дел. Ниже появится ссылка для доверителей — «Скопировать» и разместите её на сайте или в подписи.</li>
 <li>Проверка: откройте ссылку в браузере — должны быть видны дни и время. Заседания (с дорогой до суда и обратно) и встречи время занимают сами; окна обновляются после правок.</li></ol>
-<p>Заявки программа забирает раз в 15 минут, пока открыта (или кнопкой «Проверить заявки»): заявка становится обращением и встречей, на «Сегодня» — блок «Записи на приём» с кнопками «Подтвердить» (можно написать заметку: что взять с собой) и «Отклонить». Доверитель видит ответ на странице записи по коду заявки. Пока работают обе программы, заявку может забрать любая из них; если её успели забрать обе, на «Сегодня» она всё равно одна, а ответ меняет обе встречи.</p>
+<p>Заявки программа забирает раз в 15 минут, пока открыта (или кнопкой «Проверить заявки»): заявка становится обращением и встречей, на «Сегодня» — блок «Записи на приём» с кнопками «Подтвердить» (можно написать заметку: что взять с собой) и «Отклонить». Доверитель видит ответ на странице записи по коду заявки. Если выключить онлайн-запись, программа снимет окна со страницы: новые заявки сервер не примет, на странице — «Сейчас запись через эту страницу не ведётся» и ваш телефон. После смены личного сервера страницы записи и «Задать вопрос» публикуются на новом сервере сами. Пока работают обе программы, заявку может забрать любая из них; если её успели забрать обе, на «Сегодня» она всё равно одна, а ответ меняет обе встречи.</p>
 <h3>Вопросы с сайта</h3>
 <p>Страница «Задать вопрос» на вашем личном сервере: доверитель пишет имя, телефон или Telegram, как с ним связаться и вопрос и отмечает согласие на обработку персональных данных (отдельный текст). Нужен личный сервер версии 190 или новее.</p>
 <p><b>Вопросы по категории спора</b> (личный сервер 200 и новее). В листе «Вопросы с сайта» отметьте категории: ОСАГО и ДТП, защита прав потребителей, залив квартиры и ЖКХ, долги и займы, наследство, земля. На странице доверитель выбирает «О чём вопрос» — появляются вопросы этой категории (дата ДТП, страховщик, сумма выплаты…) и подсказка, какие документы подготовить. Ответы приходят в обращение: категория — в начале темы, ответы — под текстом вопроса. Категория «другое» — прежняя анкета без дополнительных вопросов.</p>
@@ -26087,7 +26228,8 @@ function keysRows() {
 function keysMove(dir) {
   const rows = keysRows(); if (!rows.length) return false;
   const i = keysStep(rows.length, rows.indexOf(document.activeElement), dir), el = rows[i];
-  try { el.focus({ preventScroll: true }); el.scrollIntoView({ block: 'nearest' }); } catch (e) { logErr('keys:move', e); }
+  // сборка 224 (Д-71): строки-div получают tabindex, иначе focus() на них не действует
+  try { if (!el.matches('a,button,input,select,textarea,[tabindex]')) el.setAttribute('tabindex', '-1'); el.focus({ preventScroll: true }); el.scrollIntoView({ block: 'nearest' }); } catch (e) { logErr('keys:move', e); }
   return true;
 }
 function keysSearch() {
@@ -26103,6 +26245,8 @@ function openKeysSheet() {
 }
 function keysOnDown(e) {
   if (e.defaultPrevented || e.isComposing) return;
+  // Enter на выбранной строке-div открывает её, как нажатие (у кнопок это делает браузер)
+  if (e.key === 'Enter' && !e.ctrlKey && !e.altKey && !e.metaKey) { const a = document.activeElement; if (a && a.matches && a.matches(KEYS_ROWS) && !/^(A|BUTTON|INPUT|SELECT|TEXTAREA)$/.test(a.tagName)) { (a.querySelector('button, a[href], [onclick]') || a).click(); e.preventDefault(); return; } }
   const d = document.getElementById('sheet'), act = keysAction(e, !!(d && d.open));
   if (!act) return;
   let done = false;
@@ -27155,13 +27299,16 @@ function judgeDayHtml(jd, myNos) {
 // 2) каркас рисуется сразу (тема применена ещё при загрузке ui/shell.js); 3) слой данных на СВОЕЙ базе; 4) экран «Сегодня».
 // window.NEXT_READY — отчёт для живой проверки (next_check.py): база, число записей, версия правил сроков.
 const NEXT_BOOT = {
+  stopped: false,
   say(msg, warn) { // остановка до запуска интерфейса — отдельный экран с причиной; обычные сообщения — через toast
     if (!warn) { toast(msg); return; }
+    this.stopped = true;
     const app = document.getElementById('app');
     if (app) app.innerHTML = `<div class="stop-screen panel pad"><h2>${NEXT_ROOT ? 'Программа остановлена' : 'Новая версия остановлена'}</h2><p class="muted" style="margin-top:10px">${esc(msg)}</p></div>`;
   },
   async report() {
-    const counts = {}; for (const st of STORES) counts[st] = (await getAllRaw(st)).length;
+    // сборка 222 (Д-16): число записей — по ключам, без чтения хранилища файлов целиком
+    const counts = {}; for (const st of STORES) counts[st] = (await getAllKeys(st)).length;
     return { версия: APP_VER, сборка: BUILD_ID, изоляция: NEXT_NS.ok, база: db && db.name, версияБазы: db && db.version, правилаСроков: NEXT_RULES_VER, секреты: _sec.ok, записей: counts };
   },
   async start() {
@@ -27202,7 +27349,8 @@ const NEXT_BOOT = {
     try { if (typeof pwaShortcut === 'function') pwaShortcut(); } catch (e) { logErr('pwa:shortcut', e); }
   },
 };
-document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() => { if (typeof nextAutoStart === 'function') setTimeout(() => { try { nextAutoStart(); } catch (e) { logErr('auto:start', e); } }, 2500);
+// сборка 222 (мелочь A1-11): программа остановлена при запуске — фоновые обмены и проверки не запускаются
+document.addEventListener('DOMContentLoaded', () => { NEXT_BOOT.start().then(() => { if (NEXT_BOOT.stopped) return; if (typeof nextAutoStart === 'function') setTimeout(() => { try { nextAutoStart(); } catch (e) { logErr('auto:start', e); } }, 2500);
   // 09.10.2026: события судов с личного сервера — сами (sync/monauto.js), через 4 секунды после запуска, чтобы не мешать первому экрану
   if (typeof monAutoStart === 'function') setTimeout(() => { try { monAutoStart(); } catch (e) { logErr('monitor:start', e); } }, 4000);
   // 12.10.2026: файл в папке облака (sync/fsync.js) — проверка разрешения без вопросов и первый обмен через 3 секунды после запуска
