@@ -291,6 +291,9 @@ public final class AutoScanActivity extends ComponentActivity {
         final ArrayList<File> pages=new ArrayList<>(rawFiles);
         processingExecutor.execute(()->{
             try {
+                // If earlier processing was interrupted, regenerate cleaned pages from raw photos.
+                for(File old:improvedFiles) old.delete();
+                improvedFiles.clear();
                 // Batch improvement only after all pages were captured.
                 for(int i=0;i<pages.size();i++){
                     int index=i+1;
@@ -329,6 +332,10 @@ public final class AutoScanActivity extends ComponentActivity {
     }
 
     private void confirmDiscard(){
+        if(saving) {
+            Toast.makeText(this,"Идёт обработка серии; дождитесь завершения",Toast.LENGTH_SHORT).show();
+            return;
+        }
         new AlertDialog.Builder(this).setTitle("Отменить серию?")
             .setMessage("Несохранённые снимки будут удалены.")
             .setNegativeButton("Продолжить",null)
