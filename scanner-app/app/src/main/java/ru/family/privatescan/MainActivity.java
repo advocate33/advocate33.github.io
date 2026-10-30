@@ -467,21 +467,31 @@ public final class MainActivity extends Activity {
                         }
                     })
                 .setPositiveButton("Продолжить с ChatGPT", (d, w) -> {
-                    status.setText("Ожидание авторизации ChatGPT в браузере…");
-                    chatLogin.login(this, new ChatGptLogin.Callback() {
-                        @Override public void onProgress(String info) {
-                            status.setText(info);
-                        }
-                        @Override public void onSuccess(String info) {
-                            status.setText("ChatGPT подключён: " + info);
-                            toast("Аккаунт ChatGPT подключён");
-                        }
-                        @Override public void onError(String reason) {
-                            showError("Ошибка входа ChatGPT: " + reason);
-                        }
-                    });
+                    new AlertDialog.Builder(this)
+                        .setTitle("Выберите браузер для OAuth")
+                        .setMessage("На скриншоте подтверждение зависло в браузере Samsung. "
+                                + "Попробуйте Chrome. Если браузер не передаст ответ в PrivateScan, "
+                                + "появится диагностическое сообщение.")
+                        .setItems(new String[]{"Chrome (рекомендуется)", "Браузер по умолчанию"},
+                            (dialog, which) -> startChatLogin(which == 0))
+                        .setNegativeButton("Отмена", null)
+                        .show();
                 })
                 .show();
+    }
+
+    private void startChatLogin(boolean chrome) {
+        status.setText("Ожидание авторизации ChatGPT в браузере…");
+        chatLogin.login(this, new ChatGptLogin.Callback() {
+            @Override public void onProgress(String info) { status.setText(info); }
+            @Override public void onSuccess(String info) {
+                status.setText("ChatGPT подключён: " + info);
+                toast("Аккаунт ChatGPT подключён");
+            }
+            @Override public void onError(String reason) {
+                showError("Ошибка входа ChatGPT: " + reason);
+            }
+        }, chrome);
     }
 
     private void requestChatOcr(Document doc) {
