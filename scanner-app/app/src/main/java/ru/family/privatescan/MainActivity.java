@@ -446,6 +446,9 @@ public final class MainActivity extends Activity {
                 .setPositiveButton("Продолжить с ChatGPT", (d, w) -> {
                     status.setText("Ожидание авторизации ChatGPT в браузере…");
                     chatLogin.login(this, new ChatGptLogin.Callback() {
+                        @Override public void onProgress(String info) {
+                            status.setText(info);
+                        }
                         @Override public void onSuccess(String info) {
                             status.setText("ChatGPT подключён: " + info);
                             toast("Аккаунт ChatGPT подключён");
