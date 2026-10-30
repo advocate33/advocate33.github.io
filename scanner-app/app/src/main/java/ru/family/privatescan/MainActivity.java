@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ArrayList<Document> documents = new ArrayList<>();
     private final OfflineOcr offlineOcr = new OfflineOcr();
+    private final A4PdfFormatter a4Formatter = new A4PdfFormatter();
     private ChatGptLogin chatLogin;
     private ChatGptProcessing chatProcessing;
     private LinearLayout list;
@@ -95,13 +96,21 @@ public final class MainActivity extends Activity {
         root.addView(subtitle);
 
         Button add = new Button(this);
-        add.setText("＋  Сканировать / импортировать");
+        add.setText("＋  Автосканирование страниц");
         add.setAllCaps(false);
         add.setTextColor(Color.WHITE);
         add.setBackground(round(TEAL, 14));
         add.setOnClickListener(v -> startScan());
         LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(-1, dp(56));
         root.addView(add, addParams);
+        TextView captureHint = new TextView(this);
+        captureHint.setText("Наведите камеру на документ и удерживайте неподвижно. "
+                + "Сканер сам определяет границы и выполняет автозахват, если функция поддерживается устройством. "
+                + "Каждый лист добавляется в тот же PDF. После сохранения создаётся отдельный A4.");
+        captureHint.setTextSize(12);
+        captureHint.setTextColor(Color.DKGRAY);
+        captureHint.setPadding(0, dp(6), 0, dp(6));
+        root.addView(captureHint);
 
         Button importBtn = new Button(this);
         importBtn.setText("＋  Импортировать готовый PDF");
@@ -171,7 +180,7 @@ public final class MainActivity extends Activity {
                 .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
                 .build();
         GmsDocumentScanner scanner = GmsDocumentScanning.getClient(options);
-        status.setText("Запуск сканера…");
+        status.setText("Открываю автосканер: границы, фокус и захват управляются Google ML Kit…");
         scanner.getStartScanIntent(this)
                 .addOnSuccessListener(sender -> {
                     try {
@@ -224,7 +233,12 @@ public final class MainActivity extends Activity {
                 ContentValues ready = new ContentValues();
                 ready.put(MediaStore.MediaColumns.IS_PENDING, 0);
                 resolver.update(dest, ready, null, null);
-                runOnUiThread(() -> { toast("PDF сохранён"); load(); });
+                Uri originalSaved = dest;
+                runOnUiThread(() -> {
+                    toast("Оригинал сохранён. Создаю A4…");
+                    load();
+                    formatA4(originalSaved, "Скан", true);
+                });
             } catch (Exception e) {
                 if (dest != null) try { getContentResolver().delete(dest, null, null); } catch (Exception ignored) {}
                 showError("Ошибка сохранения PDF: " + e.getMessage());
@@ -305,6 +319,14 @@ public final class MainActivity extends Activity {
             ocrAction.setPadding(dp(6), dp(13), dp(6), dp(7));
             ocrAction.setOnClickListener(v -> doOfflineOcr(doc));
             panel.addView(ocrAction);
+
+            TextView a4Action = new TextView(this);
+            a4Action.setText("▣  Подогнать страницы под формат A4");
+            a4Action.setTextSize(13);
+            a4Action.setTextColor(TEAL);
+            a4Action.setPadding(dp(6), dp(8), dp(6), dp(8));
+            a4Action.setOnClickListener(v -> formatA4(doc.uri, doc.name, false));
+            panel.addView(a4Action);
 
             TextView chatAction = new TextView(this);
             chatAction.setText("✦  ChatGPT по подписке → текстовый PDF");
@@ -473,6 +495,33 @@ public final class MainActivity extends Activity {
             }).show();
     }
 
+
+    private void formatA4(Uri pdf, String name, boolean automatic) {
+        status.setText("Подгонка страниц под A4…");
+        a4Formatter.format(this, pdf, name, new A4PdfFormatter.Listener() {
+            @Override public void onProgress(int current, int total) {
+                status.setText("Форматирование A4: страница " + current + " из " + total);
+            }
+            @Override public void onSuccess(Uri saved, int pages) {
+                load();
+                status.setText("Готово: " + pages + " стр. А4. Оригинал сохранён отдельно.");
+                if (!automatic) {
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("PDF формата A4 готов")
+                        .setMessage("Все страницы подогнаны без обрезания содержимого. "
+                                + "Создан отдельный PDF. Читаемость зависит от качества исходного снимка.")
+                        .setNegativeButton("Закрыть", null)
+                        .setPositiveButton("Открыть", (dialog, which) ->
+                            open(new Document(saved, "A4", 0, System.currentTimeMillis()/1000)))
+                        .show();
+                }
+            }
+            @Override public void onError(String error) {
+                showError("Оригинал сохранён, но создать A4 не удалось: " + error);
+            }
+        });
+    }
+
     private void selectPdf() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -601,6 +650,7 @@ public final class MainActivity extends Activity {
         super.onDestroy();
         io.shutdown();
         offlineOcr.shutdown();
+        a4Formatter.shutdown();
         chatProcessing.shutdown();
         chatLogin.shutdown();
     }
