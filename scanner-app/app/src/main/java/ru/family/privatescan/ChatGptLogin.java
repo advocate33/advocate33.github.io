@@ -82,7 +82,9 @@ public final class ChatGptLogin {
         } catch (Exception e) { return "Не подключён"; }
     }
 
-    public void login(Activity activity, Callback callback) {
+    public void login(Activity activity, Callback callback) { login(activity, callback, false); }
+
+    public void login(Activity activity, Callback callback, boolean preferChrome) {
         pool.execute(() -> {
             activity.runOnUiThread(() -> callback.onProgress("Готовлю защищённую OAuth-сессию…"));
             try {
@@ -130,6 +132,11 @@ public final class ChatGptLogin {
                             Intent browser = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
                             browser.addCategory(Intent.CATEGORY_BROWSABLE);
                             browser.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            if(preferChrome) {
+                                browser.setPackage("com.android.chrome");
+                                if(browser.resolveActivity(activity.getPackageManager())==null)
+                                    throw new IllegalStateException("Chrome не найден на телефоне");
+                            }
                             activity.startActivity(browser);
                         } catch (Exception e) {
                             callback.onError("Не удалось открыть браузер: " + e.getMessage());
