@@ -20,7 +20,9 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
+import android.text.InputType;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -48,6 +50,7 @@ public final class MainActivity extends Activity {
     private static final int PALE = Color.rgb(237, 246, 247);
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ArrayList<Document> documents = new ArrayList<>();
+    private AiPdfService aiService;
     private LinearLayout list;
     private TextView status;
     private EditText search;
@@ -64,6 +67,7 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        aiService = new AiPdfService(this);
         getWindow().setStatusBarColor(DARK);
         getWindow().setNavigationBarColor(Color.BLACK);
 
@@ -95,6 +99,15 @@ public final class MainActivity extends Activity {
         add.setOnClickListener(v -> startScan());
         LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(-1, dp(56));
         root.addView(add, addParams);
+
+        Button aiSettings = new Button(this);
+        aiSettings.setText("ИИ-распознавание · настройки");
+        aiSettings.setAllCaps(false);
+        aiSettings.setTextColor(TEAL);
+        aiSettings.setOnClickListener(v -> openAiSettings());
+        LinearLayout.LayoutParams aiSettingsParams = new LinearLayout.LayoutParams(-1, dp(48));
+        aiSettingsParams.topMargin = dp(6);
+        root.addView(aiSettings, aiSettingsParams);
 
         search = new EditText(this);
         search.setSingleLine(true);
@@ -194,7 +207,12 @@ public final class MainActivity extends Activity {
                 ContentValues ready = new ContentValues();
                 ready.put(MediaStore.MediaColumns.IS_PENDING, 0);
                 resolver.update(dest, ready, null, null);
-                runOnUiThread(() -> { toast("PDF сохранён"); load(); });
+                Uri saved = dest;
+                runOnUiThread(() -> {
+                    toast("PDF сохранён");
+                    load();
+                    if (aiService.autoEnabled()) doAi(saved, "Скан", true);
+                });
             } catch (Exception e) {
                 if (dest != null) try { getContentResolver().delete(dest, null, null); } catch (Exception ignored) {}
                 showError("Ошибка сохранения PDF: " + e.getMessage());
@@ -268,6 +286,14 @@ public final class MainActivity extends Activity {
             action(actions, "Удалить", () -> confirmDelete(doc));
             panel.addView(actions);
 
+            TextView aiAction = new TextView(this);
+            aiAction.setText("✦  Распознать ИИ → отдельный текстовый PDF");
+            aiAction.setTextSize(13);
+            aiAction.setTextColor(TEAL);
+            aiAction.setPadding(dp(6), dp(13), dp(6), dp(7));
+            aiAction.setOnClickListener(v -> requestAi(doc));
+            panel.addView(aiAction);
+
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.bottomMargin = dp(10);
             list.addView(panel, lp);
@@ -335,6 +361,104 @@ public final class MainActivity extends Activity {
                 }).show();
     }
 
+
+    private void openAiSettings() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(22), dp(8), dp(22), dp(4));
+
+        TextView notice = new TextView(this);
+        notice.setText(aiService.hasKey()
+                ? "Ключ уже сохранён в защищённом хранилище Android. Оставьте поле пустым, чтобы не менять его."
+                : "Введите собственный OpenAI API-ключ. Подписка ChatGPT не заменяет API-ключ.");
+        notice.setTextSize(13);
+        content.addView(notice);
+
+        EditText keyField = new EditText(this);
+        keyField.setHint("sk-...");
+        keyField.setSingleLine(true);
+        keyField.setTextSize(14);
+        keyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        content.addView(keyField, new LinearLayout.LayoutParams(-1, dp(54)));
+
+        CheckBox automatic = new CheckBox(this);
+        automatic.setText("Автоматически отправлять новые сканы в OpenAI");
+        automatic.setTextSize(13);
+        automatic.setChecked(aiService.autoEnabled());
+        content.addView(automatic);
+
+        TextView privacy = new TextView(this);
+        privacy.setText("Внимание: при обработке PDF передаётся OpenAI. "
+                + "Возможны расходы по API и хранение данных в журналах безопасности. "
+                + "Не включайте автопередачу для документов с адвокатской тайной.");
+        privacy.setTextSize(12);
+        privacy.setPadding(0, dp(10), 0, dp(2));
+        content.addView(privacy);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Подключение OpenAI")
+                .setView(content)
+                .setNegativeButton("Отмена", null)
+                .setNeutralButton("Удалить ключ", (dialog, which) -> {
+                    aiService.clearKey();
+                    toast("API-ключ удалён с устройства");
+                })
+                .setPositiveButton("Сохранить", (dialog, which) -> {
+                    try {
+                        String candidate = keyField.getText().toString().trim();
+                        if (!candidate.isEmpty()) aiService.saveKey(candidate);
+                        if (automatic.isChecked() && !aiService.hasKey()) {
+                            toast("Для автоматической обработки нужен API-ключ");
+                            return;
+                        }
+                        aiService.setAuto(automatic.isChecked());
+                        toast("Настройки ИИ сохранены");
+                    } catch (Exception e) {
+                        showError("Не удалось сохранить ключ: " + e.getMessage());
+                    }
+                }).show();
+    }
+
+    private void requestAi(Document doc) {
+        if (!aiService.hasKey()) {
+            openAiSettings();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Отправить PDF в OpenAI?")
+                .setMessage("Будет отправлен документ «" + doc.name
+                        + "». Обработка оплачивается отдельно. Оригинал останется без изменений. "
+                        + "ИИ может ошибаться в юридических реквизитах. Продолжить?")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Отправить", (dialog, which) -> doAi(doc.uri, doc.name, false))
+                .show();
+    }
+
+    private void doAi(Uri uri, String sourceName, boolean auto) {
+        if (!aiService.hasKey()) {
+            showError("Настройте API-ключ OpenAI");
+            return;
+        }
+        status.setText(auto ? "Автоматическое распознавание PDF…" : "Отправка PDF в OpenAI…");
+        aiService.process(this, uri, sourceName, new AiPdfService.Listener() {
+            @Override public void onSuccess(Uri pdf) {
+                load();
+                status.setText("Создан распознанный PDF. Проверьте реквизиты по оригиналу.");
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("PDF создан")
+                        .setMessage("Текст распознан и сохранён отдельным PDF в Документы/PrivateScan. "
+                                + "Исходный скан не изменён. Сверьте номера дел, даты и суммы.")
+                        .setNegativeButton("Закрыть", null)
+                        .setPositiveButton("Открыть PDF", (d, w) ->
+                                open(new Document(pdf, "OCR", 0, System.currentTimeMillis() / 1000)))
+                        .show();
+            }
+            @Override public void onError(String message) {
+                showError("ИИ-обработка не удалась: " + message);
+            }
+        });
+    }
+
     private GradientDrawable round(int color, int radiusDp) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(color);
@@ -347,5 +471,9 @@ public final class MainActivity extends Activity {
         if (status != null) status.setText(message);
         toast(message);
     }); }
-    @Override protected void onDestroy() { super.onDestroy(); io.shutdown(); }
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        io.shutdown();
+        aiService.close();
+    }
 }
