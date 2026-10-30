@@ -58,10 +58,10 @@ public final class AutoScanActivity extends ComponentActivity {
     private final ArrayList<File> rawFiles=new ArrayList<>();
     private final ArrayList<File> improvedFiles=new ArrayList<>();
     private final Object lock=new Object();
-    private boolean armed=true;
-    private boolean taking=false;
-    private boolean saving=false;
-    private boolean waitingForRemoval=false;
+    private volatile boolean armed=true;
+    private volatile boolean taking=false;
+    private volatile boolean saving=false;
+    private volatile boolean waitingForRemoval=false;
     private int stableFrames=0;
     private int missingFrames=0;
     private float lastX=-1,lastY=-1,lastArea=0;
@@ -241,7 +241,10 @@ public final class AutoScanActivity extends ComponentActivity {
     private void takePhoto(){
         if(saving)return;
         if(rawFiles.size()>=MAX_PAGES) {
-            saving=true;takeReadyUi("Достигнут лимит страниц; нажмите Готово");
+            taking=false;
+            armed=false;
+            waitingForRemoval=true;
+            takeReadyUi("Достигнут лимит 40 страниц; нажмите Готово");
             return;
         }
         File file=new File(workingDir,"page_"+System.currentTimeMillis()+".jpg");
