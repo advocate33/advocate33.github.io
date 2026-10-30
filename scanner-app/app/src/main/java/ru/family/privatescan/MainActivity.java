@@ -43,6 +43,7 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_SCAN = 7301;
+    private static final int REQUEST_CASCADE = 7303;
     private static final int REQUEST_IMPORT = 7302;
     private static final String FOLDER = Environment.DIRECTORY_DOCUMENTS + "/PrivateScan/";
     private static final int DARK = Color.rgb(20, 33, 47);
@@ -53,6 +54,7 @@ public final class MainActivity extends Activity {
     private final OfflineOcr offlineOcr = new OfflineOcr();
     private final A4PdfFormatter a4Formatter = new A4PdfFormatter();
     private ChatGptLogin chatLogin;
+    private UpdateManager updateManager;
     private ChatGptProcessing chatProcessing;
     private LinearLayout list;
     private TextView status;
@@ -71,6 +73,7 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         chatLogin = new ChatGptLogin(this);
+        updateManager = new UpdateManager(this);
         chatProcessing = new ChatGptProcessing(chatLogin);
         getWindow().setStatusBarColor(DARK);
         getWindow().setNavigationBarColor(Color.BLACK);
@@ -96,17 +99,19 @@ public final class MainActivity extends Activity {
         root.addView(subtitle);
 
         Button add = new Button(this);
-        add.setText("＋  Автосканирование страниц");
+        add.setText("＋  Каскадная съёмка без кнопок");
         add.setAllCaps(false);
         add.setTextColor(Color.WHITE);
         add.setBackground(round(TEAL, 14));
-        add.setOnClickListener(v -> startScan());
+        add.setOnClickListener(v -> {
+            Intent cascade = new Intent(this, AutoScanActivity.class);
+            startActivityForResult(cascade, REQUEST_CASCADE);
+        });
         LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(-1, dp(56));
         root.addView(add, addParams);
         TextView captureHint = new TextView(this);
-        captureHint.setText("Наведите камеру на документ и удерживайте неподвижно. "
-                + "Сканер сам определяет границы и выполняет автозахват, если функция поддерживается устройством. "
-                + "Каждый лист добавляется в тот же PDF. После сохранения создаётся отдельный A4.");
+        captureHint.setText("Откройте камеру: наведите на документ — снимок выполнится сам после стабилизации и фокусировки. "
+                + "Уберите лист и наведите следующий. Нажмите «Готово» только в конце серии.");
         captureHint.setTextSize(12);
         captureHint.setTextColor(Color.DKGRAY);
         captureHint.setPadding(0, dp(6), 0, dp(6));
@@ -120,6 +125,20 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(46));
         importParams.topMargin = dp(6);
         root.addView(importBtn, importParams);
+
+        Button fallback = new Button(this);
+        fallback.setText("Ручной сканер (резерв)");
+        fallback.setAllCaps(false);
+        fallback.setTextColor(TEAL);
+        fallback.setOnClickListener(v -> startScan());
+        root.addView(fallback, new LinearLayout.LayoutParams(-1, dp(40)));
+
+        Button updaterButton = new Button(this);
+        updaterButton.setText("↻  Проверить обновления");
+        updaterButton.setAllCaps(false);
+        updaterButton.setTextColor(TEAL);
+        updaterButton.setOnClickListener(v -> updateManager.checkForUpdate());
+        root.addView(updaterButton, new LinearLayout.LayoutParams(-1, dp(44)));
 
         Button connectBtn = new Button(this);
         connectBtn.setText("Подключить ChatGPT без API-ключа");
@@ -195,6 +214,10 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int resultCode, Intent data) {
         super.onActivityResult(request, resultCode, data);
+        if (request == REQUEST_CASCADE) {
+            if (resultCode == RESULT_OK) load();
+            return;
+        }
         if (resultCode != RESULT_OK || data == null) return;
         if (request == REQUEST_IMPORT) {
             if (data.getData() != null) importPdf(data.getData());
@@ -656,5 +679,6 @@ public final class MainActivity extends Activity {
         a4Formatter.shutdown();
         chatProcessing.shutdown();
         chatLogin.shutdown();
+        updateManager.shutdown();
     }
 }
