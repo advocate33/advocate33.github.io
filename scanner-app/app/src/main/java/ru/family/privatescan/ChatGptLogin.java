@@ -20,6 +20,7 @@ import java.math.BigInteger;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.ServerSocket;
+import java.net.SocketTimeoutException;
 import java.net.Socket;
 import java.net.URL;
 import java.net.URLEncoder;
@@ -48,6 +49,7 @@ public final class ChatGptLogin {
     public interface Callback {
         void onSuccess(String identity);
         void onError(String message);
+        default void onProgress(String message) {}
     }
     private static final String PREF = "ps_siwc_v1";
     private static final String KS_ALIAS = "PrivateScanSiwcOAUTH_v1";
@@ -82,6 +84,7 @@ public final class ChatGptLogin {
 
     public void login(Activity activity, Callback callback) {
         pool.execute(() -> {
+            activity.runOnUiThread(() -> callback.onProgress("Готовлю защищённую OAuth-сессию…"));
             try {
                 JSONObject saved = loadCredentials();
                 String priorId = saved != null ? saved.optString("client_id", "") : "";
@@ -101,7 +104,7 @@ public final class ChatGptLogin {
                         Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
                 String state = randomToken(), nonce = randomToken();
                 try (ServerSocket server = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-                    server.setSoTimeout(180_000);
+                    server.setSoTimeout(90_000);
                     String callbackUri = "http://127.0.0.1:" + server.getLocalPort() + "/auth/callback";
                     StringBuilder q = new StringBuilder(AUTH).append('?');
                     add(q, "client_id", clientId);
@@ -121,9 +124,16 @@ public final class ChatGptLogin {
                     add(q, "code_challenge", challenge);
                     String url = q.substring(0, q.length() - 1).replace("?&", "?");
                     activity.runOnUiThread(() -> {
+                        callback.onProgress("Открываю auth.openai.com. Дождитесь страницы разрешений "
+                                + "PrivateScan. Простой вход на chatgpt.com ещё не подключает приложение.");
                         try {
-                            activity.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
-                        } catch (Exception e) { callback.onError("Не удалось открыть браузер: " + e.getMessage()); }
+                            Intent browser = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                            browser.addCategory(Intent.CATEGORY_BROWSABLE);
+                            browser.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                            activity.startActivity(browser);
+                        } catch (Exception e) {
+                            callback.onError("Не удалось открыть браузер: " + e.getMessage());
+                        }
                     });
 
                     String path;
@@ -144,6 +154,8 @@ public final class ChatGptLogin {
                         socket.getOutputStream().write(response);
                         socket.getOutputStream().flush();
                     }
+                    activity.runOnUiThread(() -> callback.onProgress(
+                            "Браузер вернул управление; проверяю код и разрешения OpenAI…"));
                     Uri received = Uri.parse("http://127.0.0.1" + path);
                     if (!state.equals(received.getQueryParameter("state")))
                         throw new IllegalStateException("Проверка OAuth state не пройдена");
@@ -161,6 +173,7 @@ public final class ChatGptLogin {
                         clientId = issued;
                     }
 
+                    activity.runOnUiThread(() -> callback.onProgress("Получаю токен OpenAI…"));
                     JSONObject token = postToken("grant_type=authorization_code"
                         + "&client_id=" + enc(clientId)
                         + "&code=" + enc(code)
@@ -188,9 +201,16 @@ public final class ChatGptLogin {
                     credential.put("expires_at", System.currentTimeMillis()
                         + Math.max(60, token.optLong("expires_in", 3600) - 100) * 1000L);
                     storeCredentials(credential);
+                    activity.runOnUiThread(() -> callback.onProgress("Проверка завершена, сохраняю сеанс…"));
                     String label = credential.getString("email");
                     activity.runOnUiThread(() -> callback.onSuccess(label));
                 }
+            } catch (SocketTimeoutException timeout) {
+                activity.runOnUiThread(() -> callback.onError(
+                    "За 90 секунд браузер не вернулся на http://127.0.0.1. "
+                    + "Страница chatgpt.com не завершает подключение. "
+                    + "Повторите вход, откройте страницу согласия auth.openai.com и вернитесь в PrivateScan. "
+                    + "Если браузер меняет адрес или блокирует локальный возврат, попробуйте Chrome."));
             } catch (Exception e) {
                 String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                 activity.runOnUiThread(() -> callback.onError(message));
