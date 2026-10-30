@@ -175,7 +175,7 @@ public final class MainActivity extends Activity {
     private void startScan() {
         GmsDocumentScannerOptions options = new GmsDocumentScannerOptions.Builder()
                 .setGalleryImportAllowed(true)
-                .setPageLimit(100)
+                .setPageLimit(75)
                 .setResultFormats(GmsDocumentScannerOptions.RESULT_FORMAT_PDF)
                 .setScannerMode(GmsDocumentScannerOptions.SCANNER_MODE_FULL)
                 .build();
