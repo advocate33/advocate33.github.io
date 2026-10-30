@@ -14,15 +14,14 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.provider.MediaStore;
+import android.provider.OpenableColumns;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.EditText;
-import android.text.InputType;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -44,13 +43,14 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private static final int REQUEST_SCAN = 7301;
+    private static final int REQUEST_IMPORT = 7302;
     private static final String FOLDER = Environment.DIRECTORY_DOCUMENTS + "/PrivateScan/";
     private static final int DARK = Color.rgb(20, 33, 47);
     private static final int TEAL = Color.rgb(0, 119, 125);
     private static final int PALE = Color.rgb(237, 246, 247);
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ArrayList<Document> documents = new ArrayList<>();
-    private AiPdfService aiService;
+    private final OfflineOcr offlineOcr = new OfflineOcr();
     private LinearLayout list;
     private TextView status;
     private EditText search;
@@ -67,7 +67,6 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        aiService = new AiPdfService(this);
         getWindow().setStatusBarColor(DARK);
         getWindow().setNavigationBarColor(Color.BLACK);
 
@@ -100,14 +99,14 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(-1, dp(56));
         root.addView(add, addParams);
 
-        Button aiSettings = new Button(this);
-        aiSettings.setText("ИИ-распознавание · настройки");
-        aiSettings.setAllCaps(false);
-        aiSettings.setTextColor(TEAL);
-        aiSettings.setOnClickListener(v -> openAiSettings());
-        LinearLayout.LayoutParams aiSettingsParams = new LinearLayout.LayoutParams(-1, dp(48));
-        aiSettingsParams.topMargin = dp(6);
-        root.addView(aiSettings, aiSettingsParams);
+        Button importBtn = new Button(this);
+        importBtn.setText("＋  Импортировать готовый PDF");
+        importBtn.setAllCaps(false);
+        importBtn.setTextColor(TEAL);
+        importBtn.setOnClickListener(v -> selectPdf());
+        LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(46));
+        importParams.topMargin = dp(6);
+        root.addView(importBtn, importParams);
 
         search = new EditText(this);
         search.setSingleLine(true);
@@ -174,7 +173,12 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int resultCode, Intent data) {
         super.onActivityResult(request, resultCode, data);
-        if (request != REQUEST_SCAN || resultCode != RESULT_OK || data == null) return;
+        if (resultCode != RESULT_OK || data == null) return;
+        if (request == REQUEST_IMPORT) {
+            if (data.getData() != null) importPdf(data.getData());
+            return;
+        }
+        if (request != REQUEST_SCAN) return;
         GmsDocumentScanningResult result = GmsDocumentScanningResult.fromActivityResultIntent(data);
         if (result == null || result.getPdf() == null) {
             showError("Сканер не вернул PDF");
@@ -207,12 +211,7 @@ public final class MainActivity extends Activity {
                 ContentValues ready = new ContentValues();
                 ready.put(MediaStore.MediaColumns.IS_PENDING, 0);
                 resolver.update(dest, ready, null, null);
-                Uri saved = dest;
-                runOnUiThread(() -> {
-                    toast("PDF сохранён");
-                    load();
-                    if (aiService.autoEnabled()) doAi(saved, "Скан", true);
-                });
+                runOnUiThread(() -> { toast("PDF сохранён"); load(); });
             } catch (Exception e) {
                 if (dest != null) try { getContentResolver().delete(dest, null, null); } catch (Exception ignored) {}
                 showError("Ошибка сохранения PDF: " + e.getMessage());
@@ -286,13 +285,21 @@ public final class MainActivity extends Activity {
             action(actions, "Удалить", () -> confirmDelete(doc));
             panel.addView(actions);
 
-            TextView aiAction = new TextView(this);
-            aiAction.setText("✦  Распознать ИИ → отдельный текстовый PDF");
-            aiAction.setTextSize(13);
-            aiAction.setTextColor(TEAL);
-            aiAction.setPadding(dp(6), dp(13), dp(6), dp(7));
-            aiAction.setOnClickListener(v -> requestAi(doc));
-            panel.addView(aiAction);
+            TextView ocrAction = new TextView(this);
+            ocrAction.setText("⌕  Создать поисковый PDF · RU/EN · без интернета");
+            ocrAction.setTextSize(13);
+            ocrAction.setTextColor(TEAL);
+            ocrAction.setPadding(dp(6), dp(13), dp(6), dp(7));
+            ocrAction.setOnClickListener(v -> doOfflineOcr(doc));
+            panel.addView(ocrAction);
+
+            TextView aiShare = new TextView(this);
+            aiShare.setText("✦  Отправить в ChatGPT / Claude / Gemini / Яндекс");
+            aiShare.setTextSize(13);
+            aiShare.setTextColor(TEAL);
+            aiShare.setPadding(dp(6), dp(9), dp(6), dp(9));
+            aiShare.setOnClickListener(v -> confirmAiShare(doc));
+            panel.addView(aiShare);
 
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.bottomMargin = dp(10);
@@ -362,101 +369,117 @@ public final class MainActivity extends Activity {
     }
 
 
-    private void openAiSettings() {
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(22), dp(8), dp(22), dp(4));
 
-        TextView notice = new TextView(this);
-        notice.setText(aiService.hasKey()
-                ? "Ключ уже сохранён в защищённом хранилище Android. Оставьте поле пустым, чтобы не менять его."
-                : "Введите собственный OpenAI API-ключ. Подписка ChatGPT не заменяет API-ключ.");
-        notice.setTextSize(13);
-        content.addView(notice);
+    private void selectPdf() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/pdf");
+        try { startActivityForResult(intent, REQUEST_IMPORT); }
+        catch (Exception error) { showError("Не удалось открыть выбор файла: " + error.getMessage()); }
+    }
 
-        EditText keyField = new EditText(this);
-        keyField.setHint("sk-...");
-        keyField.setSingleLine(true);
-        keyField.setTextSize(14);
-        keyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        content.addView(keyField, new LinearLayout.LayoutParams(-1, dp(54)));
-
-        CheckBox automatic = new CheckBox(this);
-        automatic.setText("Автоматически отправлять новые сканы в OpenAI");
-        automatic.setTextSize(13);
-        automatic.setChecked(aiService.autoEnabled());
-        content.addView(automatic);
-
-        TextView privacy = new TextView(this);
-        privacy.setText("Внимание: при обработке PDF передаётся OpenAI. "
-                + "Возможны расходы по API и хранение данных в журналах безопасности. "
-                + "Не включайте автопередачу для документов с адвокатской тайной.");
-        privacy.setTextSize(12);
-        privacy.setPadding(0, dp(10), 0, dp(2));
-        content.addView(privacy);
-
-        new AlertDialog.Builder(this)
-                .setTitle("Подключение OpenAI")
-                .setView(content)
-                .setNegativeButton("Отмена", null)
-                .setNeutralButton("Удалить ключ", (dialog, which) -> {
-                    aiService.clearKey();
-                    toast("API-ключ удалён с устройства");
-                })
-                .setPositiveButton("Сохранить", (dialog, which) -> {
-                    try {
-                        String candidate = keyField.getText().toString().trim();
-                        if (!candidate.isEmpty()) aiService.saveKey(candidate);
-                        if (automatic.isChecked() && !aiService.hasKey()) {
-                            toast("Для автоматической обработки нужен API-ключ");
-                            return;
-                        }
-                        aiService.setAuto(automatic.isChecked());
-                        toast("Настройки ИИ сохранены");
-                    } catch (Exception e) {
-                        showError("Не удалось сохранить ключ: " + e.getMessage());
+    private void importPdf(Uri uri) {
+        io.execute(() -> {
+            Uri dest = null;
+            try {
+                String name = "Импорт_" + System.currentTimeMillis() + ".pdf";
+                try (Cursor c = getContentResolver().query(uri,
+                        new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                    if (c != null && c.moveToFirst()) {
+                        String incoming = c.getString(0);
+                        if (incoming != null && incoming.toLowerCase(Locale.ROOT).endsWith(".pdf"))
+                            name = incoming.replaceAll("[/\\\\:*?\"<>|]", "_");
                     }
+                } catch (Exception ignored) { }
+                ContentResolver resolver = getContentResolver();
+                ContentValues cv = new ContentValues();
+                cv.put(MediaStore.MediaColumns.DISPLAY_NAME,
+                        "Импорт_" + System.currentTimeMillis() + "_" + name);
+                cv.put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf");
+                cv.put(MediaStore.MediaColumns.RELATIVE_PATH, FOLDER);
+                cv.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                dest = resolver.insert(MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), cv);
+                if (dest == null) throw new IllegalStateException("Не удалось создать файл");
+                try (InputStream in = resolver.openInputStream(uri);
+                     OutputStream out = resolver.openOutputStream(dest, "w")) {
+                    if (in == null || out == null) throw new IllegalStateException("Файл недоступен");
+                    byte[] buffer = new byte[32768];
+                    int bytes;
+                    long total = 0;
+                    while ((bytes = in.read(buffer)) != -1) {
+                        total += bytes;
+                        if (total > 60L * 1024 * 1024)
+                            throw new IllegalArgumentException("Максимальный размер PDF 60 МБ");
+                        out.write(buffer, 0, bytes);
+                    }
+                }
+                ContentValues cv2 = new ContentValues();
+                cv2.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                resolver.update(dest, cv2, null, null);
+                runOnUiThread(() -> { load(); toast("PDF импортирован"); });
+            } catch (Exception error) {
+                if (dest != null) try { getContentResolver().delete(dest, null, null); }
+                catch (Exception ignored) {}
+                showError("Ошибка импорта: " + error.getMessage());
+            }
+        });
+    }
+
+    private void doOfflineOcr(Document doc) {
+        new AlertDialog.Builder(this)
+                .setTitle("Создать поисковый PDF?")
+                .setMessage("Распознавание русского и английского текста выполнится на этом устройстве. "
+                        + "Оригинальное изображение страниц сохранится, поверх добавится невидимый текст. "
+                        + "Интернет и подписка не нужны. Оригинал останется отдельно.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Распознать", (dialog, which) -> {
+                    status.setText("Запуск локального OCR…");
+                    offlineOcr.run(this, doc.uri, doc.name, new OfflineOcr.Listener() {
+                        @Override public void onProgress(int n, int total) {
+                            status.setText("Локальное OCR: страница " + n + " из " + total);
+                        }
+                        @Override public void onSuccess(Uri pdf, int count) {
+                            load();
+                            new AlertDialog.Builder(MainActivity.this)
+                                    .setTitle("Поисковый PDF готов")
+                                    .setMessage("Найдено слов: " + count + ". "
+                                        + "Оригинал сохранён. Сверьте даты, суммы, номера дел и имена.")
+                                    .setNegativeButton("Закрыть", null)
+                                    .setPositiveButton("Открыть", (d, w) ->
+                                        open(new Document(pdf, "Поисковый PDF", 0,
+                                            System.currentTimeMillis() / 1000)))
+                                    .show();
+                        }
+                        @Override public void onError(String reason) {
+                            showError("Ошибка локального OCR: " + reason);
+                        }
+                    });
                 }).show();
     }
 
-    private void requestAi(Document doc) {
-        if (!aiService.hasKey()) {
-            openAiSettings();
-            return;
-        }
+    private void confirmAiShare(Document doc) {
         new AlertDialog.Builder(this)
-                .setTitle("Отправить PDF в OpenAI?")
-                .setMessage("Будет отправлен документ «" + doc.name
-                        + "». Обработка оплачивается отдельно. Оригинал останется без изменений. "
-                        + "ИИ может ошибаться в юридических реквизитах. Продолжить?")
+                .setTitle("Передать файл нейросети?")
+                .setMessage("Выберите установленное приложение (ChatGPT, Claude, Gemini, Алиса и др.). "
+                        + "PDF покинет PrivateScan и будет обработан выбранным сервисом. "
+                        + "Не отправляйте материалы адвокатской тайны без оценки условий передачи. "
+                        + "Готовый PDF затем импортируйте кнопкой «Импортировать готовый PDF».")
                 .setNegativeButton("Отмена", null)
-                .setPositiveButton("Отправить", (dialog, which) -> doAi(doc.uri, doc.name, false))
-                .show();
-    }
-
-    private void doAi(Uri uri, String sourceName, boolean auto) {
-        if (!aiService.hasKey()) {
-            showError("Настройте API-ключ OpenAI");
-            return;
-        }
-        status.setText(auto ? "Автоматическое распознавание PDF…" : "Отправка PDF в OpenAI…");
-        aiService.process(this, uri, sourceName, new AiPdfService.Listener() {
-            @Override public void onSuccess(Uri pdf) {
-                load();
-                status.setText("Создан распознанный PDF. Проверьте реквизиты по оригиналу.");
-                new AlertDialog.Builder(MainActivity.this)
-                        .setTitle("PDF создан")
-                        .setMessage("Текст распознан и сохранён отдельным PDF в Документы/PrivateScan. "
-                                + "Исходный скан не изменён. Сверьте номера дел, даты и суммы.")
-                        .setNegativeButton("Закрыть", null)
-                        .setPositiveButton("Открыть PDF", (d, w) ->
-                                open(new Document(pdf, "OCR", 0, System.currentTimeMillis() / 1000)))
-                        .show();
-            }
-            @Override public void onError(String message) {
-                showError("ИИ-обработка не удалась: " + message);
-            }
-        });
+                .setPositiveButton("Выбрать приложение", (dialog, which) -> {
+                    try {
+                        Intent i = new Intent(Intent.ACTION_SEND);
+                        i.setType("application/pdf");
+                        i.putExtra(Intent.EXTRA_STREAM, doc.uri);
+                        i.putExtra(Intent.EXTRA_TEXT,
+                            "Распознай документ точно, сохрани исходные реквизиты, "
+                          + "таблицы и структуру. Не придумывай нечитаемые фрагменты. "
+                          + "При возможности создай поисковый PDF.");
+                        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivity(Intent.createChooser(i, "Передать PDF в нейросеть"));
+                    } catch (Exception ex) {
+                        showError("Нет приложения, принимающего PDF: " + ex.getMessage());
+                    }
+                }).show();
     }
 
     private GradientDrawable round(int color, int radiusDp) {
@@ -474,6 +497,6 @@ public final class MainActivity extends Activity {
     @Override protected void onDestroy() {
         super.onDestroy();
         io.shutdown();
-        aiService.close();
+        offlineOcr.shutdown();
     }
 }
