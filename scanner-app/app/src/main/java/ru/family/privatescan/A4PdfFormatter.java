@@ -49,8 +49,9 @@ public final class A4PdfFormatter {
             try {
                 ContentResolver resolver = activity.getContentResolver();
                 try (ParcelFileDescriptor source = resolver.openFileDescriptor(original, "r");
-                     PdfRenderer input = new PdfRenderer(source);
-                     PdfDocument output = new PdfDocument()) {
+                     PdfRenderer input = new PdfRenderer(source)) {
+                    PdfDocument output = new PdfDocument();
+                    try {
                     if (source == null) throw new IllegalStateException("PDF не открывается");
                     int count = input.getPageCount();
                     if (count < 1 || count > MAX_PAGES)
@@ -129,6 +130,9 @@ public final class A4PdfFormatter {
                     resolver.update(destination, ready, null, null);
                     Uri saved = destination;
                     activity.runOnUiThread(() -> listener.onSuccess(saved, count));
+                    } finally {
+                        output.close();
+                    }
                 }
             } catch (Exception error) {
                 if (destination != null) {
