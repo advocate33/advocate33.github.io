@@ -12,7 +12,7 @@ import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 
 import com.googlecode.tesseract.android.TessBaseAPI;
-import com.googlecode.tesseract.android.PageIteratorLevel;
+import com.googlecode.tesseract.android.TessBaseAPI.PageIteratorLevel;
 import com.googlecode.tesseract.android.ResultIterator;
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader;
 import com.tom_roush.pdfbox.pdmodel.PDDocument;
