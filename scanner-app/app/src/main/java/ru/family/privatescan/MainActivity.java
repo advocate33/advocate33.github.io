@@ -51,6 +51,8 @@ public final class MainActivity extends Activity {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final ArrayList<Document> documents = new ArrayList<>();
     private final OfflineOcr offlineOcr = new OfflineOcr();
+    private ChatGptLogin chatLogin;
+    private ChatGptProcessing chatProcessing;
     private LinearLayout list;
     private TextView status;
     private EditText search;
@@ -67,6 +69,8 @@ public final class MainActivity extends Activity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        chatLogin = new ChatGptLogin(this);
+        chatProcessing = new ChatGptProcessing(chatLogin);
         getWindow().setStatusBarColor(DARK);
         getWindow().setNavigationBarColor(Color.BLACK);
 
@@ -107,6 +111,15 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(46));
         importParams.topMargin = dp(6);
         root.addView(importBtn, importParams);
+
+        Button connectBtn = new Button(this);
+        connectBtn.setText("Подключить ChatGPT без API-ключа");
+        connectBtn.setAllCaps(false);
+        connectBtn.setTextColor(TEAL);
+        connectBtn.setOnClickListener(v -> showChatConnection());
+        LinearLayout.LayoutParams chatParams = new LinearLayout.LayoutParams(-1, dp(46));
+        chatParams.topMargin = dp(4);
+        root.addView(connectBtn, chatParams);
 
         search = new EditText(this);
         search.setSingleLine(true);
@@ -293,6 +306,14 @@ public final class MainActivity extends Activity {
             ocrAction.setOnClickListener(v -> doOfflineOcr(doc));
             panel.addView(ocrAction);
 
+            TextView chatAction = new TextView(this);
+            chatAction.setText("✦  ChatGPT по подписке → текстовый PDF");
+            chatAction.setTextSize(13);
+            chatAction.setTextColor(TEAL);
+            chatAction.setPadding(dp(6), dp(9), dp(6), dp(9));
+            chatAction.setOnClickListener(v -> requestChatOcr(doc));
+            panel.addView(chatAction);
+
             TextView aiShare = new TextView(this);
             aiShare.setText("✦  Отправить в ChatGPT / Claude / Gemini / Яндекс");
             aiShare.setTextSize(13);
@@ -369,6 +390,88 @@ public final class MainActivity extends Activity {
     }
 
 
+
+
+    private void showChatConnection() {
+        String message = chatLogin.connected()
+                ? "Подключён: " + chatLogin.accountLabel()
+                    + ". Запросы будут расходовать лимит ChatGPT-подписки."
+                : "Откроется официальный сайт OpenAI для входа. "
+                    + "Вы разрешите PrivateScan использовать лимит подписки ChatGPT. "
+                    + "Пароль и API-ключ в PrivateScan вводить не нужно.";
+        new AlertDialog.Builder(this)
+                .setTitle("ChatGPT: подключение по подписке")
+                .setMessage(message)
+                .setNegativeButton("Закрыть", null)
+                .setNeutralButton(chatLogin.connected() ? "Отключить" : "Сведения",
+                    (d, w) -> {
+                        if (chatLogin.connected()) {
+                            status.setText("Отключение ChatGPT…");
+                            chatLogin.signOut(this, new ChatGptLogin.Callback() {
+                                @Override public void onSuccess(String info) { status.setText(info); toast(info); }
+                                @Override public void onError(String reason) { showError(reason); }
+                            });
+                        } else {
+                            new AlertDialog.Builder(this)
+                                .setTitle("Правила работы")
+                                .setMessage("Без API-ключа доступен только официальный вход "
+                                    + "через браузер и разрешение использования подписки. "
+                                    + "PrivateScan не получает историю чатов. "
+                                    + "Загрузки документов осуществляются только после вашего подтверждения.")
+                                .setPositiveButton("ОК", null).show();
+                        }
+                    })
+                .setPositiveButton("Продолжить с ChatGPT", (d, w) -> {
+                    status.setText("Ожидание авторизации ChatGPT в браузере…");
+                    chatLogin.login(this, new ChatGptLogin.Callback() {
+                        @Override public void onSuccess(String info) {
+                            status.setText("ChatGPT подключён: " + info);
+                            toast("Аккаунт ChatGPT подключён");
+                        }
+                        @Override public void onError(String reason) {
+                            showError("Ошибка входа ChatGPT: " + reason);
+                        }
+                    });
+                })
+                .show();
+    }
+
+    private void requestChatOcr(Document doc) {
+        if (!chatLogin.connected()) {
+            showChatConnection();
+            return;
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Отправить документ в ChatGPT?")
+            .setMessage("PDF «" + doc.name
+                + "» будет передан OpenAI через официальный Responses API с доступом по вашей подписке. "
+                + "Это расходует лимиты подписки. Будет создан отдельный текстовый PDF; "
+                + "изображение оригинала не меняется. "
+                + "ИИ может ошибаться в реквизитах. Передавать конфиденциальные материалы без "
+                + "отдельной оценки условий сервиса не следует.")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Разрешить отправку", (dialog, which) -> {
+                status.setText("Отправка PDF в ChatGPT…");
+                chatProcessing.process(this, doc.uri, doc.name, new ChatGptProcessing.Listener() {
+                    @Override public void onSuccess(Uri pdf, String model) {
+                        load();
+                        new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Распознанная копия создана")
+                            .setMessage("Модель: " + model + ". "
+                                + "Создан отдельный текстовый PDF. "
+                                + "Оригинал сохранён. Сверьте реквизиты с исходным сканом.")
+                            .setNegativeButton("Закрыть", null)
+                            .setPositiveButton("Открыть", (d, w) ->
+                                open(new Document(pdf, "ChatGPT PDF", 0,
+                                    System.currentTimeMillis() / 1000)))
+                            .show();
+                    }
+                    @Override public void onError(String reason) {
+                        showError("ChatGPT: " + reason);
+                    }
+                });
+            }).show();
+    }
 
     private void selectPdf() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -498,5 +601,7 @@ public final class MainActivity extends Activity {
         super.onDestroy();
         io.shutdown();
         offlineOcr.shutdown();
+        chatProcessing.shutdown();
+        chatLogin.shutdown();
     }
 }
