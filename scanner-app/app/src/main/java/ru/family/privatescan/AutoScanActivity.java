@@ -182,11 +182,13 @@ public final class AutoScanActivity extends ComponentActivity {
             b.get(y);
             CascadeProcessing.Detection d=CascadeProcessing.detectGray(y,image.getWidth(),
                     image.getHeight(),plane.getRowStride());
-            int orient=image.getImageInfo().getRotationDegrees();
+            final int orient=image.getImageInfo().getRotationDegrees();
+            final int frameW=image.getWidth(),frameH=image.getHeight();
             int uiMode=waitingForRemoval ? ScanOutlineView.REMOVE_PAGE :
                     (d.found ? ScanOutlineView.STABLE : ScanOutlineView.SEARCHING);
+            // ImageProxy will be closed below; capture immutable dimensions now.
             if(scanOutline!=null)runOnUiThread(()->scanOutline.detection(
-                    d.quad,image.getWidth(),image.getHeight(),orient,uiMode));
+                    d.quad,frameW,frameH,orient,uiMode));
             synchronized(lock) {
                 if(waitingForRemoval) {
                     // Require the photographed sheet to disappear before re-arming.
