@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.media.MediaActionSound;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.Gravity;
@@ -46,6 +47,8 @@ public final class AutoScanActivity extends ComponentActivity {
     private static final int CAMERA_REQUEST=504;
     private static final int MAX_PAGES=CascadeProcessing.MAX_PAGES;
     private PreviewView preview;
+    private ScanOutlineView scanOutline;
+    private MediaActionSound shutterSound;
     private TextView status;
     private TextView counter;
     private Button finish;
@@ -71,6 +74,9 @@ public final class AutoScanActivity extends ComponentActivity {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        shutterSound=new MediaActionSound();
+        shutterSound.load(MediaActionSound.SHUTTER_CLICK);
         getWindow().setStatusBarColor(Color.BLACK);
         getWindow().setNavigationBarColor(Color.BLACK);
         try {
@@ -91,6 +97,8 @@ public final class AutoScanActivity extends ComponentActivity {
         preview=new PreviewView(this);
         preview.setScaleType(PreviewView.ScaleType.FILL_CENTER);
         root.addView(preview,new FrameLayout.LayoutParams(-1,-1));
+        scanOutline=new ScanOutlineView(this);
+        root.addView(scanOutline,new FrameLayout.LayoutParams(-1,-1));
         LinearLayout column=new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setPadding(18,25,18,20);
@@ -143,7 +151,8 @@ public final class AutoScanActivity extends ComponentActivity {
             try {
                 if(isFinishing())return;
                 provider=future.get();
-                Preview p=new Preview.Builder().build();
+                Preview p=new Preview.Builder()
+                        .setTargetAspectRatio(androidx.camera.core.AspectRatio.RATIO_4_3).build();
                 p.setSurfaceProvider(preview.getSurfaceProvider());
                 capture=new ImageCapture.Builder()
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
@@ -173,6 +182,11 @@ public final class AutoScanActivity extends ComponentActivity {
             b.get(y);
             CascadeProcessing.Detection d=CascadeProcessing.detectGray(y,image.getWidth(),
                     image.getHeight(),plane.getRowStride());
+            int orient=image.getImageInfo().getRotationDegrees();
+            int uiMode=waitingForRemoval ? ScanOutlineView.REMOVE_PAGE :
+                    (d.found ? ScanOutlineView.STABLE : ScanOutlineView.SEARCHING);
+            if(scanOutline!=null)runOnUiThread(()->scanOutline.detection(
+                    d.quad,image.getWidth(),image.getHeight(),orient,uiMode));
             synchronized(lock) {
                 if(waitingForRemoval) {
                     // Require the photographed sheet to disappear before re-arming.
@@ -180,6 +194,7 @@ public final class AutoScanActivity extends ComponentActivity {
                     if(missingFrames>=4) {
                         waitingForRemoval=false;armed=true;stableFrames=0;lastX=-1;
                         show("Готов к следующему листу — наведите камеру");
+                        if(scanOutline!=null)runOnUiThread(()->scanOutline.state(ScanOutlineView.SEARCHING));
                     }
                     return;
                 }
@@ -215,6 +230,7 @@ public final class AutoScanActivity extends ComponentActivity {
         if(camera==null || capture==null || saving)return;
         taking=true;
         show("Фокусировка и автоматический снимок…");
+        if(scanOutline!=null)scanOutline.state(ScanOutlineView.CAPTURING);
         float px=Math.max(0,Math.min(preview.getWidth()-1,cx*preview.getWidth()));
         float py=Math.max(0,Math.min(preview.getHeight()-1,cy*preview.getHeight()));
         FocusMeteringAction action=new FocusMeteringAction.Builder(
@@ -257,8 +273,11 @@ public final class AutoScanActivity extends ComponentActivity {
                     lastShot=SystemClock.elapsedRealtime();
                     waitingForRemoval=true;missingFrames=0;taking=false;
                 }
-                counter.setText(rawFiles.size()+" / "+MAX_PAGES+" страниц");
-                show("Лист снят автоматически. Уберите его и наведите следующий.");
+                int count=rawFiles.size();
+                counter.setText(count+" / "+MAX_PAGES+" страниц");
+                if(shutterSound!=null) shutterSound.play(MediaActionSound.SHUTTER_CLICK);
+                if(scanOutline!=null)scanOutline.shot(count);
+                show("✓ СТРАНИЦА "+count+" СНЯТА. Уберите лист и наведите следующий.");
             }
             @Override public void onError(ImageCaptureException exception) {
                 taking=false;armed=true;
@@ -346,6 +365,7 @@ public final class AutoScanActivity extends ComponentActivity {
         super.onDestroy();
         if(provider!=null) provider.unbindAll();
         if(analyzerExecutor!=null)analyzerExecutor.shutdownNow();
+        if(shutterSound!=null)shutterSound.release();
         if(processingExecutor!=null)processingExecutor.shutdown();
         // clean only after final export; retries need these photos until screen closes
         if(workingDir!=null && workingDir.exists()) {
