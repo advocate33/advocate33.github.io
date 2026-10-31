@@ -45,8 +45,11 @@ public final class CascadeProcessing {
     public static final class Detection {
         public final boolean found;
         public final float cx, cy, coverage, sharpness;
-        public Detection(boolean found, float cx, float cy, float coverage, float sharpness) {
-            this.found=found; this.cx=cx; this.cy=cy; this.coverage=coverage; this.sharpness=sharpness;
+        /** Normalized source-image quadrilateral, clockwise. Null when no contour. */
+        public final float[] quad;
+        public Detection(boolean found, float cx, float cy, float coverage, float sharpness, float[] quad) {
+            this.found=found; this.cx=cx; this.cy=cy; this.coverage=coverage;
+            this.sharpness=sharpness; this.quad=quad;
         }
     }
 
@@ -55,7 +58,7 @@ public final class CascadeProcessing {
      * Returns bounded contour and Laplacian variance, no RGB allocations per frame.
      */
     public static Detection detectGray(byte[] luminance, int width, int height, int rowStride) {
-        if (width < 16 || height < 16 || rowStride < width) return new Detection(false,0,0,0,0);
+        if (width < 16 || height < 16 || rowStride < width) return new Detection(false,0,0,0,0,null);
         int scale = Math.max(1, Math.max(width, height)/480);
         int w=Math.max(1,width/scale), h=Math.max(1,height/scale);
         Mat gray = new Mat(h,w,CvType.CV_8UC1);
@@ -86,6 +89,7 @@ public final class CascadeProcessing {
             Imgproc.findContours(edges,contours,hierarchy,Imgproc.RETR_LIST,Imgproc.CHAIN_APPROX_SIMPLE);
             double best=0;
             org.opencv.core.Rect bestBox=null;
+            float[] bestQuad=null;
             for(MatOfPoint contour:contours) {
                 double area=Imgproc.contourArea(contour);
                 if (area < w*h*.17 || area > w*h*.96 || area <= best) continue;
@@ -95,13 +99,21 @@ public final class CascadeProcessing {
                 Imgproc.approxPolyDP(poly,approx, .025*perimeter, true);
                 if(approx.total()==4 && Imgproc.isContourConvex(new MatOfPoint(approx.toArray()))) {
                     org.opencv.core.Rect b=Imgproc.boundingRect(contour);
-                    if(b.width > w*.30 && b.height > h*.30) { best=area; bestBox=b; }
+                    if(b.width > w*.30 && b.height > h*.30) {
+                        best=area;bestBox=b;
+                        Point[] points=approx.toArray();
+                        bestQuad=new float[8];
+                        for(int k=0;k<4;k++){
+                            bestQuad[k*2]=(float)(points[k].x/w);
+                            bestQuad[k*2+1]=(float)(points[k].y/h);
+                        }
+                    }
                 }
                 poly.release();approx.release();
             }
-            if(bestBox==null) return new Detection(false,0,0,0,focus);
+            if(bestBox==null) return new Detection(false,0,0,0,focus,null);
             return new Detection(true,(bestBox.x+bestBox.width*.5f)/w,
-                    (bestBox.y+bestBox.height*.5f)/h,(float)(best/(w*h)),focus);
+                    (bestBox.y+bestBox.height*.5f)/h,(float)(best/(w*h)),focus,bestQuad);
         } finally {
             gray.release(); edges.release();blurred.release();lap.release();hierarchy.release();
             for(MatOfPoint c:contours)c.release();
@@ -177,8 +189,8 @@ public final class CascadeProcessing {
             Utils.bitmapToMat(decoded,rgba);
             Imgproc.cvtColor(rgba,gray,Imgproc.COLOR_RGBA2GRAY);
             Point[] quad=corners(gray);
-            boolean portrait=decoded.getHeight()>=decoded.getWidth();
-            int targetW=portrait?A4_W:A4_H,targetH=portrait?A4_H:A4_W;
+            // Always export a portrait A4 page, regardless of camera sensor rotation.
+            int targetW=A4_W,targetH=A4_H;
             if(quad!=null) {
                 MatOfPoint2f src=new MatOfPoint2f(quad);
                 MatOfPoint2f dest=new MatOfPoint2f(new Point(0,0),new Point(targetW-1,0),
@@ -251,8 +263,8 @@ public final class CascadeProcessing {
                 Bitmap bitmap=BitmapFactory.decodeFile(f.getAbsolutePath(),opt);
                 if(bitmap==null)throw new IllegalStateException("Повреждена страница "+(i+1));
                 try {
-                    boolean landscape=bitmap.getWidth()>bitmap.getHeight();
-                    int width=landscape?842:595,height=landscape?595:842;
+                    // Always create portrait A4 pages. Fit without cropping original content.
+                    int width=595,height=842;
                     PdfDocument.Page page=pdf.startPage(new PdfDocument.PageInfo.Builder(width,height,i+1).create());
                     Canvas canvas=page.getCanvas();
                     canvas.drawColor(Color.WHITE);
