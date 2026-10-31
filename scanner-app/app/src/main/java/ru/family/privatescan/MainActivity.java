@@ -467,13 +467,14 @@ public final class MainActivity extends Activity {
                         }
                     })
                 .setPositiveButton("Продолжить с ChatGPT", (d, w) -> {
+                    // AlertDialog cannot combine setMessage and setItems:
+                    // message suppresses the browser choices on Samsung.
                     new AlertDialog.Builder(this)
-                        .setTitle("Выберите браузер для OAuth")
-                        .setMessage("На скриншоте подтверждение зависло в браузере Samsung. "
-                                + "Попробуйте Chrome. Если браузер не передаст ответ в PrivateScan, "
-                                + "появится диагностическое сообщение.")
-                        .setItems(new String[]{"Chrome (рекомендуется)", "Браузер по умолчанию"},
-                            (dialog, which) -> startChatLogin(which == 0))
+                        .setTitle("Выберите браузер OAuth")
+                        .setItems(new String[]{
+                            "Chrome — повторить подключение",
+                            "Системный браузер — повторить подключение"
+                        }, (dialog, which) -> startChatLogin(which == 0))
                         .setNegativeButton("Отмена", null)
                         .show();
                 })
