@@ -13,7 +13,7 @@
 
    При выходе новой версии приложения поднимите число в CACHE.
 */
-const CACHE = 'crm-main-v63'; // новая версия: свой кэш, область /next/
+const CACHE = 'crm-main-v64'; // новая версия: свой кэш, область /next/
 const CACHE_PREFIX = CACHE.replace(/\d+$/, ''); // crm-next-v… в /next/, crm-main-v… на основном адресе: удаляем только СВОИ старые кэши — чужие на том же сайте не трогаем
 
 // Базовый адрес каталога, где лежит SW (работает и в подпапке, и в корне)
@@ -70,7 +70,9 @@ self.addEventListener('fetch', (e) => {
   if (sameOrigin && FOREIGN_DIRS.some((d) => url.pathname.startsWith(d))) return;
   // сборка 224 (Д-67): чужие адреса (личный сервер, хранилище, сервисы) и запросы «без кэша» — мимо кэша программы: «Проверить» ленты
   // показывал прошлый ответ, снимки базы и файлы документов копились в кэше
-  if (!sameOrigin || req.cache === 'no-store' || req.cache === 'reload' || req.cache === 'no-cache') return;
+  // сборка 227: открытие страницы (navigate) — не «запрос без кэша»: обновление страницы браузер шлёт с cache 'no-cache'/'reload', и без
+  // сети программа не открывалась (живой сценарий main); навигация идёт ниже — сначала сеть, без сети — стартовая страница из кэша
+  if (!sameOrigin || (req.mode !== 'navigate' && (req.cache === 'no-store' || req.cache === 'reload' || req.cache === 'no-cache'))) return;
 
   const isNavigation =
     req.mode === 'navigate' ||
