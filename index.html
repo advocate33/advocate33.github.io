@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="02.11.2026 14:28 · 6973d6b">
-<meta name="build-no" content="229">
+<meta name="build" content="02.11.2026 19:20 · 409d232">
+<meta name="build-no" content="230">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -18996,7 +18996,8 @@ function calMonday(iso) { const d = parseLocalDate(iso); return calAddDays(iso, 
 function calEvents(d, from, to) {
   const cases = d.cases || [], byNum = {}, byId = {}; cases.forEach(c => { if (c.number) byNum[c.number] = c; byId[c.id] = c; });
   const caseOf = x => (x.caseId && byId[x.caseId]) || (x.caseNum && byNum[x.caseNum]) || null;
-  const title = (c, num) => [c ? c.number : num, c ? c.client : ''].filter(Boolean).join(' · ');
+  // 02.11.2026 (сборка 230, пожелание пользователя): сначала доверитель, потом номер дела
+  const title = (c, num) => [c ? c.client : '', c ? c.number : num].filter(Boolean).join(' · ');
   const inR = iso => iso && iso >= from && iso <= to, out = [];
   (d.hearings || []).forEach(h => { if (!h || !inR(h.date)) return; const c = caseOf(h);
     out.push({ date: h.date, time: h.time || '', type: 'hearing', id: h.id, title: 'Заседание · ' + (title(c, h.caseNum) || 'дело не указано'), judge: todayJudgeOf(h, c), subject: (c && (c.subject || c.category)) || '', client: (c && c.client) || '', number: (c && c.number) || h.caseNum || '', sub: [hearingCourtOf(h, c), h.room ? 'зал ' + h.room : ''].filter(Boolean).join(' · '), status: h.status || 'Назначено', muted: h.status === 'Отменено' || h.status === 'Проведено' }); });
@@ -19004,6 +19005,17 @@ function calEvents(d, from, to) {
   (d.tasks || []).forEach(t => { if (t && !t.done && inR(t.due)) out.push({ date: t.due, time: t.time || '', type: 'task', id: t.id, title: t.title || 'Задача', sub: title(caseOf(t), t.caseNum), status: '' }); });
   cases.filter(c => c && !c.archived && c.status !== 'Завершено').forEach(c => (c.deadlines || []).forEach(dl => { if (dl && !dl.done && inR(dl.date)) out.push({ date: dl.date, time: '', type: 'deadline', id: c.id, title: 'Срок · ' + (dl.title || 'срок'), sub: title(c), status: '' }); }));
   return out.sort((a, b) => a.date.localeCompare(b.date) || (a.time || '99:99').localeCompare(b.time || '99:99') || a.title.localeCompare(b.title, 'ru'));
+}
+// ФИО человека — «Фамилия И. О.» (для узкой плитки месяца); организация, ИП, несколько лиц, уже сокращённое — как есть
+function calShortName(s) {
+  const t = String(s || '').trim(), w = t.split(/\s+/);
+  if (w.length < 2 || w.length > 3 || /^(ИП|ООО|АО|ПАО|ЗАО|ОАО|ТСЖ|ТСН|СНТ|ГСК|ЖСК|МУП|ГУП|АНО|НКО|КФХ)$/i.test(w[0])) return t;
+  return w.every(x => /^[А-ЯЁ][а-яё]+(-[А-ЯЁ]?[а-яё]+)?$/.test(x)) ? w[0] + ' ' + w.slice(1).map(x => x[0] + '.').join(' ') : t;
+}
+// Подпись записи в плитке месяца: время, затем доверитель (сокращённо), затем номер дела
+function calChip(e) {
+  const what = e.type === 'hearing' && e.client ? calShortName(e.client) + (e.number ? ' · ' + e.number : '') : e.title.replace(/^(Заседание|Встреча|Срок) · /, '');
+  return (e.time ? e.time + ' ' : '') + what;
 }
 // opts: { view, month: 'YYYY-MM', week: смещение недель от текущей, day: выбранный день (месяц), past: показывать прошедшие (список) }
 function calendarModel(d, opts, now) {
@@ -19045,13 +19057,13 @@ SCREENS.calendar = async function () {
   const views = CAL_VIEWS.map(([k, t, i]) => `<button type="button" class="button small-btn" aria-pressed="${m.view === k}" onclick="calSet('view','${k}')">${icon(i, 'icon-sm')}${esc(t)}</button>`).join('');
   const dayLabel = iso => todayDayLabel(iso, m.today) + (todayDayDiff(iso, m.today) === 0 || Math.abs(todayDayDiff(iso, m.today)) === 1 ? ' · ' + parseLocalDate(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '');
   const row = x => `<button type="button" class="agenda-row" onclick="todayOpen('${x.type}', '${jsq(x.id)}')"><span class="agenda-time">${esc(x.time || ({ task: 'задача', deadline: 'срок' }[x.type] || '—'))}</span>
-    <span class="agenda-stripe ${x.type}${x.muted ? ' done' : ''}"><span class="agenda-title">${x.type === 'hearing' && x.client ? `Заседание · <span class="l-long">${esc(x.number ? x.number + ' · ' : '')}</span>${esc(x.client)}` : esc(x.title)}</span>${x.judge ? `<span class="agenda-judge">Судья: ${esc(x.judge)}</span>` : ''}${x.subject ? `<span class="agenda-sub">${esc(x.subject)}</span>` : ''}${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : x.status === 'Отменено' ? '' : 'accent') : ''}</span></button>`;
+    <span class="agenda-stripe ${x.type}${x.muted ? ' done' : ''}"><span class="agenda-title">${x.type === 'hearing' && x.client ? `Заседание · ${esc(x.client)}<span class="l-long">${esc(x.number ? ' · ' + x.number : '')}</span>` : esc(x.title)}</span>${x.judge ? `<span class="agenda-judge">Судья: ${esc(x.judge)}</span>` : ''}${x.subject ? `<span class="agenda-sub">${esc(x.subject)}</span>` : ''}${x.sub ? `<span class="agenda-sub">${esc(x.sub)}</span>` : ''}${x.status ? badge(x.status, x.status === 'Проведено' ? 'good' : x.status === 'Дата прошла' ? 'warn' : x.status === 'Отменено' ? '' : 'accent') : ''}</span></button>`;
   const rows = items => items.map(row).join('');
   const nav3 = (prev, next, label, reset) => `<div class="cal-nav">${iconBtn('Назад', prev, 'chevron-left')}<span class="cal-title">${esc(label)}</span>${iconBtn('Вперёд', next, 'chevron-right')}${reset ? btn('Сегодня', reset, 'small-btn') : ''}</div>`;
   let body = '';
   if (m.view === 'month') {
     const mo = m.month;
-    const cells = mo.cells.map(c => `<button type="button" class="day-cell${c.dim ? ' dim' : ''}${c.today ? ' today' : ''}${c.selected ? ' selected' : ''}" aria-pressed="${c.selected}" aria-label="${esc(parseLocalDate(c.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }))}, записей: ${c.items.length}" onclick="calSet('day','${c.date}')"><span class="day-number">${c.n}</span>${c.items.slice(0, 2).map(e => `<span class="day-event ${e.type}">${esc((e.time ? e.time + ' ' : '') + e.title.replace(/^(Заседание|Встреча|Срок) · /, ''))}</span>`).join('')}${c.items.length > 2 ? `<span class="day-event more">ещё ${c.items.length - 2}</span>` : ''}<span class="day-dots">${c.items.slice(0, 4).map(e => `<i class="${e.type}"></i>`).join('')}</span></button>`).join('');
+    const cells = mo.cells.map(c => `<button type="button" class="day-cell${c.dim ? ' dim' : ''}${c.today ? ' today' : ''}${c.selected ? ' selected' : ''}" aria-pressed="${c.selected}" aria-label="${esc(parseLocalDate(c.date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }))}, записей: ${c.items.length}" onclick="calSet('day','${c.date}')"><span class="day-number">${c.n}</span>${c.items.slice(0, 2).map(e => `<span class="day-event ${e.type}">${esc(calChip(e))}</span>`).join('')}${c.items.length > 2 ? `<span class="day-event more">ещё ${c.items.length - 2}</span>` : ''}<span class="day-dots">${c.items.slice(0, 4).map(e => `<i class="${e.type}"></i>`).join('')}</span></button>`).join('');
     body = `<div class="month-layout"><section class="panel">${nav3("calSet('month',-1)", "calSet('month',1)", mo.title, mo.ym !== m.today.slice(0, 7) ? "calSet('month',0)" : '')}
       <div class="weekdays">${['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(x => `<span class="weekday">${x}</span>`).join('')}</div><div class="month-grid">${cells}</div></section>
       <section class="panel month-agenda"><div class="panel-title"><h2>${esc(dayLabel(mo.day))}</h2>${badge(String(mo.dayItems.length), mo.dayItems.length ? 'accent' : '')}</div>${mo.dayItems.length ? rows(mo.dayItems) : emptyState('calendar-check', 'В этот день пусто', 'Заседаний, встреч, задач и сроков нет.')}</section></div>`;
@@ -26448,6 +26460,8 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <li>В программе: Настройки → «Напоминания в Telegram» → включите → «Передать сейчас»: в строке вверху должно быть «Включено · передано N … · Telegram у сервера настроен». Дальше список обновляется сам после каждой правки.</li></ol>
 ${typeof helpFig === 'function' ? helpFig('tgbot') : ''}
 <p>Если пишет «не заданы бот и чат» — повторите шаг 3. Если бот молчит в назначенное время — проверьте, что нажали «Start» у бота и что таймер есть: мастер сервера создаёт его сам, вручную — «Триггеры» функции crm-bridge. С сервера 201 вызов таймера принимается только с 07:30 до 10:00 по Москве (защита от чужого вызова функции): если ваш таймер стоит на другое время, задайте функции переменную TIMER_WINDOW, например 18:00-19:00, или переменную TIMER_KEY и то же значение в поле «Payload» таймера.</p>
+<h3>Экран «Календарь»</h3>
+<p>Виды «Месяц», «Неделя» и «Список». На компьютере в клетке месяца у заседания — время, доверитель (фамилия и инициалы) и номер дела, например «11:30 Вымышленная А. П. · Д-35/2026»; у организации — название целиком. На телефоне в клетке — точки по числу записей. Нажмите день — справа (на телефоне ниже) записи этого дня: «Заседание · доверитель · номер дела» (номер на телефоне — в карточке заседания), судья, суд и зал.</p>
 <h3>Где настройки календаря и что выбрать</h3>
 <p>Все настройки календаря — «Настройки» (на телефоне — «Ещё» → «Настройки»), группа «Уведомления и календарь»: «Лента календаря», «Google Календарь», «События из календаря». Нерабочие дни для расчёта сроков — «Справочники» → «Нерабочие дни». У отдельной записи — кнопка «В календарь» в её карточке.</p>
 <ul><li><b>iPhone, iPad, Mac</b> — «Лента календаря» (подписка в приложении «Календарь», нужен личный сервер). Без сервера — «В календарь» у отдельной записи (файл .ics, копия без обновления). «Google Календарь» на iPhone недоступен: он работает только в приложении «CRM Адвоката» для Android.</li>
