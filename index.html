@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="02.11.2026 19:20 · 409d232">
-<meta name="build-no" content="230">
+<meta name="build" content="03.11.2026 00:10 · c88bff3">
+<meta name="build-no" content="231">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3920,7 +3920,7 @@ function nxSupersedeOf(obj, inp, key) {
 // пометка у листа от апелляционного акта, когда кассация его изменила или отменила (не закрытие: решает пользователь)
 const NX_CASS_CHK_RE = /^Кассация: «[^»]*» от \S+ — проверьте, нужен ли лист.*?\.(?:\s+|$)/;
 function nxAppealFlow(obj, today) {
-  const r = { closed: [], reopened: [], confirmed: [], noted: [] }, inp = nextActInputs(obj), dls = Array.isArray(obj.deadlines) ? obj.deadlines : [];
+  const r = { closed: [], reopened: [], reopenedDl: [], confirmed: [], noted: [] }, inp = nextActInputs(obj), dls = Array.isArray(obj.deadlines) ? obj.deadlines : [];
   const DEC = ['act:decision:writ', 'act:decision:costs'];
   const close = (dl, why, at, kind, repl) => { dl.done = true; dl.doneAt = at || today; dl.closedWhy = kind;
     // «заменён» — только когда срок-замена действительно есть в деле (R7); его id — в replacedBy
@@ -3930,7 +3930,7 @@ function nxAppealFlow(obj, today) {
     (dl.confirmedAt ? r.confirmed : r.closed).push(dl.title + ' — ' + why); };
   const reopen = (dl, why) => { dl.done = false; delete dl.doneAt; delete dl.closedWhy; delete dl.replacedBy;
     dl.note = ('Возвращён в работу: ' + why + (dl.date && dl.date < today ? ' — срок прошёл ' + fmtDate(dl.date) + ', проверьте' : '') + '. ' + String(dl.note || '').replace(NX_CLOSED_RE, '')).trim();
-    r.reopened.push(dl.title + ' — ' + why); };
+    r.reopened.push(dl.title + ' — ' + why); r.reopenedDl.push(dl); };
   // почему закрытие «заменён» больше не держится (R6): основание убрано, жалоба возвращена или кассация акт не отменяла
   const whyBack = key => {
     if (DEC.includes(key)) return !inp.ap.base ? 'апелляционного определения в деле больше нет' : inp.ap.out === 'back' ? 'апелляционная жалоба — «' + obj.apResult + '», решение в силе с первоначальной даты' : 'апелляционный акт по существу не принят';
@@ -4024,7 +4024,8 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
       // сборка 221 (Д-19): при двух сроках с одним ключом (исполненный и добавленный типовой) пересчитывается живой
       const ex = obj.deadlines.find(dl => dl && dl.autoKey === n.autoKey && !dl.done) || obj.deadlines.find(dl => dl && dl.autoKey === n.autoKey);
       if (ex) {
-        if (ex.done) { msgs.push(`«${ex.title}» оставлен без изменений (исполнен)`); continue; }
+        // сборка 231 (A210-2): закрытый программой (заменён, дело обжалуется) не «исполнен» — его вернёт и пересчитает nxAppealFlow
+        if (ex.done) { if (!['superseded', 'closed'].includes(ex.closedWhy)) msgs.push(`«${ex.title}» оставлен без изменений (исполнен)`); continue; }
         // основание вернулось (A1): пометка «основание удалено» снимается, срок считается заново тем же объектом — дубля нет
         if (ex.baseGone) { delete ex.baseGone; ex.note = String(ex.note || '').replace(NX_BASE_GONE_RE, ''); }
         // правило снова применяется (A3): пометка и заметка снимаются, срок пересчитывается тем же объектом
@@ -4060,6 +4061,18 @@ function nextActDeadlinesApply(obj, prev, nowISO) {
   }
   // сборка 204 (O-73): ход обжалования — после расчёта (новые сроки тоже проходят через правило)
   const flow = nxAppealFlow(obj, today);
+  // сборка 231 (аудит 230, A210-2): срок, возвращённый в работу, пересчитывается от нынешнего основания — те же конечные данные дают ту же
+  // дату, что и чистый расчёт; дата, изменённая пользователем (не равна calcDate), не трогается; подтверждение снимается
+  if (flow.reopenedDl.length) {
+    const rules = {}; for (const act of ['decision', 'appeal', 'cass']) nextActRules(obj, act).forEach(n => { rules[n.autoKey] = n; });
+    flow.reopenedDl.forEach(dl => {
+      const n = rules[dl.autoKey]; if (!n || n.date === dl.date || (dl.calcDate && dl.date !== dl.calcDate)) return;
+      const was = dl.date; dl.confirmedAt = ''; dl.confirmedDate = '';
+      Object.assign(dl, { date: n.date, baseEv: n.baseEv, baseDate: n.baseDate, norm: n.norm, calcDate: n.date, rulesVer: NEXT_RULES_VER, calc: n.calc });
+      dl.note = ('Основание изменилось: ' + n.baseEv + ' — срок пересчитан (было ' + fmtDate(was) + '), подтвердите. ' + String(dl.note || '')).trim();
+      msgs.push(`«${dl.title}»: было ${fmtDate(was)} → стало ${fmtDate(n.date)} (основание изменилось, подтвердите)`);
+    });
+  }
   obj.deadlines.sort((a, b) => ((a && a.date) || '').localeCompare((b && b.date) || ''));
   // предупреждения — первыми: сообщение показывается с обрезкой (toast в rulesReviewApply — 200 знаков), и они важнее перечня дат (урок 152)
   const warn = [];
@@ -23689,7 +23702,8 @@ function filingTodayItems(docs, caseOf, today) {
 }
 // открытые сроки дела для выбора в листе подачи: [{ id, title, date }]
 // сборка 227 (аудит 225, A225-1): у срока прежнего рассмотрения (proceedingId или ключ «p:<id>|…») — пометка в списке
-function filingDeadlines(c) { return (c && Array.isArray(c.deadlines) ? c.deadlines : []).filter(x => x && x.id && !x.done && x.date).map(x => ({ id: x.id, title: x.title || 'срок', date: x.date, prev: !!(x.proceedingId || /^p:/.test(String(x.autoKey || ''))) })); }
+// сборка 231 (аудит 230, A230-1): keepId — срок, уже связанный с подачей, — в списке и закрытым (closed), иначе правка подачи теряла связь
+function filingDeadlines(c, keepId) { return (c && Array.isArray(c.deadlines) ? c.deadlines : []).filter(x => x && x.id && x.date && (!x.done || (keepId && x.id === keepId))).map(x => ({ id: x.id, title: x.title || 'срок', date: x.date, prev: !!(x.proceedingId || /^p:/.test(String(x.autoKey || ''))), closed: !!x.done })); }
 // срок, который документ закрывает по названию («Апелляционная жалоба» → срок «…апелляционн…жалоб…»); '' — не угадать
 // сборка 227 (A225-1): два и более подходящих срока (одноимённые разных рассмотрений) — не угадывать, выбор за пользователем
 function filingGuessDl(doc, dls) {
@@ -23710,9 +23724,9 @@ function filingDlReopen(rec, dlId, docId, filedDate) {
 }
 async function openFilingSheet(docId) {
   const d = await getOne('documents', docId); if (!d || d._deleted) { toast('Документ не найден', true); return null; }
-  const c = d.caseId ? await getOne('cases', d.caseId) : null, f = filingOf(d), dls = filingDeadlines(c), guess = f.dlId || filingGuessDl(d, dls), today = todayISO();
+  const c = d.caseId ? await getOne('cases', d.caseId) : null, f = filingOf(d), dls = filingDeadlines(c, f.state === 'filed' ? f.dlId : ''), guess = f.dlId || filingGuessDl(d, dls.filter(x => !x.closed)), today = todayISO();
   const state = filingStateText(d);
-  const dlSel = dls.length ? `<label class="field wide"><span>Срок, под который готовился документ</span><select id="fl-dl"><option value="">— не связан со сроком —</option>${dls.map(x => `<option value="${esc(x.id)}"${x.id === guess ? ' selected' : ''}>${esc(x.title + ' · до ' + fmtDate(x.date) + (x.prev ? ' · прежнее рассмотрение' : ''))}</option>`).join('')}</select></label>
+  const dlSel = dls.length ? `<label class="field wide"><span>Срок, под который готовился документ</span><select id="fl-dl"><option value="">— не связан со сроком —</option>${dls.map(x => `<option value="${esc(x.id)}"${x.id === guess ? ' selected' : ''}>${esc(x.title + ' · до ' + fmtDate(x.date) + (x.prev ? ' · прежнее рассмотрение' : '') + (x.closed ? ' · исполнен этой подачей' : ''))}</option>`).join('')}</select></label>
     <label class="check" style="grid-column:1/-1"><input type="checkbox" id="fl-close"${guess ? ' checked' : ''}><span>Отметить выбранный срок исполненным подачей</span></label>` : '';
   openSheet(d.title || d.fileName || 'Документ', `<p class="small muted" id="fl-state">${esc([c ? c.number : '', d.category || '', state || 'подача не отмечена'].filter(Boolean).join(' · '))}</p>
     <div class="actions" style="margin-bottom:10px">${d.currentVersionId ? btn('Открыть файл', `mailFileOpen('${jsq(d.id)}')`, 'small-btn', 'files') : ''}${f.state !== 'filed' && f.state !== 'ready' ? btn('Готов к подаче', `filingReady('${jsq(d.id)}')`, 'small-btn', 'clock-3') : ''}${f.state === 'filed' ? btn('Снять отметку о подаче', `filingUndo('${jsq(d.id)}')`, 'small-btn', 'rotate-ccw') : ''}</div>
@@ -23750,10 +23764,19 @@ async function filingSave(docId) {
   const today = todayISO(), close = document.getElementById('fl-close');
   const m = filingModel({ date: fv('fl-date'), method: fv('fl-method'), where: fv('fl-where'), inNo: fv('fl-inNo'), dlId: document.getElementById('fl-dl') ? fv('fl-dl') : '', closeDl: !!(close && close.checked) }, today);
   if (m.error) { fErr(m.error); return null; }
-  let doc = null;
-  try { doc = await filingWrite(docId, d => { d.filing = Object.assign({}, filingOf(d), m.obj, { at: Date.now() }); }); } catch (e) { logErr('filing:save', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'сбой записи')); return null; }
+  // сборка 231 (A230-1): нет поля выбора срока — связь не меняется (отсутствие поля не команда очистки); прежний срок запоминается до записи
+  const keepDl = !document.getElementById('fl-dl');
+  let doc = null, was = null;
+  try { doc = await filingWrite(docId, d => { was = filingOf(d); if (keepDl && was.state === 'filed') m.obj.dlId = was.dlId || ''; d.filing = Object.assign({}, was, m.obj, { at: Date.now() }); }); } catch (e) { logErr('filing:save', e); fErr('Не удалось сохранить: ' + ((e && e.message) || 'сбой записи')); return null; }
   if (!doc) { fErr('Документ не найден'); return null; }
   let dlMsg = '';
+  // сборка 231 (A230-1): связь подачи сменили или сняли — срок, закрытый этой подачей, снова в работе (изменённый после подачи — не трогается)
+  const prevDl = was && was.state === 'filed' ? was.dlId || '' : '';
+  if (doc.caseId && prevDl && prevDl !== m.obj.dlId && typeof dlSave === 'function') {
+    let res = null; const ok = await dlSave(doc.caseId, rec => { res = filingDlReopen(rec, prevDl, docId, was.date); return res.reopened ? undefined : false; }, null);
+    if (res && res.reopened && ok) dlMsg = '; прежний срок снова в работе';
+    else if (res && (res.changed || res.reopened)) dlMsg = '; прежний срок не возвращён — проверьте его в карточке';
+  }
   if (doc.caseId) {
     const c = await getOne('cases', doc.caseId);
     if (c) addCaseHistoryEvent(c, 'doc', '', 'Подан: ' + (doc.title || doc.fileName || 'документ') + ' — ' + fmtDate(m.obj.date) + ', ' + m.obj.method + (m.obj.inNo ? ', вх. № ' + m.obj.inNo : '') + (m.obj.where ? ', ' + m.obj.where : ''), 'card');
@@ -23761,11 +23784,11 @@ async function filingSave(docId) {
       // сборка 227 (A225-1): closedBy — какой документ закрыл срок; по нему «Снять отметку о подаче» возвращает срок в работу
       let had = false; const r = await dlSave(doc.caseId, rec => { const x = (rec.deadlines || []).find(y => y && y.id === m.obj.dlId); if (!x) return false; if (x.done) { had = true; return false; } x.done = true; x.doneAt = m.obj.date; x.closedWhy = 'docFiled'; x.closedBy = 'doc:' + doc.id; x.note = ((x.note || '') + ' · подан: ' + (doc.title || 'документ') + ' ' + fmtDate(m.obj.date)).replace(/^ · /, ''); }, null);
       // сборка 227 (A225-2): срок не записан — не «Подача записана» без оговорки: подача сохранена, срок назван неизменённым
-      if (r) dlMsg = '; срок отмечен исполненным подачей';
+      if (r) dlMsg += '; срок отмечен исполненным подачей';
       else if (!had) { toast('Подача сохранена, но срок не отмечен исполненным — отметьте его в карточке срока', true); closeSheet(); if (typeof nav === 'function') await nav(UI.screen || 'today'); if (typeof openCaseSheet === 'function') await openCaseSheet(doc.caseId); return doc; }
     }
   }
-  toast('Подача записана' + dlMsg); closeSheet(); if (typeof nav === 'function') await nav(UI.screen || 'today');
+  toast('Подача записана' + dlMsg, /не возвращён/.test(dlMsg)); closeSheet(); if (typeof nav === 'function') await nav(UI.screen || 'today');
   if (doc.caseId && typeof openCaseSheet === 'function') await openCaseSheet(doc.caseId);
   return doc;
 }
@@ -26273,7 +26296,7 @@ ${typeof helpFig === 'function' ? helpFig('appealtab') : ''}
 <p><b>Подсказки по делу и «Следующий шаг».</b> В карточке дела под шапкой — до четырёх подсказок с одной кнопкой: срок обжалования не поставлен после акта, долг без напоминания, просроченная задача, пустая папка, дело без движения. Строки «Следующий шаг» называют обычное следующее действие по стадии и событиям дела: резолютивная часть объявлена, а мотивированного решения нет дольше срока изготовления (10 рабочих дней по ГПК и КАС, 5 — по АПК) — «Заявление» об ознакомлении; претензия отправлена 30 и более дней назад, суда в деле нет — «Поставить задачу» «Подготовить исковое заявление»; последнее заседание отложено, а нового в деле нет — «Внести заседание»; соглашение «ждёт подписи» дольше трёх дней — «Соглашение»; суд рассматривает дело дольше срока (со дня «Принято к производству»: 2 месяца по ГПК и КАС, 3 — по АПК) — задача «Заявление об ускорении рассмотрения дела»; исполнительный документ получен, но не предъявлен, и до конца трёхлетнего срока предъявления меньше 90 дней — «Исполнение»; исполнительное производство возбуждено больше двух месяцев назад, а состояние в деле не обновлялось — задача «Запросить у пристава сведения». Нормы этих строк — ориентир: сверьте по КонсультантПлюс, не продлевался ли срок. Те же строки — на «Сегодня» со значком «Следующий шаг». «×» скрывает подсказку на 7 дней. Программа ничего не делает сама — только предлагает.</p>
 ${typeof helpFig === 'function' ? helpFig('nextstep') : ''}
 <p><b>Доверитель ждёт ответа</b> — вид задачи (поле «Вид» в форме задачи). Кнопка «Ждёт ответа» в карточке дела и в карточке доверителя открывает такую задачу на завтра с названием «Ответить доверителю: …». Со следующего дня на «Сегодня» — строка «Ждёт ответа N дней», даже если срок задачи ещё не наступил; в карточке доверителя — список «Ждёт ответа». Выполненная задача из списков уходит.</p>
-<p><b>Подача документов.</b> В карточке дела — список «Документы» (файлы писем и документы по шаблонам) с отметкой: «готов к подаче» или «подан …». Нажатие открывает лист документа: «Открыть файл», «Готов к подаче» и блок «Подача» — дата, способ (нарочно, Почта России, «Мой арбитр», ГАС «Правосудие», электронная почта суда, иное), куда подан, входящий номер. Если в деле есть открытые сроки, можно выбрать тот, под который готовился документ, и отметить его исполненным подачей (программа предлагает срок по названию документа; флажок можно снять). «Подано» записывает подачу в журнал дела. Документ по шаблону в суд (ходатайство, жалоба, заявление) при «В документы дела» сразу становится «готов к подаче»; со следующего дня на «Сегодня» — строка «Документ готов, не подан N дней» с кнопкой «Подано». «Снять отметку о подаче» возвращает документ в «готов к подаче» и снова открывает срок, который закрыла эта подача; если срок после подачи изменили (исполнили иначе, закрыли другим документом), программа его не трогает и говорит об этом. Если при подаче срок записать не удалось, программа так и пишет: «Подача сохранена, но срок не отмечен исполненным». Два подходящих срока с одним названием (например, разных рассмотрений) программа не выбирает сама — выберите в списке; срок прежнего рассмотрения помечен «прежнее рассмотрение».</p>
+<p><b>Подача документов.</b> В карточке дела — список «Документы» (файлы писем и документы по шаблонам) с отметкой: «готов к подаче» или «подан …». Нажатие открывает лист документа: «Открыть файл», «Готов к подаче» и блок «Подача» — дата, способ (нарочно, Почта России, «Мой арбитр», ГАС «Правосудие», электронная почта суда, иное), куда подан, входящий номер. Если в деле есть открытые сроки, можно выбрать тот, под который готовился документ, и отметить его исполненным подачей (программа предлагает срок по названию документа; флажок можно снять). «Подано» записывает подачу в журнал дела. Документ по шаблону в суд (ходатайство, жалоба, заявление) при «В документы дела» сразу становится «готов к подаче»; со следующего дня на «Сегодня» — строка «Документ готов, не подан N дней» с кнопкой «Подано». «Снять отметку о подаче» возвращает документ в «готов к подаче» и снова открывает срок, который закрыла эта подача; если срок после подачи изменили (исполнили иначе, закрыли другим документом), программа его не трогает и говорит об этом. У поданного документа срок, закрытый подачей, остаётся в списке с пометкой «исполнен этой подачей»: правка входящего номера, даты или адресата связь не меняет; если выбрать другой срок или снять флажок, прежний срок снова в работе. Если при подаче срок записать не удалось, программа так и пишет: «Подача сохранена, но срок не отмечен исполненным». Два подходящих срока с одним названием (например, разных рассмотрений) программа не выбирает сама — выберите в списке; срок прежнего рассмотрения помечен «прежнее рассмотрение».</p>
 ${typeof helpFig === 'function' ? helpFig('filing') : ''}
 <p><b>Пакет в суд</b> («Документы» → «Пакет в суд» в деле): отметьте документы дела, которые прикладываются, расставьте порядок стрелками, при необходимости поправьте «копия» / «подлинник». Программа составит перечень «Приложения» с нумерацией (число листов — «[УКАЗАТЬ]»: страницы она не считает) и строкой о госпошлине, если сумма записана в деле, и «Опись вложения» для письма. «Скачать .docx» и «Печать». Перечень вставляется в ваш документ вручную — текст документа программа не меняет.</p>
 <p><b>Сравнить редакции</b> («Документы» → «Сравнить редакции»): выберите два файла .docx — было и стало (например, ваш проект и версию оппонента). Файлы читаются на устройстве и никуда не отправляются. Программа покажет, сколько абзацев изменено, удалено и добавлено; в изменённом абзаце удалённые слова зачёркнуты, добавленные подчёркнуты. «Только изменения» прячет совпадающие абзацы, «Печать» — протокол сравнения. Сравнивается только текст — жирный шрифт и отступы не учитываются.</p>
