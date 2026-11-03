@@ -10,6 +10,8 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v202: аудит 225 — реестр публикации страницы «Ход дела» (A225-4: две вкладки → одна ссылка, «Отключить» отзывает все метки дела,
+//  опоздавшая запись страницы после отключения не открывается); сброс настроек — копия каждой заменяемой версии (A210-5)
 //  v201: разбор кода 28.10.2026 — текст акта в отпечатке события (Д-07), обновлённые события в конце списка и предел текстов актов
 //  (Д-48), вызов без HTTP — только с TIMER_KEY или в окне утреннего таймера (Д-49), кодирование префикса листинга и пути (Д-50), адрес
 //  посетителя не уходит в программу, экранирование логина Почты, «Ход дела» — 502 при сбое хранилища
@@ -217,8 +219,9 @@ async function cfgWrite(cur, vals) {
   const body = cfgSeal(vals), CT = 'application/octet-stream', cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
   let r = cond ? await s3PutIf(cfgName(), body, CT, cond) : await s3Put(cfgName(), body, CT);
   if (cond && condFailed(r)) return { ok: false, changed: true };
-  if (cond && condUnsupported(r)) { console.log('cfg: условная запись не поддерживается (501) — запись без условия'); r = await s3Put(cfgName(), body, CT); }
-  return r.ok ? { ok: true, etag: (r.headers && r.headers.get && r.headers.get('etag')) || '' } : { ok: false, error: 'хранилище ответило ' + r.status };
+  let uncond = !cond;
+  if (cond && condUnsupported(r)) { console.log('cfg: условная запись не поддерживается (501) — запись без условия'); uncond = true; r = await s3Put(cfgName(), body, CT); }
+  return r.ok ? { ok: true, etag: (r.headers && r.headers.get && r.headers.get('etag')) || '', uncond } : { ok: false, error: 'хранилище ответило ' + r.status };
 }
 // чтение — не чаще раза в минуту у работающего экземпляра функции; сбой хранилища оставляет прежние значения (переменные функции работают
 // всегда); нечитаемый файл — значения пусты, ответ называет причину. migrate — переписать файл v1 в v2 (только с кодом сервера или таймером)
@@ -264,18 +267,20 @@ async function cfgPut(body) {
     patch[k] = v;
   }
   const reset = !!(body && body.reset === true);
-  let backup = '';
+  // v202 (аудит 225, A210-5): копия — у каждой версии, которую сброс заменяет: после конфликта перечитанный другой нечитаемый файл тоже
+  // копируется (ключ — содержимое); запись без условия (хранилище без If-Match) — копия может быть не последней версии: backupSure: false
+  const backups = new Map();
   for (let i = 0; i < 5; i++) {
     const cur = await cfgRead(); if (!cur.ok) return { ok: false, error: 'не прочитаны прежние настройки: ' + cur.error };
     if (cur.unreadable && !reset) { CFG = {}; cfgAt = Date.now(); return { ok: false, error: 'cfg_unreadable', unreadable: true, why: cur.why, note: CFG_UNREADABLE[cur.why] + '. Обычное сохранение его не меняет; чтобы записать настройки заново, нажмите «Сбросить настройки на сервере» — прежний файл сохранится копией' }; }
-    if (cur.unreadable && !backup) { const b = await cfgBackup(cur); if (!b.ok) return { ok: false, error: b.error }; backup = b.key; }
+    if (cur.unreadable && !backups.has(cur.text)) { const b = await cfgBackup(cur); if (!b.ok) return { ok: false, error: b.error }; backups.set(cur.text, b.key); }
     const n = Object.assign({}, cur.unreadable ? {} : cur.vals);
     for (const k of Object.keys(patch)) { if (patch[k]) n[k] = patch[k]; else delete n[k]; }
     const w = await cfgWrite(cur, n);
     if (w.changed) continue;
     if (!w.ok) return { ok: false, error: w.error };
     CFG = n; cfgAt = Date.now();
-    return cfgState(backup ? { reset: true, backup: true } : null);
+    return cfgState(backups.size ? { reset: true, backup: true, backups: backups.size, backupSure: !w.uncond } : null);
   }
   return { ok: false, error: 'настройки на сервере меняются одновременно с другого устройства — повторите' };
 }
@@ -347,7 +352,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 201,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 202,
       ready: readiness()
     });
   }
@@ -376,7 +381,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 201, cal: true, ask: true, askCats: true, casePage: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 202, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -1879,19 +1884,72 @@ function casePageClean(d) {
     filed: (Array.isArray(d.filed) ? d.filed : []).map(x => ({ date: iso(x && x.date), title: caseStr(x && x.title, 160) })).filter(x => x.date && x.title).slice(0, 30),
     note: caseStr(d.note, 600), lawyer: caseStr(d.lawyer, 120), phone: caseStr(d.phone, 40) };
 }
+// v202 (аудит 225, A225-4): реестр публикации дела — casereg-<отпечаток>.json { on, token, revoked[] }; отпечаток — от кода хранилища и
+// номера записи дела в программе (caseId), сам номер в имени не виден. Включение при действующей публикации отдаёт её метку (две вкладки,
+// два устройства — одна ссылка); отключение пишет on:false и все метки дела в revoked, затем удаляет файлы страниц; страница с отметкой
+// реестра открывается, только если реестр называет её метку действующей — запись страницы, опоздавшая после отключения, ссылку не оживляет,
+// отозванная метка повторно не публикуется. Запись реестра — условная по ETag, конфликт — перечитать. Без caseId (программа до сборки 234) —
+// как в 201.
+const CASE_ID_RE = /^\S{1,80}$/, CASE_REG_RE = /^casereg-[0-9a-f]{40}\.json$/, CASE_REVOKED_MAX = 50;
+const caseRegKey = id => 'casereg-' + crypto.createHash('sha256').update('crm-casereg|' + storeId() + '|' + id, 'utf8').digest('hex').slice(0, 40) + '.json';
+async function caseRegRead(key) {
+  const r = await s3Get(key);
+  if (r.status === 404) return { ok: true, exists: false, etag: '', reg: { on: false, token: '', revoked: [] } };
+  if (!r.ok) return { ok: false, error: 's3 ' + r.status };
+  const etag = (r.headers && r.headers.get && r.headers.get('etag')) || '';
+  let reg = null; try { reg = JSON.parse(await r.text()); } catch (e) { reg = null; }
+  if (!reg || typeof reg !== 'object') return { ok: false, error: 'реестр страницы дела не читается' };
+  const tok = CASE_TOKEN_RE.test(String(reg.token || '')) ? String(reg.token) : '';
+  return { ok: true, exists: true, etag, reg: { on: !!reg.on && !!tok, token: tok, revoked: (Array.isArray(reg.revoked) ? reg.revoked : []).map(String).filter(x => CASE_TOKEN_RE.test(x)) } };
+}
+// изменение реестра: fn(reg) → новый реестр или { stop: ответ }; до пяти попыток при одновременной записи
+async function caseRegUpdate(key, fn) {
+  for (let i = 0; i < 5; i++) {
+    const cur = await caseRegRead(key); if (!cur.ok) return { ok: false, error: cur.error };
+    const n = fn(cur.reg); if (n.stop) return n.stop;
+    n.revoked = [...new Set(n.revoked)].slice(-CASE_REVOKED_MAX);
+    const body = JSON.stringify({ on: n.on, token: n.token, revoked: n.revoked, at: Date.now() }), CT = 'application/json';
+    const cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
+    let w = cond ? await s3PutIf(key, body, CT, cond) : await s3Put(key, body, CT);
+    if (cond && condFailed(w)) continue;
+    if (cond && condUnsupported(w)) w = await s3Put(key, body, CT);
+    if (!w.ok) return { ok: false, error: 's3 ' + w.status };
+    return { ok: true, reg: n, prev: cur.reg };
+  }
+  return { ok: false, error: 'busy', note: 'страницу дела меняют одновременно с другого устройства — повторите' };
+}
 async function casePublish(body) {
   needStorage();
   const t = String(body.token || ''); if (!CASE_TOKEN_RE.test(t)) return { ok: false, error: 'bad_token' };
-  const data = casePageClean(body.data), r = await s3Put(casePageKey(t), JSON.stringify({ data, updatedAt: Date.now() }), 'application/json; charset=utf-8');
+  const id = body.caseId == null ? '' : String(body.caseId); if (id && !CASE_ID_RE.test(id)) return { ok: false, error: 'bad_case' };
+  let tok = t, reg = '';
+  if (id) {
+    reg = caseRegKey(id);
+    const u = await caseRegUpdate(reg, r => {
+      if (r.on) return { on: true, token: r.token, revoked: r.revoked };
+      if (r.revoked.includes(t)) return { stop: { ok: false, error: 'revoked', note: 'эта ссылка уже отключена — откройте лист «Ход дела» заново и включите страницу' } };
+      return { on: true, token: t, revoked: r.revoked };
+    });
+    if (!u.ok) return u;
+    tok = u.reg.token;
+  }
+  const data = casePageClean(body.data), r = await s3Put(casePageKey(tok), JSON.stringify(Object.assign({ data, updatedAt: Date.now() }, reg ? { reg } : {})), 'application/json; charset=utf-8');
   if (!r.ok) return { ok: false, error: 's3 ' + r.status };
-  return { ok: true, url: '?case=' + t };
+  return { ok: true, url: '?case=' + tok, token: tok };
 }
 async function caseUnpublish(body) {
   needStorage();
-  const t = String(body.token || ''); if (!CASE_TOKEN_RE.test(t)) return { ok: false, error: 'bad_token' };
-  const r = await s3Delete(casePageKey(t));
-  if (!r.ok && r.status !== 404) return { ok: false, error: 's3 ' + r.status };
-  return { ok: true };
+  const t = String(body.token || ''), id = body.caseId == null ? '' : String(body.caseId);
+  if (id && !CASE_ID_RE.test(id)) return { ok: false, error: 'bad_case' };
+  if (!CASE_TOKEN_RE.test(t) && !id) return { ok: false, error: 'bad_token' };
+  const toks = new Set(CASE_TOKEN_RE.test(t) ? [t] : []);
+  if (id) {
+    const u = await caseRegUpdate(caseRegKey(id), r => { if (r.token) toks.add(r.token); return { on: false, token: '', revoked: r.revoked.concat([...toks]) }; });
+    if (!u.ok) return u;
+  }
+  // файлы страниц удаляются после отзыва в реестре: сбой удаления ссылку уже не открывает (страница сверяется с реестром), но называется
+  for (const k of toks) { const r = await s3Delete(casePageKey(k)); if (!r.ok && r.status !== 404) return { ok: false, error: 's3 ' + r.status, revoked: !!id }; }
+  return { ok: true, tokens: toks.size };
 }
 async function casePage(q) {
   const html = (h, st) => ({ statusCode: st || 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }, body: h });
@@ -1900,6 +1958,12 @@ async function casePage(q) {
   // v201 (A11-8): сбой хранилища — не «страница отключена», а временная ошибка
   const r = await s3Get(casePageKey(t)); if (r.status === 404) return gone(); if (!r.ok) return html(bookShell('Ход дела', '<p>Страница временно недоступна — попробуйте позже.</p>'), 502);
   let j; try { j = JSON.parse(await r.text()); } catch (e) { return gone(); }
+  // v202 (A225-4): страница с отметкой реестра — только пока реестр называет её метку действующей
+  if (j && j.reg) {
+    if (!CASE_REG_RE.test(String(j.reg))) return gone();
+    const g = await caseRegRead(String(j.reg)); if (!g.ok) return html(bookShell('Ход дела', '<p>Страница временно недоступна — попробуйте позже.</p>'), 502);
+    if (!g.reg.on || g.reg.token !== t) return gone();
+  }
   const d = casePageClean(j.data), dt = v => v ? v.split('-').reverse().join('.') : '';
   const upd = j.updatedAt ? new Date(Number(j.updatedAt) + 3 * 3600e3).toISOString().slice(0, 16).replace('T', ' ').split(' ').map((x, i) => i ? x : dt(x)).join(' ') : '';
   const row = (k, v) => v ? `<p><span class="fine">${esc(k)}</span><br>${esc(v)}</p>` : '';
