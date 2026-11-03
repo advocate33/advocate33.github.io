@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="03.11.2026 22:38 · 1b8be74">
-<meta name="build-no" content="238">
+<meta name="build" content="04.11.2026 00:13 · f6e4154">
+<meta name="build-no" content="239">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -24967,8 +24967,12 @@ function procModel(c, hearings) {
   }
   // сборка 238 (O-106 шаг 2): материал по делу — «Материал №k · вид» (нумерация общая для дела, по времени добавления), номер рассмотрения
   // инстанции он не занимает
-  const mats = rows.filter(r => r.kind === 'extra' && procMatterOf(r.p)).sort((a, b) => Number(a.p.createdAt || 0) - Number(b.p.createdAt || 0));
-  rows.forEach(r => { const mi = mats.indexOf(r); r.label = mi >= 0 ? 'Материал №' + (mi + 1) + ' · ' + procMatterTitle(procMatterOf(r.p)).toLowerCase() : procSlotDef(r.slot).title + ' №' + r.n; r.hearings = hs.filter(h => r.kind === 'current' ? h.proceedingId === r.id || (!h.proceedingId && procHearingSlotNow(h, c) === r.slot) : h.proceedingId === r.id); });
+  // сборка 239 (пояснение пользователя 03.11.2026): у материала свои жалобы — «Материал №1 · обеспечение иска · частная жалоба (апелляция)»;
+  // номер — у материала первой ступени, жалоба его не занимает
+  const mats = rows.filter(r => r.kind === 'extra' && procMatterOf(r.p) && !procMatterRootId(c, r.p)).sort((a, b) => Number(a.p.createdAt || 0) - Number(b.p.createdAt || 0));
+  const matLabel = mi => 'Материал №' + (mi + 1) + ' · ' + procMatterTitle(procMatterOf(mats[mi].p)).toLowerCase();
+  rows.forEach(r => { const mi = mats.indexOf(r), ri = mi < 0 && r.kind === 'extra' && procMatterOf(r.p) ? mats.findIndex(x => x.id === procMatterRootId(c, r.p)) : -1;
+    r.label = mi >= 0 ? matLabel(mi) : ri >= 0 ? matLabel(ri) + ' · ' + procMatterStep(r.slot) : procSlotDef(r.slot).title + ' №' + r.n; r.hearings = hs.filter(h => r.kind === 'current' ? h.proceedingId === r.id || (!h.proceedingId && procHearingSlotNow(h, c) === r.slot) : h.proceedingId === r.id); });
   return rows;
 }
 function procLabelOf(c, id) { const r = procModel(c, []).find(x => x.id === id); return r ? r.label + (r.kind === 'archived' ? ' (прежнее)' : r.kind === 'extra' && !procMatterOf(r.p) ? ' (параллельное)' : '') : ''; }
@@ -25185,14 +25189,19 @@ function procAddApply(c, input, now) {
   input = input || {}; const def = procSlotDef(input.slot);
   if (!def || !PROC_TARGETS.includes(input.slot)) return { error: 'Выберите инстанцию' };
   // сборка 238 (O-106 шаг 2): материал по делу узнаётся по виду — суд, номер и ссылку можно не знать
-  const matter = PROC_MATTERS.some(x => x[0] === input.matter) ? input.matter : '';
+  let matter = PROC_MATTERS.some(x => x[0] === input.matter) ? input.matter : '';
+  // сборка 239: жалоба по материалу (частная — в апелляцию, затем кассационная) — вид берётся у материала, ступень — апелляция или кассация
+  const root = input.matterOf ? procList(c).find(p => p.id === input.matterOf) : null;
+  if (input.matterOf && !(root && procMatterOf(root) && !procMatterRootId(c, root))) return { error: 'Материал не найден' };
+  if (root && input.slot === 'first') return { error: 'Жалоба по материалу — в апелляцию или кассацию' };
+  if (root) matter = procMatterOf(root);
   if (!matter && !input.court && !input.courtNo && !input.link) return { error: 'Укажите суд, номер дела или ссылку на дело' };
   const id = input.newId || procNewId(now);
   if (Array.isArray(c.proceedings) && c.proceedings.some(p => p && p.id === id)) return { id, repeat: true };
   // вид материала — поле рассмотрения (fields.matter): при обмене сливается по своей метке, как суд и номер
-  const fields = procFieldsFrom(def, input); if (matter) fields.matter = matter;
+  const fields = procFieldsFrom(def, input); if (matter) fields.matter = matter; if (root) fields.matterOf = root.id;
   c.proceedings = (Array.isArray(c.proceedings) ? c.proceedings.slice() : []).concat([{ id, slot: input.slot, status: 'active', fields, basis: input.basis || '', createdAt: Math.max(now, procTomb(c, id) + 1), updatedAt: Math.max(now, procTomb(c, id) + 1) }]);
-  procEv(c, 'proceeding', '', (matter ? 'Добавлен материал: ' : 'Добавлено рассмотрение: ') + procLabelOf(c, id) + (input.basis ? '. ' + input.basis : ''), 'card');
+  procEv(c, 'proceeding', '', (root ? 'Добавлена жалоба по материалу: ' : matter ? 'Добавлен материал: ' : 'Добавлено рассмотрение: ') + procLabelOf(c, id) + (input.basis ? '. ' + input.basis : ''), 'card');
   return { id };
 }
 function procEditApply(c, id, input, now) {
@@ -25202,14 +25211,21 @@ function procEditApply(c, id, input, now) {
   for (const [k, v] of [[def.court, input.court], [def.no, input.courtNo], [def.judge, input.judge], [def.link, input.link]]) { if (!k) continue; if (v) f[k] = String(v); else delete f[k]; }
   if (def.court2 && input.court) delete f[def.court2];
   // сборка 238: вид материала меняется только у материала (параллельное рассмотрение материалом не становится)
-  if (procMatterOf(p) && PROC_MATTERS.some(x => x[0] === input.matter)) f.matter = input.matter;
-  p.fields = f; p.basis = input.basis || ''; p.updatedAt = procStampAfter(list[i], now); list[i] = p; c.proceedings = list;
+  // сборка 239: у жалобы по материалу вид — от материала; правка вида материала переходит и на его жалобы
+  const isRoot = procMatterOf(p) && !procMatterRootId(c, p), newKind = isRoot && PROC_MATTERS.some(x => x[0] === input.matter) ? input.matter : '';
+  if (newKind) f.matter = newKind;
+  p.fields = f; p.basis = input.basis || ''; p.updatedAt = procStampAfter(list[i], now); list[i] = p;
+  if (newKind) list.forEach((x, j) => { if (x && x.fields && x.fields.matterOf === id && x.fields.matter !== newKind) list[j] = Object.assign({}, x, { fields: Object.assign({}, x.fields, { matter: newKind }), updatedAt: procStampAfter(x, now) }); });
+  c.proceedings = list;
   return { id };
 }
 function procRemoveApply(c, id, now) {
   const p = procList(c).find(x => x.id === id);
   if (!p) return { error: 'Рассмотрение не найдено' };
   if (p.status === 'archived') return { error: 'Прежнее рассмотрение не удаляется — это история дела; ошибочно созданное новое рассмотрение отменяет «Вернуть как текущее»' };
+  // сборка 239: материал с жалобами не удаляется, пока есть жалобы (они остались бы без материала)
+  const kids = procMatterOf(p) && !procMatterRootId(c, p) ? procList(c).filter(x => x.fields && x.fields.matterOf === id) : [];
+  if (kids.length) return { error: 'Сначала удалите жалобы по этому материалу: ' + kids.map(x => procLabelOf(c, x.id)).join(', ') };
   const label = procLabelOf(c, id);
   c.proceedings = (c.proceedings || []).filter(x => x && x.id !== id);
   // P6: надгробие позже версии элемента — равные метки создания и удаления не воскрешают запись при слиянии
@@ -25846,7 +25862,7 @@ function procTxRun(caseId, fn, evIds) {
 function procRowHtml(c, r, fn) {
   // сборка 238: у материала по делу в строке — и что рассматривается
   const v = r.view, sub = r.pending ? 'ожидаются реквизиты — суд, номер и ссылку можно внести позже («Изменить в форме дела»)' : [r.kind === 'extra' && procMatterOf(r.p) ? r.p.basis || '' : '', v.court, v.no ? '№ ' + v.no : '', v.judge ? 'судья ' + v.judge : '', v.date ? (procSlotDef(r.slot).act + ' ' + fmtDate(v.date)) : '', v.result].filter(Boolean).join(' · ');
-  const tag = r.kind === 'archived' ? badge('прежнее', '') : r.kind === 'current' ? badge(r.pending ? 'текущее · без реквизитов' : 'текущее', 'accent') : badge(procMatterOf(r.p) ? 'материал' : 'параллельное', 'warn');
+  const tag = r.kind === 'archived' ? badge('прежнее', '') : r.kind === 'current' ? badge(r.pending ? 'текущее · без реквизитов' : 'текущее', 'accent') : badge(procMatterOf(r.p) ? (procMatterRootId(c, r.p) ? 'жалоба' : 'материал') : 'параллельное', 'warn');
   return `<button type="button" class="list-btn proc-row" data-proc="${esc(r.key)}" onclick="${fn || 'openProcSheet'}('${jsq(c.id)}', '${jsq(r.key)}')"><span>${esc(r.label)} ${tag}${sub ? `<br><span class="muted small">${esc(sub)}</span>` : ''}${r.hearings.length ? `<br><span class="muted small">заседаний: ${r.hearings.length}</span>` : ''}</span>${icon('chevron-right', 'icon-sm')}</button>`;
 }
 function procBlockHtml(c, hearings) {
@@ -25926,6 +25942,12 @@ async function openProcSheet(caseId, key) {
   else acts.push(`<button type="button" class="button small-btn" id="proc-edit" onclick="openProcForm('${jsq(caseId)}', '${jsq(r.id)}')">${icon('pencil', 'icon-sm')}Изменить реквизиты</button>`);
   const isMat = r.kind === 'extra' && !!procMatterOf(r.p);
   if (r.kind !== 'current') acts.push(`<button type="button" class="button small-btn" id="proc-hearing" onclick="openHearingForm('', '${jsq(c.number || '')}', '${jsq(r.id)}')">${icon('plus', 'icon-sm')}${isMat ? 'Заседание по материалу' : 'Заседание этого рассмотрения'}</button>`);
+  // сборка 239: материал первой ступени — частная жалоба в апелляцию, после неё — кассационная жалоба
+  if (isMat && !procMatterRootId(c, r.p)) {
+    const steps = procList(c).filter(x => x.fields && x.fields.matterOf === r.id).map(x => x.slot);
+    acts.push(`<button type="button" class="button small-btn" id="proc-mat-appeal" onclick="openProcForm('${jsq(caseId)}', '', '', '${jsq(r.id)}', 'appeal')">${icon('plus', 'icon-sm')}Частная жалоба (апелляция)</button>`);
+    if (steps.includes('appeal')) acts.push(`<button type="button" class="button small-btn" id="proc-mat-cass" onclick="openProcForm('${jsq(caseId)}', '', '', '${jsq(r.id)}', 'cass')">${icon('plus', 'icon-sm')}Кассационная жалоба</button>`);
+  }
   if (r.kind === 'archived') acts.push(`<button type="button" class="button small-btn" id="proc-undo" onclick="procUndoAsk('${jsq(caseId)}', '${jsq(r.id)}')">${icon('rotate-ccw', 'icon-sm')}Вернуть как текущее</button>`);
   const body = `<div class="task-badges">${r.kind === 'archived' ? badge('прежнее рассмотрение') : r.kind === 'current' ? badge(r.pending ? 'текущее · ожидаются реквизиты' : 'текущее', 'accent') : badge(isMat ? 'материал по делу' : 'параллельное', 'warn')}</div>
     ${cancelled || basis ? `<p class="small" id="proc-basis">${cancelled ? 'Новое рассмотрение после отмены: ' + esc(cancelled) + (basis ? '. Основание: ' + esc(basis) : '') : 'Основание: ' + esc(basis)}</p>` : ''}${r.kind === 'archived' && (r.p.endWhy || r.p.endCancelled) ? `<p class="small muted">Перенесено в историю ${esc(fmtDate(r.p.archivedAt))}: ${esc([r.p.endCancelled ? 'отменён ' + r.p.endCancelled : '', r.p.endWhy].filter(Boolean).join('; '))}</p>` : ''}
@@ -25943,13 +25965,15 @@ function procFieldLabels() {
   return L;
 }
 // сборка 238: asMatter — вид нового материала по делу (лист «Материалы по делу»)
-async function openProcForm(caseId, procId, asMatter) {
+// сборка 239: matterOf, slot — новая жалоба по материалу (лист материала: «Частная жалоба (апелляция)», «Кассационная жалоба»)
+async function openProcForm(caseId, procId, asMatter, matterOf, slot) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
   const p = procId ? procList(c).find(x => x.id === procId) : null; if (procId && !p) { toast('Рассмотрение не найдено', true); return; }
   const def = p ? procSlotDef(p.slot) : null, v = p ? procView(p.fields, def) : { court: '', no: '', judge: '', link: '' };
   UI.procFormNewId = procId ? '' : procNewId(Date.now());
-  const mk = p ? procMatterOf(p) : (PROC_MATTERS.some(x => x[0] === asMatter) ? asMatter : '');
-  if (mk) { procMatterForm(c, p, v, mk); return; }
+  const root = !p && matterOf ? procList(c).find(x => x.id === matterOf && procMatterOf(x)) : null; if (matterOf && !p && !root) { toast('Материал не найден', true); return; }
+  const mk = p ? procMatterOf(p) : root ? procMatterOf(root) : (PROC_MATTERS.some(x => x[0] === asMatter) ? asMatter : '');
+  if (mk) { procMatterForm(c, p, v, mk, root, slot); return; }
   const body = `${p ? '' : '<p class="small muted">Параллельное рассмотрение — например, частная жалоба, которая рассматривается одновременно с основным делом. Основное рассмотрение каждой инстанции ведётся в форме дела.</p>'}<div class="form-grid">
     ${p ? `<p class="small" style="grid-column:1/-1">${esc(procLabelOf(c, p.id))}</p>` : fSelect('pf-slot', 'Инстанция *', 'appeal', PROC_TARGETS.map(s => [s, procSlotDef(s).title]))}
     ${def && !def.court ? '' : fInput('pf-court', 'Суд', v.court, 'autocomplete="off"', typeof refList === 'function' ? refList('courts') : null)}${fInput('pf-no', '№ дела', v.no, 'autocomplete="off"')}
@@ -25959,7 +25983,8 @@ async function openProcForm(caseId, procId, asMatter) {
   openSheet(p ? 'Реквизиты рассмотрения' : 'Новое параллельное рассмотрение', body, true);
 }
 async function saveProcForm(caseId, procId) {
-  const input = { slot: fv('pf-slot'), court: fv('pf-court'), courtNo: fv('pf-no'), judge: fv('pf-judge'), link: fv('pf-link'), basis: fv('pf-basis'), newId: UI.procFormNewId || '', matter: fv('pf-matter') };
+  const input = { slot: fv('pf-slot'), court: fv('pf-court'), courtNo: fv('pf-no'), judge: fv('pf-judge'), link: fv('pf-link'), basis: fv('pf-basis'), newId: UI.procFormNewId || '', matter: fv('pf-matter'), matterOf: fv('pf-matterof') };
+  const isMatForm = !!document.getElementById('pf-mat-help');
   if (input.link && !safeExternalUrl(input.link)) { fErr('Ссылка на дело должна начинаться с https://'); return; }
   let res = null;
   try { await recUpdate('cases', caseId, rec => { res = procId ? procEditApply(rec, procId, input, Date.now()) : procAddApply(rec, input, Date.now()); return res.error || res.repeat ? false : undefined; }); }
@@ -25968,8 +25993,8 @@ async function saveProcForm(caseId, procId) {
   if (res.error) { fErr(res.error); return; }
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
   if (typeof monLinksTouch === 'function') monLinksTouch();
-  const mat = PROC_MATTERS.some(x => x[0] === input.matter);
-  toast(mat ? (procId ? 'Материал сохранён' : res.repeat ? 'Материал уже добавлен' : 'Материал добавлен в дело') : procId ? 'Реквизиты рассмотрения сохранены' : res.repeat ? 'Рассмотрение уже добавлено' : 'Рассмотрение добавлено'); await openCaseSheet(caseId);
+  const mat = isMatForm || PROC_MATTERS.some(x => x[0] === input.matter);
+  toast(input.matterOf ? (res.repeat ? 'Жалоба уже добавлена' : 'Жалоба по материалу добавлена') : mat ? (procId ? 'Материал сохранён' : res.repeat ? 'Материал уже добавлен' : 'Материал добавлен в дело') : procId ? 'Реквизиты рассмотрения сохранены' : res.repeat ? 'Рассмотрение уже добавлено' : 'Рассмотрение добавлено'); await openCaseSheet(caseId);
 }
 function procRemoveAsk(caseId, procId) {
   openSheet('Удалить рассмотрение?', `<p>Параллельное рассмотрение будет удалено из дела (на всех устройствах после обмена). Заседания и сроки дела не удаляются.</p><div class="form-actions"><button type="button" class="button danger" id="proc-remove-go" onclick="procRemove('${jsq(caseId)}', '${jsq(procId)}')">${icon('trash-2')}Удалить</button><button type="button" class="button" onclick="sheetBack()">Отмена</button></div>`, true);
@@ -26004,17 +26029,30 @@ async function procUndo(caseId, procId) {
 const PROC_MATTERS = [['secure', 'Обеспечение иска'], ['unsecure', 'Отмена обеспечения иска'], ['costs', 'Судебные расходы'], ['other', 'Иной материал']];
 function procMatterOf(p) { const k = p && p.status !== 'archived' && p.fields ? String(p.fields.matter || '') : ''; return PROC_MATTERS.some(x => x[0] === k) ? k : ''; }
 function procMatterTitle(k) { return (PROC_MATTERS.find(x => x[0] === k) || ['', ''])[1]; }
-function procMatterRows(c, hearings) { return c ? procModel(c, hearings || []).filter(r => r.kind === 'extra' && procMatterOf(r.p)) : []; }
+// сборка 239: материал первой ступени — сам; жалоба по материалу — id материала (fields.matterOf), если он есть и сам не жалоба; иначе — ''
+function procMatterRootId(c, p) {
+  const id = p && p.fields ? String(p.fields.matterOf || '') : ''; if (!id || id === p.id) return '';
+  const r = procList(c).find(x => x.id === id); return r && procMatterOf(r) && !(r.fields && r.fields.matterOf) ? id : '';
+}
+function procMatterStep(slot) { return slot === 'cass' ? 'кассационная жалоба' : slot === 'appeal' ? 'частная жалоба (апелляция)' : 'первая инстанция'; }
+// список материалов: каждый материал, за ним — его жалобы (апелляция, затем кассация)
+function procMatterRows(c, hearings) {
+  if (!c) return []; const rows = procModel(c, hearings || []).filter(r => r.kind === 'extra' && procMatterOf(r.p)), t = r => Number(r.p.createdAt || 0);
+  const roots = rows.filter(r => !procMatterRootId(c, r.p)).sort((a, b) => t(a) - t(b));
+  return roots.flatMap(rt => [rt].concat(rows.filter(r => procMatterRootId(c, r.p) === rt.id).sort((a, b) => PROC_TARGETS.indexOf(a.slot) - PROC_TARGETS.indexOf(b.slot) || t(a) - t(b))));
+}
 function procMatterOfHearing(c, h) { if (!c || !h || !h.proceedingId) return ''; const p = procList(c).find(x => x.id === h.proceedingId); return p ? procMatterOf(p) : ''; }
-function procMatterForm(c, p, v, mk) {
-  const body = `<p class="small muted" id="pf-mat-help">Материал рассматривается в этом же деле — отдельного дела и номера в программе не создаётся. Номер материала в суде (например, 13-…/2026) — если известен: по нему материал ищут на сайте суда.</p><div class="form-grid">
-    ${fSelect('pf-matter', 'Вид материала *', mk, PROC_MATTERS)}
-    ${p ? `<p class="small" style="grid-column:1/-1">${esc(procLabelOf(c, p.id))}</p>` : fSelect('pf-slot', 'Инстанция *', 'first', [['first', 'Первая инстанция'], ['appeal', 'Апелляция (частная жалоба)']])}
-    ${fInput('pf-no', '№ материала в суде', v.no, 'autocomplete="off" placeholder="13-…/2026 — если известен"')}${fInput('pf-court', 'Суд', v.court, 'autocomplete="off"', typeof refList === 'function' ? refList('courts') : null)}
-    ${fInput('pf-judge', 'Судья', v.judge, 'autocomplete="off"')}${wide(fInput('pf-link', 'Ссылка на материал', v.link, 'type="url" inputmode="url" autocomplete="off" placeholder="https://… — можно добавить позже"'))}
-    ${wide(fInput('pf-basis', 'Что рассматривается', p ? p.basis || '' : '', 'autocomplete="off" placeholder="заявление о взыскании расходов на представителя"'))}
+// сборка 239: root, slot — новая жалоба по материалу; у жалобы (новой и сохранённой) вид не выбирается — он от материала
+function procMatterForm(c, p, v, mk, root, slot) {
+  const step = root ? (slot === 'cass' ? 'cass' : 'appeal') : '', isStep = !!step || !!(p && procMatterRootId(c, p));
+  const body = `<p class="small muted" id="pf-mat-help">${isStep ? 'Жалоба по материалу рассматривается в этом же деле: стадия дела и заседания инстанций дела не меняются. Номер в суде вышестоящей инстанции (например, 33-…/2026) — если известен.' : 'Материал рассматривается в этом же деле — отдельного дела и номера в программе не создаётся. Номер материала в суде (например, 13-…/2026) — если известен: по нему материал ищут на сайте суда. Частная жалоба и кассационная жалоба по материалу добавляются в листе материала.'}</p><div class="form-grid">
+    ${isStep ? '' : fSelect('pf-matter', 'Вид материала *', mk, PROC_MATTERS)}
+    ${p ? `<p class="small" style="grid-column:1/-1">${esc(procLabelOf(c, p.id))}</p>` : step ? `<p class="small" style="grid-column:1/-1" id="pf-mat-step">${esc(procLabelOf(c, root.id) + ' · ' + procMatterStep(step))}</p><input type="hidden" id="pf-slot" value="${step}"><input type="hidden" id="pf-matterof" value="${esc(root.id)}">` : fSelect('pf-slot', 'Инстанция *', 'first', [['first', 'Первая инстанция'], ['appeal', 'Апелляция']])}
+    ${fInput('pf-no', isStep ? '№ в суде' : '№ материала в суде', v.no, 'autocomplete="off" placeholder="' + (isStep ? (step === 'cass' || (p && p.slot === 'cass') ? '88-…/2026' : '33-…/2026') : '13-…/2026') + ' — если известен"')}${fInput('pf-court', 'Суд', v.court, 'autocomplete="off"', typeof refList === 'function' ? refList('courts') : null)}
+    ${fInput('pf-judge', 'Судья', v.judge, 'autocomplete="off"')}${wide(fInput('pf-link', isStep ? 'Ссылка на жалобу на сайте суда' : 'Ссылка на материал', v.link, 'type="url" inputmode="url" autocomplete="off" placeholder="https://… — можно добавить позже"'))}
+    ${wide(fInput('pf-basis', 'Что рассматривается', p ? p.basis || '' : '', 'autocomplete="off" placeholder="' + (isStep ? 'частная жалоба на определение от …' : 'заявление о взыскании расходов на представителя') + '"'))}
   </div>${fSaveBar(`saveProcForm('${jsq(c.id)}', '${jsq(p ? p.id : '')}')`, '', p ? `procRemoveAsk('${jsq(c.id)}', '${jsq(p.id)}')` : '')}`;
-  openSheet(p ? 'Материал по делу' : 'Новый материал по делу', body, true);
+  openSheet(step ? (step === 'cass' ? 'Кассационная жалоба по материалу' : 'Частная жалоба по материалу') : isStep ? 'Жалоба по материалу' : p ? 'Материал по делу' : 'Новый материал по делу', body, true);
 }
 
 // ▼▼▼ ui/helpfig.js
@@ -26577,7 +26615,7 @@ ${typeof fsyncGuideHtml === 'function' ? fsyncGuideHtml('') : ''}
 <li>Жалобы (коллектор 3.20): со страницы кассационного суда читается вкладка «Жалобы», со страницы первой инстанции — «Обжалование решений, определений»: дата поступления жалобы, кто подал, статус заявителя, оставление без движения и срок устранения недостатков, результат. Поданная жалоба — событие «жалоба» в «Судах и мониторинге» и в ленте дела; на «Сегодня» появляется строка «Подана … жалоба по делу …» с кнопкой «Разобрано» (после неё событие — «применено»; «×» — скрыть на 7 дней). В пустые поля дела записываются «Жалоба подана» нужной инстанции и «Кто обжалует» (сторона считается для каждой жалобы по имени подавшего: доверитель — «Наша жалоба», противная сторона дела или участник с ролью, противоположной роли доверителя, — «Жалоба оппонента»; представитель, третье лицо, иное лицо или незнакомое имя — сторона не установлена: поле не заполняется, сроки по такой жалобе не ставятся, на «Сегодня» это сказано в строке жалобы; при жалобах обеих сторон поле дела — «Обе стороны»; заполненное вами поле к чужой жалобе не относится). Сроки ставятся по стороне самой жалобы: у жалобы оппонента — контрольный срок возражений, у нашей жалобы без движения — срок устранения недостатков. Сторону можно задать самому в карточке события («Наша жалоба», «Жалоба оппонента», «Не установлена») — программа разберёт жалобу заново; «Разобрать заново» делает то же после исправления данных дела. Строка «Почему так» объясняет, откуда взялась сторона, а при неустановленной — чего не хватает; ниже перечислены все сроки по этой жалобе с состоянием, нажатие открывает паспорт срока. Если сторона той же жалобы изменилась, сроки, поставленные по прежней стороне, снимаются (подтверждённые вами остаются с пометкой «Сторона жалобы изменена» — в паспорте срока «Проверено — оставить срок» или «Снять срок»; вернулась прежняя сторона — пометка снимается сама). Срок, снятый программой, который вы потом правили, подтверждали или отмечали, считается вашим: при возврате стороны он не открывается и его дата не меняется — иная дата с сайта суда показывается предложением «Принять дату суда» / «Оставить мою». «Кто обжалует» пересчитывается по жалобам инстанции — исправление одной жалобы не превращается в две. Частная жалоба (на определение) поля «Жалоба подана», «Кто обжалует» и результат инстанции не заполняет — это не жалоба на решение, срок на подачу апелляции она не закрывает. Если срок устранения недостатков уже подтверждён вами, а на сайте суда появилась другая дата, срок получает пометку «На сайте суда иная дата» — в паспорте срока выберите «Принять дату суда» (принимается последняя дата с сайта) или «Оставить мою»; если сайт потом вернётся к отклонённой вами дате, прежнее предложение снимается без нового предупреждения. Возврат одной из нескольких жалоб результатом всей инстанции не записывается. Если наша жалоба оставлена без движения и на сайте указан срок устранения недостатков, в деле появляется срок «Устранить недостатки … жалобы» — подтвердите его по определению суда. Изменилось состояние жалобы (без движения, результат) — событие снова становится новым и снова показывается на «Сегодня».</li>
 <li>Что ещё делает программа по жалобе: стадия дела поднимается до «Апелляция» или «Кассация» по дате подачи жалобы (поле «Жалоба подана» в форме или событие с сайта), как по номеру дела или заседанию вышестоящей инстанции; по жалобе оппонента ставится контрольный срок «Возражения (отзыв) на … жалобу оппонента» — 10 дней от поступления, срок устанавливает суд в определении (ч. 2 ст. 325 ГПК РФ; по АПК отзыв — до начала заседания, ст. 262, 279) — уточните и подтвердите; жалоба возвращена или оставлена без рассмотрения — строка «Возвращена … жалоба по делу …» (или «Оставлена без рассмотрения …») с кнопкой «Снять срок», которая исполняет поставленные по этой жалобе сроки с пометкой (без таких сроков — «Разобрано»), в поле результата инстанции записывается «Жалоба возвращена» или «Оставлена без рассмотрения»; жалоба, уже показанная в «Требует внимания», в блоке «События судов» не повторяется. С карточки апелляции и кассации (и первой инстанции по гражданским, арбитражным и административным делам) в пустые поля дела записываются дата рассмотрения и результат, если результат на сайте переводится в значение списка формы («Оставлено без изменения», «Отменено полностью», «Отменено частично», «Изменено», «Жалоба возвращена», «Оставлена без рассмотрения», «Отказано в передаче»; для первой инстанции — «Удовлетворено», «Отказано» и другие); иначе в листе — строка «на сайте «…», выберите в форме вручную». Записанная дата акта пересчитывает сроки, как при вводе в форме. В карточке события строка «Дата акта» называет состояние: записана (куда и как — программой, вами или подтверждает уже стоявшую дату), пропущена вами, есть что записать или записать некуда; кнопка «Записать дату акта» показывается только когда есть что записать, у пропущенного — «Записать всё же». В списке событий такое событие помечено «дата акта записана» (а не «новое») и в «Событиях судов» на «Сегодня» не считается требующим разбора. В утренней сводке Telegram (личный сервер) новая жалоба — строкой «Подана … жалоба по делу …» на следующее утро после получения, без имён (кто подал — только по отметке «Полные названия и имена в Telegram»); дайджест коллектора 3.21 называет жалобы тоже без имён.</li>
 <li>«Исправить участников» (карточка дела, рядом с «Изменить участников» — кнопка видна, когда есть что исправить): программа находит среди участников подписи со страницы суда («Вышестоящий суд», «Судебный акт …», роль без имени), доверителя в другом написании и одно лицо в двух написаниях («ИП … Е.А.» и «ИП … Екатерина Анатольевна») и предлагает убрать их отметками; «Применить» — одной записью дела, реквизиты дубля переходят к оставленной записи, убранные не вернутся при обмене и с сайта суда. Сама программа участников не удаляет.</li>
-<li><b>Расходы и обеспечение</b> (со сборки 236). Строки движения дела о судебных расходах (заявление о взыскании расходов или процессуальных издержек, расходы на представителя, определение по ним) и об обеспечении иска (заявление, определение о принятии или отмене мер, обеспечительные меры) программа узнаёт по словам строки, её результата, основания и примечания. Под плашками стадий карточки дела («Досудебная», «Первая инстанция», «Апелляция»…) — плашка «Материалы по делу». На ней — число материалов дела и записей ленты о судебных расходах и обеспечении иска («Материалы по делу · 2 · записей 6»). Нажатие открывает лист «Материалы по делу» (со сборки 238): список материалов, кнопки «Добавить материал» и «Показать в ленте дела». Материал — заявление, которое суд рассматривает в этом же деле: обеспечение иска, отмена обеспечения иска, судебные расходы или иной материал. Отдельного дела и номера в программе он не получает; в форме — вид материала, инстанция (первая или апелляция — частная жалоба), № материала в суде (например, 13-…/2026, если известен), суд, судья, ссылка и что рассматривается. Материалов в деле может быть несколько: «Материал №1 · обеспечение иска», «Материал №2 · судебные расходы». Те же материалы — в форме дела: «Изменить» → вкладка «Материалы» (рядом с «Первая инстанция», «Апелляция»…; в краткой форме — группа «Материалы по делу»). Нажатие на материал открывает его форму — там вид, номер, суд и кнопка «Удалить»; «Добавить материал» — новый. Если в форме дела есть несохранённые изменения, программа сначала просит нажать «Сохранить». В листе материала — «Заседание по материалу»: такое заседание видно в ленте дела («Заседание · Материал №1 · обеспечение иска») и в календаре с пометкой вида, но не меняет стадию дела и заседания инстанций. Сайт суда по ссылке материала программа пока не опрашивает — заседания материала вносятся вручную. Это не стадия: стадия дела не меняется. Над «Лентой дела» — фильтр «Расходы и обеспечение»: он оставляет в ленте события суда, заседания, сроки (например, «Заявление о взыскании судебных расходов»), задачи, переписку и заметки о расходах и обеспечении; кнопки нет, пока таких записей в деле нет. В группе «Суд, стороны, инстанции» (ниже ленты, раскрывается нажатием) те же строки движения дела собраны блоком «Расходы и обеспечение» — все, а не только последние 12, — а в общей ленте данных суда помечены «расходы» или «обеспечение». Заседание по такому заявлению помечено в списке заседаний дела, а в календаре называется «Заседание (судебные расходы)» или «Заседание (обеспечение иска)». Материал со своим номером (например, «13-…/2026» в районном суде) пока отдельно не отслеживается — это следующий шаг.</li></ul>
+<li><b>Расходы и обеспечение</b> (со сборки 236). Строки движения дела о судебных расходах (заявление о взыскании расходов или процессуальных издержек, расходы на представителя, определение по ним) и об обеспечении иска (заявление, определение о принятии или отмене мер, обеспечительные меры) программа узнаёт по словам строки, её результата, основания и примечания. Под плашками стадий карточки дела («Досудебная», «Первая инстанция», «Апелляция»…) — плашка «Материалы по делу». На ней — число материалов дела и записей ленты о судебных расходах и обеспечении иска («Материалы по делу · 2 · записей 6»). Нажатие открывает лист «Материалы по делу» (со сборки 238): список материалов, кнопки «Добавить материал» и «Показать в ленте дела». Материал — заявление, которое суд рассматривает в этом же деле: обеспечение иска, отмена обеспечения иска, судебные расходы или иной материал. Отдельного дела и номера в программе он не получает; в форме — вид материала, инстанция (обычно первая), № материала в суде (например, 13-…/2026, если известен), суд, судья, ссылка и что рассматривается. Материалов в деле может быть несколько: «Материал №1 · обеспечение иска», «Материал №2 · судебные расходы». По материалу, как по делу, бывают жалобы: в листе материала — «Частная жалоба (апелляция)», а после неё — «Кассационная жалоба». Жалоба — часть того же материала и того же дела: «Материал №1 · обеспечение иска · частная жалоба (апелляция)», «… · кассационная жалоба»; у неё свой номер в суде (33-…/2026, 88-…/2026 — если известен), суд, судья, ссылка и свои заседания, стадию дела она не меняет. В списке материалов жалобы стоят сразу под своим материалом. Материал с жалобами удаляется после того, как удалены его жалобы. Те же материалы — в форме дела: «Изменить» → вкладка «Материалы» (рядом с «Первая инстанция», «Апелляция»…; в краткой форме — группа «Материалы по делу»). Нажатие на материал открывает его форму — там вид, номер, суд и кнопка «Удалить»; «Добавить материал» — новый. Если в форме дела есть несохранённые изменения, программа сначала просит нажать «Сохранить». В листе материала — «Заседание по материалу»: такое заседание видно в ленте дела («Заседание · Материал №1 · обеспечение иска») и в календаре с пометкой вида, но не меняет стадию дела и заседания инстанций. Сайт суда по ссылке материала программа пока не опрашивает — заседания материала вносятся вручную. Это не стадия: стадия дела не меняется. Над «Лентой дела» — фильтр «Расходы и обеспечение»: он оставляет в ленте события суда, заседания, сроки (например, «Заявление о взыскании судебных расходов»), задачи, переписку и заметки о расходах и обеспечении; кнопки нет, пока таких записей в деле нет. В группе «Суд, стороны, инстанции» (ниже ленты, раскрывается нажатием) те же строки движения дела собраны блоком «Расходы и обеспечение» — все, а не только последние 12, — а в общей ленте данных суда помечены «расходы» или «обеспечение». Заседание по такому заявлению помечено в списке заседаний дела, а в календаре называется «Заседание (судебные расходы)» или «Заседание (обеспечение иска)». Материал со своим номером (например, «13-…/2026» в районном суде) пока отдельно не отслеживается — это следующий шаг.</li></ul>
 <h3>Карточки всех дел разом</h3>
 <p>«Суды и мониторинг» → «Карточки всех дел»: программа по очереди читает карточку каждого дела в работе со ссылкой на сайт суда — суды общей юрисдикции через коллектор, КАД в приложении для Android или для компьютера — и пишет в дело то же, что кнопки «Данные с сайта суда» и «Карточка КАД». В листе — итог по каждому делу; «Остановить» прерывает обход после текущего дела.</p>
 <h3>Арбитражные дела (КАД Арбитр)</h3>
