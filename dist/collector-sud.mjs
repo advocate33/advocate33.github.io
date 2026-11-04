@@ -24,6 +24,8 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.30: страница материала (delo_id=1610001): «ДВИЖЕНИЕ МАТЕРИАЛА», «МАТЕРИАЛ № 13-…», «Предмет представления, ходатайства, жалобы»;
+//         у ссылки материала (mat) номер основного дела не подставляется (жалоба пользователя 04.11.2026, O-106 шаг 3).
 //  v3.29: разбор кода 28.10.2026 — зал в расписании (не «№ п/п»), тексты актов и у ссылок рассмотрений, расписание судьи — событие на
 //         каждое дело, судья — по фамилии и инициалам, транспорт судов и на «холодном» процессе, доставка пачками по байтам, тексты и
 //         списки дня — с повтором по http и проверкой на капчу, поиск по судам — параллельно с бюджетом 90 с; нужен личный сервер 201
@@ -95,7 +97,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.29';
+const COLLECTOR_VER = '3.30';
 // v3.27 (аудит сборки 188, R6): сетевые послабления (самоподписанные и просроченные сертификаты, устаревший TLS у многих *.sudrf.ru) —
 // ТОЛЬКО у запросов к сайтам судов ГАС «Правосудие» и только через отдельный транспорт (courtDispatcher). Процесс целиком их больше не
 // получает: личный сервер (с кодом), хранилище (с IAM-токеном), Telegram, API Assist, СУДиДЕЛО и загрузка обновлений проверяют сертификаты.
@@ -225,7 +227,7 @@ function decodeEntities(t) { return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z
 const CARD_LABELS = {
   number: /^(номер дела( ?[~(\/].{0,20})?|№ дела|дело №|номер дела в суде|номер материала)\s*:?$/i, uid: /^(уникальный идентификатор дела|уид)\s*:?$/i, // v3.12: «Номер дела ~ материала» (ГАС «Правосудие»)
   judge: /^(судья|председательствующий судья|судья, рассматривающий дело|судья-докладчик|судья докладчик)\s*:?$/i, registered: /^(дата поступления|дата регистрации|дата поступления в суд)\s*:?$/i,
-  category: /^(категория дела|категория)\s*:?$/i, result: /^(результат рассмотрения|результат)\s*:?$/i, decided: /^(дата рассмотрения|дата решения)\s*:?$/i
+  category: /^(категория дела|категория)\s*:?$/i, subject: /^(предмет представления, ходатайства, жалобы|предмет ходатайства|предмет)\s*:?$/i, matKind: /^вид материала\s*:?$/i, result: /^(результат рассмотрения|результат)\s*:?$/i, decided: /^(дата рассмотрения|дата решения)\s*:?$/i
 };
 const ROLE_RE = /^(истец|ответчик|третье лицо|заявитель|заинтересованное лицо|должник|взыскатель|административный истец|административный ответчик|представитель|прокурор|потерпевший|подсудимый|обвиняемый)/i;
 // v3.20: ячейка рядом с ролью, которая именем быть не может — подписи соседних таблиц и заголовки
@@ -240,8 +242,11 @@ function parseCaseCard(html) {
   const RE_CASE_NO = /(?:[АA]\d{2}|\d{1,2}[а-яёa-z]{0,2})[-–]\d{1,7}\/\d{4}/i;
   if (card.number) { const m = card.number.match(RE_CASE_NO); card.number = m ? m[0].replace(/–/g, '-') : ''; }
   if (!card.number) { // заголовок карточки «ДЕЛО № 33-3331/2026» или «Дело №…» в любой ячейке
-    for (const t of cells) { const h = t.match(/(?:^|\s)дело\s*№\s*([^\s,;]+)/i); if (h) { const m = h[1].match(RE_CASE_NO); if (m) { card.number = m[0].replace(/–/g, '-'); break; } } }
+    // v3.30: и заголовок материала «МАТЕРИАЛ № 13-392/2026»
+    for (const t of cells) { const h = t.match(/(?:^|\s)(?:дело|материал)\s*№\s*([^\s,;]+)/i); if (h) { const m = h[1].match(RE_CASE_NO); if (m) { card.number = m[0].replace(/–/g, '-'); break; } } }
   }
+  // v3.30: заголовок «МАТЕРИАЛ № …» стоит вне таблиц — по тексту страницы
+  if (!card.number) { const h = String(html || '').replace(/<[^>]+>/g, ' ').match(/материал\s*№\s*([^\s,;<]+)/i); const m = h && h[1].match(RE_CASE_NO); if (m) card.number = m[0].replace(/–/g, '-'); }
   if (!card.number) delete card.number;
   for (const k of ['registered', 'decided']) if (card[k]) { const m = card[k].match(RE_DATE); card[k] = m ? isoOf(m[0]) : ''; }
   const t = String(html || '').match(/<title>([^<]{3,160})<\/title>/i); if (t) card.court = norm(t[1]).replace(/\s*[-–—|].*$/, '');
@@ -275,7 +280,8 @@ function buildCardEvent(card, ctx) {
 // «ДВИЖЕНИЕ ДЕЛА»: секция карточки → строки {title, date, time, result, basis}
 function parseFlow(html) {
   const src = String(html || '');
-  const mHead = src.match(/ДВИЖЕНИЕ\s+ДЕЛА/i);
+  // v3.30: у материала раздел называется «ДВИЖЕНИЕ МАТЕРИАЛА»
+  const mHead = src.match(/ДВИЖЕНИЕ\s+(?:ДЕЛА|МАТЕРИАЛА)/i);
   if (!mHead) return [];
   const mTab = src.slice(mHead.index).match(/<table[\s\S]*?<\/table>/i);
   if (!mTab) return [];
@@ -851,7 +857,8 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
     const kind = hostKind(l.url);
     const apply = (page, flow, cardP, uidOnPage, via, cmpP) => { // v3.13: общий хвост — события из разобранной карточки; v3.20: cmpP — жалобы
       stats.flowRows += flow.length;
-      const ctx = { number: c.number, uid: uidOnPage, courtNo: l.courtNo || c.courtNo, stage: l.stage, url: l.url, sinceDays, judge: page.judge || cardP.judge || '', court: cardP.court || '' };
+      // v3.30: у материала свой номер (из ссылки или карточки), номер основного дела ему чужой
+      const ctx = { number: c.number, uid: uidOnPage, courtNo: l.courtNo || (l.mat ? cardP.number || '' : c.courtNo), stage: l.stage, url: l.url, sinceDays, judge: page.judge || cardP.judge || '', court: cardP.court || '' };
       for (const e of buildEvents(page, ctx)) { pidMark(e, l.pid, l.cpid); byId.set(e.externalId, e); }
       for (const e of buildFlowEvents(flow, ctx)) { pidMark(e, l.pid, l.cpid); byId.set(e.externalId, e); }
       const cardEv = buildCardEvent(cardP, ctx); if (cardEv) { pidMark(cardEv, l.pid, l.cpid); byId.set(cardEv.externalId, cardEv); } // v3.7
@@ -1428,7 +1435,7 @@ function sanitizeLinksPack(pack) {
       number: String(c.number || ''), uid: String(c.uid || ''), stage: String(c.stage || ''),
       courtNo: String(c.courtNo || ''), courtNoApp: String(c.courtNoApp || ''), courtNoCass: String(c.courtNoCass || ''),
       links: (Array.isArray(c.links) ? c.links : []).map(l => ({
-        url: String(l.url || ''), stage: String(l.stage || ''), courtNo: String(l.courtNo || ''), pid: String(l.pid || '').slice(0, 80), cpid: String(l.cpid || '').slice(0, 80) }))
+        url: String(l.url || ''), stage: String(l.stage || ''), courtNo: String(l.courtNo || ''), pid: String(l.pid || '').slice(0, 80), cpid: String(l.cpid || '').slice(0, 80), mat: l.mat ? '1' : '' }))
     })).filter(c => c.links.length)
   };
 }

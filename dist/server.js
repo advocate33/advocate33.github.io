@@ -10,6 +10,9 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v203: аудит 240 (A239-1) — поколение реестра страницы «Ход дела»: «Отключить» поднимает его, публикация, начатая до отключения
+//  (другая вкладка, задержка сети), страницу не включает; обновление (mode:'update') выключенную страницу не включает; включение
+//  (mode:'on') — с поколением, которое программа получила последним; программа до сборки 242 после отключения — отказ «обновите программу»
 //  v202: аудит 225 — реестр публикации страницы «Ход дела» (A225-4: две вкладки → одна ссылка, «Отключить» отзывает все метки дела,
 //  опоздавшая запись страницы после отключения не открывается); сброс настроек — копия каждой заменяемой версии (A210-5)
 //  v201: разбор кода 28.10.2026 — текст акта в отпечатке события (Д-07), обновлённые события в конце списка и предел текстов актов
@@ -352,7 +355,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 202,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 203,
       ready: readiness()
     });
   }
@@ -381,7 +384,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 202, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 203, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -1894,13 +1897,16 @@ const CASE_ID_RE = /^\S{1,80}$/, CASE_REG_RE = /^casereg-[0-9a-f]{40}\.json$/, C
 const caseRegKey = id => 'casereg-' + crypto.createHash('sha256').update('crm-casereg|' + storeId() + '|' + id, 'utf8').digest('hex').slice(0, 40) + '.json';
 async function caseRegRead(key) {
   const r = await s3Get(key);
-  if (r.status === 404) return { ok: true, exists: false, etag: '', reg: { on: false, token: '', revoked: [] } };
+  if (r.status === 404) return { ok: true, exists: false, etag: '', reg: { on: false, token: '', revoked: [], gen: 0 } };
   if (!r.ok) return { ok: false, error: 's3 ' + r.status };
   const etag = (r.headers && r.headers.get && r.headers.get('etag')) || '';
   let reg = null; try { reg = JSON.parse(await r.text()); } catch (e) { reg = null; }
   if (!reg || typeof reg !== 'object') return { ok: false, error: 'реестр страницы дела не читается' };
   const tok = CASE_TOKEN_RE.test(String(reg.token || '')) ? String(reg.token) : '';
-  return { ok: true, exists: true, etag, reg: { on: !!reg.on && !!tok, token: tok, revoked: (Array.isArray(reg.revoked) ? reg.revoked : []).map(String).filter(x => CASE_TOKEN_RE.test(x)) } };
+  const revoked = (Array.isArray(reg.revoked) ? reg.revoked : []).map(String).filter(x => CASE_TOKEN_RE.test(x));
+  // v203 (A239-1): поколение — число отключений; реестр сервера 202 без поля: 1, если отключение уже было
+  const gen = Number.isInteger(reg.gen) && reg.gen >= 0 ? reg.gen : (revoked.length ? 1 : 0);
+  return { ok: true, exists: true, etag, reg: { on: !!reg.on && !!tok, token: tok, revoked, gen } };
 }
 // изменение реестра: fn(reg) → новый реестр или { stop: ответ }; до пяти попыток при одновременной записи
 async function caseRegUpdate(key, fn) {
@@ -1908,7 +1914,7 @@ async function caseRegUpdate(key, fn) {
     const cur = await caseRegRead(key); if (!cur.ok) return { ok: false, error: cur.error };
     const n = fn(cur.reg); if (n.stop) return n.stop;
     n.revoked = [...new Set(n.revoked)].slice(-CASE_REVOKED_MAX);
-    const body = JSON.stringify({ on: n.on, token: n.token, revoked: n.revoked, at: Date.now() }), CT = 'application/json';
+    const body = JSON.stringify({ on: n.on, token: n.token, revoked: n.revoked, gen: Number(n.gen) || 0, at: Date.now() }), CT = 'application/json';
     const cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
     let w = cond ? await s3PutIf(key, body, CT, cond) : await s3Put(key, body, CT);
     if (cond && condFailed(w)) continue;
@@ -1922,34 +1928,42 @@ async function casePublish(body) {
   needStorage();
   const t = String(body.token || ''); if (!CASE_TOKEN_RE.test(t)) return { ok: false, error: 'bad_token' };
   const id = body.caseId == null ? '' : String(body.caseId); if (id && !CASE_ID_RE.test(id)) return { ok: false, error: 'bad_case' };
-  let tok = t, reg = '';
+  let tok = t, reg = '', gen;
   if (id) {
     reg = caseRegKey(id);
+    // v203 (A239-1): mode 'update' — обновить включённую страницу (выключенную не включает); 'on' — включить, с поколением реестра, которое
+    // программа получила последним (ответ включения, отключения или отказа); старее текущего — отказ с текущим поколением: программа его
+    // запоминает, и следующее нажатие «Включить» — уже новое осознанное действие. Без mode (программа до сборки 242) — включение только
+    // до первого отключения дела
+    const mode = body.mode === 'on' || body.mode === 'update' ? body.mode : '', want = Number.isInteger(body.gen) ? body.gen : -1;
     const u = await caseRegUpdate(reg, r => {
-      if (r.on) return { on: true, token: r.token, revoked: r.revoked };
-      if (r.revoked.includes(t)) return { stop: { ok: false, error: 'revoked', note: 'эта ссылка уже отключена — откройте лист «Ход дела» заново и включите страницу' } };
-      return { on: true, token: t, revoked: r.revoked };
+      if (r.on) return { on: true, token: r.token, revoked: r.revoked, gen: r.gen };
+      if (mode === 'update') return { stop: { ok: false, error: 'off', gen: r.gen, note: 'страница отключена (возможно, с другого устройства) — чтобы она снова открывалась, включите её' } };
+      if (r.gen > 0 && want !== r.gen) return { stop: { ok: false, error: 'stale', gen: r.gen, note: mode ? 'страницу отключили после того, как был открыт этот лист, — нажмите «Включить страницу» ещё раз, если она нужна' : 'страницу этого дела отключали — обновите программу и включите страницу заново' } };
+      if (r.revoked.includes(t)) return { stop: { ok: false, error: 'revoked', gen: r.gen, note: 'эта ссылка уже отключена — откройте лист «Ход дела» заново и включите страницу' } };
+      return { on: true, token: t, revoked: r.revoked, gen: r.gen };
     });
     if (!u.ok) return u;
-    tok = u.reg.token;
+    tok = u.reg.token; gen = u.reg.gen;
   }
   const data = casePageClean(body.data), r = await s3Put(casePageKey(tok), JSON.stringify(Object.assign({ data, updatedAt: Date.now() }, reg ? { reg } : {})), 'application/json; charset=utf-8');
   if (!r.ok) return { ok: false, error: 's3 ' + r.status };
-  return { ok: true, url: '?case=' + tok, token: tok };
+  return Object.assign({ ok: true, url: '?case=' + tok, token: tok }, gen === undefined ? {} : { gen });
 }
 async function caseUnpublish(body) {
   needStorage();
   const t = String(body.token || ''), id = body.caseId == null ? '' : String(body.caseId);
   if (id && !CASE_ID_RE.test(id)) return { ok: false, error: 'bad_case' };
   if (!CASE_TOKEN_RE.test(t) && !id) return { ok: false, error: 'bad_token' };
-  const toks = new Set(CASE_TOKEN_RE.test(t) ? [t] : []);
+  const toks = new Set(CASE_TOKEN_RE.test(t) ? [t] : []); let gen;
   if (id) {
-    const u = await caseRegUpdate(caseRegKey(id), r => { if (r.token) toks.add(r.token); return { on: false, token: '', revoked: r.revoked.concat([...toks]) }; });
-    if (!u.ok) return u;
+    // v203 (A239-1): отключение поднимает поколение — публикации, начатые до него, страницу не включают
+    const u = await caseRegUpdate(caseRegKey(id), r => { if (r.token) toks.add(r.token); return { on: false, token: '', revoked: r.revoked.concat([...toks]), gen: r.gen + 1 }; });
+    if (!u.ok) return u; gen = u.reg.gen;
   }
   // файлы страниц удаляются после отзыва в реестре: сбой удаления ссылку уже не открывает (страница сверяется с реестром), но называется
   for (const k of toks) { const r = await s3Delete(casePageKey(k)); if (!r.ok && r.status !== 404) return { ok: false, error: 's3 ' + r.status, revoked: !!id }; }
-  return { ok: true, tokens: toks.size };
+  return Object.assign({ ok: true, tokens: toks.size }, gen === undefined ? {} : { gen });
 }
 async function casePage(q) {
   const html = (h, st) => ({ statusCode: st || 200, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' }, body: h });
