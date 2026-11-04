@@ -24,6 +24,8 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.31: признак капчи и блокировки — без <script>, <style>, <noscript>, <template>: настройка «useRecaptcha» в коде каждой карточки
+//         mos-gorsud.ru принималась за капчу, и дела судов Москвы не читались (проверка 04.11.2026 по поручению пользователя).
 //  v3.30: страница материала (delo_id=1610001): «ДВИЖЕНИЕ МАТЕРИАЛА», «МАТЕРИАЛ № 13-…», «Предмет представления, ходатайства, жалобы»;
 //         у ссылки материала (mat) номер основного дела не подставляется (жалоба пользователя 04.11.2026, O-106 шаг 3).
 //  v3.29: разбор кода 28.10.2026 — зал в расписании (не «№ п/п»), тексты актов и у ссылок рассмотрений, расписание судьи — событие на
@@ -97,7 +99,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.30';
+const COLLECTOR_VER = '3.31';
 // v3.27 (аудит сборки 188, R6): сетевые послабления (самоподписанные и просроченные сертификаты, устаревший TLS у многих *.sudrf.ru) —
 // ТОЛЬКО у запросов к сайтам судов ГАС «Правосудие» и только через отдельный транспорт (courtDispatcher). Процесс целиком их больше не
 // получает: личный сервер (с кодом), хранилище (с IAM-токеном), Telegram, API Assist, СУДиДЕЛО и загрузка обновлений проверяют сертификаты.
@@ -225,7 +227,7 @@ function cellsOf(html) {
 const ENT = { nbsp: ' ', quot: '"', amp: '&', lt: '<', gt: '>', laquo: '«', raquo: '»', rarr: '→', larr: '←', ndash: '–', mdash: '—', hellip: '…', apos: "'" };
 function decodeEntities(t) { return String(t || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, e) => { if (e[0] === '#') { const code = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10); return isFinite(code) && code >= 0 && code <= 0x10FFFF ? String.fromCodePoint(code) : m; } return ENT[e.toLowerCase()] !== undefined ? ENT[e.toLowerCase()] : m; }); }
 const CARD_LABELS = {
-  number: /^(номер дела( ?[~(\/].{0,20})?|№ дела|дело №|номер дела в суде|номер материала)\s*:?$/i, uid: /^(уникальный идентификатор дела|уид)\s*:?$/i, // v3.12: «Номер дела ~ материала» (ГАС «Правосудие»)
+  number: /^(номер дела( ?[~(\/].{0,20})?|№ дела|дело №|номер дела в суде|номер материала|номер заявления)\s*:?$/i, uid: /^(уникальный идентификатор дела|уид)\s*:?$/i, // v3.12: «Номер дела ~ материала» (ГАС «Правосудие»)
   judge: /^(судья|председательствующий судья|судья, рассматривающий дело|судья-докладчик|судья докладчик)\s*:?$/i, registered: /^(дата поступления|дата регистрации|дата поступления в суд)\s*:?$/i,
   category: /^(категория дела|категория)\s*:?$/i, subject: /^(предмет представления, ходатайства, жалобы|предмет ходатайства|предмет)\s*:?$/i, matKind: /^вид материала\s*:?$/i, result: /^(результат рассмотрения|результат)\s*:?$/i, decided: /^(дата рассмотрения|дата решения)\s*:?$/i
 };
@@ -235,11 +237,16 @@ const PARTY_NOT_NAME = /^(вышестоящий|нижестоящий)\s+су�
 function parseCaseCard(html) {
   const cells = cellsOf(html), card = { parties: [] };
   // v3.20: у дат — только ячейка с датой (заголовок таблицы жалоб «Дата поступления» стоит перед «Процессуальный статус заявителя»)
-  const pick = (re, needDate) => { for (let i = 0; i < cells.length - 1; i++) if (re.test(cells[i])) { const v = cells[i + 1]; if (needDate && !RE_DATE.test(v)) continue; if (v && v.length < 300 && !Object.values(CARD_LABELS).some(r => r.test(v))) return v; } return ''; };
+  // v3.31: подпись с латинскими буквами вместо русских («Cудья» на портале Москвы); подпись столбца — не значение
+  const LAT = { A: 'А', a: 'а', B: 'В', C: 'С', c: 'с', E: 'Е', e: 'е', H: 'Н', K: 'К', k: 'к', M: 'М', O: 'О', o: 'о', P: 'Р', p: 'р', T: 'Т', X: 'Х', x: 'х', y: 'у' };
+  const lab = t => /[а-яё]/i.test(t) ? t.replace(/[AaBCcEeHKkMOoPpTXxy]/g, ch => LAT[ch]) : t;
+  const COL_HEAD = /^(основание назначения|тип судебного|дата и время|документ-основание|вид документа|текст документа)/i;
+  const pick = (re, needDate) => { for (let i = 0; i < cells.length - 1; i++) if (re.test(lab(cells[i]))) { if (COL_HEAD.test(cells[i + 1] || '')) continue; const v = cells[i + 1]; if (needDate && !RE_DATE.test(v)) continue; if (v && v.length < 300 && !Object.values(CARD_LABELS).some(r => r.test(v))) return v; } return ''; };
   for (const [k, re] of Object.entries(CARD_LABELS)) { const v = pick(re, k === 'registered' || k === 'decided'); if (v) card[k] = v; }
   if (!card.uid) card.uid = parseUid(html);
   // v3.12: номер в любом виде — 2-1500/2026, 33а-123/2026, 8Г-12345/2026, 88-1/2026, А11-1234/2026, 02-2485/2026
-  const RE_CASE_NO = /(?:[АA]\d{2}|\d{1,2}[а-яёa-z]{0,2})[-–]\d{1,7}\/\d{4}/i;
+  // v3.31: и «Ма-2187/2026», «М-6773/2026» (заявление, материал на портале Москвы)
+  const RE_CASE_NO = /(?:[АA]\d{2}|\d{1,2}[а-яёa-z]{0,2}|[МM][аa]?)[-–]\d{1,7}\/\d{4}/i;
   if (card.number) { const m = card.number.match(RE_CASE_NO); card.number = m ? m[0].replace(/–/g, '-') : ''; }
   if (!card.number) { // заголовок карточки «ДЕЛО № 33-3331/2026» или «Дело №…» в любой ячейке
     // v3.30: и заголовок материала «МАТЕРИАЛ № 13-392/2026»
@@ -255,6 +262,10 @@ function parseCaseCard(html) {
   // «прихватывала» первую ячейку следующей вкладки («Вышестоящий суд», «Судебный акт #1 (Решения)» со страницы кассации)
   const seen = new Set(), add = (role, name) => { name = norm(name); if (!name || seen.has(name)) return; seen.add(name); card.parties.push({ role, name }); };
   for (const c of cells) { const m = c.match(/^(истец|ответчик|третье лицо|заявитель|заинтересованное лицо|должник|взыскатель|административн\S+ истец|административн\S+ ответчик|потерпевший|подсудимый|обвиняемый)\s*:\s*(.{3,120})$/i); if (m) add(cap(m[1]), m[2]); }
+  // v3.31: Москва — строка карточки «<div class="left">Подсудимый</div><div class="right">Фамилия И.О.<br>(Ст. …)</div>»
+  for (const m of String(html || '').matchAll(/<div class="left">\s*([^<]{3,40}?)\s*<\/div>\s*<div class="right">([\s\S]{0,400}?)<\/div>/gi)) { const role = norm(decodeEntities(m[1])); if (!ROLE_RE.test(role) || role.length >= 40) continue; const nm = norm(decodeEntities(String(m[2]).split(/<br\s*\/?>|<p\b/i)[0].replace(/<[^>]+>/g, ' '))); if (nm && !ROLE_RE.test(nm) && /[А-Яа-яA-Za-z]{2,}/.test(nm) && nm.length < 160 && !PARTY_NOT_NAME.test(nm)) add(cap(role), nm); }
+  // v3.31: Москва — «Стороны»: роль жирным абзацем, имя следом до <br>
+  for (const m of String(html || '').matchAll(/<p[^>]*>\s*([^<]{3,40}?)\s*<\/p>\s*([^<]{2,160})/gi)) { const role = norm(decodeEntities(m[1])), nm = norm(decodeEntities(m[2])); if (ROLE_RE.test(role) && !ROLE_RE.test(nm) && /[А-Яа-яA-Za-z]{2,}/.test(nm) && !PARTY_NOT_NAME.test(nm)) add(cap(role), nm); }
   const rows = rowsOf(html), cmpRows = complaintRows(rows).idx;
   rows.forEach((rc, ri) => {
     if (cmpRows.has(ri)) return;
@@ -293,7 +304,8 @@ function parseFlow(html) {
   if (head.some(x => /наименование|результат|основани/.test(x))) {
     start = 1;
     const f = re => head.findIndex(x => re.test(x));
-    iT = Math.max(0, f(/наименование|событие/));
+    // v3.31: «Состояние» — столбец названия в «Истории состояний» портала судов Москвы
+    iT = Math.max(0, f(/наименование|событие|^состояние/));
     iD = head.findIndex(x => x.includes('дата') && !x.includes('размещ'));
     iTime = f(/время/);
     iR = f(/результат/);
@@ -441,10 +453,31 @@ function cmpDigestText(e) {
 }
 
 // Универсальный разбор карточки дела: заседания, публикации актов, судья
+// v3.31: столбцы таблицы заседаний портала судов Москвы по строке заголовков («Дата и время», «Зал», «Стадия», «Результат»)
+function mosHearingCols(cells) {
+  const h = cells.map(x => String(x || '').toLowerCase().trim());
+  const f = re => h.findIndex(x => re.test(x));
+  const col = { date: f(/^дата и время/), room: f(/^зал/), stage: f(/^стадия/), result: f(/^результат/), kind: f(/^тип судебного/) };
+  return col.date >= 0 && col.room >= 0 && (col.stage >= 0 || col.result >= 0) ? col : null;
+}
 function parseCasePage(html) {
   const out = { hearings: [], acts: [], judge: '' };
+  let mos = null;
   for (const cells of rowsOf(html)) {
     const joined = cells.join(' | ');
+    // v3.31: таблица заседаний Москвы — строки до первой строки без даты в столбце «Дата и время»
+    const mh = mosHearingCols(cells); if (mh) { mos = mh; continue; }
+    if (mos) {
+      const g = k => mos[k] >= 0 ? norm(cells[mos[k]] || '') : '';
+      const dm = g('date').match(RE_DATE);
+      if (dm) {
+        const tm = g('date').match(RE_TIME), stage = g('stage'), kind = g('kind');
+        const label = (stage && !/^судебное заседание$/i.test(stage) ? stage : 'Судебное заседание') + (kind && !/^(судебное )?заседание$/i.test(kind) ? ' (' + kind + ')' : '');
+        out.hearings.push({ date: dm[1], time: tm ? tm[0] : '', room: g('room'), label: label.slice(0, 120), result: g('result').slice(0, 160) });
+        continue;
+      }
+      mos = null;
+    }
     if (!out.judge && /^судья/i.test(cells[0] || '') && cells[1]) out.judge = cells[1];
     const dm = joined.match(RE_DATE);
     if (!dm) continue;
@@ -639,6 +672,9 @@ async function sdCollectLink(sd, c, l, cfg, logf, cache) {
 
 // ── сеть ─────────────────────────────────────────────────────────────
 const BLOCK_RE = /captcha|доступ ограничен|запрос(ы)? с вашего ip|ваш ip:|attention required|ddos/i;
+// v3.31: признак блокировки — в том, что видит человек: код страниц (useRecaptcha, ключ капчи в <script>) блокировкой не считается
+const visibleHtml = t => String(t || '').replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, ' ').replace(/<!--[\s\S]*?-->/g, ' ');
+const pageBlocked = t => BLOCK_RE.test(visibleHtml(String(t || '').slice(0, 200000)).slice(0, 6000));
 function errText(e) {
   if (!e) return 'ошибка';
   if (e.name === 'AbortError') return 'нет ответа (таймаут)';
@@ -879,7 +915,7 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
       for (const { a, ev } of todo) {
         try { await sleep(Math.min(delay, 1500)); const t = await fetchPageSmart(a.url, cfg.timeoutMs, logf);
           // v3.29 (Д-56): капча, блокировка и «текст не опубликован» — не текст акта
-          if (t.status >= 400 || BLOCK_RE.test(t.text.slice(0, 6000))) { stats.actTextErrors = (stats.actTextErrors || 0) + 1; logf(`   текст акта ${a.date}: сайт не отдал страницу (HTTP ${t.status}${BLOCK_RE.test(t.text.slice(0, 6000)) ? ', похоже на капчу/блокировку' : ''})`); continue; }
+          if (t.status >= 400 || pageBlocked(t.text)) { stats.actTextErrors = (stats.actTextErrors || 0) + 1; logf(`   текст акта ${a.date}: сайт не отдал страницу (HTTP ${t.status}${pageBlocked(t.text) ? ', похоже на капчу/блокировку' : ''})`); continue; }
           const txt = actTextOf(t.text); if (txt.length > 200 && !ACT_NOTEXT_RE.test(txt)) { ev.actText = txt; stats.actTexts = (stats.actTexts || 0) + 1; } }
         catch (e) { stats.actTextErrors = (stats.actTextErrors || 0) + 1; logf(`   текст акта ${a.date}: ${errText(e)}`); }
       }
@@ -890,7 +926,7 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
         if (list === undefined) {
           if (JD_LISTS.size >= JD_PER_RUN) continue; JD_LISTS.set(k, null); list = null;
           try { await sleep(Math.min(delay, 1500)); const t = await fetchPageSmart(dayListUrl(base, d), cfg.timeoutMs, logf);
-            if (t.status < 400 && !BLOCK_RE.test(t.text.slice(0, 6000))) list = parseDayList(t.text); else logf(`   расписание судьи ${h.date}: сайт не отдал страницу (HTTP ${t.status})`); }
+            if (t.status < 400 && !pageBlocked(t.text)) list = parseDayList(t.text); else logf(`   расписание судьи ${h.date}: сайт не отдал страницу (HTTP ${t.status})`); }
           catch (e) { logf(`   расписание судьи ${h.date}: ${errText(e)}`); }
           JD_LISTS.set(k, list);
         }
@@ -907,9 +943,9 @@ async function collectRun(pack, cfg, logf, deadlineMs) {
       if (AA.mode === 'primary' && await tryAA('')) return;
       const r = await fetchPageRetry(l.url, cfg.timeoutMs, logf, Math.max(2000, delay));
       stats.pages++; let pm = null;
-      if (r.status >= 400 || BLOCK_RE.test(r.text.slice(0, 6000))) {
+      if (r.status >= 400 || pageBlocked(r.text)) {
         if (AA.mode !== 'primary' && await tryAA(`сайт суда не отдал страницу (HTTP ${r.status})`)) return;
-        stats.blocked++; logf(`⚠ ${c.number} (${l.stage}): сайт суда не отдал страницу (HTTP ${r.status}${BLOCK_RE.test(r.text.slice(0, 6000)) ? ', похоже на капчу/блокировку' : ''}) — проверьте вручную`);
+        stats.blocked++; logf(`⚠ ${c.number} (${l.stage}): сайт суда не отдал страницу (HTTP ${r.status}${pageBlocked(r.text) ? ', похоже на капчу/блокировку' : ''}) — проверьте вручную`);
       } else if (!(pm = pageMatchesCase(r.text, l, c)).ok) { // v3.6: страница не про это дело; v3.20: дело узнаётся и по УИД, и по любому его номеру
         // v3.17: названо, какой номер на странице; номеров дел на странице нет вовсе — это нераспознанная страница, а не «другое дело»
         const found = pm.found;
@@ -1044,7 +1080,7 @@ async function courtSearch(body) {
       const site = queue.shift(), left = budget - (Date.now() - started);
       if (left < 3000) { errors.push({ site, err: 'не опрошен — время поиска истекло, повторите для этого суда' }); continue; }
       const url = courtSearchUrl(site, name);
-      try { const r = await fetchPageSmart(url, Math.min(20000, left)); const blocked = BLOCK_RE.test(r.text.slice(0, 6000));
+      try { const r = await fetchPageSmart(url, Math.min(20000, left)); const blocked = pageBlocked(r.text);
         // мелочь 12: страница капчи приходит с кодом 200 — так и сказано
         if (r.status >= 400 || blocked) { errors.push({ site, err: blocked ? 'похоже на капчу/блокировку' : 'сайт не отдал страницу (HTTP ' + r.status + ')' }); continue; }
         for (const x of parseSearchResults(r.text, r.url || url)) results.push(Object.assign({ site: new URL(site).hostname }, x)); }
@@ -1153,6 +1189,31 @@ function runTests() {
   // распознавание хостов
   t('sudrf', hostKind('https://kovrovsky--wld.sudrf.ru/modules.php?name=sud_delo') === 'sudrf');
   t('mos', hostKind('https://mos-gorsud.ru/rs/babushkinskij/services/cases/civil/details/abc') === 'mos');
+  // v3.31: карточка портала судов Москвы (разметка настоящей страницы 04.11.2026, данные вымышленные)
+  const MOS = `<html><head><script>window.useRecaptcha = true; window.reCaptchaApiKey = 'ysc1_x';</script></head><body>
+    <div class="row"><div class="left">Уникальный идентификатор дела</div><div class="right">77RS0001-02-2026-000001-11</div></div>
+    <div class="row"><div class="left">Номер дела ~ материала</div><div class="right">02-0001/2026 &#8764; М-0002/2026</div></div>
+    <div class="row"><div class="left">Дата поступления</div><div class="right">30.09.2026</div></div>
+    <div class="row"><div class="left">Стороны</div><div class="right"><p class="table-bold-text">Истец</p>Вымыслов В.В.<br/><p class="table-bold-text">Ответчик</p>ООО "Пример"<br/></div></div>
+    <div class="row"><div class="left">\u0043удья</div><div class="right">Примерова П.П.</div></div>
+    <div>Движение дела</div><div>История состояний</div>
+    <table><tr><th>Дата</th><th>Состояние</th><th>Документ-основание</th></tr>
+      <tr><td>30.09.2026</td><td>Регистрация поступившего заявления</td><td></td></tr>
+      <tr><td>07.10.2026</td><td>Заявление принято к производству</td><td></td></tr>
+      <tr><td>07.10.2026</td><td>Подготовка к рассмотрению</td><td>Определение о подготовке дела к судебному разбирательству</td></tr></table>
+    <div>Судебные заседания и беседы</div>
+    <table><tr><th>Дата и время</th><th>Зал</th><th>Стадия</th><th>Результат</th><th>Основание назначения судебного заседания</th><th>Тип судебного заседания/слушания</th></tr>
+      <tr><td>17.10.2026 14:20</td><td>304</td><td>Беседа</td><td>Рассмотрение завершено</td><td></td><td></td></tr>
+      <tr><td>17.11.2026 10:00</td><td>304</td><td>Судебное заседание</td><td></td><td></td><td>Открытое</td></tr></table>
+    <table><tr><th>Дата документа</th><th>Вид документа</th><th>Текст документа</th></tr><tr><td>07.10.2026</td><td>Определение о принятии заявления к производству</td><td></td></tr></table>
+  </body></html>`;
+  t('v3.31 Москва: настройка useRecaptcha в коде — не блокировка; видимая капча — блокировка', !pageBlocked(MOS) && pageBlocked('<html><body><div class="smart-captcha">Подтвердите, что вы не робот (captcha)</div></body></html>') && pageBlocked('<html><body>Доступ ограничен</body></html>'));
+  const mp = parseCasePage(MOS), mf = parseFlow(MOS), mc = parseCaseCard(MOS);
+  t('v3.31 Москва: заседания — дата и время в одной ячейке, вид из «Стадии», зал, результат', mp.hearings.length === 2 && mp.hearings[0].date === '17.10.2026' && mp.hearings[0].time === '14:20' && mp.hearings[0].label === 'Беседа' && mp.hearings[0].room === '304' && mp.hearings[0].result === 'Рассмотрение завершено' && mp.hearings[1].label === 'Судебное заседание (Открытое)' && mp.hearings[1].time === '10:00');
+  t('v3.31 Москва: история состояний — название из «Состояния», строки одного дня не сливаются', mf.length === 3 && mf[0].title === 'Регистрация поступившего заявления' && mf[2].title === 'Подготовка к рассмотрению' && mf[2].basis === 'Определение о подготовке дела к судебному разбирательству');
+  t('v3.31 Москва: судья с латинской «C» в подписи, стороны, номер, без подписи столбца в «Результате»', mc.judge === 'Примерова П.П.' && mc.number === '02-0001/2026' && mc.parties.length === 2 && mc.parties[0].role === 'Истец' && mc.parties[0].name === 'Вымыслов В.В.' && mc.parties[1].name === 'ООО "Пример"' && !mc.result);
+  const mc2 = parseCaseCard('<div class="row"><div class="left">Номер заявления</div><div class="right">Ма-0003/2026</div></div><div class="row"><div class="left">Подсудимый</div><div class="right">Вымыслов В.В.<br>(Ст. 158, Ч. 1)</div></div>');
+  t('v3.31 Москва: номер заявления «Ма-…», подсудимый без статьи', mc2.number === 'Ма-0003/2026' && mc2.parties.length === 1 && mc2.parties[0].role === 'Подсудимый' && mc2.parties[0].name === 'Вымыслов В.В.');
   t('kad', hostKind('https://kad.arbitr.ru/card/xxxx') === 'kad');
 
   // декодер cp1251: «Дело» = 0xC4 0xE5 0xEB 0xEE
@@ -1620,7 +1681,7 @@ async function collectOne(body) {
   if (kind === 'sudrf' && aaEnabled() && AA.mode === 'primary') { try { await viaAA(); } catch (e) { /* ниже — сайт суда */ } }
   if (!page) {
     let r = null; try { r = await fetchPageRetry(url, timeoutMs, () => {}, 3000); } catch (e) { if (!(kind === 'sudrf' && aaEnabled())) throw e; }
-    const bad = !r || r.status >= 400 || BLOCK_RE.test(r.text.slice(0, 6000));
+    const bad = !r || r.status >= 400 || pageBlocked(r.text);
     // v3.17: при расхождении назван номер со страницы; страница без номера дела — «не распознана»
     // v3.20: дело узнаётся по номеру своей инстанции, по УИД и по любому номеру дела из программы
     const pm = bad ? null : pageMatchesCase(r.text, { courtNo }, { uid: uidIn, numbers });
