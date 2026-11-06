@@ -10,6 +10,9 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v204: аудит 250 (A250-4, A250-5) — страница «Ход дела»: устаревший запрос не пишет в действующую ссылку (проверка метки и поколения и при
+//  включённой странице), обновление реестр не переписывает, запись содержимого сверяется с реестром после записи, без условной записи
+//  реестр меняет только отключение.
 //  v203: аудит 240 (A239-1) — поколение реестра страницы «Ход дела»: «Отключить» поднимает его, публикация, начатая до отключения
 //  (другая вкладка, задержка сети), страницу не включает; обновление (mode:'update') выключенную страницу не включает; включение
 //  (mode:'on') — с поколением, которое программа получила последним; программа до сборки 242 после отключения — отказ «обновите программу»
@@ -355,7 +358,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 203,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 204,
       ready: readiness()
     });
   }
@@ -384,7 +387,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 203, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 204, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -1908,17 +1911,23 @@ async function caseRegRead(key) {
   const gen = Number.isInteger(reg.gen) && reg.gen >= 0 ? reg.gen : (revoked.length ? 1 : 0);
   return { ok: true, exists: true, etag, reg: { on: !!reg.on && !!tok, token: tok, revoked, gen } };
 }
-// изменение реестра: fn(reg) → новый реестр или { stop: ответ }; до пяти попыток при одновременной записи
-async function caseRegUpdate(key, fn) {
+// изменение реестра: fn(reg) → новый реестр, { stop: ответ } или { keep: true } (реестр не меняется и не пишется); до пяти попыток при
+// одновременной записи. v204 (A250-4): без условной записи (501, нет ETag) поздняя запись могла бы вернуть прежнее состояние, поэтому
+// реестр тогда меняет только отключение (revoke): оно должно проходить всегда, а других писателей в этом случае нет
+async function caseRegUpdate(key, fn, revoke) {
   for (let i = 0; i < 5; i++) {
     const cur = await caseRegRead(key); if (!cur.ok) return { ok: false, error: cur.error };
     const n = fn(cur.reg); if (n.stop) return n.stop;
+    if (n.keep) return { ok: true, reg: cur.reg, prev: cur.reg };
     n.revoked = [...new Set(n.revoked)].slice(-CASE_REVOKED_MAX);
     const body = JSON.stringify({ on: n.on, token: n.token, revoked: n.revoked, gen: Number(n.gen) || 0, at: Date.now() }), CT = 'application/json';
     const cond = cur.exists ? (cur.etag ? { 'If-Match': cur.etag } : null) : { 'If-None-Match': '*' };
-    let w = cond ? await s3PutIf(key, body, CT, cond) : await s3Put(key, body, CT);
+    let w = cond ? await s3PutIf(key, body, CT, cond) : null;
     if (cond && condFailed(w)) continue;
-    if (cond && condUnsupported(w)) w = await s3Put(key, body, CT);
+    if (!cond || condUnsupported(w)) {
+      if (!revoke) return { ok: false, error: 'no_cond', note: 'хранилище не поддерживает условную запись — страницу дела включить нельзя; уже включённые страницы можно обновлять и отключать' };
+      w = await s3Put(key, body, CT);
+    }
     if (!w.ok) return { ok: false, error: 's3 ' + w.status };
     return { ok: true, reg: n, prev: cur.reg };
   }
@@ -1937,7 +1946,14 @@ async function casePublish(body) {
     // до первого отключения дела
     const mode = body.mode === 'on' || body.mode === 'update' ? body.mode : '', want = Number.isInteger(body.gen) ? body.gen : -1;
     const u = await caseRegUpdate(reg, r => {
-      if (r.on) return { on: true, token: r.token, revoked: r.revoked, gen: r.gen };
+      // v204 (A250-5): включённая страница — тоже проверка: иначе запрос, начатый до отключения, получил бы метку новой ссылки и записал в неё
+      // прежнее содержимое. Обновление — только своей метки и текущего поколения (поколение из отказа без метки не проходит; пока отключений не
+      // было, программа 234–241 поколения не шлёт); включение и программа без mode — с текущим поколением, если страницу уже отключали
+      if (r.on) {
+        const fresh = mode === 'update' ? t === r.token && (r.gen === 0 || want === r.gen) : r.gen === 0 || want === r.gen;
+        if (!fresh) return { stop: { ok: false, error: 'stale', gen: r.gen, note: mode ? 'страницу отключали и включали заново — проверьте лист «Ход дела» и нажмите «Включить страницу»: ссылка останется действующей' : 'страницу этого дела отключали — обновите программу' } };
+        return { keep: true };
+      }
       if (mode === 'update') return { stop: { ok: false, error: 'off', gen: r.gen, note: 'страница отключена (возможно, с другого устройства) — чтобы она снова открывалась, включите её' } };
       if (r.gen > 0 && want !== r.gen) return { stop: { ok: false, error: 'stale', gen: r.gen, note: mode ? 'страницу отключили после того, как был открыт этот лист, — нажмите «Включить страницу» ещё раз, если она нужна' : 'страницу этого дела отключали — обновите программу и включите страницу заново' } };
       if (r.revoked.includes(t)) return { stop: { ok: false, error: 'revoked', gen: r.gen, note: 'эта ссылка уже отключена — откройте лист «Ход дела» заново и включите страницу' } };
@@ -1948,6 +1964,12 @@ async function casePublish(body) {
   }
   const data = casePageClean(body.data), r = await s3Put(casePageKey(tok), JSON.stringify(Object.assign({ data, updatedAt: Date.now() }, reg ? { reg } : {})), 'application/json; charset=utf-8');
   if (!r.ok) return { ok: false, error: 's3 ' + r.status };
+  // v204 (A250-4): страницу могли отключить, пока шла запись: файл убирается, а программе не говорится «обновлено». Ссылка закрыта и без этого —
+  // страница открывается только по реестру
+  if (reg) {
+    const g = await caseRegRead(reg); if (!g.ok) return { ok: false, error: g.error };
+    if (!g.reg.on || g.reg.token !== tok) { await s3Delete(casePageKey(tok)); return { ok: false, error: g.reg.on ? 'stale' : 'off', gen: g.reg.gen, note: 'страницу отключили, пока шла запись, — чтобы она снова открывалась, включите её' }; }
+  }
   return Object.assign({ ok: true, url: '?case=' + tok, token: tok }, gen === undefined ? {} : { gen });
 }
 async function caseUnpublish(body) {
@@ -1958,7 +1980,7 @@ async function caseUnpublish(body) {
   const toks = new Set(CASE_TOKEN_RE.test(t) ? [t] : []); let gen;
   if (id) {
     // v203 (A239-1): отключение поднимает поколение — публикации, начатые до него, страницу не включают
-    const u = await caseRegUpdate(caseRegKey(id), r => { if (r.token) toks.add(r.token); return { on: false, token: '', revoked: r.revoked.concat([...toks]), gen: r.gen + 1 }; });
+    const u = await caseRegUpdate(caseRegKey(id), r => { if (r.token) toks.add(r.token); return { on: false, token: '', revoked: r.revoked.concat([...toks]), gen: r.gen + 1 }; }, true);
     if (!u.ok) return u; gen = u.reg.gen;
   }
   // файлы страниц удаляются после отзыва в реестре: сбой удаления ссылку уже не открывает (страница сверяется с реестром), но называется
