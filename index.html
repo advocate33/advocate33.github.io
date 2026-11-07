@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="07.11.2026 00:45 · b9fafd5">
-<meta name="build-no" content="251">
+<meta name="build" content="07.11.2026 14:50 · 2117329">
+<meta name="build-no" content="252">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -487,6 +487,7 @@ button.agenda-row:hover{background:var(--surface2)}
 .case-head{margin-bottom:6px}.case-who{font-size:1.25rem;font-weight:700;line-height:1.25;overflow-wrap:anywhere}.case-what{color:var(--text-muted);margin-top:2px}
 .case-court{display:grid;gap:4px;margin-top:8px;font-size:.9375rem}.case-court>div{display:flex;gap:8px;align-items:flex-start}.case-court .icon{margin-top:3px;flex:none;color:var(--text-muted)}
 /* v174: строка «Соглашение … · Ордер …» — значок по центру строки, кнопки-действия в ряд с текстом */
+.ord-group{margin-top:12px}.ord-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;min-width:0}.ord-head>span{min-width:0;overflow-wrap:anywhere}.ord-none{margin:0}
 .case-docs{gap:0;margin-top:4px}.case-docs>div{align-items:center;min-height:36px}.case-docs .icon{margin-top:0}.case-docs>div>span{display:inline-flex;flex-wrap:wrap;align-items:center;gap:0 10px;min-width:0}.case-docs .text-button{padding:5px 2px}
 .case-next{display:flex;align-items:center;gap:12px;width:100%;text-align:left;padding:12px 14px;margin:6px 0;border:1px solid var(--line);border-radius:var(--r-md);background:var(--accent-soft);color:var(--text);cursor:pointer;min-height:var(--touch)}.case-next>span{flex:1;min-width:0}.case-next small{display:block;color:var(--text-muted)}.case-next>.icon:first-child{color:var(--accent)}
 .case-step{display:flex;gap:8px;align-items:flex-start;margin:8px 0;font-size:.9375rem}.case-step.overdue{color:var(--bad)}.case-step .icon{margin-top:3px;flex:none}
@@ -15532,6 +15533,7 @@ async function openCaseForm(id, full) {
   partyPrefillBind();
   caseGroupsBind(true);
   if (typeof caseKindBind === 'function') caseKindBind();
+  if (full && prev && typeof caseFormOrdersNote === 'function') caseFormOrdersNote(prev);
   if (full) { const k = document.getElementById('cf-kind'); if (k) k.onchange = () => caseTabsRefresh(); caseTabsRefresh(); const kb = document.getElementById('cx-koap-koapBodyKind'); if (kb) { kb.onchange = () => caseKoapHint(); caseKoapHint(); } }
 }
 // поле номера с кнопкой «Авто» (data/numbering.js): следующий свободный номер подставляется, но номер можно править
@@ -17385,6 +17387,8 @@ function todayModel(d, now, hidden) {
   if (typeof poaTodayItems === 'function') poaTodayItems(d.poa || [], today).forEach(x => imp.push(x));
   // Е11 (13.10.2026): заседание, на дату которого доверенность по делу уже не действует (screens/poa.js)
   if (typeof poaHearingItems === 'function') poaHearingItems(d.poa || [], hearings.filter(planned), caseOf, today).forEach(x => imp.push(x));
+  // сборка 252: заседание близко, по делу есть ордера, а на эту инстанцию нет (ui/depord.js)
+  if (typeof orderHearingItems === 'function') orderHearingItems(d.orders || [], hearings.filter(planned), caseOf, today).forEach(x => imp.push(x));
   // 13.10.2026 (этап 5 плана по ЮрТопосу): переписка — срок ответа и «вручено — создать задачу?» (ui/mailx.js)
   if (typeof mailTodayItems === 'function') mailTodayItems(d.mail || [], today, caseOf).forEach(x => imp.push(x));
   // 13.10.2026 (этап 6): событие календаря, уже разобранное в программе, в календаре перенесли, отменили или удалили (sync/calimp.js)
@@ -17504,7 +17508,7 @@ SCREENS.today = async function () {
   // 12.10.2026 (next/tz.js): «сегодня» и «через N мин» — по часам пояса заседаний, а не устройства (в поездке время заседания не сдвигается)
   const now = typeof tzNow === 'function' ? tzNow() : new Date(), today = localISO(now);
   // 21.10.2026 (ui/hints.js): расходы, документы, деньги на расходы и журнал дел — для подсказок и «Без движения» (одно чтение каждого хранилища, урок 90)
-  const d = {}; for (const st of ['cases', 'hearings', 'tasks', 'meetings', 'finance', 'poa', 'mail', 'monitorEvents', 'expenses', 'documents', 'deposits', 'caseEvents']) d[st] = await getAll(st);
+  const d = {}; for (const st of ['cases', 'hearings', 'tasks', 'meetings', 'finance', 'poa', 'mail', 'monitorEvents', 'expenses', 'documents', 'deposits', 'caseEvents', 'orders']) d[st] = await getAll(st);
   const m = todayModel(d, now, todayHiddenLoad(today)); TODAY_LAST = m;
   const fold = lsJSON(TODAY_FOLD_KEY, {}) || {}, folded = b => fold[b] === today;
   const dateLine = now.toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
@@ -18046,11 +18050,8 @@ function caseDocsLineModel(c, orders) {
   const agrNo = String(c.agreementNo || '').trim(), agrDate = c.agreementDate ? fmtDate(c.agreementDate) : '';
   const signed = c.agreementSigned === 'Да' ? 'подписано' : c.agreementSigned === 'Нет — ждёт подписи' ? 'ждёт подписи' : '';
   const agr = agrNo || agrDate ? 'Соглашение ' + [agrNo ? '№ ' + agrNo : '', agrDate ? 'от ' + agrDate : ''].filter(Boolean).join(' ') + (signed ? ' · ' + signed : '') : 'Соглашение не указано';
-  const mine = (orders || []).filter(o => o && !o._deleted && (typeof depMine === 'function' ? depMine(o, c) : (o.caseId ? o.caseId === c.id : !!o.caseNum && o.caseNum === c.number)))
-    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.createdAt || 0).localeCompare(String(a.createdAt || 0)));
-  const last = mine[0] || null;
-  const ord = last ? 'Ордер № ' + (last.num || '—') + (last.date ? ' от ' + fmtDate(last.date) : '') + (last.basis && last.basis !== 'Соглашение' ? ' · ' + last.basis : '') : 'Ордер не выписан';
-  return { agr, agrBtn: agrNo || agrDate ? 'Изменить' : 'Указать', ord, ordBtn: last ? 'Открыть' : 'Выписать ордер', ordId: last ? last.id : '', ordMore: mine.length > 1 ? 'ещё ' + (mine.length - 1) : '', count: mine.length };
+  // сборка 252: строка ордера — по текущей инстанции дела (orderLineModel, ui/depord.js)
+  return { agr, agrBtn: agrNo || agrDate ? 'Изменить' : 'Указать', ...orderLineModel(c, orders) };
 }
 async function openCaseSheet(id, keep) {
   const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
@@ -18078,7 +18079,7 @@ async function openCaseSheet(id, keep) {
   // строка реквизитов поручения под судом и судьёй — соглашение (номер, дата, подпись) и последний ордер; пустое названо словами, действие —
   // на месте (раздел 7): соглашение правится в форме дела на вкладке «Соглашение», ордер — в журнале ордеров (ui/depord.js)
   const docsM = caseDocsLineModel(c, d.orders);
-  const docsLine = `<div class="case-court case-docs" id="case-docs"><div>${icon('notebook-pen', 'icon-sm')}<span>${esc(docsM.agr)} <button type="button" class="text-button" id="case-agr-btn" onclick="openCaseFormTab('${jsq(c.id)}', 'agreement')">${esc(docsM.agrBtn)}</button></span></div><div>${icon('book-marked', 'icon-sm')}<span>${esc(docsM.ord)} <button type="button" class="text-button" id="case-ord-btn" onclick="${docsM.ordId ? `openOrderForm('${jsq(docsM.ordId)}')` : `openOrderForm('', '${jsq(c.number || '')}')`}">${esc(docsM.ordBtn)}</button>${docsM.ordMore ? ` <button type="button" class="text-button" onclick="openOrdersSheet('${jsq(c.number || '')}')">${esc(docsM.ordMore)}</button>` : ''}</span></div></div>`;
+  const docsLine = `<div class="case-court case-docs" id="case-docs"><div>${icon('notebook-pen', 'icon-sm')}<span>${esc(docsM.agr)} <button type="button" class="text-button" id="case-agr-btn" onclick="openCaseFormTab('${jsq(c.id)}', 'agreement')">${esc(docsM.agrBtn)}</button></span></div><div>${icon('book-marked', 'icon-sm')}<span>${esc(docsM.ord)} <button type="button" class="text-button" id="case-ord-btn" onclick="${docsM.ordId ? `openOrderForm('${jsq(docsM.ordId)}')` : `openOrderForm('', '${jsq(c.number || '')}', '${jsq(docsM.ordInst)}', '${jsq(docsM.ordPid)}')`}">${esc(docsM.ordBtn)}</button>${docsM.ordMore ? ` <button type="button" class="text-button" id="case-ord-all" onclick="openOrdersSheet('${jsq(c.number || '')}')">${esc(docsM.ordMore)}</button>` : ''}</span></div></div>`;
   const cardGroup = (gid, title, html) => html && html.replace(/\s/g, '') ? `<details class="fgroup card-more" id="${gid}"><summary>${icon('chevron-down', 'icon-sm')}<span>${esc(title)}</span></summary><div class="card-more-body">${html}</div></details>` : '';
   const body = `
     <div class="case-head"><div class="case-who">${esc(c.client || 'Доверитель не указан')}</div>${c.subject ? `<div class="case-what">${esc(c.subject)}</div>` : ''}</div>
@@ -20677,7 +20678,8 @@ function finUnworkedList(list, cases) {
 // (госпошлина, экспертиза, почта) — внесение и списание; гонорар, аванс по нему и этапы работ — только счётом (screens/finance.js).
 // Имена функций, хранилище и поле kind не менялись — данные прежней программы и записи до этого выпуска читаются как есть.
 
-const ORDER_BASIS = ['Соглашение', 'Назначение (ст. 51 УПК РФ)', 'Назначение (ст. 50 ГПК РФ)', 'Поручение коллегии'];
+// сборка 252: назначение по ч. 4 ст. 54 КАС РФ — наравне с ГПК и УПК (поручение пользователя 07.11.2026: изменения — для всех видов дел)
+const ORDER_BASIS = ['Соглашение', 'Назначение (ст. 51 УПК РФ)', 'Назначение (ст. 50 ГПК РФ)', 'Назначение (ст. 54 КАС РФ)', 'Поручение коллегии'];
 // запись относится к делу: по внутренней связи, а без неё — по номеру (как в карточке дела, caseCardModel)
 function depMine(x, c) { return !!(x && c && (x.caseId ? x.caseId === c.id : (!!x.caseNum && x.caseNum === c.number))); }
 function depAmount(s) { return Number(String(s == null ? '' : s).replace(/\s/g, '').replace(',', '.')) || 0; }
@@ -20747,6 +20749,95 @@ function depositsTabHtml(list, cases) {
 }
 
 // ── журнал ордеров ──
+// Сборка 252 (поручение пользователя 07.11.2026): на каждую инстанцию — свой ордер, все ордера — в одном деле, для всех видов дел. У ордера два
+// новых необязательных поля: inst — инстанция (ORDER_INST), proceedingId — рассмотрение (тот же постоянный id, что у заседаний, ui/proceedings.js).
+// Перенос базы не нужен: ордер без inst — запись прежних сборок; инстанция по ней не угадывается, показывается как раньше и указывается вручную.
+// Удаление рассмотрения ордер не трогает: он остаётся в журнале со своей инстанцией.
+const ORDER_INST = ['pre', 'first', 'appeal', 'cass', 'vs', 'nz', 'ip', 'other'];
+const ORDER_STAGE_INST = { 'Досудебная': 'pre', 'Первая инстанция': 'first', 'Апелляция': 'appeal', 'Кассация': 'cass', 'Надзор': 'nz', 'Исполнение': 'ip' };
+const ORDER_COURT_INST = ['first', 'appeal', 'cass', 'vs', 'nz'];
+// подпись инстанции по виду дела; to — форма для «На … ордера нет»
+function orderInstName(inst, kind) {
+  const crim = kind === 'Уголовное', koap = kind === 'КоАП';
+  const T = {
+    pre: crim ? ['Следствие, дознание', 'следствие, дознание'] : koap ? ['До суда (орган, должностное лицо)', 'стадию до суда'] : ['Досудебная стадия', 'досудебную стадию'],
+    first: ['Первая инстанция', 'первую инстанцию'], appeal: koap ? ['Жалоба на постановление', 'жалобу на постановление'] : ['Апелляция', 'апелляцию'], cass: ['Кассация', 'кассацию'],
+    vs: ['Верховный Суд', 'Верховный Суд'], nz: ['Надзор', 'надзор'], ip: crim ? ['Исполнение приговора', 'исполнение приговора'] : koap ? ['Исполнение постановления', 'исполнение постановления'] : ['Исполнение', 'исполнение'],
+    other: ['Другое', 'другое поручение'] }[inst];
+  return T ? { label: T[0], to: T[1] } : { label: '', to: '' };
+}
+const orderInstLabel = (inst, kind) => orderInstName(inst, kind).label;
+const orderInstOptions = kind => ORDER_INST.map(i => [i, orderInstLabel(i, kind)]);
+// дело ордера по кэшу дел (журнал, печать, выгрузка показывают инстанцию словами вида дела)
+function orderCaseOf(o) { if (!o) return null; return (o.caseId && typeof CASES_BY_ID !== 'undefined' && CASES_BY_ID[o.caseId]) || (o.caseNum && typeof CASES_BY_NUM !== 'undefined' && CASES_BY_NUM[o.caseNum]) || null; }
+function orderInstOf(o, c) { const k = c || orderCaseOf(o); return o && o.inst ? orderInstLabel(o.inst, (k && k.kind) || '') : ''; }
+function orderCurrentPid(c, inst) { return ORDER_COURT_INST.includes(inst) && typeof procCurrentId === 'function' ? procCurrentId(c, inst) : ''; }
+// на какую инстанцию нужен ордер сейчас: по стадии дела; у завершённого и архивного дела — ни на какую
+function orderTarget(c) {
+  if (!c || c.status === 'Завершено' || c.archived) return null;
+  let inst = ORDER_STAGE_INST[c.stage]; if (!inst) return null;
+  if (inst === 'cass' && (c.courtNoVs || c.linkVs || c.cs2DecisionDate || c.cs2Result)) inst = 'vs';
+  return { inst, pid: orderCurrentPid(c, inst) };
+}
+// ордер закрывает инстанцию: та же инстанция и то же рассмотрение; ордер без рассмотрения — на инстанцию в целом
+function orderCovers(o, t) { return !!(o && t && o.inst === t.inst && (!o.proceedingId || !t.pid || o.proceedingId === t.pid)); }
+function orderCaseModel(c, orders) {
+  const mine = (orders || []).filter(o => o && !o._deleted && depMine(o, c)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  const t = orderTarget(c), hit = t ? mine.find(o => orderCovers(o, t)) || null : null, noInst = mine.find(o => !o.inst) || null;
+  const state = !mine.length ? 'none' : hit ? 'ok' : noInst ? 'noinst' : t ? 'missing' : 'last';
+  return { mine, t, hit, noInst, state, shown: hit || noInst || mine[0] || null, again: !!(state === 'missing' && mine.some(o => o.inst === t.inst)) };
+}
+// строка «Ордер …» вверху карточки дела: на текущую инстанцию ордер есть — он; нет — сказано словами и действие на месте
+function orderLineModel(c, orders) {
+  const m = orderCaseModel(c, orders), o = m.shown, kind = (c && c.kind) || '';
+  const title = x => 'Ордер № ' + (x.num || '—') + (x.date ? ' от ' + fmtDate(x.date) : '') + (x.inst ? ' · ' + orderInstLabel(x.inst, kind) : '') + (x.basis && x.basis !== 'Соглашение' ? ' · ' + x.basis : '');
+  const name = m.t ? orderInstName(m.t.inst, kind) : null;
+  const ord = m.state === 'none' ? 'Ордер не выписан' : m.state === 'missing' ? (m.again ? 'Новое рассмотрение (' + name.label.toLowerCase() + '): ордера нет' : 'На ' + name.to + ' ордера нет') : title(o);
+  const write = m.state === 'none' || m.state === 'missing';
+  return { ord, ordBtn: m.state === 'noinst' ? 'Указать инстанцию' : write ? 'Выписать ордер' : 'Открыть', ordId: write ? '' : o.id, ordInst: write && m.t ? m.t.inst : '', ordPid: write && m.t ? m.t.pid : '', ordMore: m.mine.length ? 'Все ордера (' + m.mine.length + ')' : '', count: m.mine.length, state: m.state };
+}
+// лист «Ордера по делу»: группы по инстанциям и рассмотрениям. Группа без ордера видна («ордера нет» и «Выписать»), если рассмотрение есть в деле
+// или инстанция — текущая; ордер без инстанции — в своей группе последним
+function orderGroups(c, orders) {
+  const kind = (c && c.kind) || '', m = orderCaseModel(c, orders), rows = typeof procModel === 'function' ? procModel(c, []) : [], groups = [];
+  const add = (inst, pid, title, tag) => { const g = { inst, pid: pid || '', title, tag: tag || '', list: [], cur: false }; groups.push(g); return g; };
+  for (const r of rows) {
+    if (!ORDER_INST.includes(r.slot)) continue;
+    const alone = rows.filter(x => x.slot === r.slot).length === 1 && r.kind !== 'extra';
+    add(r.slot, r.id, alone ? orderInstLabel(r.slot, kind) : r.label, r.kind === 'archived' ? 'прежнее' : r.kind === 'extra' ? (typeof procMatterOf === 'function' && procMatterOf(r.p) ? 'материал' : 'параллельное') : '').current = r.kind === 'current';
+  }
+  if (m.t && !groups.some(g => g.inst === m.t.inst && (g.pid === m.t.pid || !m.t.pid))) add(m.t.inst, m.t.pid, orderInstLabel(m.t.inst, kind));
+  if (m.t) { const g = groups.find(x => x.inst === m.t.inst && (x.pid === m.t.pid || !m.t.pid)); if (g) g.cur = true; }
+  const none = [];
+  for (const o of m.mine.slice().reverse()) {
+    if (!o.inst) { none.push(o); continue; }
+    const g = (o.proceedingId && groups.find(x => x.inst === o.inst && x.pid === o.proceedingId))
+      || (!o.proceedingId && (groups.find(x => x.inst === o.inst && x.current) || groups.find(x => x.inst === o.inst)))
+      || groups.find(x => x.inst === o.inst && !x.pid) || add(o.inst, '', orderInstLabel(o.inst, kind));
+    g.list.push(o);
+  }
+  const idx = g => ORDER_INST.indexOf(g.inst), sorted = groups.map((g, i) => [g, i]).sort((a, b) => idx(a[0]) - idx(b[0]) || a[1] - b[1]).map(x => x[0]);
+  if (none.length) sorted.push({ inst: '', pid: '', title: 'Инстанция не указана', tag: '', list: none, cur: false });
+  return sorted;
+}
+// кто адвокат в деле: защитник — в уголовном деле и деле об АП, если доверитель не потерпевший и не иной участник
+function orderWho(c) {
+  const kind = c.kind || '', role = String(c.clientRole || '');
+  if (kind !== 'Уголовное' && kind !== 'КоАП') return 'представительство интересов';
+  if (/свидетел/i.test(role)) return 'оказание юридической помощи свидетелю';
+  return /потерпевш|гражданск|заявител|законный представитель/i.test(role) ? 'представительство интересов' : 'защита';
+}
+// подсказка для поля «Поручение / стадия»: только предложение, поле правится свободно
+function orderStageText(c, inst, pid) {
+  if (!c || !ORDER_INST.includes(inst) || inst === 'other') return '';
+  const kind = c.kind || '', crim = kind === 'Уголовное', koap = kind === 'КоАП';
+  const where = { pre: crim ? (c.crimStage === 'Доследственная проверка' ? 'на стадии проверки сообщения о преступлении' : 'на стадии предварительного расследования') : koap ? 'в производстве по делу об административном правонарушении' : 'на досудебной стадии',
+    first: koap ? 'при рассмотрении дела об административном правонарушении' : 'в суде первой инстанции', appeal: koap ? 'при рассмотрении жалобы на постановление' : 'в суде апелляционной инстанции',
+    cass: 'в суде кассационной инстанции', vs: 'в Верховном Суде РФ', nz: 'в порядке надзора', ip: crim ? 'на стадии исполнения приговора' : koap ? 'на стадии исполнения постановления' : 'в исполнительном производстве' }[inst];
+  const rows = typeof procModel === 'function' ? procModel(c, []) : [], r = rows.find(x => x.id === pid) || rows.find(x => x.slot === inst && x.kind === 'current'), v = r ? r.view : null;
+  const place = inst === 'pre' ? [c.agency] : inst === 'vs' || inst === 'nz' ? [v && v.no ? 'дело № ' + v.no : ''] : [v && v.court, v && v.no ? 'дело № ' + v.no : ''];
+  return [orderWho(c) + ' ' + where].concat(place.filter(Boolean)).join(', ');
+}
 // следующий номер: наибольший числовой в журнале + 1 (как в v314 nextOrderNo); пусто — если ордеров ещё нет
 function nextOrderNo(orders) { let max = 0; (orders || []).filter(o => o && !o._deleted).forEach(o => { const n = parseInt(String(o.num || '').replace(/\D/g, ''), 10); if (n > max) max = n; }); return max ? String(max + 1) : ''; }
 const orderNumKey = s => String(s || '').replace(/\s+/g, '').replace(/^№/, '').toLowerCase();
@@ -20755,35 +20846,69 @@ function formModelOrder(v, prev, orders) {
   if (!num || !date) return { error: 'Заполните номер и дату ордера' };
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'Дата — из поля даты' };
   const p = prev || {}, dup = (orders || []).find(o => o && !o._deleted && o.id !== p.id && orderNumKey(o.num) === orderNumKey(num));
-  return { obj: { ...p, id: p.id || uid('О'), num, date, ...formCaseLink(v.caseNum, prev), basis: ORDER_BASIS.includes(v.basis) ? v.basis : (String(v.basis || '').trim() || 'Соглашение'), stage: String(v.stage || '').trim(), note: String(v.note || '').trim(), createdAt: p.createdAt || Date.now() }, dup: dup || null };
+  const inst = v.inst === undefined ? (p.inst || '') : (ORDER_INST.includes(v.inst) ? v.inst : ''), pid = !inst ? '' : v.proceedingId === undefined ? (p.proceedingId || '') : String(v.proceedingId || '');
+  return { obj: { ...p, id: p.id || uid('О'), num, date, ...formCaseLink(v.caseNum, prev), inst, proceedingId: pid, basis: ORDER_BASIS.includes(v.basis) ? v.basis : (String(v.basis || '').trim() || 'Соглашение'), stage: String(v.stage || '').trim(), note: String(v.note || '').trim(), createdAt: p.createdAt || Date.now() }, dup: dup || null };
+}
+function orderRowHtml(o, sub) { return `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>Ордер № ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}${sub ? `<br><span class="muted small">${esc(sub)}</span>` : ''}</span>${icon('chevron-right', 'icon-sm')}</button>`; }
+function orderGroupsHtml(c, orders) {
+  return orderGroups(c, orders).map(g => `<div class="ord-group" data-inst="${esc(g.inst)}"><div class="ord-head"><span><b>${esc(g.title)}</b>${g.tag ? ' ' + badge(g.tag) : ''}${g.cur ? ' ' + badge('текущая', 'accent') : ''}</span>${g.inst ? btn('Выписать', `openOrderForm('', '${jsq(c.number || '')}', '${jsq(g.inst)}', '${jsq(g.pid)}')`, 'small-btn', 'plus') : ''}</div>
+    ${g.list.length ? `<div class="list-rows">${g.list.map(o => orderRowHtml(o, [o.basis, o.stage].filter(Boolean).join(' · '))).join('')}</div>` : '<p class="small muted ord-none">ордера нет</p>'}${g.inst ? '' : '<p class="small muted">Откройте ордер и укажите инстанцию — он займёт своё место в списке.</p>'}</div>`).join('');
 }
 async function openOrdersSheet(caseNum, mode) {
   await refreshCasesCache();
   const all = (await getAll('orders')).filter(o => o && !o._deleted).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.num || '').localeCompare(String(a.num || ''), 'ru', { numeric: true }));
   const c = caseNum ? CASES_BY_NUM[caseNum] : null, list = c ? all.filter(o => depMine(o, c)) : all;
-  const rows = list.map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>Ордер № ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}<br><span class="muted small">${esc([caseNum ? '' : (o.caseNum || 'без дела'), o.basis, o.stage].filter(Boolean).join(' · '))}</span></span>${icon('chevron-right', 'icon-sm')}</button>`).join('');
-  openSheet(c ? 'Ордера по делу ' + (c.number || '') : 'Журнал ордеров', `<p class="small muted">${c ? 'Ордера, выписанные по этому делу' : 'Все выписанные ордера'}: ${list.length}. Номер — с бланка из вашей книжки; ордер из формы дела («Номер ордера») попадает сюда сам.</p>
-    ${list.length ? `<div class="list-rows" id="ord-rows">${rows}</div>` : '<p class="small muted">Ордеров пока нет.</p>'}
+  const rows = list.map(o => orderRowHtml(o, [caseNum ? '' : (o.caseNum || 'без дела'), orderInstOf(o), o.basis, o.stage].filter(Boolean).join(' · '))).join('');
+  const content = c ? `<div id="ord-rows">${orderGroupsHtml(c, all)}</div>` : list.length ? `<div class="list-rows" id="ord-rows">${rows}</div>` : '<p class="small muted">Ордеров пока нет.</p>';
+  openSheet(c ? 'Ордера по делу ' + (c.number || '') : 'Журнал ордеров', `<p class="small muted">${c ? 'На каждую инстанцию — свой ордер; все ордера дела собраны здесь. Выписано' : 'Все выписанные ордера'}: ${list.length}. Номер — с бланка из вашей книжки; ордер из формы дела («Номер ордера») попадает сюда сам.</p>
+    ${content}
     <div class="form-actions">${btn('Выписать ордер', `openOrderForm('', '${jsq(caseNum || '')}')`, 'primary', 'plus')}${typeof printRegister === 'function' && !c ? btn('Реестр на печать', "printRegister('orders')", '', 'files') : ''}</div>`, mode || (UI.cur ? true : undefined));
   // отметка листа-журнала: после записи ордера из него журнал показывается заново со свежим списком (saveOrderForm)
   if (UI.cur) UI.cur.ordJournal = caseNum || '';
 }
-async function openOrderForm(id, presetCaseNum) {
+// форма ордера: дело, инстанция, рассмотрение и подсказка поручения зависят друг от друга
+const ORD_FORM = { auto: '', pid: '' };
+function orderFormCase() { const num = fv('or-caseNum'); return (num && typeof CASES_BY_NUM !== 'undefined' && CASES_BY_NUM[num]) || null; }
+function orderProcRows(c, inst) { return c && typeof procModel === 'function' ? procModel(c, []).filter(r => r.slot === inst) : []; }
+// рассмотрение для записи: выбранное в списке; единственное в инстанции; иначе — текущее
+function orderFormPid(c, inst) {
+  const el = document.getElementById('or-proc'); if (el) return String(el.value || '');
+  const rows = orderProcRows(c, inst); return rows.length === 1 ? rows[0].id : (c ? orderCurrentPid(c, inst) : '');
+}
+function orderFormSync() {
+  const c = orderFormCase(), sel = document.getElementById('or-inst'), box = document.getElementById('or-proc-box'); if (!sel || !box) return;
+  const inst = sel.value, kind = (c && c.kind) || '', cur = sel.value;
+  sel.innerHTML = '<option value="">—</option>' + orderInstOptions(kind).map(([v, t]) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(t)}</option>`).join('');
+  const rows = orderProcRows(c, inst), keep = ORD_FORM.pid && rows.some(r => r.id === ORD_FORM.pid) ? ORD_FORM.pid : c ? orderCurrentPid(c, inst) : '';
+  box.innerHTML = rows.length > 1 ? fSelect('or-proc', 'Рассмотрение', keep, rows.map(r => [r.id, r.label + (r.kind === 'archived' ? ' (прежнее)' : '')])) : '';
+  box.hidden = rows.length <= 1;
+  const stage = document.getElementById('or-stage'); if (!stage) return;
+  if (!stage.value.trim() || stage.value === ORD_FORM.auto) { ORD_FORM.auto = orderStageText(c, inst, orderFormPid(c, inst)); stage.value = ORD_FORM.auto; }
+}
+function orderFormProcChanged() { const el = document.getElementById('or-proc'); if (el) ORD_FORM.pid = el.value; orderFormSync(); }
+async function openOrderForm(id, presetCaseNum, presetInst, presetPid) {
   const prev = id ? await getOne('orders', id) : null; if (id && !prev) { toast('Ордер не найден', true); return; }
-  const orders = await getAll('orders'), o = prev || { num: nextOrderNo(orders), date: todayISO(), caseNum: presetCaseNum || '', basis: 'Соглашение' };
+  const orders = await getAll('orders'), o = prev || { num: nextOrderNo(orders), date: todayISO(), caseNum: presetCaseNum || '', basis: 'Соглашение', inst: presetInst || '', proceedingId: presetPid || '' };
   const cases = await depCasesFor(o.caseNum), basis = ORDER_BASIS.includes(o.basis) || !o.basis ? ORDER_BASIS : ORDER_BASIS.concat([o.basis]);
-  const body = `<p class="small muted">Номер — с бланка ордера из вашей книжки${prev ? '' : '; предложен следующий за последним в журнале'}.</p><div class="form-grid">
+  const c = cases.find(x => (o.caseId ? x.id === o.caseId : x.number === o.caseNum)) || orderCaseOf(o), t = !prev && !o.inst ? orderTarget(c) : null;
+  if (t) { o.inst = t.inst; o.proceedingId = t.pid; }
+  const body = `<p class="small muted">Номер — с бланка ордера из вашей книжки${prev ? '' : '; предложен следующий за последним в журнале'}. На каждую инстанцию — свой ордер: все они видны в деле.</p><div class="form-grid">
     ${fInput('or-num', 'Номер ордера *', o.num, 'inputmode="numeric" autocomplete="off"')}${fInput('or-date', 'Дата *', o.date, 'type="date"')}
-    ${fCasePick('or-caseNum', 'Дело', o.caseNum, cases, 'number', true)}${fSelect('or-basis', 'Основание', o.basis || 'Соглашение', basis)}
+    ${fCasePick('or-caseNum', 'Дело', o.caseNum, cases, 'number', true)}${fSelect('or-inst', 'Инстанция', o.inst || '', orderInstOptions((c && c.kind) || ''), true)}
+    <div class="wide" id="or-proc-box" hidden></div>${fSelect('or-basis', 'Основание', o.basis || 'Соглашение', basis)}
     ${wide(fInput('or-stage', 'Поручение / стадия', o.stage, 'autocomplete="off" placeholder="защита в суде первой инстанции"'))}${wide(fInput('or-note', 'Заметка', o.note, 'autocomplete="off"'))}
   </div>${fSaveBar(`saveOrderForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('orders', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Ордер № ' + (o.num || '') : 'Новый ордер', body, UI.cur ? true : undefined);
+  ORD_FORM.auto = ''; ORD_FORM.pid = o.proceedingId || ''; orderFormSync();
+  const on = (el, h) => { const n = document.getElementById(el); if (n) n.addEventListener('change', h); };
+  on('or-inst', () => { ORD_FORM.pid = ''; orderFormSync(); }); on('or-caseNum', () => { ORD_FORM.pid = ''; orderFormSync(); });
+  const box = document.getElementById('or-proc-box'); if (box) box.addEventListener('change', orderFormProcChanged);
   if (prev && typeof formRecMark === 'function') formRecMark('orders', prev);
 }
 let ORD_WARNED = '';
 async function saveOrderForm(id) {
   const prev = id ? await getOne('orders', id) : null; if (formGone(id, prev, 'Ордер')) return;
-  const v = { num: fv('or-num'), date: fv('or-date'), caseNum: fv('or-caseNum'), basis: fv('or-basis'), stage: fv('or-stage'), note: fv('or-note') };
+  const inst = fv('or-inst'), v = { num: fv('or-num'), date: fv('or-date'), caseNum: fv('or-caseNum'), inst, proceedingId: inst ? orderFormPid(orderFormCase(), inst) : '', basis: fv('or-basis'), stage: fv('or-stage'), note: fv('or-note') };
   const r = formModelOrder(v, prev, await getAll('orders')); if (r.error) { fErr(r.error); return; }
   const key = [id || '', orderNumKey(r.obj.num)].join('|');
   if (r.dup && ORD_WARNED !== key) { ORD_WARNED = key; fErr('Ордер № ' + r.obj.num + ' уже есть в журнале (от ' + fmtDate(r.dup.date) + (r.dup.caseNum ? ', дело ' + r.dup.caseNum : '') + '). Если это другой ордер с тем же номером — нажмите «Сохранить» ещё раз.'); return; }
@@ -20797,8 +20922,48 @@ async function saveOrderForm(id) {
 // блок «Ордера» в карточке дела
 function ordersBlockHtml(c, list) {
   const mine = (list || []).filter(o => o && !o._deleted && depMine(o, c)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-  return `<div class="section-label">Ордера${mine.length ? ' · ' + mine.length : ''}</div>${mine.length ? `<div class="list-rows">${mine.slice(0, 6).map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>№ ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}</span><span class="muted">${esc(o.basis || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Ордеров по делу нет.</p>'}
-    <div class="actions" style="margin:8px 0">${btn('Выписать ордер', `openOrderForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${mine.length > 6 ? btn('Все ордера дела', `openOrdersSheet('${jsq(c.number || '')}')`, 'small-btn', 'list') : ''}</div>`;
+  return `<div class="section-label">Ордера${mine.length ? ' · ' + mine.length : ''}</div>${mine.length ? `<div class="list-rows">${mine.slice(0, 6).map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>№ ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}</span><span class="muted">${esc(orderInstOf(o, c) || o.basis || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Ордеров по делу нет.</p>'}
+    <div class="actions" style="margin:8px 0">${btn('Выписать ордер', `openOrderForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${mine.length ? btn('Все ордера дела', `openOrdersSheet('${jsq(c.number || '')}')`, 'small-btn', 'list') : ''}</div>`;
+}
+// «Сегодня» → «Требует внимания»: заседание в ближайшие дни, по делу есть ордера, а на инстанцию заседания — нет. Дела без ордеров и с ордером без
+// инстанции не называются (представительство по доверенности, записи прежних сборок); материалы — не называются: они идут в той же инстанции
+const ORDER_HEAR_DAYS = 30;
+function orderHearingTarget(h, c) {
+  if (typeof procHearingSlot !== 'function') return null;
+  if (typeof procMatterOfHearing === 'function' && procMatterOfHearing(c, h)) return null;
+  const slot = procHearingSlot(h, c); if (!ORDER_COURT_INST.includes(slot)) return null;
+  return { inst: slot, pid: h.proceedingId || orderCurrentPid(c, slot) };
+}
+function orderHearingItems(orders, hearings, caseOf, today) {
+  const out = [], seen = new Set();
+  (hearings || []).filter(h => h && !h._deleted && h.date).sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || ''))).forEach(h => {
+    const k = todayDayDiff(h.date, today); if (k === null || k < 0 || k > ORDER_HEAR_DAYS) return;
+    const c = caseOf(h); if (!c || seen.has(c.id)) return;
+    const mine = (orders || []).filter(o => o && !o._deleted && depMine(o, c)); if (!mine.length || mine.some(o => !o.inst)) return;
+    const t = orderHearingTarget(h, c); if (!t || mine.some(o => orderCovers(o, t))) return;
+    seen.add(c.id);
+    const name = orderInstName(t.inst, c.kind || '');
+    out.push({ key: 'oh:' + c.id + ':' + t.inst + ':' + t.pid, kind: 'order', pr: 1, date: h.date, title: 'На ' + name.to + ' ордера нет',
+      sub: fmtDate(h.date) + (h.time ? ' ' + h.time : '') + ' · ' + [c.number, c.client].filter(Boolean).join(' · '), when: k === 0 ? 'Заседание сегодня' : k === 1 ? 'Заседание завтра' : 'Заседание через ' + k + ' ' + plural(k, 'день', 'дня', 'дней'),
+      open: `openOrdersSheet('${jsq(c.number || '')}')`, act: { fn: `openOrderForm('', '${jsq(c.number || '')}', '${jsq(t.inst)}', '${jsq(t.pid)}')`, label: 'Выписать ордер', icon: 'plus' }, badges: [['Ордер', 'warn']] });
+  });
+  return out;
+}
+// подпись в документах: «по ордеру № … от …» — только если ордер есть на текущую инстанцию и действующей доверенности по делу нет (иначе выбор за адвокатом)
+function orderSignText(c, orders, poa, today) {
+  if (!c) return ''; const m = orderCaseModel(c, orders); if (!m.hit) return '';
+  if (typeof poaForCase === 'function' && typeof poaValidOn === 'function' && poaForCase(poa, c).some(p => poaValidOn(p, today))) return '';
+  return 'ордеру № ' + (m.hit.num || '') + (m.hit.date ? ' от ' + fmtDate(m.hit.date) : '');
+}
+// форма дела: у дела уже есть ордера — поля «Номер ордера» и «Дата ордера» скрыты (значения остаются в записи), вместо них ссылка на лист
+async function caseFormOrdersNote(c) {
+  if (!c || !c.id) return;
+  const no = document.getElementById('cx-agreement-orderNo'), dt = document.getElementById('cx-agreement-orderDate'); if (!no || !dt) return;
+  let orders = []; try { orders = (await getAll('orders')).filter(o => o && !o._deleted && depMine(o, c)); } catch (e) { logErr('case:orders', e); return; }
+  if (!orders.length || document.getElementById('cx-ord-note')) return;
+  const lab = el => el.closest('.field'), a = lab(no), b = lab(dt); if (!a || !b) return;
+  a.hidden = true; b.hidden = true;
+  a.insertAdjacentHTML('beforebegin', `<div class="wide" id="cx-ord-note"><p class="small muted">Ордера ведутся по инстанциям: их по этому делу ${orders.length}.</p>${btn('Все ордера дела', `openOrdersSheet('${jsq(c.number || '')}')`, 'small-btn', 'list')}</div>`);
 }
 // форма дела: «Номер ордера» заполнен, а в журнале такого номера нет — ордер записывается в журнал (v314 maybeCreateOrderForCase делал это
 // только для нового дела; здесь — и при правке, если номер появился позже). Возвращает записанный ордер или null.
@@ -20810,7 +20975,8 @@ async function orderFromCase(caseObj, prev) {
   const orders = typeof getAllRaw === 'function' ? await getAllRaw('orders') : await getAll('orders');
   if (orders.some(o => o && orderNumKey(o.num) === orderNumKey(num))) return null;
   const date = /^\d{4}-\d{2}-\d{2}$/.test(String(caseObj.orderDate || '')) ? caseObj.orderDate : todayISO();
-  const o = { id: uid('О'), num, date, caseNum: caseObj.number || '', caseId: caseObj.id || '', basis: 'Соглашение', stage: '', note: 'из формы дела', createdAt: Date.now() };
+  const t = orderTarget(caseObj);
+  const o = { id: uid('О'), num, date, caseNum: caseObj.number || '', caseId: caseObj.id || '', inst: t ? t.inst : '', proceedingId: t ? t.pid : '', basis: 'Соглашение', stage: t ? orderStageText(caseObj, t.inst, t.pid) : '', note: 'из формы дела', createdAt: Date.now() };
   await put('orders', o); return o;
 }
 
@@ -21607,9 +21773,9 @@ function registerHtml(kind, d, today) {
     n = list.length; if (!n) rows = '<tr><td colspan="8">Предстоящих заседаний нет</td></tr>';
   } else if (kind === 'orders') {
     title = 'Реестр ордеров'; const list = live(d.orders).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-    head = '<tr><th>№</th><th>Ордер №</th><th>Дата</th><th>Дело</th><th>Доверитель</th><th>Основание</th><th>Поручение</th></tr>';
-    rows = list.map((o, i) => `<tr><td>${i + 1}</td><td><b>${prEsc(o.num || o.number || '')}</b></td><td>${prEsc(o.date ? fmtDate(o.date) : '')}</td><td>${prEsc(o.caseNum || '')}</td><td>${prEsc(o.client || client(o.caseNum))}</td><td>${prEsc(o.basis || o.org || '')}</td><td>${prEsc(o.stage || '')}</td></tr>`).join('');
-    n = list.length; if (!n) rows = '<tr><td colspan="7">Ордеров нет</td></tr>';
+    head = '<tr><th>№</th><th>Ордер №</th><th>Дата</th><th>Дело</th><th>Доверитель</th><th>Инстанция</th><th>Основание</th><th>Поручение</th></tr>';
+    rows = list.map((o, i) => `<tr><td>${i + 1}</td><td><b>${prEsc(o.num || o.number || '')}</b></td><td>${prEsc(o.date ? fmtDate(o.date) : '')}</td><td>${prEsc(o.caseNum || '')}</td><td>${prEsc(o.client || client(o.caseNum))}</td><td>${prEsc(typeof orderInstOf === 'function' ? orderInstOf(o, (d.cases || []).find(c => c && (o.caseId ? c.id === o.caseId : c.number === o.caseNum))) : '')}</td><td>${prEsc(o.basis || o.org || '')}</td><td>${prEsc(o.stage || '')}</td></tr>`).join('');
+    n = list.length; if (!n) rows = '<tr><td colspan="8">Ордеров нет</td></tr>';
   } else if (kind === 'poa') {
     title = 'Реестр доверенностей'; const until = p => (typeof poaUntil === 'function' ? poaUntil(p) : (p.until || ''));
     const list = live(d.poa).sort((a, b) => (until(a) || '9999').localeCompare(until(b) || '9999'));
@@ -21653,7 +21819,7 @@ const CSV_COLS = {
   tasks: [['title', 'Задача'], ['caseNum', 'Дело'], ['due', 'Срок'], ['time', 'Время'], ['priority', 'Приоритет'], ['done', 'Выполнено'], ['note', 'Заметка']],
   mail: [['barcode', 'Трек-номер'], ['title', 'Описание'], ['caseNum', 'Дело'], ['status', 'Последний статус'], ['statusAt', 'Дата статуса']],
   expenses: [['caseNum', 'Дело'], ['category', 'Категория'], ['amount', 'Сумма'], ['date', 'Дата'], ['recoverable', 'К взысканию'], ['note', 'Примечание']],
-  orders: [['num', 'Номер'], ['date', 'Дата'], ['caseNum', 'Дело'], ['basis', 'Основание'], ['stage', 'Поручение'], ['note', 'Заметка']],
+  orders: [['num', 'Номер'], ['date', 'Дата'], ['caseNum', 'Дело'], ['inst', 'Инстанция'], ['basis', 'Основание'], ['stage', 'Поручение'], ['note', 'Заметка']],
   poa: [['clientName', 'Доверитель'], ['issued', 'Выдана'], ['until', 'Действует до'], ['notary', 'Удостоверена'], ['regno', 'Реестровый №'], ['caseNum', 'Дело'], ['revoked', 'Отозвана']],
   time: [['date', 'Дата'], ['caseNum', 'Дело'], ['minutes', 'Минут'], ['desc', 'Работа'], ['billed', 'В счёте']],
   deposits: [['date', 'Дата'], ['caseNum', 'Дело'], ['kind', 'Тип'], ['amount', 'Сумма'], ['note', 'Назначение']],
@@ -21663,7 +21829,7 @@ function csvCell(v) { if (v === null || v === undefined) v = ''; if (typeof v ==
 function csvText(store, rows) {
   const cols = CSV_COLS[store]; const head = cols.map(c => csvCell(c[1])).join(';');
   // противная сторона дела — по правилу caseOpponentOf (screens/cases.js), а не только поле opponent (13.10.2026)
-  const body = (rows || []).filter(r => r && !r._deleted).map(r => cols.map(c => csvCell(store === 'cases' && c[0] === 'opponent' ? caseOpponentName(r) : typeof r[c[0]] === 'number' && c[0] === 'createdAt' ? localISO(new Date(r[c[0]])) : r[c[0]])).join(';')).join('\r\n');
+  const body = (rows || []).filter(r => r && !r._deleted).map(r => cols.map(c => csvCell(store === 'cases' && c[0] === 'opponent' ? caseOpponentName(r) : store === 'orders' && c[0] === 'inst' ? (typeof orderInstOf === 'function' ? orderInstOf(r) : r.inst) : typeof r[c[0]] === 'number' && c[0] === 'createdAt' ? localISO(new Date(r[c[0]])) : r[c[0]])).join(';')).join('\r\n');
   return '﻿' + head + '\r\n' + body;
 }
 async function exportCSV(store) {
@@ -21867,7 +22033,7 @@ function caseSummaryHtml(c, d, mode, today) {
     const ts = live(d.tasks).filter(mine), open = ts.filter(x => !x.done).sort((a, b) => String(a.due || '9999').localeCompare(String(b.due || '9999'))), done = ts.length - open.length;
     if (ts.length) h += `<h2>Задачи (открытых ${open.length}${done ? ', выполненных ' + done : ''})</h2>${open.length ? `<table><thead><tr><th>Срок</th><th>Задача</th><th>Приоритет</th></tr></thead><tbody>${open.map(x => `<tr><td>${prEsc(date(x.due))}${x.time ? ' ' + prEsc(x.time) : ''}</td><td>${prEsc(x.title || '')}</td><td>${prEsc(x.priority || '')}</td></tr>`).join('')}</tbody></table>` : ''}`;
     const os = live(d.orders).filter(mine).sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
-    if (os.length) h += `<h2>Ордера (${os.length})</h2><table><thead><tr><th>№</th><th>Дата</th><th>Основание</th><th>Поручение</th></tr></thead><tbody>${os.map(o => `<tr><td>${prEsc(o.num || o.number || '')}</td><td>${prEsc(date(o.date))}</td><td>${prEsc(o.basis || o.org || '')}</td><td>${prEsc(o.stage || '')}</td></tr>`).join('')}</tbody></table>`;
+    if (os.length) h += `<h2>Ордера (${os.length})</h2><table><thead><tr><th>№</th><th>Дата</th><th>Инстанция</th><th>Основание</th><th>Поручение</th></tr></thead><tbody>${os.map(o => `<tr><td>${prEsc(o.num || o.number || '')}</td><td>${prEsc(date(o.date))}</td><td>${prEsc(typeof orderInstOf === 'function' ? orderInstOf(o, c) : '')}</td><td>${prEsc(o.basis || o.org || '')}</td><td>${prEsc(o.stage || '')}</td></tr>`).join('')}</tbody></table>`;
     const ps = Array.isArray(c.participants) ? c.participants.filter(p => p && p.name) : [];
     if (ps.length) h += `<h2>Участники дела</h2><table><thead><tr><th>ФИО / наименование</th><th>Роль</th><th>Контакты</th></tr></thead><tbody>${ps.map(p => `<tr><td>${prEsc(p.name)}</td><td>${prEsc(p.role || '')}</td><td>${prEsc([p.phone, p.email].filter(Boolean).join(', '))}${p.note ? '<br>' + prEsc(p.note) : ''}</td></tr>`).join('')}</tbody></table>`;
   }
@@ -23213,7 +23379,7 @@ const TPL_LABELS = {
   'ПоложениеУчастника': 'процессуальное положение доверителя', 'РольДоверителя': 'роль доверителя', 'ДатаРождения': 'дата рождения доверителя', 'МестоРождения': 'место рождения доверителя',
   'АдресДоверителя': 'адрес доверителя', 'Индекс': 'индекс доверителя', 'АдресДоверителяПолный': 'адрес доверителя', 'ИНН': 'ИНН доверителя', 'ТелефонДоверителя': 'телефон доверителя',
   'EmailДоверителя': 'электронная почта доверителя', 'Паспорт': 'паспорт доверителя: серия и номер', 'ПаспортВыдан': 'кем и когда выдан паспорт',
-  'НомерДела': 'номер дела', 'НомерВСуде': 'номер дела в суде', 'УИД': 'УИД дела', 'ВидДела': 'вид дела', 'Категория': 'категория дела', 'СтатусДела': 'статус дела', 'Предмет': 'предмет спора',
+  'ОрдерПодпись': 'ордер на текущую инстанцию: № и дата', 'НомерДела': 'номер дела', 'НомерВСуде': 'номер дела в суде', 'УИД': 'УИД дела', 'ВидДела': 'вид дела', 'Категория': 'категория дела', 'СтатусДела': 'статус дела', 'Предмет': 'предмет спора',
   'Суд': 'суд', 'АдресСуда': 'адрес суда', 'ТелефонСуда': 'телефон суда', 'Судья': 'судья', 'СудАпелляции': 'суд апелляционной инстанции', 'АдресСудаАпелляции': 'адрес суда апелляционной инстанции',
   'ДатаРешения': 'дата решения', 'ДатаМотивированногоРешения': 'дата мотивированного решения', 'ДатаАпелляционногоОпределения': 'дата апелляционного определения',
   'ДатаКассационногоОпределения': 'дата кассационного определения', 'ДатаПостановленияАП': 'дата постановления по делу об АП', 'ДатаВрученияПостановления': 'дата вручения постановления',
@@ -23234,7 +23400,7 @@ const TPL_LABELS = {
 const TPL_ROLE_KEYS = new Set(['ПоложениеДоверителя', 'ПоложениеУчастника', 'РольДоверителя', 'РольОппонента']);
 const TPL_NAME_KEYS = new Set(['Доверитель', 'Участник', 'Оппонент', 'ПротивнаяСторона', 'Адвокат', 'Представитель', 'Юрист', 'Пристав', 'Судья', 'ДолжностноеЛицо']);
 const TPL_FIELD_GROUPS = [
-  ['Дело и суд', ['НомерДела', 'НомерВСуде', 'УИД', 'ВидДела', 'Категория', 'Предмет', 'Суд', 'АдресСуда', 'ТелефонСуда', 'Судья', 'СудАпелляции', 'АдресСудаАпелляции', 'ДатаРегистрации', 'ДатаРешения', 'ДатаМотивированногоРешения', 'ДатаАпелляционногоОпределения', 'ДатаКассационногоОпределения', 'ПравоохранительныйОрган', 'ДолжностноеЛицо', 'ДатаПостановленияАП', 'ДатаВрученияПостановления', 'НомерИП', 'ОСП', 'Пристав', 'ИсполнительныйДокумент', 'ДатаВозбужденияИП']],
+  ['Дело и суд', ['НомерДела', 'НомерВСуде', 'УИД', 'ОрдерПодпись', 'ВидДела', 'Категория', 'Предмет', 'Суд', 'АдресСуда', 'ТелефонСуда', 'Судья', 'СудАпелляции', 'АдресСудаАпелляции', 'ДатаРегистрации', 'ДатаРешения', 'ДатаМотивированногоРешения', 'ДатаАпелляционногоОпределения', 'ДатаКассационногоОпределения', 'ПравоохранительныйОрган', 'ДолжностноеЛицо', 'ДатаПостановленияАП', 'ДатаВрученияПостановления', 'НомерИП', 'ОСП', 'Пристав', 'ИсполнительныйДокумент', 'ДатаВозбужденияИП']],
   ['Доверитель', ['Доверитель', 'ДоверительКратко', 'ПоложениеДоверителя', 'ТипУчастника', 'ДатаРождения', 'МестоРождения', 'Паспорт', 'ПаспортВыдан', 'АдресДоверителя', 'Индекс', 'АдресДоверителяПолный', 'ИНН', 'ТелефонДоверителя', 'EmailДоверителя']],
   ['Противная сторона', ['Оппонент', 'РольОппонента', 'АдресОппонента', 'ИННОппонента', 'ОГРНОппонента']],
   ['Деньги и соглашение', ['СуммаИска', 'СуммаИскаПрописью', 'Госпошлина', 'СудебныеРасходы', 'СудебныеРасходыПрописью', 'СуммаУслуг', 'СуммаУслугПрописью', 'Вознаграждение', 'СоглашениеНомер', 'СоглашениеДата']],
@@ -23282,6 +23448,7 @@ function tplFieldsModel(d) {
     'ПравоохранительныйОрган': c.agency || '', 'ДолжностноеЛицо': c.official || c.crimInvestigator || '', 'ДатаРегистрации': tplDate(c.regdate),
     'Оппонент': opp.name || '', 'ПротивнаяСторона': opp.name || '', 'РольОппонента': oppRole, 'АдресОппонента': oppAddr, 'ИННОппонента': opp.inn || '', 'ОГРНОппонента': opp.ogrn || '',
     'СоглашениеНомер': c.agreementNo || '', 'СоглашениеДата': tplDate(c.agreementDate),
+    'ОрдерПодпись': typeof orderSignText === 'function' && c.id ? orderSignText(c, d.orders, d.poa, today) : '',
     'СуммаИска': money(c.amount), 'СуммаИскаПрописью': words(c.amount), 'Госпошлина': money(c.stateFee),
     'СудебныеРасходы': money(expTotal), 'СудебныеРасходыПрописью': words(expTotal), 'СуммаУслуг': money(services), 'СуммаУслугПрописью': words(services), 'Вознаграждение': typeof priceFeeText === 'function' ? priceFeeText(fin) : '',
     'Адвокат': prof.name || '', 'АдвокатКратко': tplFioShort(prof.name || ''), 'РегНомерАдвоката': prof.reg || '', 'РеестрАдвокатов': prof.region || '',
@@ -23450,6 +23617,8 @@ function tplRenderLine(line, M) {
     const r = tplLookup(M, key); let html, text;
     if (r.unknown) { unknown.push(String(key).trim()); html = `<span class="tpl-miss">${esc(all)}</span>`; text = all; }
     else if (r.miss) { empty = true; miss.push(r.miss); html = `<span class="tpl-miss">[УКАЗАТЬ: ${esc(r.miss)}]</span>`; text = ''; }
+    // сборка 252: запасной текст поля — «[УКАЗАТЬ: …]» — такое же незаполненное место: жёлтая отметка и перечень
+    else if (r.def && /^\[УКАЗАТЬ:[^\]]*\]$/.test(r.v)) { miss.push(r.v.slice(9, -1).trim()); html = `<span class="tpl-miss">${esc(r.v)}</span>`; text = r.v; }
     else { if (!r.v) empty = true; else if (!r.def) fills++; html = esc(r.v); text = r.v; }
     vals.push({ html, text });
     return '\u0001' + (vals.length - 1) + '\u0002';
@@ -23502,7 +23671,7 @@ const TPL_HEAD_COURT = ['> В {{Суд}}', '?> {{АдресСуда}}', '', '?> 
   '?> Представитель — адвокат {{Адвокат}}', '?> рег. № {{РегНомерАдвоката}} в реестре адвокатов {{РеестрАдвокатов}}', '?> адрес: {{АдресАдвоката}}', '?> тел. {{ТелефонАдвоката}}', '',
   '?> {{РольОппонента|Противная сторона}}: {{Оппонент}}', '?> адрес: {{АдресОппонента}}'].join('\n');
 // подпись с датой — одним абзацем: в .docx он не разрывается между страницами (keepLines у tpl-l)
-const TPL_SIGN_REP = ['Представитель {{ПоложениеДоверителя:род|доверителя}}', 'по [УКАЗАТЬ: доверенности от … № … или ордеру № … от …]', 'адвокат ______________ {{АдвокатКратко}}', '{{Дата}}'].join('\n');
+const TPL_SIGN_REP = ['Представитель {{ПоложениеДоверителя:род|доверителя}}', 'по {{ОрдерПодпись|[УКАЗАТЬ: доверенности от … № … или ордеру № … от …]}}', 'адвокат ______________ {{АдвокатКратко}}', '{{Дата}}'].join('\n');
 const TPL_BUILTIN = [
   { key: 'pretension', title: 'Претензия', sub: 'контрагенту — до обращения в суд', kinds: ['case', 'client', 'lead'], cat: 'Переписка', to: 'opp',
     hint: 'Срок ответа на претензию по спорам, подсудным арбитражному суду, — тридцать календарных дней со дня направления претензии, если иные срок и (или) порядок не установлены законом или договором (ч. 5 ст. 4 АПК РФ). Для других споров срок и обязательность претензии — по закону или договору.',
@@ -23688,6 +23857,8 @@ async function tplLoadCtx(kind, id) {
     ctx.opp = typeof caseOpponentOf === 'function' ? caseOpponentOf(c) : null; ctx.owner = c.number || '';
     const mine = x => x.caseId ? x.caseId === c.id : (!!c.number && x.caseNum === c.number);
     for (const [k, st] of [['exps', 'expenses'], ['fin', 'finance'], ['time', 'time'], ['hear', 'hearings']]) { try { ctx[k] = live(await getAll(st)).filter(mine); } catch (e) { logErr('doctpl:' + st, e); } }
+    // сборка 252: для подписи «по ордеру № …» — ордера дела и доверенности (общие доверенности доверителя тоже, поэтому без отбора по делу)
+    for (const [k, st] of [['orders', 'orders'], ['poa', 'poa']]) { try { ctx[k] = live(await getAll(st)); } catch (e) { logErr('doctpl:' + st, e); } }
   } else if (kind === 'client') {
     const cl = await getOne('clients', id); if (!cl || cl._deleted) return null;
     ctx.cl = cl; ctx.c = { client: cl.name || '', clientId: cl.id, clientRole: '' }; ctx.owner = cl.name || '';
@@ -26140,11 +26311,14 @@ async function openProcSheet(caseId, key) {
   const fields = Object.keys(src).filter(k => !procEmpty(src[k]) && !(matSrc && (k === 'matter' || k === 'matterOf'))).map(k => row(labels[k] || k, /Date$|At$/.test(k) && /^\d{4}-\d{2}-\d{2}/.test(String(src[k])) ? fmtDate(src[k]) : String(src[k]))).join('');
   const meta = r.kind === 'current' ? (r.cur || {}) : r.p, basis = meta.basis, cancelled = meta.cancelled, url = safeExternalUrl(r.view.link || '');
   const dls = (c.deadlines || []).filter(d => d && (r.kind === 'current' ? !d.proceedingId && d.autoKey && def.acts.some(a => d.autoKey.indexOf(a) === 0) : d.proceedingId === r.id));
+  // сборка 252: ордера этого рассмотрения и выписка нового — прямо здесь (ui/depord.js)
+  const ords = (await getAll('orders')).filter(o => o && !o._deleted && o.inst === r.slot && (typeof depMine !== 'function' || depMine(o, c)) && (o.proceedingId === r.id || (!o.proceedingId && r.kind === 'current')));
   const acts = [];
   if (url) acts.push(`<a class="button small-btn" id="proc-site" href="${esc(url)}" target="_blank" rel="noopener noreferrer">${icon('arrow-right', 'icon-sm')}Открыть сайт суда</a>`);
   if (r.kind === 'current') acts.push(btn('Изменить в форме дела', `openCaseForm('${jsq(caseId)}', true)`, 'small-btn', 'pencil'));
   else acts.push(`<button type="button" class="button small-btn" id="proc-edit" onclick="openProcForm('${jsq(caseId)}', '${jsq(r.id)}')">${icon('pencil', 'icon-sm')}Изменить реквизиты</button>`);
   const isMat = r.kind === 'extra' && !!procMatterOf(r.p);
+  acts.push(`<button type="button" class="button small-btn" id="proc-order" onclick="openOrderForm('', '${jsq(c.number || '')}', '${jsq(r.slot)}', '${jsq(r.id)}')">${icon('plus', 'icon-sm')}Выписать ордер</button>`);
   if (r.kind !== 'current') acts.push(`<button type="button" class="button small-btn" id="proc-hearing" onclick="openHearingForm('', '${jsq(c.number || '')}', '${jsq(r.id)}')">${icon('plus', 'icon-sm')}${isMat ? 'Заседание по материалу' : 'Заседание этого рассмотрения'}</button>`);
   // сборка 239: материал первой ступени — частная жалоба в апелляцию, после неё — кассационная жалоба
   if (isMat && procMatterIsRoot(r.p)) {
@@ -26160,6 +26334,7 @@ async function openProcSheet(caseId, key) {
     ${isMat ? '<p class="small muted" id="proc-mat-note">Материал рассматривается в этом же деле: его заседания отмечены «Материал» в ленте дела и календаре и не меняют стадию дела и заседания инстанций. Если указана ссылка на материал (страница «МАТЕРИАЛ № …» на сайте суда), коллектор судов 3.30 читает её вместе с делом (и у завершённого или архивного дела): номер, судья, «Движение материала», заседания, дата и результат рассмотрения приходят сюда, а не в заседания дела. Заседание можно внести и вручную — «Заседание по материалу».</p>' : r.kind === 'archived' ? '<p class="small muted">Прежнее рассмотрение на сайтах судов не опрашивается; его события, пришедшие с опозданием, программа записывает сюда, а не в текущее.</p>' : r.kind === 'extra' ? '<p class="small muted">Ссылка параллельного рассмотрения уходит коллектору вместе с остальными; заседания и сроки этого рассмотрения — отдельно от основного.</p>' : ''}
     <div class="section-label">Заседания · ${r.hearings.length}</div>${r.hearings.length ? `<div class="list-rows">${r.hearings.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || ''))).map(h => `<button type="button" class="list-btn" onclick="openHearingForm('${jsq(h.id)}')"><span>${esc(fmtDate(h.date))}${h.time ? ' ' + esc(h.time) : ''}</span><span class="muted">${esc(h.status || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Заседаний этого рассмотрения нет.</p>'}
     <div class="section-label">Сроки от актов · ${dls.length}</div>${dls.length ? `<div class="list-rows">${dls.map(d => `<button type="button" class="list-btn" onclick="openDeadlineSheet('${jsq(caseId)}', '${jsq(d.id)}')"><span>${esc(d.title || 'Срок')}</span><span class="muted">${esc(fmtDate(d.date))}${d.done ? ' · выполнен' : ''}</span></button>`).join('')}</div>` : '<p class="small muted">Сроков от актов этого рассмотрения нет.</p>'}
+    <div class="section-label">Ордера · ${ords.length}</div>${ords.length ? `<div class="list-rows" id="proc-orders">${ords.map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>№ ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}</span><span class="muted">${esc(o.basis || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Ордера на это рассмотрение нет.</p>'}
     <div class="actions" style="margin-top:10px">${acts.join('')}</div>`;
   if (typeof sheetFreeze === 'function' && sheetIsOpen()) sheetFreeze();
   openSheet(r.label + ' · ' + ([c.number, c.client].filter(Boolean).join(' · ') || 'дело'), body, true);
@@ -26552,6 +26727,18 @@ HFIG.payqr = { h: 214, title: 'Лист «QR для оплаты»', caption: '�
   s += hf.t(20, 158, 'Получатель: … · р/с … · банк', { fs: 9, fill: 'var(--text-muted)' });
   s += hf.btn(20, 170, 160, 26, 'Печать счёта с QR', true) + hf.btn(188, 170, 170, 26, 'Картинка для отправки') + hf.num(376, 183, 3);
   return s; })() };
+// сборка 252: ордера по инстанциям — строка карточки и лист дела
+HFIG.orders = { h: 226, title: 'Ордера по инстанциям', caption: '① Вверху карточки — ордер текущей инстанции; его нет — «На апелляцию ордера нет». ② «Выписать ордер» заполняет инстанцию по стадии дела. ③ «Все ордера» — лист «Ордера по делу»: у каждой инстанции свои ордера и кнопка «Выписать».', svg: (() => {
+  let s = hf.box(10, 6, 500, 214, { rx: 8 }) + hf.t(20, 26, 'На апелляцию ордера нет', { bold: true, fs: 12 }) + hf.num(186, 22, 1);
+  s += hf.btn(206, 12, 124, 24, 'Выписать ордер', true) + hf.num(342, 24, 2) + hf.btn(356, 12, 112, 24, 'Все ордера (1)') + hf.num(482, 24, 3);
+  s += hf.t(20, 62, 'Ордера по делу', { bold: true, fs: 12 });
+  s += hf.t(20, 86, 'Первая инстанция', { bold: true, fs: 10 }) + hf.btn(410, 72, 86, 22, 'Выписать');
+  s += hf.box(20, 96, 476, 24, { rx: 4 }) + hf.t(30, 112, 'Ордер № 12 от 02.09.2026', { fs: 10 });
+  s += hf.t(20, 142, 'Апелляция · текущая', { bold: true, fs: 10 }) + hf.btn(410, 128, 86, 22, 'Выписать', true);
+  s += hf.t(20, 164, 'ордера нет', { fs: 10, fill: 'var(--text-muted)' });
+  s += hf.t(20, 192, 'Кассация', { bold: true, fs: 10 }) + hf.btn(410, 178, 86, 22, 'Выписать');
+  s += hf.t(20, 210, 'ордера нет', { fs: 10, fill: 'var(--text-muted)' });
+  return s; })() };
 // сборка 213 (Ш-1): подсказка «Следующий шаг» в карточке дела
 HFIG.nextstep = { h: 150, title: 'Подсказки по делу: «Следующий шаг»', caption: '① Что обычно делают дальше на этой стадии — по датам и событиям дела. ② Одна кнопка: задача, документ по шаблону или нужная форма. ③ «×» — скрыть на 7 дней.', svg: (() => {
   let s = hf.box(10, 6, 500, 138, { rx: 8 }) + hf.t(20, 26, 'Подсказки по делу', { bold: true, fs: 12, fill: 'var(--text-muted)' });
@@ -26638,7 +26825,9 @@ ${typeof helpFig === 'function' ? helpFig('todaycolor') : ''}
 <p>«Дела» — список с фильтрами и поиском, таблица (на компьютере можно выбрать столбцы) и доска по стадиям. Поиск и фильтр сохраняются, пока вы смотрите карточки.</p>
 <p><b>Профиль практики.</b> Настройки → «Дела» → «Профиль практики»: отметьте, какие дела вы ведёте (Гражданское, Арбитраж, КАС, Уголовное, КоАП). В выборе вида дела останутся только они и виды, которые вы добавили в справочник сами; у уже заведённых дел вид не меняется. Без гражданских, арбитражных и КАС из «Калькуляторов» уходят расчёты для исков. Ничего не отмечено — видно всё. Настройка переходит на другие устройства обменом.</p>
 <p><b>Название дела</b> можно не вводить: если при сохранении поле «Предмет спора» пустое, оно заполняется само из доверителя и противной стороны («Иванов И. И. к ООО «Гарант»»; без противной стороны — доверитель и категория) и дальше правится как обычное. Выключается в Настройки → «Дела» → отметка «Название дела заполняется само…» — настройка этого устройства.</p>
-<p><b>Карточка дела</b>: сверху доверитель, суд и судья, строка «Соглашение № … от … · подписано» и «Ордер № … от …» (кнопки «Указать» / «Изменить» открывают форму дела на вкладке «Соглашение», «Выписать ордер» / «Открыть» — журнал ордеров; соглашение — поля самого дела, отдельной записи у него нет), ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Сайты судов», «Папка документов», «Связаться с доверителем». «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам. Одно заседание с сайта суда — одной строкой: если заседание есть в программе, событие суда и строка движения «Судебное заседание» того же дня под ним не повторяются (у материала — отдельно от дела).</p>
+<p><b>Карточка дела</b>: сверху доверитель, суд и судья, строка «Соглашение № … от … · подписано» и «Ордер № … от …» (кнопки «Указать» / «Изменить» открывают форму дела на вкладке «Соглашение», «Выписать ордер» / «Открыть» — ордер текущей инстанции, «Все ордера» — все ордера дела; соглашение — поля самого дела, отдельной записи у него нет), ближайшее событие и следующий шаг; кнопки «Изменить», «Контакты суда», «Сайты судов», «Папка документов», «Связаться с доверителем». «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. «Ещё: добавить в дело» — заседание, встреча, срок, отправление, счёт, расход, доверенность. Лента дела собирает всё по датам. Одно заседание с сайта суда — одной строкой: если заседание есть в программе, событие суда и строка движения «Судебное заседание» того же дня под ним не повторяются (у материала — отдельно от дела).</p>
+<p><b>Ордера по инстанциям.</b> На каждую инстанцию — свой ордер, все ордера видны в одном деле; так устроены дела всех видов: гражданские, арбитражные, по КАС, уголовные и об административных правонарушениях. Строка «Ордер» вверху карточки смотрит на стадию дела: ордер на эту инстанцию есть — видны его номер и дата; нет — написано, например, «На апелляцию ордера нет» и рядом кнопка «Выписать ордер». Кнопка «Все ордера» открывает лист «Ордера по делу»: инстанции идут по порядку, у каждой свои ордера и кнопка «Выписать», текущая отмечена. В форме ордера поле «Инстанция» заполнено по стадии дела, «Поручение / стадия» подсказано по виду дела (его можно исправить), а если в инстанции несколько рассмотрений, появляется поле «Рассмотрение»: после отмены и нового рассмотрения нужен новый ордер. Ордера, записанные до этой версии, остаются как были: инстанцию им можно указать кнопкой «Указать инстанцию», пока она не указана, программа не считает, что ордера не хватает. У рассмотрения в его листе тоже есть раздел «Ордера» и кнопка «Выписать ордер». В форме дела поля «Номер ордера» и «Дата ордера» видны, пока по делу нет ни одного ордера.</p>
+${typeof helpFig === 'function' ? helpFig('orders') : ''}
 <p><b>Ширина карточки на компьютере.</b> На широком экране (от 1200 точек) карточка дела открывается панелью справа. Её ширину можно менять, как колонку в Проводнике: наведите указатель на левую границу панели (он станет двусторонней стрелкой) и потяните влево — шире, вправо — уже. Двойной щелчок по границе возвращает обычную ширину. С клавиатуры: клавишей Tab дойдите до границы, стрелки «влево» и «вправо» меняют ширину, Home — обычная. Панель не бывает уже 360 точек, а основному экрану слева всегда остаётся место. Ширина запоминается на этом устройстве и на другие устройства не переходит. На телефоне и в узком окне карточка, как раньше, открывается во весь экран.</p>
 <p><b>Тема и акцентный цвет.</b> «Настройки → Оформление → Тема»: кроме светлой и тёмной есть «Бумага» (тёплая светлая), «Зелёная лампа», «Контрастная» (чёрный текст на белом — для слабого зрения и яркого солнца), «Графит» (серая тёмная) и «Полночь» (тёмно-синяя с золотым акцентом), а со сборки 248 ещё шесть: светлые «Слоновая кость» (тёплая кремовая), «Морская» (серо-голубая), «Лаванда» (сиреневая), «Бордо» (розоватая с винным акцентом) и тёмные «Сепия ночью» (коричневая с янтарным акцентом) и «Ночной лес» (тёмно-зелёная); «Как в системе» — светлая или тёмная по настройке телефона или компьютера; «По времени суток» — светлая днём, тёмная ночью по часам устройства. Ниже — акцентный цвет (кнопки, ссылки, отметки): «Как в теме» или любой из семи цветов, он подходит к любой теме. Все сочетания проверены на читаемость. Тема и акцент — настройки этого устройства. В приложении для Android (1.32 и новее, со сборки 249) верхняя строка телефона со временем, датой и значками сети окрашивается в цвет левой панели выбранной темы; прежние версии приложения оставляли её синей. Кнопка с солнцем или луной в шапке быстро переключает светлую и тёмную. Объёмное оформление (со сборки 240): как пункты левой панели и вкладки формы дела, объёмными выглядят и блоки всех экранов — на «Сегодня» «План дня», «Ближайшие заседания», «Дела в работе», плитки сводки «Требуют внимания», «На сегодня», «К оплате», — а также кнопки-фильтры («Всё», «Суд», «Задачи» над лентой дела) и переключатели вида календаря: выбранная кнопка приподнята и подчёркнута акцентным цветом. Цветная полоса блока «Сегодня» (кнопка «Цвет» в «Настроить экран») остаётся. Объём есть во всех темах.</p>
 ${typeof helpFig === 'function' ? helpFig('themes') : ''}
@@ -26728,7 +26917,7 @@ ${typeof helpFig === 'function' ? helpFig('payqr') : ''}
 <p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер. Заседания-двойники (одно заседание, записанное по событию суда на нескольких устройствах до обмена базой, — до 19.10.2026 у каждого устройства получалась своя запись) программа сводит сама при запуске и после обмена, если ваши поля у копий совпадают (статус, итог, комментарий, участие, подготовка), а сведения с сайта суда не противоречат: пустое у одной копии дополняется из другой, суд, записанный коротко и с регионом («… городской суд» и «… городской суд … области»), — один суд, остаётся полное название; копии, которые различаются по существу (разные залы, итоги, комментарии), показывает здесь строкой «Заседания-двойники» с листом «Оставить одно». Так же со сроками, которые программа рассчитала сама (от даты акта, по жалобе), — до сборки 187 каждое устройство записывало свою копию: одинаковые копии сводятся сами, различающиеся — строка «Сроки-двойники», в листе отмечаете, какую оставить. Пока есть неразобранные двойники, на «Сегодня» стоит строка «Повторяющиеся записи» с кнопкой «Разобрать».</p>
 <p>Жест: строку «Выполнено» в «Задачах и сроках» и на «Сегодня» можно смахнуть пальцем вправо — задача или срок отмечаются выполненными; у прошедшего заседания смахивание открывает «Итог заседания». Кнопки в строке работают как раньше.</p>
 <p>Настройки: строка «Найти настройку» вверху — введите слово (например, «PIN», «Telegram», «ордер»), останутся только подходящие пункты.</p>
-<p>Журнал ордеров: «Настройки» → «Журнал ордеров» или карточка дела → «Суд, стороны, инстанции» → «Выписать ордер». Номер предлагается следующим за последним в журнале — сверьте его с бланком из книжки; повтор номера программа показывает и записывает только после второго нажатия. Номер ордера, вписанный в форму дела (вкладка «Соглашение»), попадает в журнал сам, один раз. Реестр ордеров для печати — кнопка в журнале.</p>
+<p>Журнал ордеров: «Настройки» → «Журнал ордеров» — все ордера всех дел; ордера одного дела — карточка дела → «Все ордера» (раздел «Дела, сроки, стадии», абзац «Ордера по инстанциям»). Номер предлагается следующим за последним в журнале — сверьте его с бланком из книжки; повтор номера программа показывает и записывает только после второго нажатия. Номер ордера, вписанный в форму дела (вкладка «Соглашение»), попадает в журнал сам, один раз. Реестр ордеров для печати — кнопка в журнале; в нём и в выгрузке есть инстанция. Если до заседания осталось не больше 30 дней, по делу есть ордера, а на инстанцию заседания нет, «Сегодня» покажет строку «На апелляцию ордера нет» с кнопкой «Выписать ордер»; дела без ордеров так не отмечаются. В подписи документов из шаблонов подставляется «по ордеру № … от …», если ордер на текущую инстанцию есть, а действующей доверенности по делу нет; иначе остаётся поле «[УКАЗАТЬ: …]».</p>
 <p>«Отчёты»: дела, деньги, нагрузка и обращения за месяц, квартал, год или свой период. Расчёт — как в прежней программе; у каждого блока указано, за какой он срок.</p>
 <p><b>QR для оплаты госпошлины.</b> «Калькуляторы» → «Госпошлина в суд» → «QR для оплаты»: код для приложения банка доверителя с реквизитами получателя госпошлины (Казначейство России (ФНС России), единый казначейский счёт), КБК по виду суда (общей юрисдикции и мировые — 18210803010011050110, арбитражные — 18210801000011050110) и ОКТМО суда. ОКТМО берётся из карточки суда (поле «ОКТМО (для госпошлины)», его пишут на сайте суда в «Реквизитах для уплаты госпошлины»); если дело выбрано, а ОКТМО в карточке нет, — впишите его в листе и нажмите «ОКТМО — в карточку суда». «Квитанция с QR» печатает реквизиты и код, «Картинка для отправки» — файл PNG. Реквизиты получателя — по сведениям на 08.07.2026; перед выдачей доверителю сверьте с сайтом суда.</p>
 <p><b>Расчёт — документом.</b> После «Рассчитать» в процентах по ст. 395 ГК РФ, неустойке и индексации есть «Скачать .docx» — документ «Расчёт …» с таблицей периодов и строкой для подписи — и «В документы дела»: выберите дело, расчёт сохранится в его документы (категория «Расчёт») и в «Пакете в суд» его можно отметить приложением.</p>
