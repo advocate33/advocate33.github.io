@@ -1,0 +1,73 @@
+name: FamilyVPN - build UNSIGNED test APK
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'familyvpn/**'
+      - '.github/workflows/family-debug.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  debug-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout our family patch
+        uses: actions/checkout@v4
+        with:
+          path: family
+          persist-credentials: false
+      - name: Checkout compatible donor v20
+        uses: actions/checkout@v4
+        with:
+          repository: Ivan4537/WDTT-Plus
+          ref: v20
+          path: donor
+          persist-credentials: false
+      - name: Copy patch and verify device policy
+        run: |
+          set -euo pipefail
+          mkdir -p donor/tools donor/config
+          cp family/familyvpn/tools/*.kt family/familyvpn/tools/*.py donor/tools/
+          cp family/familyvpn/config/approved-server-version.txt donor/config/
+          cd donor
+          python3 tools/verify_device_binding.py
+          python3 tools/test_patch.py
+          python3 tools/apply_family_mode.py
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+      - name: Android SDK already on GitHub runner
+        shell: bash
+        run: |
+          test -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --version
+      - name: Install platform and NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+      - name: Compile debug APK
+        working-directory: donor
+        run: |
+          chmod +x gradlew
+                    # FamilyVPN has its own monotonic APK versionCode, unlike upstream v20.
+          # Source lock is checked by verify_device_binding.py and the exact v20 tag.
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug \
+            -x :app:verifyVersionSynchronization --no-daemon --stacktrace
+      - name: Save test APK as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FamilyVPN-debug-test-apks
+          path: donor/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
