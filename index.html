@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="16.11.2026 21:04 · 1b14cbb">
-<meta name="build-no" content="262">
+<meta name="build" content="17.11.2026 00:39 · 2606482">
+<meta name="build-no" content="263">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -8871,10 +8871,10 @@ function reqParse(text) {
   return out;
 }
 const REQ_LABELS = [['name', 'Наименование'], ['inn', 'ИНН'], ['kpp', 'КПП'], ['ogrn', 'ОГРН'], ['zip', 'Индекс'], ['addr', 'Адрес'], ['phone', 'Телефон'], ['email', 'Email'], ['bank', 'Банк'], ['bik', 'БИК'], ['rs', 'Расчётный счёт'], ['ks', 'Корр. счёт']];
-// куда в форме ложится каждое поле: для карточки доверителя банковские реквизиты, КПП и ОГРН (своих полей нет) — строкой в «Примечание»;
-// в форме дела у противной стороны есть ОГРН и КПП, банковских полей нет
+// куда в форме ложится каждое поле: для карточки доверителя банковские реквизиты (своих полей нет) — строкой в «Примечание»; ОГРН и КПП —
+// в свои поля (сборка 263, U13; прежде тоже в «Примечание»); в форме дела у противной стороны есть ОГРН и КПП, банковских полей нет
 const REQ_TARGETS = {
-  cl: { name: 'cl-name', inn: 'clInn', zip: 'clZip', addr: 'clAddr', phone: 'cl-phone', email: 'cl-email', type: 'cl-type', note: 'cl-comment', noteKeys: ['ogrn', 'kpp', 'bank', 'bik', 'rs', 'ks'] },
+  cl: { name: 'cl-name', inn: 'clInn', zip: 'clZip', addr: 'clAddr', phone: 'cl-phone', email: 'cl-email', type: 'cl-type', ogrn: 'clOgrn', kpp: 'clKpp', note: 'cl-comment', noteKeys: ['bank', 'bik', 'rs', 'ks'] },
   'cf-opp': { name: 'cf-opponent', inn: 'cf-oppInn', ogrn: 'cf-oppOgrn', kpp: 'cf-oppKpp', addr: 'cf-oppAddr', skip: ['bank', 'bik', 'rs', 'ks', 'phone', 'email', 'zip'] }
 };
 // строка реквизитов для «Примечания»: «ОГРН …; КПП …; р/с … в …, БИК …, к/с …»
@@ -15709,6 +15709,32 @@ function formModelHearing(v, prev) {
     participation: HEARING_PARTICIPATION.includes(v.participation) ? v.participation : '', prep: String(v.prep || '').trim(), prepDays: v.prepDays === '' || v.prepDays == null ? PREP_DAYS_DEFAULT : Math.max(0, Math.min(30, Number(v.prepDays) || 0)), prepDone: String(v.prep || '').trim() === String((prev && prev.prep) || '').trim() ? ((prev && prev.prepDone) || '') : '',
     ...formHearingProc(v, prev, formCaseLink(v.caseNum, prev)) } };
 }
+// сборка 263 (аудит 256, U8, U9, U13): предупреждение, а не запрет — первое «Сохранить» показывает текст, второе с теми же данными записывает;
+// key — форма, запись и проверяемые значения: изменили данные — проверка заново (как CASE_CONFLICT_WARNED, ui/parties.js)
+let FORM_WARNED = '';
+function formWarnGate(key, warns, btnLabel) {
+  if (!warns || !warns.length) { FORM_WARNED = ''; return true; }
+  const k = key + '|' + warns.join('|');
+  if (FORM_WARNED === k) { FORM_WARNED = ''; return true; }
+  FORM_WARNED = k; fErr(warns.join(' ') + ' Если всё верно — нажмите «' + (btnLabel || 'Сохранить') + '» ещё раз.');
+  if (typeof guardSaveFailed === 'function') guardSaveFailed();
+  return false;
+}
+// U8: заседание в нерабочий день (производственный календарь) или больше года назад; дата не менялась — без предупреждения
+function hearingWarnsModel(obj, today, prev) {
+  const d = obj && obj.date, out = []; if (!d || (prev && prev.date === d)) return out;
+  if (typeof isWorkdayISO === 'function' && !isWorkdayISO(d)) out.push('Дата заседания ' + fmtDate(d) + ' — нерабочий день.');
+  const yearAgo = String(Number(today.slice(0, 4)) - 1) + today.slice(4);
+  if (d < yearAgo) out.push('Дата заседания ' + fmtDate(d) + ' — больше года назад, проверьте год.');
+  return out;
+}
+// U8: даты вынесенных актов всех видов дел (решение, определения, приговор, постановление по КоАП, решение по КАС, приказ); сроки «до» сюда не входят
+const CASE_ACT_DATES = [['i1DecisionDate', 'Дата решения'], ['i1DecisionFullDate', 'Мотивированное решение изготовлено'], ['apDecisionDate', 'Дата апелляционного определения'], ['apDecisionFullDate', 'Мотивированное апелляционное определение изготовлено'], ['csDecisionDate', 'Дата кассационного определения'], ['csDecisionFullDate', 'Мотивированное кассационное определение изготовлено'], ['cs2DecisionDate', 'Дата определения (постановления) ВС'], ['nzDecisionDate', 'Дата постановления надзорной инстанции'], ['crimVerdictDate', 'Дата приговора'], ['koapDate', 'Дата постановления по делу об АП'], ['kasActDate', 'Дата решения (действия)'], ['judOrderDate', 'Приказ вынесен'], ['crimCheckDate', 'Дата решения по сообщению']];
+function caseActWarnsModel(obj, prev, today) {
+  const p = prev || {}, out = [];
+  for (const [k, label] of CASE_ACT_DATES) { const v = obj && obj[k]; if (v && /^\d{4}-\d{2}-\d{2}$/.test(v) && v !== p[k] && v > today) out.push('«' + label + '» — ' + fmtDate(v) + ', в будущем.'); }
+  return out;
+}
 // v169 (аудит «Переезд и рассмотрения дела», P7): рассмотрение заседания — выбор в форме (ui/proceedings.js, procHearingOptions); пусто —
 // текущее рассмотрение инстанции. Поле в форме не показано (у дела нет других рассмотрений) — прежнее значение не трогается.
 // Выбор другого рассмотрения — ручное решение: отметки переноса (procAuto) снимаются, «Вернуть как текущее» такое заседание не трогает
@@ -15917,6 +15943,8 @@ async function saveCaseForm(id) {
   if (document.getElementById('cx-tabs')) { const ex = caseFormValues(k => fv('cx-' + k), caseTabsFor(r.obj.kind || '')); for (const k of Object.keys(ex)) { const val = ex[k]; if (k === 'amount' || k === 'recovered' || /^ip(Sum|Collected|Fee)$/.test(k)) { if (String(val).trim() === '') { r.obj[k] = ''; continue; } const num = Number(String(val).replace(/[\s ]/g, '').replace(',', '.')); if (!Number.isFinite(num) || num < 0 || num > 1e12) { fErr('Сумма «' + String(val).trim() + '» — укажите число не меньше нуля (например, 150000 или 150 000,50)'); return; } r.obj[k] = Math.round(num * 100) / 100; } else if (k === 'labels') r.obj[k] = String(val).split(',').map(s => s.trim()).filter(Boolean); else r.obj[k] = val; } }
   // папка документов (14.10.2026): поля в основной части формы — и в краткой, и в полной
   if (document.getElementById('cf-docsPath') || document.getElementById('cf-docsUrl')) { const dv = caseDocsInput(fv('cf-docsPath'), fv('cf-docsUrl')); if (dv.error) { fErr(dv.error); return; } r.obj.docsPath = dv.path; r.obj.docsUrl = dv.url; }
+  // сборка 263 (U8): дата акта в будущем — предупреждение, второе «Сохранить» записывает
+  { const aw = caseActWarnsModel(r.obj, prev, todayISO()); if (!formWarnGate('case|' + (id || 'new') + '|' + CASE_ACT_DATES.map(x => r.obj[x[0]] || '').join(','), aw)) return; }
   // автонумерация соглашений (03.10.2026): новому делу без номера — следующий; номер, занятый другим делом, — отказ
   if (typeof nextAgreementNo === 'function') {
     if (!id && !String(r.obj.agreementNo || '').trim()) { r.obj.agreementNo = nextAgreementNo(numCases); r.obj.agreementDate = r.obj.agreementDate || todayISO(); }
@@ -16035,6 +16063,8 @@ async function saveHearingForm(id) {
   const v = {}; ['caseNum', 'date', 'time', 'court', 'room', 'judge', 'status', 'result', 'comment', 'participation', 'prep', 'prepDays'].forEach(k => { v[k] = fv('hf-' + k); });
   if (document.getElementById('hf-proc')) v.proc = fv('hf-proc');
   const r = formModelHearing(v, prev); if (r.error) { fErr(r.error); return; }
+  // сборка 263 (U8): нерабочий день или больше года назад — предупреждение, второе «Сохранить» записывает
+  if (!formWarnGate('hearing|' + (id || 'new') + '|' + r.obj.date, hearingWarnsModel(r.obj, todayISO(), prev))) return;
   if (!id && typeof demoAllow === 'function' && !(await demoAllow('hearings'))) return;
   await comboRememberAll(document.getElementById('sheetContent'));
   // проведённое и отменённое заседание времени не занимает — для них занятость не проверяется
@@ -20093,7 +20123,7 @@ async function openClientSheet(id, mode) {
   const row = (k, v, html) => v ? `<div><span class="muted">${esc(k)}</span><span>${html || esc(v)}</span></div>` : '';
   const body = `<div class="task-badges">${badge(clientIsLegal(c) ? 'организация' : 'физическое лицо')}${c.role ? badge(c.role, 'accent') : ''}</div>
     <div class="actions" style="margin-bottom:12px">${btn('Изменить', `openClientForm('${jsq(c.id)}')`, 'small-btn', 'pencil')}${btn('Новое дело', `openCaseForm('', false).then(() => clientPreset('${jsq(c.name)}'))`, 'small-btn', 'plus')}${btn('Встреча', `openMeetingForm('', '')`, 'small-btn', 'handshake')}${typeof openClientWaitTask === 'function' ? btn('Ждёт ответа', `openClientWaitTask('${jsq(cases[0] ? cases[0].number || '' : '')}', '${jsq(c.name || '')}')`, 'small-btn', 'clock-3') : ''}${typeof openDocTplPicker === 'function' ? btn('Документ по шаблону', `openDocTplPicker('client', '${jsq(c.id)}')`, 'small-btn', 'notebook-pen') : ''}</div>
-    <div class="list-rows">${row('Телефон', c.phone, `<a class="contact" href="${esc(contactLinks(c.phone).tel)}">${esc(c.phone)}</a>`)}${contactRow(c.phone)}${row('Email', c.email, `<a class="contact" href="mailto:${esc(c.email)}">${esc(c.email)}</a>`)}${row('ИНН', c.inn)}${row('Адрес', [c.zip, c.addr].filter(Boolean).join(', '))}${row('Рождение', [c.birthDate ? fmtDate(c.birthDate) : '', c.birthPlace].filter(Boolean).join(', '))}${row('Паспорт', [c.passport, c.passportInfo].filter(Boolean).join(' · '))}${row('Примечание', c.comment)}</div>
+    <div class="list-rows">${row('Телефон', c.phone, `<a class="contact" href="${esc(contactLinks(c.phone).tel)}">${esc(c.phone)}</a>`)}${contactRow(c.phone)}${row('Email', c.email, `<a class="contact" href="mailto:${esc(c.email)}">${esc(c.email)}</a>`)}${row('ИНН', c.inn)}${row('ОГРН', c.ogrn)}${row('КПП', c.kpp)}${row('Адрес', [c.zip, c.addr].filter(Boolean).join(', '))}${row('Рождение', [c.birthDate ? fmtDate(c.birthDate) : '', c.birthPlace].filter(Boolean).join(', '))}${row('Паспорт', [c.passport, c.passportInfo].filter(Boolean).join(' · '))}${row('Примечание', c.comment)}</div>
     <div class="section-label">Дела · ${cases.length}</div>${cases.length ? `<div class="list-rows">${cases.map(x => `<button type="button" class="list-btn" onclick="openCaseSheet('${jsq(x.id)}')"><span>${esc([x.number, x.subject].filter(Boolean).join(' · '))}</span><span class="muted">${esc([x.status, x.court].filter(Boolean).join(' · '))}</span></button>`).join('')}</div>` : '<p class="small muted">Дел пока нет.</p>'}
     ${typeof clientWaitBlockHtml === 'function' ? clientWaitBlockHtml(await getAll('tasks'), cases) : ''}
     ${typeof poaBlockHtml === 'function' ? poaBlockHtml((await getAll('poa')).filter(p => p.clientId === c.id), { clientId: c.id }) : ''}
@@ -20105,15 +20135,42 @@ function clientPreset(name) { const el = document.getElementById('cf-client'); i
 function clientRenamePlan(prev, next, cases) { if (!prev || !next || prev.name === next.name) return []; return (cases || []).filter(x => x && !x._deleted && (x.clientId === prev.id || (!x.clientId && clientKey(x.client) === clientKey(prev.name)))); }
 function formModelClient(v, prev, clients) {
   const name = String(v.name || '').replace(/\s+/g, ' ').trim(); if (!name) return { error: 'Укажите ФИО или наименование' };
-  const dup = (clients || []).find(c => c && !c._deleted && (!prev || c.id !== prev.id) && clientKey(c.name) === clientKey(name));
-  if (dup) return { error: 'Такой доверитель уже есть: ' + dup.name };
+  // сборка 263 (аудит 256, U13, решение пользователя 11.11.2026): тёзка — не отказ, а предупреждение при сохранении (clientWarnsModel)
+  const rq = clientReqModel({ type: v.type, ogrn: v.ogrn, kpp: v.kpp }); if (rq.error) return { error: rq.error };
   const inn = String(v.inn || '').replace(/\D/g, ''); if (inn && inn.length !== 10 && inn.length !== 12) return { error: 'ИНН — 10 цифр (организация) или 12 (физлицо, ИП)' };
   const dupInn = inn && (clients || []).find(c => c && !c._deleted && (!prev || c.id !== prev.id) && String(c.inn || '').replace(/\D/g, '') === inn);
   if (dupInn) return { error: 'Этот ИНН уже указан у доверителя ' + dupInn.name };
   if (v.birthDate && !/^\d{4}-\d{2}-\d{2}$/.test(v.birthDate)) return { error: 'Дата рождения — из поля даты' };
   const p = prev || {};
   return { obj: { ...p, id: p.id || uid('К'), name, type: v.type || p.type || 'Физическое лицо', role: String(v.role || '').trim(), phone: String(v.phone || '').trim(), email: String(v.email || '').trim(), inn, addr: String(v.addr || '').trim(), zip: String(v.zip || '').trim(),
-    birthDate: v.birthDate || '', birthPlace: String(v.birthPlace || '').trim(), passport: String(v.passport || '').trim(), passportInfo: String(v.passportInfo || '').trim(), comment: String(v.comment || '').trim(), createdAt: p.createdAt || Date.now(), updatedAt: Date.now() } };
+    birthDate: v.birthDate || '', birthPlace: String(v.birthPlace || '').trim(), passport: String(v.passport || '').trim(), passportInfo: String(v.passportInfo || '').trim(), comment: String(v.comment || '').trim(),
+    // сборка 263 (U13): ОГРН и КПП организации (у ИП — ОГРНИП); поле не показано в форме (v.ogrn === undefined) — прежнее значение не трогается
+    ogrn: v.ogrn === undefined ? (p.ogrn || '') : rq.ogrn, kpp: v.kpp === undefined ? (p.kpp || '') : rq.kpp, createdAt: p.createdAt || Date.now(), updatedAt: Date.now() } };
+}
+// сборка 263 (U13): ОГРН — 13 цифр (организация) или 15 (ОГРНИП); КПП — 9 знаков: 4 цифры, 2 цифры или латинские буквы, 3 цифры
+function clientReqModel(o) {
+  const ogrn = String((o && o.ogrn) || '').replace(/\D/g, ''), kpp = String((o && o.kpp) || '').replace(/\s/g, '').toUpperCase();
+  if (ogrn && ogrn.length !== 13 && ogrn.length !== 15) return { error: 'ОГРН — 13 цифр (организация) или 15 (ОГРНИП)' };
+  if (kpp && !/^\d{4}[\dA-Z]{2}\d{3}$/.test(kpp)) return { error: 'КПП — 9 знаков: 4 цифры, 2 цифры или латинские буквы, 3 цифры' };
+  return { ogrn, kpp };
+}
+// сборка 263 (U13): предупреждения при сохранении доверителя — тёзка (решение пользователя 11.11.2026), телефон и почта с ошибкой написания;
+// не изменённое при правке не проверяется заново
+function clientWarnsModel(obj, clients, prev) {
+  const p = prev || {}, out = [], name = String(obj.name || '');
+  const dup = clientKey(name) !== clientKey(p.name || '') ? (clients || []).find(c => c && !c._deleted && c.id !== obj.id && clientKey(c.name) === clientKey(name)) : null;
+  if (dup) out.push('Такой доверитель уже есть — создать ещё одного? (' + [dup.name, dup.phone, dup.inn ? 'ИНН ' + dup.inn : ''].filter(Boolean).join(', ') + ')');
+  const ph = String(obj.phone || '').trim(), digits = ph.replace(/\D/g, '');
+  if (ph && ph !== String(p.phone || '').trim() && (digits.length < 10 || digits.length > 11)) out.push('Телефон «' + ph + '» — проверьте: в номере обычно 10–11 цифр.');
+  const em = String(obj.email || '').trim();
+  if (em && em !== String(p.email || '').trim() && !/^[^\s@]+@[^\s@]+\.[^\s@.]{2,}$/.test(em)) out.push('Email «' + em + '» — проверьте написание: имя@домен.ru.');
+  return out;
+}
+// у организации — ОГРН и КПП вместо паспорта и сведений о рождении; поле с заполненным значением не прячется
+function clientFormTypeSync() {
+  const legal = fv('cl-type') === 'Юридическое лицо', box = id => { const el = document.getElementById(id); return el ? el.closest('.field') || el : null; };
+  ['cl-birthDate', 'cl-birthPlace', 'cl-passport', 'cl-passportInfo'].forEach(id => { const b = box(id); if (b) b.hidden = legal && !fv(id); });
+  ['clOgrn', 'clKpp'].forEach(id => { const b = box(id); if (b) b.hidden = !legal && !fv(id); });
 }
 async function openClientForm(id) {
   const prev = id ? await getOne('clients', id) : null; if (id && !prev) { toast('Доверитель не найден', true); return; }
@@ -20125,6 +20182,7 @@ async function openClientForm(id) {
     ${fInnRow('cl', 'ИНН', c.inn)}${fInput('clZip', 'Индекс', c.zip, 'autocomplete="off" inputmode="numeric"')}
     ${fAddr('clAddr', 'Адрес', c.addr, 'clZip')}
     ${typeof fReqPaste === 'function' ? fReqPaste('cl') : ''}
+    ${fInput('clOgrn', 'ОГРН', c.ogrn, 'autocomplete="off" inputmode="numeric" placeholder="13 цифр, у ИП — 15"')}${fInput('clKpp', 'КПП', c.kpp, 'autocomplete="off" placeholder="9 знаков"')}
     ${fInput('cl-birthDate', 'Дата рождения', c.birthDate, 'type="date"')}${fInput('cl-birthPlace', 'Место рождения', c.birthPlace, 'autocomplete="off"')}
     ${fInput('cl-passport', 'Паспорт (серия, номер)', c.passport, 'autocomplete="off"')}${fInput('cl-passportInfo', 'Кем и когда выдан', c.passportInfo, 'autocomplete="off"')}
     ${fText('cl-comment', 'Примечание', c.comment, 2)}
@@ -20132,11 +20190,15 @@ async function openClientForm(id) {
   openSheet(id ? 'Правка доверителя' : 'Новый доверитель', body, UI.cur ? true : undefined);
   // запись при открытии — для проверки «изменили, пока форма была открыта» (ui/guard.js)
   if (prev && typeof formRecMark === 'function') formRecMark('clients', prev);
+  { const t = document.getElementById('cl-type'); if (t) t.addEventListener('change', clientFormTypeSync); clientFormTypeSync(); }
 }
 async function saveClientForm(id) {
   const prev = id ? await getOne('clients', id) : null, clients = await getAll('clients'); if (formGone(id, prev, 'Карточка')) return;
   const v = {}; ['name', 'type', 'role', 'phone', 'email', 'birthDate', 'birthPlace', 'passport', 'passportInfo', 'comment'].forEach(k => { v[k] = fv('cl-' + k); }); v.inn = fv('clInn'); v.addr = fv('clAddr'); v.zip = fv('clZip');
+  if (document.getElementById('clOgrn')) { v.ogrn = fv('clOgrn'); v.kpp = fv('clKpp'); }
   const r = formModelClient(v, prev, clients); if (r.error) { fErr(r.error); return; }
+  // сборка 263 (U13): тёзка, телефон, почта — предупреждение, второе «Сохранить» записывает
+  if (!formWarnGate('client|' + (id || 'new') + '|' + [r.obj.name, r.obj.phone, r.obj.email].join(','), clientWarnsModel(r.obj, clients, prev))) return;
   if (!id && typeof demoAllow === 'function' && !(await demoAllow('clients'))) return;
   // Б16 (11.10.2026): новый или переименованный доверитель встречается участником других дел — предупреждение (ui/parties.js)
   if (typeof clientConflictGate === 'function' && !clientConflictGate(r.obj, prev, await getAll('cases'))) return;
@@ -20913,6 +20975,14 @@ function formModelFinance(v, prev, ctx) {
   if (Array.isArray(obj.payments) && obj.payments.length) finRecalc(obj); else { obj.paid = Number(p.paid || 0); obj.status = obj.paid <= 0 ? 'Не оплачено' : (obj.paid >= amount ? 'Оплачено' : 'Частично оплачено'); }
   return { obj, paidNow: paidNow > 0 && !obj.pending ? r2(paidNow) : 0 };
 }
+// сборка 263 (аудит 256, U8, U9): срок оплаты раньше выставления; оплачено больше суммы счёта — с суммой сверх счёта. Предупреждение, а не запрет
+// (ui/forms.js, formWarnGate); prev — счёт до правки: то, что не менялось, не предупреждает при каждом сохранении
+function finWarnsModel(obj, prev) {
+  const p = prev || null, out = [], amount = Number(obj.amount || 0), paid = Number(obj.paid || 0);
+  if (obj.dueDate && obj.createdAt && obj.dueDate < obj.createdAt && !(p && p.dueDate === obj.dueDate && p.createdAt === obj.createdAt)) out.push('Срок оплаты ' + fmtDate(obj.dueDate) + ' раньше даты выставления ' + fmtDate(obj.createdAt) + '.');
+  if (paid > amount && amount > 0 && !(p && Number(p.paid || 0) === paid && Number(p.amount || 0) === amount)) out.push('Оплачено ' + fmtMoney(paid) + ' — больше суммы счёта на ' + fmtMoney(r2(paid - amount)) + ' (переплата).');
+  return out;
+}
 // сборка 212 (Ш-12): заготовка счёта из «Прайса услуг» (ui/prices.js) — услуга, сумма и этапы работ; этапы записываются при сохранении
 let FIN_FORM_PRE = null;
 async function openFinanceForm(id, presetCaseNum) {
@@ -20957,6 +21027,8 @@ async function saveFinanceForm(id) {
   const r = formModelFinance(v, prev, { clients: await getAll('clients'), cases: await getAll('cases') }); if (r.error) { fErr(r.error); return; }
   // разбор GPT 04.10.2026 (вечер), п. 1: id нового счёта — один на всё время формы (повтор после сбоя не выставляет второй)
   if (!id && typeof formNewId === 'function') r.obj.id = formNewId('Ф', r.obj.id);
+  // сборка 263 (U8, U9): срок раньше выставления, переплата — предупреждение, второе «Сохранить» записывает
+  if (typeof formWarnGate === 'function' && !formWarnGate('fin|' + (id || 'new') + '|' + [r.obj.amount, r.obj.paid, r.obj.createdAt, r.obj.dueDate].join(','), finWarnsModel(r.obj, prev))) return;
   // сборка 212 (Ш-12): этапы работ из прайса — только если сумма осталась итогом прайса
   if (!id && FIN_FORM_PRE && typeof priceStagesFor === 'function' && Number(r.obj.amount) === Number(FIN_FORM_PRE.amount) && !finStagesOf(r.obj).length) r.obj.stages = priceStagesFor(FIN_FORM_PRE, Date.now());
   if (!id && typeof demoAllow === 'function' && !(await demoAllow('finance'))) return;
@@ -21044,6 +21116,8 @@ async function savePayForm(finId, payId) {
   // новый платёж — версия на момент записи (чужой новый платёж не повод для отказа: он уже в перечитанном счёте); правка — версия на момент открытия
   if (!payId && typeof formRecMark === 'function') formRecMark('finance', f);
   const r = formModelPayment(f, { sum: fv('py-sum'), at: fv('py-at'), method: fv('py-method'), note: fv('py-note') }, payId, Date.now()); if (r.error) { fErr(r.error); return; }
+  // сборка 263 (U9): платёж больше остатка — переплата с суммой сверх счёта; второе «Записать платёж» записывает
+  if (typeof formWarnGate === 'function' && !formWarnGate('pay|' + finId + '|' + (payId || 'new') + '|' + fv('py-sum'), finWarnsModel(r.obj, f).filter(w => /переплат/.test(w)), 'Записать платёж')) return;
   if (r.obj.payments.length && fv('py-method')) localStorage.setItem('crm_pay_method', fv('py-method'));
   try { await put('finance', r.obj); } catch (e) { logErr('finance:pay', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
   toast(`Платёж ${fmtMoney(Number(String(fv('py-sum')).replace(/\s/g, '').replace(',', '.')) || 0)} записан` + (r.obj.status === 'Оплачено' ? ' · счёт оплачен полностью' : '')); finReopen(finId);
@@ -27487,6 +27561,8 @@ ${typeof helpFig === 'function' ? helpFig('payqr') : ''}
 <p>«Проверить» у участника в карточке дела открывает лист со ссылками на официальные поиски: ЕГРЮЛ/ЕГРИП, исполнительные производства ФССП, банкротство (Федресурс), арбитражные дела, суды общей юрисдикции (поиск по сайтам судов). Программа на эти сайты сама не обращается: нажатие копирует ИНН или ФИО — вставьте его в поле поиска на сайте; найденное запишите в заметку участника.</p>
 <p>Участники дела (третьи лица, представители, противная сторона): карточка дела → «Суд, стороны, инстанции» → «Изменить участников». У каждого — роль, ИНН (кнопка «По ИНН» заполняет адрес), телефон, почта, заметка. Участник, которого вы убрали, не вернётся ни при обмене с другими устройствами, ни с сайта суда.</p>
 <p>Конфликт интересов: при сохранении дела, доверителя и участников программа ищет то же имя в других делах — доверитель, который проходит у вас противной стороной или третьим лицом, и наоборот (подп. 10 п. 1 ст. 9, п. 1 ст. 11 Кодекса профессиональной этики адвоката). Совпадение имени или фамилии — только предупреждение: если конфликта нет, нажмите «Сохранить» ещё раз.</p>
+<p><b>Проверки при сохранении.</b> Программа предупреждает, но не запрещает: под формой появляется текст, и если всё верно — нажмите «Сохранить» ещё раз (в форме платежа — «Записать платёж»). Заседание — в нерабочий день по производственному календарю или больше года назад («проверьте год»). Дело — дата решения, определения, приговора, постановления по делу об административном правонарушении, решения по КАС или судебного приказа в будущем. Счёт — срок оплаты раньше даты выставления; оплачено больше суммы счёта (переплата) — с суммой сверх счёта, так же и при записи платежа больше остатка. Доверитель — такой доверитель уже есть («Такой доверитель уже есть — создать ещё одного?», рядом телефон или ИНН имеющегося); в телефоне не 10–11 цифр; в почте нет домена. Дата или сумма, которую вы не меняли, при каждом сохранении не проверяется заново.</p>
+<p><b>ОГРН и КПП доверителя-организации.</b> В форме доверителя при типе «Юридическое лицо» вместо паспорта и сведений о рождении — поля «ОГРН» (13 цифр, у ИП — 15) и «КПП» (9 знаков); неверная длина не сохраняется. «По ИНН» и «Вставить реквизиты из текста» заполняют их сами (банковские реквизиты по-прежнему — строкой в «Примечание»). В карточке доверителя — строки «ОГРН» и «КПП». Прежняя программа (/old/) этих полей не знает: правка доверителя там может их стереть.</p>
 <p>«Проверка данных» («Справочники» → «Проверка данных») находит дубли доверителей (одинаковое имя или ИНН) и объединяет их в одну карточку — дела, счета и доверенности переходят к ней, остальные карточки уходят в корзину; делу с повторяющимся номером даётся новый номер. Заседания-двойники (одно заседание, записанное по событию суда на нескольких устройствах до обмена базой, — до 19.10.2026 у каждого устройства получалась своя запись) программа сводит сама при запуске и после обмена, если ваши поля у копий совпадают (статус, итог, комментарий, участие, подготовка), а сведения с сайта суда не противоречат: пустое у одной копии дополняется из другой, суд, записанный коротко и с регионом («… городской суд» и «… городской суд … области»), — один суд, остаётся полное название; копии, которые различаются по существу (разные залы, итоги, комментарии), показывает здесь строкой «Заседания-двойники» с листом «Оставить одно». Так же со сроками, которые программа рассчитала сама (от даты акта, по жалобе), — до сборки 187 каждое устройство записывало свою копию: одинаковые копии сводятся сами, различающиеся — строка «Сроки-двойники», в листе отмечаете, какую оставить. Пока есть неразобранные двойники, на «Сегодня» стоит строка «Повторяющиеся записи» с кнопкой «Разобрать».</p>
 <p>Жест: строку «Выполнено» в «Задачах и сроках» и на «Сегодня» можно смахнуть пальцем вправо — задача или срок отмечаются выполненными; у прошедшего заседания смахивание открывает «Итог заседания». Кнопки в строке работают как раньше.</p>
 <p>Настройки: строка «Найти настройку» вверху — введите слово (например, «PIN», «Telegram», «ордер»), останутся только подходящие пункты.</p>
