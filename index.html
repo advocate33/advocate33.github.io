@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="16.11.2026 15:15 · 3ca8720">
-<meta name="build-no" content="259">
+<meta name="build" content="16.11.2026 17:09 · 4edb2ce">
+<meta name="build-no" content="260">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -14323,9 +14323,12 @@ function shellRender() {
   // Поэтому: событие от уже снова открытого листа пропускается; запись истории снимается в момент закрытия (sheetHistDrop);
   // свой возврат по истории помечается и в popstate пропускается.
   // Esc: закрытие — через closeSheet, чтобы сработала защита формы (п. 1.1)
-  d.addEventListener('cancel', e => { e.preventDefault(); closeSheet(false, true); });
+  // сборка 260: Esc при листе поверх другого — шаг назад, а не закрытие всех листов
+  d.addEventListener('cancel', e => { e.preventDefault(); sheetCloseUser(); });
   // в Chrome «cancel» на Esc приходит не всегда (нужна активация пользователем) — перехват клавиши надёжнее
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheetIsOpen() && !e.defaultPrevented) { e.preventDefault(); closeSheet(false, true); } });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && sheetIsOpen() && !e.defaultPrevented) { e.preventDefault(); sheetCloseUser(); } });
+  // сборка 260: нажатие внутри листа запоминается до обработчика — лист, который оно откроет, ляжет поверх (openSheet); «Сохранить», «Удалить» и выбор защиты формы — нет
+  document.getElementById('sheetContent').addEventListener('click', e => { const t = e.target && e.target.closest ? e.target.closest('button, a, [onclick], [role="button"]') : null; UI.sheetClick = t && !t.closest('.guard-box') && !t.matches('.primary, .danger') ? { t: Date.now(), cur: UI.cur } : null; }, true);
   d.addEventListener('close', () => { if (d.open) return; toastRaise(); sheetHistDrop(); const side = document.getElementById('side'), box = document.getElementById('sheetContent'); if (UI.moving || (side && !side.hidden && box && box.parentNode === side)) return; UI.stack = []; UI.cur = null; });
   themeToggleRender();
   topbarMeasure(); // высота шапки — в переменную для боковой панели (как v308 в прежней программе)
@@ -14491,6 +14494,8 @@ window.addEventListener('popstate', () => { if (UI.skipPop) { UI.skipPop--; shee
   if (d && d.open && typeof guardDirty === 'function' && guardDirty()) { try { history.pushState({ nextSheet: 1 }, ''); UI.hist = true; } catch (e) { logErr('sheet:history', e); } guardPrompt('close'); return; }
   // сборка 257 (E1): обязательный лист — запись истории возвращается, лист остаётся (или открывается снова из-под верхнего)
   if (d && d.open && (sheetLockOn(UI.cur) || UI.stack.some(sheetLockOn))) { sheetHistPush(); sheetLockHold(); return; }
+  // сборка 260: лист поверх другого — «Назад» возвращает в прежний лист, запись истории возвращается (лист ещё открыт)
+  if (d && d.open && UI.stack.length) { sheetHistPush(); sheetBack(true, true); return; }
   if (d && d.open) d.close(); } });
 
 // ── экраны ──
@@ -14552,12 +14557,20 @@ async function screenStub(it) {
 // Каждый лист помнит свой режим: форма поверх карточки-панели открывается листом, а «←» возвращает карточку в панель.
 function sheetHost(mode) { return mode === 'panel' && window.innerWidth >= 1200 ? document.getElementById('side') : document.getElementById('sheet'); }
 function sheetIsOpen() { const d = document.getElementById('sheet'), side = document.getElementById('side'); return !!((d && d.open) || (side && !side.hidden)); }
+// сборка 260: нажатие в листе действует 3 с (открытие может ждать чтения базы); стек — не глубже 10 листов
+const SHEET_AUTO_MS = 3000, SHEET_STACK_MAX = 10;
 function openSheet(title, body, mode) {
   if (!document.getElementById('sheet')) return;
   const open = sheetIsOpen();
   // сборка 257 (E1): поверх непринятого соглашения новый лист кладётся в стек над ним и открывается листом, а не панелью
   const locked = open && sheetLockOn(UI.cur);
-  if (locked) UI.stack.push(UI.cur); else if (mode === 'replace' && open) { /* стек не меняется */ } else if (mode === true && open && UI.cur) UI.stack.push(UI.cur); else UI.stack = [];
+  // сборка 260 (пользователь 16.11.2026): лист, открытый нажатием внутри другого листа, ложится поверх него — «←», «×», Esc и «Назад»
+  // возвращают в прежний. Не поверх: перерисовка того же листа, давнее нажатие, форма с «Сохранить» (её закрытие решает защита формы)
+  const c = UI.sheetClick; UI.sheetClick = null;
+  const reopen = !!UI.sheetReopen && UI.sheetReopen === UI.cur; UI.sheetReopen = null;
+  const auto = open && !locked && !reopen && mode !== true && mode !== 'replace' && !!UI.cur && !!c && c.cur === UI.cur && Date.now() - c.t < SHEET_AUTO_MS && UI.cur.title !== title && !(typeof guardIsForm === 'function' && guardIsForm());
+  if (auto) { sheetFreeze(); UI.stack.push(UI.cur); if (UI.stack.length > SHEET_STACK_MAX) UI.stack.splice(0, UI.stack.length - SHEET_STACK_MAX); }
+  else if (locked) UI.stack.push(UI.cur); else if ((mode === 'replace' || reopen) && open) { /* стек не меняется */ } else if (mode === true && open && UI.cur) UI.stack.push(UI.cur); else UI.stack = [];
   UI.cur = { title, body, mode: mode === 'panel' && !locked && !UI.stack.some(sheetLockOn) ? 'panel' : 'sheet' }; sheetPlace(UI.cur);
 }
 // Показать запись в нужном месте (панель или лист), перенеся контейнер, если он в другом месте
@@ -14593,7 +14606,7 @@ function sheetHistWanted() { if (!UI.histWant) return; UI.histWant = false; cons
 function sheetShow() {
   const box = document.getElementById('sheetContent'); if (!box || !UI.cur) return;
   const back = UI.stack.length ? `<button type="button" class="icon-button" aria-label="Назад" onclick="sheetBack(false, true)">${icon('arrow-left')}</button>` : '';
-  box.innerHTML = `<div class="modal-head"><div class="split" style="justify-content:flex-start;gap:4px">${back}<h2 id="sheetTitle">${esc(UI.cur.title)}</h2></div>${sheetLockOn(UI.cur) ? '' : iconBtn('Закрыть', 'closeSheet(false, true)', 'x')}</div><div class="modal-content">${UI.cur.body}</div>`;
+  box.innerHTML = `<div class="modal-head"><div class="split" style="justify-content:flex-start;gap:4px">${back}<h2 id="sheetTitle">${esc(UI.cur.title)}</h2></div>${sheetLockOn(UI.cur) ? '' : iconBtn('Закрыть', 'sheetCloseUser()', 'x')}</div><div class="modal-content">${UI.cur.body}</div>`;
   const d = document.getElementById('sheet'); if (d) d.scrollTop = 0;
   if (typeof guardArm === 'function') guardArm(); // п. 1.1: защита незавершённой формы
 }
@@ -14605,7 +14618,15 @@ function sheetFreeze() {
   box.querySelectorAll('select').forEach(el => Array.from(el.options).forEach(o => { if (o.selected) o.setAttribute('selected', ''); else o.removeAttribute('selected'); }));
   UI.cur.body = box.innerHTML;
 }
-function sheetBack(force, byUser) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('back', byUser)) return false; if (sheetLockOn(UI.cur)) { sheetLockHold(); return false; } UI.cur = UI.stack.pop() || null; if (!UI.cur) closeSheet(true); else sheetPlace(UI.cur); return true; }
+function sheetBack(force, byUser) { if (!force && typeof guardBeforeClose === 'function' && !guardBeforeClose('back', byUser)) return false; if (sheetLockOn(UI.cur)) { sheetLockHold(); return false; } UI.cur = UI.stack.pop() || null; if (!UI.cur) closeSheet(true); else { sheetPlace(UI.cur); sheetReopenRun(UI.cur); } return true; }
+// сборка 260: «×» и Esc — лист поверх другого возвращает в прежний, последний закрывается
+function sheetCloseUser() { return UI.stack.length && !sheetLockOn(UI.cur) ? sheetBack(false, true) : closeSheet(false, true); }
+// сборка 260: лист с пометкой reopen (настройки, карточка дела) при возврате перерисовывается своей функцией — состояние пунктов свежее, а не снимок
+function sheetReopenRun(e) {
+  const r = e && e.reopen, fn = r && typeof window !== 'undefined' ? window[r[0]] : null; if (typeof fn !== 'function') return;
+  UI.sheetReopen = e;
+  Promise.resolve().then(() => fn(...(r[1] || []))).catch(err => logErr('sheet:reopen', err)).then(() => { if (UI.sheetReopen === e) UI.sheetReopen = null; });
+}
 function sheetHistDrop() { UI.histWant = false; if (UI.hist) { UI.hist = false; UI.skipPop = (UI.skipPop || 0) + 1; history.back(); } }
 // сборка 257 (аудит 256, E1): обязательный лист (соглашение до принятия) не закрывается ни «×», ни Esc, ни «Назад», ни закрытием листа поверх него —
 // закрытие возвращает к нему. Признак — lock у записи стека; условие проверяется каждый раз (после принятия лист закрывается как обычно)
@@ -15007,6 +15028,8 @@ async function openSettingsSheet(sub) {
       <div><span>Иконки</span><span class="muted">Lucide — © Lucide Contributors, лицензия ISC</span></div>
     </div>
     <div class="info-box set-block" data-words="лицензия устройства учёт учет">Устройства, на которых действует пропуск, — «Лицензия» → «Устройства»: там же можно отвязать устройство, которым вы больше не пользуетесь.</div>`, sub);
+  // сборка 260: при возврате из листа, открытого отсюда, настройки перерисовываются (состояние пунктов свежее)
+  if (UI.cur) UI.cur.reopen = ['openSettingsSheet', []];
 }
 // журнал ошибок: что сломалось, где и когда — чтобы прислать разработчику; «Скопировать» собирает текст для чата
 function errlogText() { return errLogGet().slice().reverse().map(r => `${new Date(r.t).toLocaleString('ru-RU')} · ${r.ver || ''} · ${r.where || ''}: ${r.msg || ''}${r.extra ? ' · ' + r.extra : ''}${r.stack ? '\n    ' + r.stack : ''}`).join('\n'); }
@@ -18405,6 +18428,8 @@ async function openCaseSheet(id, keep) {
   const stack = keep && sheetIsOpen() && UI.cur ? UI.stack.concat([UI.cur]) : null;
   openSheet([c.number, c.client].filter(Boolean).join(' · ') || 'Дело', body, 'panel');
   if (UI.cur) UI.cur.caseId = c.id;
+  // сборка 260: при возврате из листа, открытого из карточки, карточка перерисовывается (новая задача, заседание — сразу видны)
+  if (UI.cur) UI.cur.reopen = ['openCaseSheet', [c.id]];
   if (stack) { UI.stack = stack; sheetShow(); }
 }
 
@@ -27127,6 +27152,7 @@ ${typeof helpFig === 'function' ? helpFig('todaycolor') : ''}
 <p>Дело программа ищет по номеру, номеру в суде или фамилии доверителя. Если подходит несколько дел или ни одного — нажмите «Выбрать дело». «Так и есть» записывает сразу, «Отменить» возвращает запись. Некогда — «В неразобранные».</p>` },
   { id: 'cases', title: 'Дела, сроки, стадии', html: `
 <p>«Дела» — список с фильтрами и поиском, таблица (на компьютере можно выбрать столбцы) и доска по стадиям. Поиск и фильтр сохраняются, пока вы смотрите карточки.</p>
+<p><b>«Назад» в листах.</b> Лист, открытый из другого листа (например, «Настройки» → «Свой сервер в Яндекс Облаке» или пункт карточки дела), открывается поверх него: слева от заголовка появляется стрелка «←». Стрелка, крестик «×», клавиша Esc и кнопка «Назад» телефона возвращают в прежний лист, а не на главный экран; последний лист они закрывают. Настройки и карточка дела при возврате показывают свежее состояние. Перейти в раздел сразу — кнопкой раздела внизу или в боковой панели.</p>
 <p><b>Поиск по мере ввода.</b> В «Делах», «Доверителях» и «Обращениях» список отбирается сам, пока вы набираете текст в поле поиска, — нажимать «Найти» или Enter не нужно; крестик в поле очищает поиск и возвращает весь список.</p>
 <p><b>Профиль практики.</b> Настройки → «Дела» → «Профиль практики»: отметьте, какие дела вы ведёте (Гражданское, Арбитраж, КАС, Уголовное, КоАП). В выборе вида дела останутся только они и виды, которые вы добавили в справочник сами; у уже заведённых дел вид не меняется. Без гражданских, арбитражных и КАС из «Калькуляторов» уходят расчёты для исков. Ничего не отмечено — видно всё. Настройка переходит на другие устройства обменом.</p>
 <p><b>Название дела</b> можно не вводить: если при сохранении поле «Предмет спора» пустое, оно заполняется само из доверителя и противной стороны («Иванов И. И. к ООО «Гарант»»; без противной стороны — доверитель и категория) и дальше правится как обычное. Выключается в Настройки → «Дела» → отметка «Название дела заполняется само…» — настройка этого устройства.</p>
