@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="17.11.2026 00:39 · 2606482">
-<meta name="build-no" content="263">
+<meta name="build" content="17.11.2026 13:00 · 12aa318">
+<meta name="build-no" content="264">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -15735,6 +15735,23 @@ function caseActWarnsModel(obj, prev, today) {
   for (const [k, label] of CASE_ACT_DATES) { const v = obj && obj[k]; if (v && /^\d{4}-\d{2}-\d{2}$/.test(v) && v !== p[k] && v > today) out.push('«' + label + '» — ' + fmtDate(v) + ', в будущем.'); }
   return out;
 }
+// сборка 264 (аудит 256, U6): смена вида дела пересчитывает автосроки — до сохранения список «было → стало» на пробной копии дела;
+// сама запись идёт прежним путём (nextActDeadlines в saveCaseForm), копия ничего не сохраняет
+function caseKindDlWarnsModel(obj, prev, nowISO) {
+  if (!obj || !prev || String(obj.kind || '') === String(prev.kind || '') || typeof nextActDeadlinesApply !== 'function') return [];
+  const was = new Map((Array.isArray(obj.deadlines) ? obj.deadlines : []).filter(d => d && d.autoKey && !d.done).map(d => [d.id, d]));
+  let probe; try { probe = JSON.parse(JSON.stringify(obj)); nextActDeadlinesApply(probe, JSON.parse(JSON.stringify(prev)), nowISO); } catch (e) { logErr('caseKindDlWarnsModel', e); return []; }
+  const list = [];
+  for (const d of probe.deadlines || []) {
+    if (!d || !d.autoKey) continue;
+    const w = was.get(d.id);
+    if (!w) { if (!d.done) list.push('«' + d.title + '» — новый, ' + (d.kind === 'control' ? 'с ' : 'до ') + fmtDate(d.date)); continue; }
+    if (d.baseGone && !w.baseGone) list.push('«' + w.title + '» (' + fmtDate(w.date) + ') — у нового вида нет даты акта, от которой он считался');
+    else if (d.ruleGone && !w.ruleGone) list.push('«' + w.title + '» (' + fmtDate(w.date) + ') — по правилам нового вида не возникает');
+    else if (d.date !== w.date) list.push('«' + w.title + '»: было ' + fmtDate(w.date) + ' → стало ' + fmtDate(d.date));
+  }
+  return list.length ? ['Вид дела меняется («' + (prev.kind || 'не указан') + '» → «' + (obj.kind || 'не указан') + '»), сроки изменятся: ' + list.join('; ') + '.'] : [];
+}
 // v169 (аудит «Переезд и рассмотрения дела», P7): рассмотрение заседания — выбор в форме (ui/proceedings.js, procHearingOptions); пусто —
 // текущее рассмотрение инстанции. Поле в форме не показано (у дела нет других рассмотрений) — прежнее значение не трогается.
 // Выбор другого рассмотрения — ручное решение: отметки переноса (procAuto) снимаются, «Вернуть как текущее» такое заседание не трогает
@@ -15944,7 +15961,9 @@ async function saveCaseForm(id) {
   // папка документов (14.10.2026): поля в основной части формы — и в краткой, и в полной
   if (document.getElementById('cf-docsPath') || document.getElementById('cf-docsUrl')) { const dv = caseDocsInput(fv('cf-docsPath'), fv('cf-docsUrl')); if (dv.error) { fErr(dv.error); return; } r.obj.docsPath = dv.path; r.obj.docsUrl = dv.url; }
   // сборка 263 (U8): дата акта в будущем — предупреждение, второе «Сохранить» записывает
-  { const aw = caseActWarnsModel(r.obj, prev, todayISO()); if (!formWarnGate('case|' + (id || 'new') + '|' + CASE_ACT_DATES.map(x => r.obj[x[0]] || '').join(','), aw)) return; }
+  // сборка 264 (U6): смена вида дела — список изменений сроков до сохранения; одним вызовом с U8 — два вызова подряд сбрасывали
+  // запомненное друг друга, и второе «Сохранить» снова предупреждало (урок 276)
+  { const aw = caseActWarnsModel(r.obj, prev, todayISO()).concat(caseKindDlWarnsModel(r.obj, prev)); if (!formWarnGate('case|' + (id || 'new') + '|' + (r.obj.kind || '') + '|' + CASE_ACT_DATES.map(x => r.obj[x[0]] || '').join(','), aw)) return; }
   // автонумерация соглашений (03.10.2026): новому делу без номера — следующий; номер, занятый другим делом, — отказ
   if (typeof nextAgreementNo === 'function') {
     if (!id && !String(r.obj.agreementNo || '').trim()) { r.obj.agreementNo = nextAgreementNo(numCases); r.obj.agreementDate = r.obj.agreementDate || todayISO(); }
@@ -21891,6 +21910,8 @@ function stateFeeCalc(o) {
   const court = o.court === 'arb' ? 'arb' : 'sou', cfg = STATE_FEE[court], it = cfg.items.find(x => x.id === o.item);
   if (!it) return null;
   const payer = o.payer === 'ul' ? 'ul' : 'fl'; let fee, text;
+  // сборка 264 (аудит 256, U14): цена иска не указана — суммы нет («Укажите цену иска»), а не первая ступень шкалы
+  if (it.amount && !(Number(o.amount) > 0)) return { fee: null, noAmount: true, text: 'Укажите цену иска', norm: `${it.norm} ${cfg.art} НК РФ`, note: it.note || '', title: it.t, needsAmount: true };
   if (it.amount) {
     const amt = Math.max(0, Number(o.amount) || 0), sc = stateFeeScale(amt, court); let f = sc.fee;
     text = `${fmtNum(sc.base)} ₽` + (sc.pct ? ` + ${sc.pct} % от суммы свыше ${fmtNum(sc.over)} ₽ (${fmtNum(amt - sc.over)} ₽ × ${sc.pct} % = ${fmtNum((amt - sc.over) * sc.pct / 100)} ₽)` : '') + (sc.capped ? ` — но не более ${fmtNum(cfg.cap)} ₽` : '');
@@ -21902,7 +21923,9 @@ function stateFeeCalc(o) {
 }
 // срок от даты: календарное прибавление (как srCalc) и перенос последнего дня с нерабочего на следующий рабочий
 function calcTerm(startISO, n, unit) {
-  n = Math.round(Number(n) || 0); if (!startISO || !n) return null;
+  // сборка 264 (аудит 256, U14): дробный срок не округляется («1,5 месяца» давало 2 месяца) — отказ с подсказкой
+  n = Number(n) || 0; if (!startISO || !n) return null;
+  if (!Number.isInteger(n)) return { error: 'Срок — целое число. Дробный срок (например, полмесяца) переведите в дни по норме, которая его устанавливает, и выберите «Дней»' };
   const end = unit === 'd' ? addDaysLocalISO(startISO, n) : addMonthsLocalISO(startISO, unit === 'y' ? n * 12 : n);
   let work = end, guard = 0; const isWork = typeof isWorkdayISO === 'function' ? isWorkdayISO : (iso => { const w = parseLocalDate(iso).getDay(); return w !== 0 && w !== 6; });
   while (!isWork(work) && guard++ < 30) work = addDaysLocalISO(work, 1);
@@ -21911,7 +21934,9 @@ function calcTerm(startISO, n, unit) {
 // дни между датами: календарные и рабочие (по справочнику нерабочих дней), с днём начала или со следующего — как dpCalc
 function calcPeriodDays(fromISO, toISO, incl) {
   if (!fromISO || !toISO) return null;
-  let a = fromISO, b = toISO; if (b < a) { const t = a; a = b; b = t; }
+  // сборка 264 (аудит 256, U14): обратные даты — как в остальных калькуляторах («поменяйте даты местами»), а не молчаливая перестановка
+  if (toISO < fromISO) return { reversed: true };
+  const a = fromISO, b = toISO;
   const cal = Math.round((parseLocalDate(b) - parseLocalDate(a)) / 864e5) + (incl ? 1 : 0);
   const isWork = typeof isWorkdayISO === 'function' ? isWorkdayISO : (iso => { const w = parseLocalDate(iso).getDay(); return w !== 0 && w !== 6; });
   let work = 0, d = incl ? a : addDaysLocalISO(a, 1), guard = 0;
@@ -21980,11 +22005,12 @@ function sfCalc() {
   const r = sfCurrent(), box = document.getElementById('sf-result'); if (!box) return;
   const wrap = document.getElementById('sf-amount-wrap'); if (wrap) wrap.hidden = !(r && r.needsAmount);
   CALC_LAST.fee = r;
-  box.innerHTML = r ? `<div class="info-box calc-result"><b class="calc-big">${esc(fmtNum(r.fee))} ₽</b><span class="small">${esc(r.text)}</span><span class="small muted">${esc(r.norm)}${r.note ? ' · ' + esc(r.note) : ''}</span></div>` : '';
+  box.innerHTML = r && r.noAmount ? '<p class="small muted" id="sf-noamount">Укажите цену иска</p>' : r ? `<div class="info-box calc-result"><b class="calc-big">${esc(fmtNum(r.fee))} ₽</b><span class="small">${esc(r.text)}</span><span class="small muted">${esc(r.norm)}${r.note ? ' · ' + esc(r.note) : ''}</span></div>` : '';
 }
-function sfCopy() { const r = sfCurrent(); if (r) calcCopy(String(r.fee), 'Сумма госпошлины скопирована'); }
+function sfCopy() { const r = sfCurrent(); if (r && r.noAmount) { toast('Укажите цену иска', true); return; } if (r) calcCopy(String(r.fee), 'Сумма госпошлины скопирована'); }
 async function sfSaveToCase() {
   const r = sfCurrent(), id = fv('sf-case'); if (!r) return;
+  if (r.noAmount) { toast('Укажите цену иска', true); return; }
   if (!id) { toast('Выберите дело, в которое записать госпошлину', true); return; }
   const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
   const prev = c.stateFee; c.stateFee = r.fee; c.stateFeeText = `${r.title}: ${r.text} — ${r.norm}`;
@@ -22037,6 +22063,8 @@ function openCalcIndexSheet() {
 function runCalcIndex() {
   const sum = clcNum('ci-sum'), from = fv('ci-from'), to = fv('ci-to'), out = document.getElementById('ci-out');
   if (!(sum > 0) || !from || !to) { out.innerHTML = '<p class="small muted">Укажите сумму и оба месяца</p>'; return; }
+  // сборка 264 (U14): обратные месяцы — то же сообщение, что у других калькуляторов (прежде — индексация 0)
+  if (to < from) { out.innerHTML = '<p class="small muted">Месяц «по» раньше месяца «с» — поменяйте месяцы местами</p>'; return; }
   const r = calcIndex(sum, from, to); CALC_LAST.idx = r; CALC_LAST.idxIn = { sum, from, to };
   if (r.missing.length) { out.innerHTML = `<div class="info-box warning" id="ci-missing">Нет ИПЦ за ${r.missing.length} ${plural(r.missing.length, 'месяц', 'месяца', 'месяцев')}: ${esc(r.missing.slice(0, 6).join(', '))}${r.missing.length > 6 ? '…' : ''}. Заполните справочник ИПЦ (данные Росстата) — без них индексация неверна.</div>`; return; }
   const text = r.rows.map(x => `${x.month}: ИПЦ ${String(x.cpi).replace('.', ',')} % → ${calcRubText(x.acc)} ₽`).join('\n') + `\nПроиндексированная сумма: ${calcRubText(r.result)} ₽, индексация: ${calcRubText(r.total)} ₽`;
@@ -22045,19 +22073,36 @@ function runCalcIndex() {
     <div class="form-actions"><button type="button" class="button" onclick="calcCopy(${esc(JSON.stringify(text))}, 'Расчёт скопирован')">${icon('files')}Скопировать расчёт</button>${typeof calcDocButtons === 'function' ? calcDocButtons('idx') : ''}</div>`;
 }
 // ── сроки и дни ──
-function openCalcTermSheet() {
+async function openCalcTermSheet() {
+  // сборка 264 (аудит 256, U14): «Записать в дело» — форма нового срока выбранного дела с рассчитанной датой (название и подтверждение — за пользователем)
+  const cases = (await getAll('cases')).filter(c => c && !c._deleted && !c.archived && c.status !== 'Завершено').sort((a, b) => String(a.number || '').localeCompare(String(b.number || ''), 'ru', { numeric: true }));
   openSheet('Расчёт срока', `<p class="small muted">Календарное прибавление дней, месяцев или лет. Если последний день — нерабочий, срок оканчивается в следующий рабочий день (ч. 2 ст. 108 ГПК, ч. 4 ст. 114 АПК, ч. 2 ст. 93 КАС). Начало течения срока и особые правила определяйте по норме.</p>
     <div class="form-grid">${fInput('sr-date', 'Дата начала', todayISO(), 'type="date"')}${fInput('sr-num', 'Срок', '', 'type="text" inputmode="numeric" autocomplete="off"')}${fSelect('sr-unit', 'Единица', 'd', [['d', 'Дней (календарных)'], ['m', 'Месяцев'], ['y', 'Лет']])}</div>
-    <div id="sr-out" role="status"></div>`, sheetIsOpen() ? true : undefined);
+    <div id="sr-out" role="status"></div>
+    <div class="form-grid">${wide(fCasePick('sr-case', 'Записать в дело (необязательно)', '', cases, 'id', true))}</div>
+    <div class="form-actions"><button type="button" class="button" id="sr-save" onclick="srSaveToCase()">${icon('check')}Записать в дело</button></div>`, sheetIsOpen() ? true : undefined);
   ['sr-date', 'sr-num', 'sr-unit'].forEach(id => { const el = document.getElementById(id); if (el) { el.addEventListener('input', srCalc); el.addEventListener('change', srCalc); } });
   srCalc();
 }
 function srCalc() {
   const out = document.getElementById('sr-out'); if (!out) return;
-  const r = calcTerm(fv('sr-date'), clcNum('sr-num'), fv('sr-unit') || 'd'); CALC_LAST.term = r;
+  const r0 = calcTerm(fv('sr-date'), clcNum('sr-num'), fv('sr-unit') || 'd');
+  if (r0 && r0.error) { CALC_LAST.term = null; out.innerHTML = `<p class="small muted" id="sr-error">${esc(r0.error)}</p>`; return; }
+  const r = r0; CALC_LAST.term = r;
   // 14.10.2026: год без постановления о переносах — пометка «предварительно» (next/prodcal.js)
   const pre = r && typeof prodcalPrelim === 'function' ? prodcalPrelimText(prodcalPrelim(r.end, r.work)) : '';
   out.innerHTML = r ? `<div class="info-box calc-result"><span class="small muted">Дата окончания</span><b class="calc-big" id="sr-end">${esc(calcDateLong(r.end))}</b>${r.moved ? `<span class="small" id="sr-moved">нерабочий день — срок оканчивается ${esc(calcDateLong(r.work))}</span>` : ''}${pre ? `<span class="small muted" id="sr-note">${esc(pre)}</span>` : ''}</div>` : '<p class="small muted">Укажите дату начала и срок</p>';
+}
+// модель «Записать в дело»: черновик формы срока — дата с учётом переноса, отсчёт от даты начала, порядок исчисления в «Норма / порядок»
+function srDeadlineDraft(startISO, n, unit) {
+  const r = calcTerm(startISO, n, unit); if (!r) return { error: 'Укажите дату начала и срок' }; if (r.error) return { error: r.error };
+  const num = Number(n), word = unit === 'y' ? plural(num, 'год', 'года', 'лет') : unit === 'm' ? plural(num, 'месяц', 'месяца', 'месяцев') : plural(num, 'день', 'дня', 'дней');
+  return { date: r.work, baseDate: startISO, kind: 'procedural', src: 'Калькулятор «Расчёт срока»', norm: num + ' ' + word + (r.moved ? ' (последний день ' + fmtDate(r.end) + ' — нерабочий, перенесён)' : '') };
+}
+async function srSaveToCase() {
+  const id = fv('sr-case'); if (!id) { toast('Выберите дело, в которое записать срок', true); return; }
+  const d = srDeadlineDraft(fv('sr-date'), clcNum('sr-num'), fv('sr-unit') || 'd'); if (d.error) { toast(d.error, true); return; }
+  if (typeof openDeadlineForm === 'function') await openDeadlineForm(id, '', d);
 }
 function openCalcDaysSheet() {
   openSheet('Дни в периоде', `<p class="small muted">Рабочие дни — по производственному календарю программы (Справочники → «Нерабочие дни»): праздники и переносы выходных загружаются с сайта программы, свои даты — там же.</p>
@@ -22068,7 +22113,8 @@ function openCalcDaysSheet() {
 }
 function dpCalc() {
   const out = document.getElementById('dp-out'); if (!out) return;
-  const r = calcPeriodDays(fv('dp-from'), fv('dp-to'), fv('dp-incl') === '1'); CALC_LAST.days = r;
+  const r = calcPeriodDays(fv('dp-from'), fv('dp-to'), fv('dp-incl') === '1'); CALC_LAST.days = r && !r.reversed ? r : null;
+  if (r && r.reversed) { out.innerHTML = '<p class="small muted" id="dp-reversed">Дата окончания раньше даты начала — поменяйте даты местами</p>'; return; }
   const pre = r && typeof prodcalPrelim === 'function' ? prodcalPrelimText(prodcalPrelim(fv('dp-from'), fv('dp-to'))) : '';
   out.innerHTML = r ? `<div class="calc-pair"><div class="info-box calc-result"><span class="small muted">Календарных дней</span><b class="calc-big" id="dp-cal">${r.cal.toLocaleString('ru-RU')}</b></div><div class="info-box calc-result"><span class="small muted">Рабочих дней</span><b class="calc-big" id="dp-work">${r.work.toLocaleString('ru-RU')}</b></div></div>${pre ? `<p class="small muted" id="dp-note">${esc(pre)}</p>` : ''}` : '';
 }
@@ -27570,7 +27616,9 @@ ${typeof helpFig === 'function' ? helpFig('payqr') : ''}
 <p>«Отчёты»: дела, деньги, нагрузка и обращения за месяц, квартал, год или свой период. Расчёт — как в прежней программе; у каждого блока указано, за какой он срок.</p>
 <p><b>QR для оплаты госпошлины.</b> «Калькуляторы» → «Госпошлина в суд» → «QR для оплаты»: код для приложения банка доверителя с реквизитами получателя госпошлины (Казначейство России (ФНС России), единый казначейский счёт), КБК по виду суда (общей юрисдикции и мировые — 18210803010011050110, арбитражные — 18210801000011050110) и ОКТМО суда. ОКТМО берётся из карточки суда (поле «ОКТМО (для госпошлины)», его пишут на сайте суда в «Реквизитах для уплаты госпошлины»); если дело выбрано, а ОКТМО в карточке нет, — впишите его в листе и нажмите «ОКТМО — в карточку суда». «Квитанция с QR» печатает реквизиты и код, «Картинка для отправки» — файл PNG. Реквизиты получателя — по сведениям на 08.07.2026; перед выдачей доверителю сверьте с сайтом суда.</p>
 <p><b>Расчёт — документом.</b> После «Рассчитать» в процентах по ст. 395 ГК РФ, неустойке и индексации есть «Скачать .docx» — документ «Расчёт …» с таблицей периодов и строкой для подписи — и «В документы дела»: выберите дело, расчёт сохранится в его документы (категория «Расчёт») и в «Пакете в суд» его можно отметить приложением.</p>
-<p>«Калькуляторы»: госпошлина (с записью в дело), проценты по ст. 395 ГК РФ по ключевой ставке, неустойка и пеня по закону о защите прав потребителей, индексация по ст. 208 ГПК РФ, расчёт срока с переносом с нерабочего дня, дни в периоде. Ставки и индексы — в справочниках на том же экране; результат — подсказка, перед подачей сверяйте с первоисточником.</p>` },
+<p>«Калькуляторы»: госпошлина (с записью в дело), проценты по ст. 395 ГК РФ по ключевой ставке, неустойка и пеня по закону о защите прав потребителей, индексация по ст. 208 ГПК РФ, расчёт срока с переносом с нерабочего дня, дни в периоде. Ставки и индексы — в справочниках на том же экране; результат — подсказка, перед подачей сверяйте с первоисточником.</p>
+<p><b>Калькуляторы: даты и пустые поля.</b> Если дата «по» раньше даты «с» (или месяц «по» раньше месяца «с» в индексации), любой калькулятор пишет «поменяйте даты местами» и не считает. В «Расчёте срока» срок — целое число: «1,5» месяца не округляется, а программа просит перевести дробный срок в дни по норме, которая его устанавливает. В «Госпошлине» без цены иска суммы нет — «Укажите цену иска». «Расчёт срока» → «Записать в дело» (выберите дело) открывает форму нового срока этого дела с рассчитанной датой, датой отсчёта и порядком исчисления; название впишите сами, «Дату проверил(а) и подтверждаю» — после сверки.</p>
+<p><b>Смена вида дела.</b> Сроки по датам актов считаются по правилам вида дела, поэтому при смене вида в форме дела программа до сохранения перечисляет, что изменится: «было → стало», новые сроки и сроки, которых по правилам нового вида нет. Если всё верно — нажмите «Сохранить» ещё раз.</p>` },
   { id: 'sync', title: 'Синхронизация и свой сервер', html: `
 <p>Устройства обмениваются базой через <b>ваш</b> сервер в Яндекс Облаке — небольшую функцию в вашем аккаунте. База на сервере зашифрована вашим паролем: сервер, Яндекс и автор программы прочитать её не могут. Автор к вашему облаку доступа не имеет. Тот же сервер нужен для мониторинга судов, ленты календаря, снимков базы, напоминаний в Telegram и онлайн-записи.</p>
 ${typeof helpFig === 'function' ? helpFig('scheme') : ''}
