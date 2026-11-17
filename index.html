@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="17.11.2026 13:00 · 12aa318">
-<meta name="build-no" content="264">
+<meta name="build" content="17.11.2026 19:52 · 06d600c">
+<meta name="build-no" content="265">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -4838,24 +4838,29 @@ async function caseStageSet(id, stage, confirmed) {
   else if (c.status === 'Завершено') { c.status = 'В работе'; c.closedAt = ''; addCaseHistoryEvent(c, 'status', 'Завершено', 'В работе', 'card'); }
   const ev = caseStageEvidence(c, hs); if (ev && STAGE_RANK[ev.stage] > stageRankOf(stage)) c.stageAutoSkip = ev.key;
   addCaseHistoryEvent(c, 'stage', from, stage, 'card');
+  // сборка 265 (аудит 262, A258-1): состояние сразу после смены — отмена вернёт только поля, которые с тех пор никто не менял
+  const after = { stage: c.stage, status: c.status, closedAt: c.closedAt, stageAutoSkip: c.stageAutoSkip, outcome: c.outcome };
   STAGE_AUTO.busy = true;
   try { await put('cases', c); } catch (e) { logErr('stage:set', e); toast('Не удалось сохранить: ' + ((e && e.message) || 'ошибка записи'), true); return; } finally { STAGE_AUTO.busy = false; }
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
   // v168: стадия ниже данных дела (вышестоящий суд вернул дело) — подсказка о «Новом рассмотрении после отмены», чтобы прежние ссылки ушли в историю
   const lower = ev && STAGE_RANK[ev.stage] > stageRankOf(stage) && ['Первая инстанция', 'Апелляция', 'Кассация'].includes(stage);
-  toast(stage === 'Завершено' ? 'Дело завершено' : 'Стадия: ' + stage + (lower && typeof openProcNew === 'function' ? '. Если дело вернулось на новое рассмотрение — «Рассмотрения дела» → «Новое рассмотрение после отмены»: прежние ссылки и даты уйдут в историю' : ''), false, { label: 'Отменить', run: () => caseStageUndo(id, snap, stage) });
+  toast(stage === 'Завершено' ? 'Дело завершено' : 'Стадия: ' + stage + (lower && typeof openProcNew === 'function' ? '. Если дело вернулось на новое рассмотрение — «Рассмотрения дела» → «Новое рассмотрение после отмены»: прежние ссылки и даты уйдут в историю' : ''), false, { label: 'Отменить', run: () => caseStageUndo(id, snap, stage, after) });
   if (typeof openCaseSheet === 'function') await openCaseSheet(id);
 }
 // сборка 257 (аудит 256, E2; решение пользователя 11.11.2026 «а»): «Отменить» в сообщении о смене стадии — прежние стадия, статус, дата
 // завершения, отметка «не поднимать» и исход; в журнал дела — строки возврата. Стадию за это время сменили ещё раз — не отменяется
-async function caseStageUndo(id, snap, stage) {
+// сборка 265 (аудит 262, A258-1): возвращается только поле, которое сама смена стадии изменила (after ≠ snap) и которое с тех пор осталось
+// как после смены (текущее = after); исход, указанный позже, сохраняется. Без after (старый вызов) — как прежде, все поля
+async function caseStageUndo(id, snap, stage, after) {
   const c = await getOne('cases', id); if (!c || !snap) return;
   const cur = c.status === 'Завершено' ? 'Завершено' : (c.stage || '');
   if (cur !== stage) { toast('Стадия уже изменена ещё раз — отменять нечего', true); return; }
-  if ((c.status || '') !== (snap.status || '')) addCaseHistoryEvent(c, 'status', c.status || '', snap.status || '', 'card');
-  if ((c.stage || '') !== (snap.stage || '')) addCaseHistoryEvent(c, 'stage', c.stage || '', snap.stage || '', 'card');
-  if (String(c.outcome || '') !== String(snap.outcome || '')) addCaseHistoryEvent(c, 'outcome', c.outcome || '', snap.outcome || '', 'card');
-  for (const k of ['stage', 'status', 'closedAt', 'stageAutoSkip', 'outcome']) { if (snap[k] === undefined) delete c[k]; else c[k] = snap[k]; }
+  const same = (a, b) => String(a == null ? '' : a) === String(b == null ? '' : b);
+  const keys = ['stage', 'status', 'closedAt', 'stageAutoSkip', 'outcome'].filter(k => !after || (!same(after[k], snap[k]) && same(c[k], after[k])));
+  const hist = { status: 'status', stage: 'stage', outcome: 'outcome' };
+  for (const k of ['status', 'stage', 'outcome']) if (keys.includes(k) && !same(c[k], snap[k])) addCaseHistoryEvent(c, hist[k], c[k] || '', snap[k] || '', 'card');
+  for (const k of keys) { if (snap[k] === undefined) delete c[k]; else c[k] = snap[k]; }
   STAGE_AUTO.busy = true;
   try { await put('cases', c); } catch (e) { logErr('stage:undo', e); toast('Не удалось вернуть стадию: ' + ((e && e.message) || 'ошибка записи'), true); return; } finally { STAGE_AUTO.busy = false; }
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
@@ -18450,8 +18455,10 @@ function listSearchInput(el, setter) { clearTimeout(LIST_Q_TIMER); const scr = U
 async function listSearchGo(el, setter, live) {
   clearTimeout(LIST_Q_TIMER);
   const v = el.value, fn = typeof window !== 'undefined' ? window[setter] : null; if (typeof fn !== 'function') return;
-  const had = document.activeElement === el;
+  const had = document.activeElement === el, scr = UI.screen;
   try { await fn('q', v); } catch (e) { logErr('list:q', e); return; }
+  // сборка 265 (аудит 262, A262-2): за время перерисовки пользователь ушёл в другой раздел — его поле не трогаем и назад не возвращаем
+  if (UI.screen !== scr) return;
   if (!live && !had) return;
   const box = document.querySelector('#main .search-wrap input[type="search"]'); if (!box || box === el) return;
   if (el.value !== v) { box.value = el.value; listSearchInput(box, setter); }
@@ -18664,15 +18671,18 @@ async function openCaseSheet(id, keep) {
 }
 // сборка 262 (аудит 256, E3): «В архив» / «Вернуть из архива» в карточке — как toggleArchiveCase в /old/: снятый признак удаляется из записи;
 // строка журнала «Архив»; «Отменить» в сообщении; список дел коллектору — как после сохранения дела (у архивного — только ссылки материалов)
-async function caseArchiveToggle(id, undo) {
+// сборка 265 (аудит 262, A262-1): «Отменить» передаёт состояние, которое отменяется (expect — «в архиве» после действия); если дело за это
+// время вернули или перенесли другим путём (другое устройство, вкладка), отмена ничего не переключает
+async function caseArchiveToggle(id, undo, expect) {
   const c = await getOne('cases', id); if (!c) { toast('Дело не найдено', true); return; }
+  if (undo && typeof expect === 'boolean' && !!c.archived !== expect) { toast('Дело уже ' + (c.archived ? 'в архиве' : 'не в архиве') + ' — отменять нечего', true); if (typeof openCaseSheet === 'function') await openCaseSheet(id); return; }
   const was = !!c.archived, live = c.status || 'В работе';
   if (was) delete c.archived; else c.archived = true;
   addCaseHistoryEvent(c, 'archive', was ? 'В архиве' : live, was ? live : 'В архиве', 'card');
   try { await put('cases', c); } catch (e) { logErr('case:archive', e); toast('Не удалось сохранить: ' + ((e && e.message) || 'ошибка записи'), true); return; }
   if (typeof refreshCasesCache === 'function') await refreshCasesCache();
   if (typeof monLinksTouch === 'function') monLinksTouch();
-  toast(was ? 'Дело возвращено из архива' : 'Дело перенесено в архив — оно в списке «Дел» под фильтром «Архив»', false, undo ? undefined : { label: 'Отменить', run: () => caseArchiveToggle(id, true) });
+  toast(was ? 'Дело возвращено из архива' : 'Дело перенесено в архив — оно в списке «Дел» под фильтром «Архив»', false, undo ? undefined : { label: 'Отменить', run: () => caseArchiveToggle(id, true, !was) });
   if (typeof openCaseSheet === 'function') await openCaseSheet(id);
 }
 
@@ -27481,7 +27491,7 @@ ${typeof helpFig === 'function' ? helpFig('navphone') : ''}
 <p>Вверху — поиск по делам, доверителям, судам и судьям (и по номеру телефона) и переключатель темы. Дело находится и по номерам в суде всех инстанций — номеру апелляции, кассации, Верховного Суда, — и по УИД; ещё поиск показывает задачи и сроки дел по названию и отправления по трек-номеру или названию. Нажмите строку — откроется запись.</p>
 <p><b>Оформление</b> (Настройки → «Оформление»: тема, размер текста, начертание) — настройка каждого устройства: на планшете может быть тёмная тема, на телефоне светлая, и обмен базой это не меняет. Остальные настройки (пояс заседаний, напоминания, справочники) по-прежнему общие для всех устройств.</p>
 <p><b>Знак программы</b> (сборка 210): в левом верхнем углу — значок «папка дела с отметкой» и надпись «CRM»; на телефоне — тот же значок в шапке, цветом выбранной темы. Нажатие на значок — «В начало страницы»: открытый раздел и карточка справа плавно прокручиваются к началу; раздел, вкладка, фильтры и набранное не меняются. Тот же знак белым на синем поле — значок программы на экране «Домой» телефона и во вкладке браузера; если программа уже установлена на экран «Домой», новый значок появится после того, как вы удалите ярлык и добавите его снова (телефон хранит прежнюю картинку). У установленных приложений для Android и для компьютера значок на рабочем столе пока прежний.</p>
-<p><b>Защита входа</b> (Настройки → «Защита входа», на каждом устройстве отдельно): «Установить PIN-код» — шесть цифр, которые программа спрашивает при открытии на этом устройстве; где есть отпечаток или распознавание лица, можно входить ими. Это блокировка экрана, а не шифрование базы на устройстве — поэтому включите и блокировку самого устройства (пароль Windows, блокировка экрана Android и iPhone). Отметка «Закрыть PIN-кодом и секреты» дополнительно закрывает код сервера, пароль шифрования и ключи. Без PIN-кода программу на этом устройстве не открыть, но данные на сервере и в копиях останутся: на другом устройстве они доступны по паролю шифрования. Окно PIN-кода не закрывается клавишей Esc и не пропускает нажатия клавиш в программу под ним; вход по отпечатку сбрасывает счётчик неверных PIN-кодов. «Изменить PIN-код», «Отключить защиту» и снятие отметки «Закрыть PIN-кодом и секреты» сначала просят ввести текущий PIN-код.</p>
+<p><b>Защита входа</b> (Настройки → «Защита входа», на каждом устройстве отдельно): «Установить PIN-код» — шесть цифр, которые программа спрашивает при открытии на этом устройстве; где есть отпечаток или распознавание лица, можно входить ими. Это блокировка экрана, а не шифрование базы на устройстве — поэтому включите и блокировку самого устройства (пароль Windows, блокировка экрана Android и iPhone). Отметка «Закрыть PIN-кодом и секреты» дополнительно закрывает код сервера, пароль шифрования и ключи. Без PIN-кода программу на этом устройстве не открыть, но данные на сервере и в копиях останутся: на другом устройстве они доступны по паролю шифрования. Окно PIN-кода не закрывается клавишей Esc и не пропускает нажатия клавиш в программу под ним; вход по отпечатку сбрасывает счётчик неверных PIN-кодов. «Изменить PIN-код», «Отключить защиту» и снятие отметки «Закрыть PIN-кодом и секреты» сначала просят ввести текущий PIN-код. Так же — выключение автоблокировки или её более долгий срок («Автоблокировка при бездействии») и снятие отметки «Вход по отпечатку или Face ID»: без верного PIN-кода они не меняются. Включить автоблокировку или сократить её срок можно сразу.</p>
 <h3>Забыли PIN-код</h3>
 <p>На экране входа — «Забыли PIN-код?». PIN-код хранится только защищённым хэшем, восстановить его нельзя. Если был включён обмен (свой сервер или файл в облаке) или есть резервная копия, данные не потеряны. На этом устройстве удалите данные программы: в браузере — данные сайта программы в настройках браузера; в приложении для Android — Настройки телефона → Приложения → CRM Адвоката → Хранилище → «Очистить данные». Затем откройте программу, подключите обмен заново (нужен пароль шифрования) или загрузите копию и задайте новый PIN-код. Без обмена и без копии данные, которые были только на этом устройстве, не вернуть.</p>
 <h3>Новый телефон или компьютер</h3>
@@ -28398,7 +28408,14 @@ async function openSecuritySheet(mode, msg) {
   // сборка 225 (Н-9): журнал входов и утерянное устройство — под настройками защиты
   if (typeof lostDevHtml === 'function') { const box = document.querySelector('#sheetContent .modal-content') || document.getElementById('sheetContent'); if (box) box.insertAdjacentHTML('beforeend', `<details class="set-group" id="lock-log-box"><summary class="section-label">Журнал входов на этом устройстве</summary>${lockLogHtml()}</details><div class="section-label" id="lost-label">Утерянное устройство</div><p class="small muted">Помеченное устройство при следующем обмене сотрёт у себя базу, настройки, пароли и ключи.</p>${lostDevHtml()}`); }
   // сборка 220 (Д-72): общая настройка — метка настроек сдвигается, иначе снимок другого устройства молча вернёт прежнее значение
-  const sel = document.getElementById('lock-auto'); if (sel) sel.addEventListener('change', () => { localStorage.setItem('crm_autolock_min', sel.value); if (typeof bumpSettings === 'function') bumpSettings(); lockArm(); toast(sel.value === '0' ? 'Автоблокировка выключена' : 'Автоблокировка: через ' + sel.value + ' мин бездействия'); });
+  // сборка 265 (аудит 262, A258-2; план E4): выключить автоблокировку или удлинить её — после текущего PIN-кода; включить и сократить — сразу
+  const sel = document.getElementById('lock-auto'); if (sel) sel.addEventListener('change', () => { const v = sel.value; if (on && lockAutoWeaker(auto, v)) { sel.value = String(auto); LOCK_AUTO_PENDING = v; lockConfirmAsk('auto'); return; } lockAutoApply(v); });
+}
+let LOCK_AUTO_PENDING = '';
+function lockAutoWeaker(cur, v) { const a = Number(cur) || 0, b = Number(v) || 0; return a > 0 && (b === 0 || b > a); }
+function lockAutoApply(v) {
+  localStorage.setItem('crm_autolock_min', v); if (typeof bumpSettings === 'function') bumpSettings(); lockArm();
+  toast(v === '0' ? 'Автоблокировка выключена' : 'Автоблокировка: через ' + v + ' мин бездействия');
 }
 function openPinSetup(first) {
   openSheet(first ? 'Повторите PIN-код' : 'Придумайте PIN-код', `<p class="small muted">${first ? 'Введите тот же PIN-код ещё раз.' : 'Ровно 6 цифр. Запомните его: без PIN-кода программу на этом устройстве не открыть (данные на сервере и в копии — останутся).'}</p>
@@ -28419,7 +28436,10 @@ async function pinSetupNext(first) {
 const LOCK_CONFIRM = {
   change: ['Изменить PIN-код', 'Сначала введите текущий PIN-код, затем придумаете новый.', 'Далее'],
   off: ['Отключить защиту входа?', 'Программа перестанет спрашивать PIN-код на этом устройстве. Секреты, закрытые PIN-кодом, останутся защищены ключом устройства. Для подтверждения введите текущий PIN-код.', 'Отключить'],
-  secoff: ['Снять PIN-код с секретов?', 'Код сервера, пароль шифрования и ключи останутся защищены только ключом устройства. Для подтверждения введите текущий PIN-код.', 'Снять']
+  secoff: ['Снять PIN-код с секретов?', 'Код сервера, пароль шифрования и ключи останутся защищены только ключом устройства. Для подтверждения введите текущий PIN-код.', 'Снять'],
+  // сборка 265 (аудит 262, A258-2)
+  auto: ['Изменить автоблокировку?', 'Программа будет закрываться позже или не будет закрываться сама при бездействии. Для подтверждения введите текущий PIN-код.', 'Изменить'],
+  biooff: ['Отключить вход по отпечатку?', 'Программа будет спрашивать только PIN-код. Для подтверждения введите текущий PIN-код.', 'Отключить']
 };
 function lockConfirmAsk(act) {
   const a = LOCK_CONFIRM[act]; if (!a) return;
@@ -28437,10 +28457,13 @@ async function lockConfirmGo(act) {
   localStorage.removeItem('crm_lock_fails'); localStorage.removeItem('crm_lock_blocked');
   if (act === 'change') { openPinSetup(); return; }
   if (act === 'off') { await lockOffGo(); return; }
+  if (act === 'auto') { const v = LOCK_AUTO_PENDING; LOCK_AUTO_PENDING = ''; if (v !== '') lockAutoApply(v); openSecuritySheet('replace', { text: v === '0' ? 'Автоблокировка выключена' : 'Автоблокировка: через ' + v + ' мин бездействия' }); return; }
+  if (act === 'biooff') { LOCK.bio = false; localStorage.removeItem('crm_lock_bio_id'); openSecuritySheet('replace', { text: 'Вход по отпечатку отключён — программа спрашивает PIN-код' }); return; }
   if (act === 'secoff') { const ok = await secretsPinToggle(false); openSecuritySheet('replace', ok ? { text: 'Секреты защищены только ключом устройства' } : { text: 'Не удалось перезаписать секреты без PIN-кода — они по-прежнему закрыты PIN-кодом', bad: true }); }
 }
 async function lockOffGo() { try { await lockDisable(); } catch (e) { logErr('lock:off', e); openSecuritySheet('replace', { text: 'Не отключено: ' + ((e && e.message) || 'ошибка'), bad: true }); return; } openSecuritySheet('replace', { text: 'Защита входа отключена' }); }
-async function lockBioToggle(cb) { if (cb.checked) { if (!(await bioRegister())) cb.checked = false; } else { LOCK.bio = false; localStorage.removeItem('crm_lock_bio_id'); } openSecuritySheet('replace'); }
+// сборка 265 (аудит 262, A258-2): снять вход по отпечатку — после текущего PIN-кода; флажок остаётся, пока PIN не подтверждён
+async function lockBioToggle(cb) { if (cb.checked) { if (!(await bioRegister())) cb.checked = false; } else { cb.checked = true; lockConfirmAsk('biooff'); return; } openSecuritySheet('replace'); }
 async function lockSecPinToggle(cb) {
   // сборка 257 (E4): снятие — после текущего PIN-кода; флажок остаётся, пока PIN не подтверждён
   if (!cb.checked) { cb.checked = true; lockConfirmAsk('secoff'); return; }
