@@ -24,6 +24,7 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.32: разовое чтение (collectone) — ссылка материала и рассмотрения: pid/cpid, mat, как в плановом сборе; в ответе ver и matOk (O-166).
 //  v3.31: признак капчи и блокировки — без <script>, <style>, <noscript>, <template>: настройка «useRecaptcha» в коде каждой карточки
 //         mos-gorsud.ru принималась за капчу, и дела судов Москвы не читались (проверка 04.11.2026 по поручению пользователя).
 //  v3.30: страница материала (delo_id=1610001): «ДВИЖЕНИЕ МАТЕРИАЛА», «МАТЕРИАЛ № 13-…», «Предмет представления, ходатайства, жалобы»;
@@ -99,7 +100,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.31';
+const COLLECTOR_VER = '3.32';
 // v3.27 (аудит сборки 188, R6): сетевые послабления (самоподписанные и просроченные сертификаты, устаревший TLS у многих *.sudrf.ru) —
 // ТОЛЬКО у запросов к сайтам судов ГАС «Правосудие» и только через отдельный транспорт (courtDispatcher). Процесс целиком их больше не
 // получает: личный сервер (с кодом), хранилище (с IAM-токеном), Telegram, API Assist, СУДиДЕЛО и загрузка обновлений проверяют сертификаты.
@@ -1671,6 +1672,8 @@ async function collectOne(body) {
   const url = String(body.url || '').trim(), courtNo = String(body.courtNo || '').trim(), number = String(body.number || '').trim(), stage = String(body.stage || 'Первая инстанция');
   // v3.20: УИД дела и все его номера — дело на странице узнаётся по ним, когда номера своей инстанции на странице нет
   const uidIn = String(body.uid || '').trim(), numbers = Array.isArray(body.numbers) ? body.numbers.map(x => String(x || '').trim()).filter(Boolean) : [];
+  // v3.32 (O-166): ссылка материала или рассмотрения — id рассмотрения и признак материала, как у ссылок планового сбора (sanitizeLinksPack)
+  const pid = String(body.pid || '').trim().slice(0, 80), cpid = String(body.cpid || '').trim().slice(0, 80), mat = !!body.mat;
   const kind = hostKind(url);
   if (kind === 'bad') return { ok: false, error: 'некорректная ссылка' };
   // v3.18 (урок 99): о СУДиДЕЛО — только когда ключ задан; без него называется путь, который действительно работает
@@ -1695,7 +1698,9 @@ async function collectOne(body) {
   const ctx = { number, uid: card.uid || '', courtNo: courtNo || card.number || '', stage, url, sinceDays: full ? 36500 : 45, allPast: full, judge: page.judge || card.judge || '', court: card.court || '' };
   // v3.20: события жалоб; match — номер своей инстанции на странице не найден, дело узнано по УИД или другому номеру
   const events = [...buildEvents(page, ctx), ...buildFlowEvents(flow, ctx), ...buildComplaintEvents(cmp, ctx)];
-  return Object.assign({ ok: true, card, events, hearings: page.hearings.length, flow: flow.length, complaints: cmp.length, via }, match ? { match } : {});
+  // v3.32: события ссылки рассмотрения — с его id (ключ «|p:<id>»), как в плановом сборе
+  for (const e of events) pidMark(e, pid, cpid);
+  return Object.assign({ ok: true, card, events, hearings: page.hearings.length, flow: flow.length, complaints: cmp.length, via, ver: COLLECTOR_VER, matOk: true }, mat ? { mat: '1' } : {}, pid ? { pid } : {}, match ? { match } : {});
 }
 // v3.15: проверка доставки на личный сервер. Возвращает только несекретное: адрес сервера, длину кода, были ли пробелы по краям,
 // совпадает ли код с кодом программы (программа присылает SHA-256 своего кода в body.hash), и ответ сервера на ping.
