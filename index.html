@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="20.11.2026 20:15 · 660cf80">
-<meta name="build-no" content="276">
+<meta name="build" content="21.11.2026 19:00 · 52177cd">
+<meta name="build-no" content="277">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -401,6 +401,9 @@ table.grid.gc-fixed td{max-width:none;overflow:hidden;text-overflow:ellipsis}
 .client-extra>.list-btn>span:first-child{font-size:.8125rem}
 .client-extra>.list-btn>span:last-child{overflow-wrap:break-word;max-width:100%}
 .client-extra>.list-btn:hover{background:var(--surface2)}
+/* сборка 277 (O-167): строка соглашения второго доверителя — под его строкой, с отступом, «Указать» / «Изменить» справа */
+.list-rows>.client-agr{padding-left:12px;font-size:.875rem}
+.list-rows>.client-agr>span:last-child{color:var(--accent);flex:none}
 /* v194: карточки «С чего начать» в листе «Синхронизация» — значок, заголовок с пояснением в две строки, стрелка справа */
 .list-rows>.sy-start{align-items:center}.list-rows>.sy-start>span{flex:1;min-width:0;line-height:1.35;text-align:left}.list-rows>.sy-start>span .small{display:block;margin-top:2px;text-align:left}
 /* этап 2б: показатели и строки «Сначала важное» — кнопки */
@@ -4702,9 +4705,17 @@ function nextCaseNo(cases, orphans, year) {
   let n = 1; while (used.has(n)) n++;
   return 'Д-' + n + '/' + year;
 }
+// сборка 277 (O-167, шаг 2): у второго и следующих доверителей дела — своё соглашение (поля участника с ролью «Доверитель…»); его номер тоже
+// занят — для следующего номера и проверки занятости. part — имя доверителя-участника, '' — соглашение дела (основной доверитель)
+function agreementHolders(cases) {
+  const out = [];
+  (cases || []).forEach(c => { if (!c) return; if (c.agreementNo) out.push({ c, no: c.agreementNo, part: '' });
+    (Array.isArray(c.participants) ? c.participants : []).forEach(p => { if (p && p.name && p.agreementNo && String(p.role || '').startsWith('Доверитель')) out.push({ c, no: p.agreementNo, part: String(p.name) }); }); });
+  return out;
+}
 function nextAgreementNo(cases, year) {
   year = year || numberingYear(); let max = 0;
-  (cases || []).forEach(c => { if (!c) return; const m = AGREEMENT_NO_RE.exec(String(c.agreementNo || '').trim()); if (m && Number(m[2]) === year && Number(m[1]) > max) max = Number(m[1]); });
+  agreementHolders(cases).forEach(h => { const m = AGREEMENT_NO_RE.exec(String(h.no || '').trim()); if (m && Number(m[2]) === year && Number(m[1]) > max) max = Number(m[1]); });
   return (max + 1) + '/' + year;
 }
 // номера сравниваются без лишних пробелов и регистра
@@ -4714,10 +4725,11 @@ function caseNoTakenBy(cases, number, exceptId) {
   const n = numberingNorm(number); if (!n) return null;
   return (cases || []).find(c => c && c.id !== exceptId && numberingNorm(c.number) === n) || null;
 }
-// дело, у которого уже есть такой номер соглашения (кроме exceptId) — или null
-function agreementNoTakenBy(cases, no, exceptId) {
+// дело, у которого уже есть такой номер соглашения (кроме соглашения exceptId / exceptPart) — или null; номер второго доверителя — дело с его именем в client
+function agreementNoTakenBy(cases, no, exceptId, exceptPart) {
   const n = numberingNorm(no); if (!n) return null;
-  return (cases || []).find(c => c && c.id !== exceptId && numberingNorm(c.agreementNo) === n) || null;
+  const h = agreementHolders(cases).find(x => !(x.c.id === exceptId && x.part === (exceptPart || '')) && numberingNorm(x.no) === n);
+  return !h ? null : h.part ? { ...h.c, client: h.part } : h.c;
 }
 // номера-сироты: caseNum связанных записей, у которых дела уже нет
 async function orphanCaseNums(cases) {
@@ -18563,12 +18575,18 @@ function caseClientList(c) {
   for (const p of Array.isArray(c.participants) ? c.participants : []) {
     if (!p || !p.name || !String(p.role || '').startsWith('Доверитель')) continue;
     if (out.some(o => partySame(o.name, p.name) || (p.clientId && o.clientId === p.clientId))) continue;
-    out.push({ name: String(p.name), clientId: p.clientId || '', role: String(p.role || ''), main: false });
+    out.push({ name: String(p.name), clientId: p.clientId || '', role: String(p.role || ''), main: false, agreementNo: p.agreementNo || '', agreementDate: p.agreementDate || '', agreementSigned: p.agreementSigned || '' });
   }
   return out;
 }
 function caseClientText(c) { return caseClientList(c).map(x => x.name).join(', '); }
 function caseIsClientName(c, n) { return !!n && caseClientList(c).some(x => partySame(n, x.name)); }
+// сборка 277 (O-167, шаг 2): строка соглашения — у дела (основной доверитель) и у каждого следующего доверителя своя
+function caseAgrText(x) {
+  const no = String((x && x.agreementNo) || '').trim(), d = x && x.agreementDate ? fmtDate(x.agreementDate) : '';
+  const s = x && x.agreementSigned === 'Да' ? 'подписано' : x && x.agreementSigned === 'Нет — ждёт подписи' ? 'ждёт подписи' : '';
+  return no || d ? 'Соглашение ' + [no ? '№ ' + no : '', d ? 'от ' + d : ''].filter(Boolean).join(' ') + (s ? ' · ' + s : '') : 'Соглашение не указано';
+}
 // ── конец: противная сторона ──
 // Фильтр, поиск и порядок. Порядок: сначала просроченное действие, потом по дате действия, потом без даты — по номеру.
 function casesModel(cases, opts, now) {
@@ -18848,7 +18866,10 @@ function caseOpenBar(selId, num) {
 function caseDocsLineModel(c, orders) {
   const agrNo = String(c.agreementNo || '').trim(), agrDate = c.agreementDate ? fmtDate(c.agreementDate) : '';
   const signed = c.agreementSigned === 'Да' ? 'подписано' : c.agreementSigned === 'Нет — ждёт подписи' ? 'ждёт подписи' : '';
-  const agr = agrNo || agrDate ? 'Соглашение ' + [agrNo ? '№ ' + agrNo : '', agrDate ? 'от ' + agrDate : ''].filter(Boolean).join(' ') + (signed ? ' · ' + signed : '') : 'Соглашение не указано';
+  // сборка 277 (O-167): следующие доверители без своего соглашения названы в той же строке
+  const miss = (typeof caseClientList === 'function' ? caseClientList(c) : []).filter(x => !x.main && !String(x.agreementNo || '').trim() && !x.agreementDate);
+  const agr = (agrNo || agrDate ? 'Соглашение ' + [agrNo ? '№ ' + agrNo : '', agrDate ? 'от ' + agrDate : ''].filter(Boolean).join(' ') + (signed ? ' · ' + signed : '') : 'Соглашение не указано')
+    + (miss.length ? ' · нет соглашения: ' + miss.map(x => String(x.name).trim().split(/\s+/)[0]).join(', ') : '');
   // сборка 252: строка ордера — по текущей инстанции дела (orderLineModel, ui/depord.js)
   return { agr, agrBtn: agrNo || agrDate ? 'Изменить' : 'Указать', ...orderLineModel(c, orders) };
 }
@@ -18969,7 +18990,8 @@ async function openCaseSheet(id, keep) {
     ${typeof procBlockHtml === 'function' ? cardGroup('cm-proc', 'Рассмотрения дела: инстанции и новые рассмотрения', procBlockHtml(c, d.hearings)) : ''}
     ${cardGroup('cm-details', 'Суд, стороны, инстанции', [
       // сборка 276 (O-167): второй и следующие доверители — под основным, у каждого «Убрать»; «Добавить доверителя»
-      `${(() => { const extra = typeof caseClientList === 'function' ? caseClientList(c).filter(x => !x.main) : []; return cl || extra.length ? sec(extra.length ? 'Доверители' : 'Доверитель', `<div class="list-rows">${cl ? `<button type="button" class="list-btn" onclick="openClientSheet('${jsq(cl.id)}')"><span class="muted">Доверитель</span><span>${esc(cl.name)}</span></button>${row('Телефон', cl.phone)}${contactRow(cl.phone)}${row('Email', cl.email)}` : ''}${extra.map(x => `<div class="client-extra"><button type="button" class="list-btn"${x.clientId ? ` onclick="openClientSheet('${jsq(x.clientId)}')"` : ''}><span class="muted">${esc(x.role || 'Доверитель')}</span><span>${esc(x.name)}</span></button><button type="button" class="button small-btn client-extra-rm" onclick="caseClientRemoveAsk('${jsq(c.id)}', '${jsq(x.name)}')">${icon('trash-2', 'icon-sm')}Убрать</button></div>`).join('')}</div>${typeof openClientAdd === 'function' ? `<div class="actions" style="margin-top:8px"><button type="button" class="button small-btn" id="case-client-add" onclick="openClientAdd('${jsq(c.id)}')">${icon('plus', 'icon-sm')}Добавить доверителя</button></div>` : ''}`) : ''; })()}`,
+      // сборка 277 (O-167, шаг 2): под каждым следующим доверителем — строка его соглашения («Указать» / «Изменить», лист openClientAgreement)
+      `${(() => { const extra = typeof caseClientList === 'function' ? caseClientList(c).filter(x => !x.main) : []; return cl || extra.length ? sec(extra.length ? 'Доверители' : 'Доверитель', `<div class="list-rows">${cl ? `<button type="button" class="list-btn" onclick="openClientSheet('${jsq(cl.id)}')"><span class="muted">Доверитель</span><span>${esc(cl.name)}</span></button>${row('Телефон', cl.phone)}${contactRow(cl.phone)}${row('Email', cl.email)}` : ''}${extra.map(x => `<div class="client-extra"><button type="button" class="list-btn"${x.clientId ? ` onclick="openClientSheet('${jsq(x.clientId)}')"` : ''}><span class="muted">${esc(x.role || 'Доверитель')}</span><span>${esc(x.name)}</span></button><button type="button" class="button small-btn client-extra-rm" onclick="caseClientRemoveAsk('${jsq(c.id)}', '${jsq(x.name)}')">${icon('trash-2', 'icon-sm')}Убрать</button></div><button type="button" class="list-btn client-agr" onclick="openClientAgreement('${jsq(c.id)}', '${jsq(x.name)}')"><span class="muted">${esc(caseAgrText(x))}</span><span>${x.agreementNo || x.agreementDate ? 'Изменить' : 'Указать'}</span></button>`).join('')}</div>${typeof openClientAdd === 'function' ? `<div class="actions" style="margin-top:8px"><button type="button" class="button small-btn" id="case-client-add" onclick="openClientAdd('${jsq(c.id)}')">${icon('plus', 'icon-sm')}Добавить доверителя</button></div>` : ''}`) : ''; })()}`,
       `${sec('Суд и стороны', `<div class="list-rows">${row('Суд', c.court)}${row('№ в суде', c.courtNo)}${row('УИД', c.caseUid)}${row('Судья', jm.text)}${row('Помощник судьи', [c.secretary, c.secretaryPhone, c.cabinet ? 'каб. ' + c.cabinet : ''].filter(Boolean).join(' · '))}${row('Противная сторона', [oppP && oppP.name, oppP && oppP.inn ? 'ИНН ' + oppP.inn : '', oppP && oppP.ogrn ? 'ОГРН ' + oppP.ogrn : ''].filter(Boolean).join(' · '))}${row('Адрес противной стороны', oppP && oppP.addr)}${row('Роль доверителя', c.clientRole || c.role)}${row('Сумма', c.amount ? fmtMoney(c.amount) : '')}${row('Соглашение', [c.agreementNo, c.agreementDate ? fmtDate(c.agreementDate) : ''].filter(Boolean).join(' от '))}</div>${hasLink ? `<div class="actions" style="margin-top:8px"><button type="button" class="button small-btn" id="case-card-fetch-old" onclick="caseFetchCard('${jsq(c.id)}')">${icon('cloud-download')}Данные с сайта суда</button></div>` : ''}${!jm.judge && c.court ? `<p class="small muted" style="margin-top:8px">Судья не указан. Впишите его в форме дела («Изменить») ${hasLink ? 'или нажмите «Данные с сайта суда»' : 'или добавьте в форме дела ссылку на дело на сайте суда — тогда программа прочитает судью, номер и УИД сама'}.</p>` : ''}`)}`,
       `${c.kind === 'Уголовное' ? sec('Уголовное дело', `<div class="list-rows">${row('Кто ведёт расследование', c.crimAgencyKind)}${row('Орган', c.agency)}${row('Форма расследования', c.crimForm)}${row('Следователь / дознаватель', c.crimInvestigator)}${row('№ у органа', c.crimAgencyNum)}${row('Возбуждено', c.crimStartDate ? fmtDate(c.crimStartDate) : '')}${row('Статья УК', c.crimArticle)}${row('Стадия расследования', c.crimStage)}${row('Обвинение', c.crimChargeDate ? fmtDate(c.crimChargeDate) + (c.crimCharge ? ' · ' + c.crimCharge : '') : c.crimCharge)}${row('Мера пресечения', [c.crimMeasure, c.crimMeasureUntil ? 'до ' + fmtDate(c.crimMeasureUntil) : ''].filter(Boolean).join(' · '))}${row('В суде', [c.crimCourtStage, c.crimVerdictDate ? 'приговор ' + fmtDate(c.crimVerdictDate) : '', c.crimVerdict].filter(Boolean).join(' · '))}</div>`) : ''}`,
       `${c.kind === 'КоАП' ? sec('Дело об административном правонарушении', `<div class="list-rows">${row('Статья КоАП', c.koapArticle)}${row('Протокол', [c.koapProtocolDate ? fmtDate(c.koapProtocolDate) : '', c.koapProtocolNo ? '№ ' + c.koapProtocolNo : '', c.koapProtocolBy].filter(Boolean).join(' · '))}${row('Рассматривает', [c.koapBodyKind, c.agency].filter(Boolean).join(' · '))}${row('Постановление', [c.koapDate ? fmtDate(c.koapDate) : '', c.koapServedDate ? 'вручено ' + fmtDate(c.koapServedDate) : '', c.koapResult].filter(Boolean).join(' · '))}${row('Жалоба', [c.koapAppealTo, c.koapAppealDate ? fmtDate(c.koapAppealDate) : '', c.koapAppealResult].filter(Boolean).join(' · '))}${row('Вступило в силу', c.koapInForce ? fmtDate(c.koapInForce) : '')}</div>`) : ''}`,
@@ -18987,7 +19009,7 @@ async function openCaseSheet(id, keep) {
       // 15.10.2026 (решение пользователя, пп. 1 и 5): гонорар — только счётом (аванс и доплата — платежи по счёту, этапы работ — в карточке счёта);
       // прежний «депозит» — только деньги доверителя на расходы (госпошлина, экспертиза), ui/depord.js
       `<p class="small muted" id="cm-money-help">Счёт — гонорар по соглашению: что начислено и что оплачено; аванс и доплата — платежи по счёту (в отчётах «Получено» — оплаты счетов), этапы работ в карточке счёта показывают, какая часть оплаченного отработана. Деньги доверителя на расходы — суммы, переданные им на госпошлину, экспертизу и подобное: внесение и списание, в отчёты не входят. Расход — ваши затраты по делу, их можно отметить «к возмещению».</p>`,
-      `${sec('Счета', (m.bills.length ? `<div class="list-rows">${m.bills.map(f => { const st = finStateOf(f, localISO(new Date())), mt = FIN_STATE_META[st], sl = typeof finStagesLine === 'function' ? finStagesLine(f) : ''; return `<button type="button" class="list-btn" onclick="openFinanceSheet('${jsq(f.id)}')"><span>${esc(f.service || BILLING_LABEL[f.billType || 'fixed'])}${f.dueDate ? `<br><span class="muted small">срок ${esc(fmtDate(f.dueDate))}</span>` : ''}${sl ? `<br><span class="muted small">${esc(sl)}</span>` : ''}</span><span class="muted">${esc(fmtMoney(f.amount))} ${badge(mt[0], mt[1])}</span></button>`; }).join('')}</div>` : '<p class="small muted">Счетов по делу нет.</p>') + `<div class="actions" style="margin:8px 0"><button type="button" class="button small-btn" id="cm-bill-add" onclick="openFinanceForm('', '${jsq(c.number || '')}')">${icon('plus', 'icon-sm')}Выставить счёт</button></div>`, m.bills.length || undefined)}`,
+      `${sec('Счета', (m.bills.length ? `<div class="list-rows">${m.bills.map(f => { const multiCl = typeof caseClientList === 'function' && caseClientList(c).length > 1, st = finStateOf(f, localISO(new Date())), mt = FIN_STATE_META[st], sl = typeof finStagesLine === 'function' ? finStagesLine(f) : ''; return `<button type="button" class="list-btn" onclick="openFinanceSheet('${jsq(f.id)}')"><span>${esc(f.service || BILLING_LABEL[f.billType || 'fixed'])}${multiCl && f.client ? `<br><span class="muted small">плательщик: ${esc(f.client)}</span>` : ''}${f.dueDate ? `<br><span class="muted small">срок ${esc(fmtDate(f.dueDate))}</span>` : ''}${sl ? `<br><span class="muted small">${esc(sl)}</span>` : ''}</span><span class="muted">${esc(fmtMoney(f.amount))} ${badge(mt[0], mt[1])}</span></button>`; }).join('')}</div>` : '<p class="small muted">Счетов по делу нет.</p>') + `<div class="actions" style="margin:8px 0"><button type="button" class="button small-btn" id="cm-bill-add" onclick="openFinanceForm('', '${jsq(c.number || '')}')">${icon('plus', 'icon-sm')}Выставить счёт</button></div>`, m.bills.length || undefined)}`,
       `${sec('Расходы', (m.expenses.length ? `<div class="list-rows">${m.expenses.slice(0, 8).map(e => `<button type="button" class="list-btn" onclick="openExpenseForm('${jsq(e.id)}')"><span>${esc(e.category || 'Расход')}${e.note ? ' · ' + esc(e.note) : ''}</span><span class="muted">${esc(fmtMoney(e.amount))}${e.recoverable ? ' ' + badge(e.recovered ? 'возмещено' : 'к возмещению', e.recovered ? 'good' : 'warn') : ''}</span></button>`).join('')}</div>` : '<p class="small muted">Расходов по делу нет.</p>') + `<div class="actions" style="margin:8px 0"><button type="button" class="button small-btn" id="cm-exp-add" onclick="openExpenseForm('', '${jsq(c.number || '')}')">${icon('plus', 'icon-sm')}Записать расход</button></div>`, m.expenses.length || undefined)}`,
       `${typeof depositBlockHtml === 'function' ? depositBlockHtml(c, d.deposits) : ''}`,
       `${m.fin.amount || m.fin.paid || m.fin.pending || m.docs ? sec('Итог по счетам', `<div class="list-rows">${row('Начислено', m.fin.amount ? fmtMoney(m.fin.amount) : '')}${row('Оплачено', m.fin.paid ? fmtMoney(m.fin.paid) : '')}${row('Остаток', m.fin.debt ? fmtMoney(m.fin.debt) : (m.fin.amount ? '0 ₽' : ''))}${row('Отработано по этапам', m.fin.staged ? fmtMoney(m.fin.worked) : '')}${row('Не отработано', m.fin.unworked ? fmtMoney(m.fin.unworked) : '')}${row('Ожидается', m.fin.pending ? fmtMoney(m.fin.pending) : '')}${row('Документов', m.docs ? String(m.docs) : '')}</div>`) : ''}`].join(''))}
@@ -21014,19 +21036,30 @@ const POA_HEAR_DAYS = 90;
 function poaValidOn(p, date) { if (!p || p._deleted || p.revoked) return false; const u = poaUntil(p); return !!u && date <= u && !(p.issued && p.issued > date); }
 const poaNameKey = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
 // доверенности, которыми ведётся дело: по этому делу (связь по id или номеру) и общие доверенности доверителя (дело не указано)
+// сборка 277 (O-167, шаг 2): общие доверенности — любого доверителя дела (основного и следующих)
+function poaClientIs(p, k) { return k.clientId && p.clientId ? p.clientId === k.clientId : (!!p.clientName && poaNameKey(p.clientName) === poaNameKey(k.name)); }
+function poaCaseClients(c) { return typeof caseClientList === 'function' ? caseClientList(c) : [{ name: c.client || '', clientId: c.clientId || '', main: true }]; }
+const poaOfCase = (p, c) => p.caseId ? p.caseId === c.id : (!!p.caseNum && p.caseNum === c.number);
 function poaForCase(list, c) {
   if (!c) return [];
-  return (list || []).filter(p => p && !p._deleted && ((p.caseId ? p.caseId === c.id : (!!p.caseNum && p.caseNum === c.number))
-    || (!p.caseId && !p.caseNum && (c.clientId && p.clientId ? p.clientId === c.clientId : (!!p.clientName && poaNameKey(p.clientName) === poaNameKey(c.client))))));
+  const ks = poaCaseClients(c);
+  return (list || []).filter(p => p && !p._deleted && (poaOfCase(p, c) || (!p.caseId && !p.caseNum && ks.some(k => poaClientIs(p, k)))));
 }
 // доверенности есть, а на дату ни одна не действует → { until — до какой даты действовала самая поздняя неотозванная, revoked — все отозваны }
+// сборка 277 (O-167): у дела несколько доверителей — доверенность одного не покрывает другого: проверка по каждому, у кого доверенности есть
+// (по делу или общие); who — доверитель, у которого на дату ни одна не действует
 function poaHearingGap(list, c, date) {
-  if (!date || !c) return null; const rel = poaForCase(list, c); if (!rel.length || rel.some(p => poaValidOn(p, date))) return null;
+  if (!date || !c) return null; const ks = poaCaseClients(c);
+  if (ks.length > 1) { for (const k of ks) { const g = poaGapOf((list || []).filter(p => p && !p._deleted && poaClientIs(p, k) && (poaOfCase(p, c) || (!p.caseId && !p.caseNum))), date); if (g) return { ...g, who: k.name, whoId: k.clientId || '' }; } return null; }
+  return poaGapOf(poaForCase(list, c), date);
+}
+function poaGapOf(rel, date) {
+  if (!rel.length || rel.some(p => poaValidOn(p, date))) return null;
   const until = rel.filter(p => !p.revoked).map(poaUntil).filter(Boolean).sort().pop() || '';
   return { rel, until, revoked: rel.every(p => p.revoked), late: !until && rel.some(p => !p.revoked && p.issued && p.issued > date) };
 }
 function poaHearingReason(g) { return g.revoked ? 'доверенность отозвана' : g.until ? 'последняя истекает ' + fmtDate(g.until) : g.late ? 'доверенность выдана позже заседания' : 'у доверенности не указаны даты'; }
-function poaHearingText(g, date) { return 'На ' + fmtDate(date) + ' доверенность по делу уже не действует: ' + poaHearingReason(g) + '. Оформите новую или проверьте реестр доверенностей.'; }
+function poaHearingText(g, date) { return 'На ' + fmtDate(date) + ' доверенность ' + (g.who ? 'доверителя ' + g.who : 'по делу') + ' уже не действует: ' + poaHearingReason(g) + '. Оформите новую или проверьте реестр доверенностей.'; }
 // «Сегодня» → «Требует внимания»: по одному делу — одна строка (ближайшее заседание без действующей доверенности)
 function poaHearingItems(list, hearings, caseOf, today) {
   const out = [], seen = new Set();
@@ -21035,8 +21068,8 @@ function poaHearingItems(list, hearings, caseOf, today) {
     const c = caseOf(h); if (!c || seen.has(c.id)) return; const g = poaHearingGap(list, c, h.date); if (!g) return; seen.add(c.id);
     const last = g.rel.slice().sort((a, b) => (poaUntil(b) || '').localeCompare(poaUntil(a) || ''))[0];
     out.push({ key: 'ph:' + c.id + ':' + (g.until || 'x') + ':' + h.date, kind: 'poa', poaId: last.id, pr: k <= 14 ? 0 : 1, date: h.date, title: 'Доверенность не действует на дату заседания',
-      sub: fmtDate(h.date) + (h.time ? ' ' + h.time : '') + ' · ' + [c.number, c.client].filter(Boolean).join(' · ') + ' · ' + poaHearingReason(g), when: k === 0 ? 'Заседание сегодня' : k === 1 ? 'Заседание завтра' : 'Заседание через ' + k + ' ' + plural(k, 'день', 'дня', 'дней'), overdue: k <= 14,
-      act: { fn: `openPoaForm('', ${esc(JSON.stringify({ caseId: c.id, clientId: c.clientId || '' }))})`, label: 'Новая доверенность', icon: 'plus' }, badges: [['Доверенность', k <= 14 ? 'bad' : 'warn']] });
+      sub: fmtDate(h.date) + (h.time ? ' ' + h.time : '') + ' · ' + [c.number, g.who || c.client].filter(Boolean).join(' · ') + ' · ' + poaHearingReason(g), when: k === 0 ? 'Заседание сегодня' : k === 1 ? 'Заседание завтра' : 'Заседание через ' + k + ' ' + plural(k, 'день', 'дня', 'дней'), overdue: k <= 14,
+      act: { fn: `openPoaForm('', ${esc(JSON.stringify({ caseId: c.id, clientId: g.whoId || c.clientId || '' }))})`, label: 'Новая доверенность', icon: 'plus' }, badges: [['Доверенность', k <= 14 ? 'bad' : 'warn']] });
   });
   return out;
 }
@@ -21079,6 +21112,7 @@ async function openPoaForm(id, preset) {
   const years = [1, 3, 5, 10].map(n => `<button type="button" class="chip" onclick="poaYears(${n})">${n} ${plural(n, 'год', 'года', 'лет')}</button>`).join('');
   openSheet(id ? 'Доверенность' : 'Новая доверенность', `<div class="form-grid">
     ${wide(fCombo('po-client', 'Доверитель *', cl ? cl.name : (v.clientName || ''), '', clients.map(x => x.name)))}
+    ${c0 && typeof caseClientChips === 'function' ? `<div style="grid-column:1/-1">${caseClientChips('po-client', c0)}</div>` : ''}
     ${fInput('po-issued', 'Дата совершения (выдачи)', v.issued || '', 'type="date"')}${fInput('po-until', 'Действует до', v.until || '', 'type="date"')}
     <div class="field wide"><span>Срок от даты совершения</span><div class="chips">${years}</div></div>
     <p class="small muted wide" style="margin:0">Оставьте «Действует до» пустым — по п. 1 ст. 186 ГК доверенность действует год со дня совершения.</p>
@@ -21436,6 +21470,7 @@ async function openFinanceForm(id, presetCaseNum) {
   const body = `<div class="form-grid">
     ${fSelect('fn-billType', 'Тип расчёта', f.billType || 'fixed', BILLING_TYPES)}${fCasePick('fn-caseNum', 'Дело', f.caseNum, cases, 'number', true)}
     ${wide(fCombo('fn-client', 'Плательщик (доверитель)', f.client, '', clients.map(x => x.name)))}
+    <div id="fn-client-chips-box" style="grid-column:1/-1">${typeof caseClientChips === 'function' ? caseClientChips('fn-client', cases.find(c => c.number === f.caseNum)) : ''}</div>
     ${wide(fCombo('fn-service', 'За что (услуга)', f.service, 'services'))}
     <div class="field fn-fixed fn-retainer"><span>Сумма, ₽ *</span><input id="fn-amount" value="${esc(f.billType === 'fixed' || f.billType === 'retainer' || !f.billType ? (f.amount || '') : '')}" inputmode="decimal" autocomplete="off"></div>
     <div class="field fn-hourly"><span>Ставка, ₽/час</span><input id="fn-rate" value="${esc(f.rate || '')}" inputmode="decimal" autocomplete="off"></div><div class="field fn-hourly"><span>Часов</span><input id="fn-hours" value="${esc(f.hours || '')}" inputmode="decimal" autocomplete="off"></div>
@@ -21459,7 +21494,8 @@ async function openFinanceForm(id, presetCaseNum) {
   if (bt) { bt.onchange = refresh; refresh(); }
   // сборка 212 (Ш-12): услуга с ценой из «Прайса услуг» — в пустую сумму
   { const sv = document.getElementById('fn-service'); if (sv && typeof priceFillAmount === 'function') sv.addEventListener('change', () => priceFillAmount(sv.value)); }
-  if (cs) cs.onchange = () => { const c = cases.find(x => x.number === cs.value), cl = document.getElementById('fn-client'); if (c && cl && !cl.value) { cl.value = c.client || ''; if (c.clientId) cl.dataset.pickedId = c.clientId; else delete cl.dataset.pickedId; } };
+  // сборка 277 (O-167): у дела несколько доверителей — под плательщиком кнопки с каждым из них
+  if (cs) cs.onchange = () => { const c = cases.find(x => x.number === cs.value), cl = document.getElementById('fn-client'), box = document.getElementById('fn-client-chips-box'); if (box && typeof caseClientChips === 'function') box.innerHTML = caseClientChips('fn-client', c); if (c && cl && !cl.value) { cl.value = c.client || ''; if (c.clientId) cl.dataset.pickedId = c.clientId; else delete cl.dataset.pickedId; } };
 }
 async function saveFinanceForm(id) {
   const prev = id ? await getOne('finance', id) : null; if (formGone(id, prev, 'Счёт')) return;
@@ -21815,13 +21851,26 @@ function orderCaseModel(c, orders) {
   const state = !mine.length ? 'none' : hit ? 'ok' : noInst ? 'noinst' : t ? 'missing' : 'last';
   return { mine, t, hit, noInst, state, shown: hit || noInst || mine[0] || null, again: !!(state === 'missing' && mine.some(o => o.inst === t.inst)) };
 }
+// сборка 277 (O-167, шаг 2): у дела несколько доверителей — у каждого свой ордер. Ордер без доверителя (прежние записи) — основного доверителя
+function orderClientsOf(c) { return c && typeof caseClientList === 'function' ? caseClientList(c) : []; }
+function orderClientIs(o, k) { return o.clientId && k.clientId ? o.clientId === k.clientId : o.client ? partySame(o.client, k.name) : !!k.main; }
+function orderClientName(o, c) { return (o && o.client) || (c && c.client) || ''; }
+// доверители дела без ордера на текущую инстанцию (при одном доверителе — пусто)
+function orderClientGap(c, orders, t) {
+  const ks = orderClientsOf(c); if (ks.length < 2 || !t) return [];
+  const mine = (orders || []).filter(o => o && !o._deleted && depMine(o, c) && orderCovers(o, t));
+  return ks.filter(k => !mine.some(o => orderClientIs(o, k)));
+}
 // строка «Ордер …» вверху карточки дела: на текущую инстанцию ордер есть — он; нет — сказано словами и действие на месте
 function orderLineModel(c, orders) {
   const m = orderCaseModel(c, orders), o = m.shown, kind = (c && c.kind) || '';
   const title = x => 'Ордер № ' + (x.num || '—') + (x.date ? ' от ' + fmtDate(x.date) : '') + (x.inst ? ' · ' + orderInstLabel(x.inst, kind) : '') + (x.basis && x.basis !== 'Соглашение' ? ' · ' + x.basis : '');
   const name = m.t ? orderInstName(m.t.inst, kind) : null;
   const ord = m.state === 'none' ? 'Ордер не выписан' : m.state === 'missing' ? (m.again ? 'Новое рассмотрение (' + name.label.toLowerCase() + '): ордера нет' : 'На ' + name.to + ' ордера нет') : title(o);
-  const write = m.state === 'none' || m.state === 'missing';
+  // сборка 277: ордер на инстанцию есть, но не у всех доверителей — их фамилии и «Выписать ордер»
+  const gap = m.state === 'ok' && typeof orderClientGap === 'function' ? orderClientGap(c, orders, m.t) : [];
+  const write = m.state === 'none' || m.state === 'missing' || gap.length > 0;
+  if (gap.length) return { ord: ord + ' · нет ордера: ' + gap.map(k => String(k.name).trim().split(/\s+/)[0]).join(', '), ordBtn: 'Выписать ордер', ordId: '', ordInst: m.t.inst, ordPid: m.t.pid, ordMore: 'Все ордера (' + m.mine.length + ')', count: m.mine.length, state: 'client', gap: gap.map(k => k.name) };
   return { ord, ordBtn: m.state === 'noinst' ? 'Указать инстанцию' : write ? 'Выписать ордер' : 'Открыть', ordId: write ? '' : o.id, ordInst: write && m.t ? m.t.inst : '', ordPid: write && m.t ? m.t.pid : '', ordMore: m.mine.length ? 'Все ордера (' + m.mine.length + ')' : '', count: m.mine.length, state: m.state };
 }
 // лист «Ордера по делу»: группы по инстанциям и рассмотрениям. Группа без ордера видна («ордера нет» и «Выписать»), если рассмотрение есть в деле
@@ -21875,18 +21924,21 @@ function formModelOrder(v, prev, orders) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'Дата — из поля даты' };
   const p = prev || {}, dup = (orders || []).find(o => o && !o._deleted && o.id !== p.id && orderNumKey(o.num) === orderNumKey(num));
   const inst = v.inst === undefined ? (p.inst || '') : (ORDER_INST.includes(v.inst) ? v.inst : ''), pid = !inst ? '' : v.proceedingId === undefined ? (p.proceedingId || '') : String(v.proceedingId || '');
-  return { obj: { ...p, id: p.id || uid('О'), num, date, ...formCaseLink(v.caseNum, prev), inst, proceedingId: pid, basis: ORDER_BASIS.includes(v.basis) ? v.basis : (String(v.basis || '').trim() || 'Соглашение'), stage: String(v.stage || '').trim(), note: String(v.note || '').trim(), createdAt: p.createdAt || Date.now() }, dup: dup || null };
+  const obj = { ...p, id: p.id || uid('О'), num, date, ...formCaseLink(v.caseNum, prev), inst, proceedingId: pid, basis: ORDER_BASIS.includes(v.basis) ? v.basis : (String(v.basis || '').trim() || 'Соглашение'), stage: String(v.stage || '').trim(), note: String(v.note || '').trim(), createdAt: p.createdAt || Date.now() };
+  // сборка 277 (O-167): доверитель ордера — из поля «Доверитель» (есть, когда у дела несколько доверителей); пустое — ордер основного доверителя
+  if (v.client !== undefined) { const nm = String(v.client || '').trim(); if (nm) { obj.client = nm; obj.clientId = String(v.clientId || ''); if (!obj.clientId) delete obj.clientId; } else { delete obj.client; delete obj.clientId; } }
+  return { obj, dup: dup || null };
 }
 function orderRowHtml(o, sub) { return `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>Ордер № ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}${sub ? `<br><span class="muted small">${esc(sub)}</span>` : ''}</span>${icon('chevron-right', 'icon-sm')}</button>`; }
 function orderGroupsHtml(c, orders) {
   return orderGroups(c, orders).map(g => `<div class="ord-group" data-inst="${esc(g.inst)}"><div class="ord-head"><span><b>${esc(g.title)}</b>${g.tag ? ' ' + badge(g.tag) : ''}${g.cur ? ' ' + badge('текущая', 'accent') : ''}</span>${g.inst ? btn('Выписать', `openOrderForm('', '${jsq(c.number || '')}', '${jsq(g.inst)}', '${jsq(g.pid)}')`, 'small-btn', 'plus') : ''}</div>
-    ${g.list.length ? `<div class="list-rows">${g.list.map(o => orderRowHtml(o, [o.basis, o.stage].filter(Boolean).join(' · '))).join('')}</div>` : '<p class="small muted ord-none">ордера нет</p>'}${g.inst ? '' : '<p class="small muted">Откройте ордер и укажите инстанцию — он займёт своё место в списке.</p>'}</div>`).join('');
+    ${g.list.length ? `<div class="list-rows">${g.list.map(o => orderRowHtml(o, [typeof orderClientsOf === 'function' && orderClientsOf(c).length > 1 ?orderClientName(o, c) : '', o.basis, o.stage].filter(Boolean).join(' · '))).join('')}</div>` : '<p class="small muted ord-none">ордера нет</p>'}${g.inst ? '' : '<p class="small muted">Откройте ордер и укажите инстанцию — он займёт своё место в списке.</p>'}</div>`).join('');
 }
 async function openOrdersSheet(caseNum, mode) {
   await refreshCasesCache();
   const all = (await getAll('orders')).filter(o => o && !o._deleted).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(b.num || '').localeCompare(String(a.num || ''), 'ru', { numeric: true }));
   const c = caseNum ? CASES_BY_NUM[caseNum] : null, list = c ? all.filter(o => depMine(o, c)) : all;
-  const rows = list.map(o => orderRowHtml(o, [caseNum ? '' : (o.caseNum || 'без дела'), orderInstOf(o), o.basis, o.stage].filter(Boolean).join(' · '))).join('');
+  const rows = list.map(o => orderRowHtml(o, [caseNum ? '' : (o.caseNum || 'без дела'), o.client || '', orderInstOf(o), o.basis, o.stage].filter(Boolean).join(' · '))).join('');
   const content = c ? `<div id="ord-rows">${orderGroupsHtml(c, all)}</div>` : list.length ? `<div class="list-rows" id="ord-rows">${rows}</div>` : '<p class="small muted">Ордеров пока нет.</p>';
   openSheet(c ? 'Ордера по делу ' + (c.number || '') : 'Журнал ордеров', `<p class="small muted">${c ? 'На каждую инстанцию — свой ордер; все ордера дела собраны здесь. Выписано' : 'Все выписанные ордера'}: ${list.length}. Номер — с бланка из вашей книжки; ордер из формы дела («Номер ордера») попадает сюда сам.</p>
     ${content}
@@ -21897,7 +21949,7 @@ async function openOrdersSheet(caseNum, mode) {
 // форма ордера: дело, инстанция, рассмотрение и подсказка поручения зависят друг от друга
 // сборка 253 (аудит сборки 252, A252-1): orig — дело, инстанция и рассмотрение открытого ордера. Пока дело и инстанция те же и рассмотрение не выбрано заново
 // (picked), связь не вычисляется: правка заметки, даты, основания её не меняет. Удалённое рассмотрение и ордер на всю инстанцию видны в поле «Рассмотрение»
-const ORD_FORM = { auto: '', pid: '', orig: null, picked: false };
+const ORD_FORM = { auto: '', pid: '', orig: null, picked: false, client: '' };
 function orderFormSame(inst) { const o = ORD_FORM.orig; return !!o && o.inst === inst && o.caseNum === fv('or-caseNum'); }
 function orderFormCase() { const num = fv('or-caseNum'); return (num && typeof CASES_BY_NUM !== 'undefined' && CASES_BY_NUM[num]) || null; }
 function orderProcRows(c, inst) { return c && typeof procModel === 'function' ? procModel(c, []).filter(r => r.slot === inst) : []; }
@@ -21918,6 +21970,10 @@ function orderFormSync() {
   const keep = opts.some(x => x[0] === ORD_FORM.pid) ? ORD_FORM.pid : c ? orderCurrentPid(c, inst) : '';
   box.innerHTML = opts.length > 1 ? fSelect('or-proc', 'Рассмотрение', keep, opts) : '';
   box.hidden = opts.length <= 1;
+  // сборка 277 (O-167): поле «Доверитель» — только у дела с несколькими доверителями
+  const cbox = document.getElementById('or-client-box');
+  if (cbox) { const ks = orderClientsOf(c), was = document.getElementById('or-client'), want = was ? was.value : ORD_FORM.client, val = ks.some(k => k.name === want) ? want : ((ks[0] || {}).name || '');
+    cbox.innerHTML = ks.length > 1 ? fSelect('or-client', 'Доверитель', val, ks.map(k => [k.name, k.name])) : ''; cbox.hidden = ks.length <= 1; }
   const stage = document.getElementById('or-stage'); if (!stage) return;
   if (!stage.value.trim() || stage.value === ORD_FORM.auto) { ORD_FORM.auto = orderStageText(c, inst, orderFormPid(c, inst)); stage.value = ORD_FORM.auto; }
 }
@@ -21931,10 +21987,12 @@ async function openOrderForm(id, presetCaseNum, presetInst, presetPid) {
   const body = `<p class="small muted">Номер — с бланка ордера из вашей книжки${prev ? '' : '; предложен следующий за последним в журнале'}. На каждую инстанцию — свой ордер: все они видны в деле.</p><div class="form-grid">
     ${fInput('or-num', 'Номер ордера *', o.num, 'inputmode="numeric" autocomplete="off"')}${fInput('or-date', 'Дата *', o.date, 'type="date"')}
     ${fCasePick('or-caseNum', 'Дело', o.caseNum, cases, 'number', true)}${fSelect('or-inst', 'Инстанция', o.inst || '', orderInstOptions((c && c.kind) || ''), true)}
-    <div class="wide" id="or-proc-box" hidden></div>${fSelect('or-basis', 'Основание', o.basis || 'Соглашение', basis)}
+    <div class="wide" id="or-proc-box" hidden></div><div class="wide" id="or-client-box" hidden></div>${fSelect('or-basis', 'Основание', o.basis || 'Соглашение', basis)}
     ${wide(fInput('or-stage', 'Поручение / стадия', o.stage, 'autocomplete="off" placeholder="защита в суде первой инстанции"'))}${wide(fInput('or-note', 'Заметка', o.note, 'autocomplete="off"'))}
   </div>${fSaveBar(`saveOrderForm('${jsq(id || '')}')`, '', id ? `openDeleteSheet('orders', '${jsq(id)}')` : '')}`;
   openSheet(id ? 'Ордер № ' + (o.num || '') : 'Новый ордер', body, UI.cur ? true : undefined);
+  // сборка 277: доверитель нового ордера — первый из доверителей без ордера на эту инстанцию, иначе основной
+  { const gap = !prev && c && o.inst ? orderClientGap(c, orders, { inst: o.inst, pid: o.proceedingId || '' }) : []; ORD_FORM.client = prev ? orderClientName(prev, c) : (gap[0] ? gap[0].name : ((c && c.client) || '')); }
   ORD_FORM.auto = ''; ORD_FORM.pid = o.proceedingId || ''; ORD_FORM.picked = false; ORD_FORM.orig = prev ? { caseNum: String(prev.caseNum || '').trim(), inst: prev.inst || '', pid: prev.proceedingId || '' } : null; orderFormSync();
   const on = (el, h) => { const n = document.getElementById(el); if (n) n.addEventListener('change', h); };
   const relink = () => { ORD_FORM.pid = ''; ORD_FORM.picked = false; orderFormSync(); };
@@ -21946,6 +22004,8 @@ let ORD_WARNED = '';
 async function saveOrderForm(id) {
   const prev = id ? await getOne('orders', id) : null; if (formGone(id, prev, 'Ордер')) return;
   const inst = fv('or-inst'), v = { num: fv('or-num'), date: fv('or-date'), caseNum: fv('or-caseNum'), inst, proceedingId: inst ? orderFormPid(orderFormCase(), inst) : '', basis: fv('or-basis'), stage: fv('or-stage'), note: fv('or-note') };
+  // сборка 277: доверитель — из поля «Доверитель»; дело с одним доверителем — ордер основного (поле снимается)
+  { const c = orderFormCase(), ks = orderClientsOf(c), sel = document.getElementById('or-client'); if (c && ks.length > 1 && sel) { const k = ks.find(x => x.name === sel.value); v.client = k ? k.name : ''; v.clientId = k ? k.clientId : ''; } else if (c) v.client = ''; }
   const r = formModelOrder(v, prev, await getAll('orders')); if (r.error) { fErr(r.error); return; }
   const key = [id || '', orderNumKey(r.obj.num)].join('|');
   if (r.dup && ORD_WARNED !== key) { ORD_WARNED = key; fErr('Ордер № ' + r.obj.num + ' уже есть в журнале (от ' + fmtDate(r.dup.date) + (r.dup.caseNum ? ', дело ' + r.dup.caseNum : '') + '). Если это другой ордер с тем же номером — нажмите «Сохранить» ещё раз.'); return; }
@@ -21959,7 +22019,7 @@ async function saveOrderForm(id) {
 // блок «Ордера» в карточке дела
 function ordersBlockHtml(c, list) {
   const mine = (list || []).filter(o => o && !o._deleted && depMine(o, c)).sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-  return `<div class="section-label">Ордера${mine.length ? ' · ' + mine.length : ''}</div>${mine.length ? `<div class="list-rows">${mine.slice(0, 6).map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>№ ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}</span><span class="muted">${esc(orderInstOf(o, c) || o.basis || '')}</span></button>`).join('')}</div>` : '<p class="small muted">Ордеров по делу нет.</p>'}
+  return `<div class="section-label">Ордера${mine.length ? ' · ' + mine.length : ''}</div>${mine.length ? `<div class="list-rows">${mine.slice(0, 6).map(o => `<button type="button" class="list-btn" onclick="openOrderForm('${jsq(o.id)}')"><span>№ ${esc(o.num || '—')} от ${esc(o.date ? fmtDate(o.date) : '—')}</span><span class="muted">${esc([typeof orderClientsOf === 'function' && orderClientsOf(c).length > 1 ?orderClientName(o, c) : '', orderInstOf(o, c) || o.basis || ''].filter(Boolean).join(' · '))}</span></button>`).join('')}</div>` : '<p class="small muted">Ордеров по делу нет.</p>'}
     <div class="actions" style="margin:8px 0">${btn('Выписать ордер', `openOrderForm('', '${jsq(c.number || '')}')`, 'small-btn', 'plus')}${mine.length ? btn('Все ордера дела', `openOrdersSheet('${jsq(c.number || '')}')`, 'small-btn', 'list') : ''}</div>`;
 }
 // «Сегодня» → «Требует внимания»: заседание в ближайшие дни, по делу есть ордера, а на инстанцию заседания — нет. Дела без ордеров и с ордером без
@@ -26135,6 +26195,52 @@ function caseClientRemoveModel(c, name, now) {
   return { obj: { ...c, participants: list.filter(p => p !== was), _delItems: { ...(c._delItems || {}), participants: del } }, name: was.name };
 }
 function caseClientWrite(rec, obj) { rec.participants = obj.participants; if (obj._delItems) rec._delItems = obj._delItems; else delete rec._delItems; }
+// сборка 277 (O-167, шаг 2): соглашение второго и следующих доверителей — у каждого своё: номер, дата, подпись — поля участника; номер не должен
+// совпадать ни с соглашением дела, ни с соглашением другого доверителя (agreementNoTakenBy, data/numbering.js). cases — все дела, включая корзину
+const CLIENT_AGR_SIGNED = ['Да', 'Нет — ждёт подписи'];
+function caseClientAgrModel(c, name, v, cases) {
+  if (!c) return { error: 'Дело не найдено' };
+  const list = Array.isArray(c.participants) ? c.participants : [], i = list.findIndex(p => p && p.name && partySame(p.name, name) && String(p.role || '').startsWith('Доверитель'));
+  if (i < 0) return { error: 'Доверитель «' + name + '» в деле не найден' };
+  const no = String((v && v.no) || '').trim(), date = String((v && v.date) || '').trim(), signed = CLIENT_AGR_SIGNED.includes(v && v.signed) ? v.signed : '';
+  if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return { error: 'Дата соглашения — из поля даты' };
+  const taken = no && typeof agreementNoTakenBy === 'function' ? agreementNoTakenBy(cases || [c], no, c.id, list[i].name) : null;
+  if (taken) return { error: 'Номер соглашения ' + no + ' уже занят: дело ' + (taken.number || '') + (taken.client ? ' (' + taken.client + ')' : '') };
+  const p = { ...list[i] };
+  for (const [k, val] of [['agreementNo', no], ['agreementDate', date], ['agreementSigned', signed]]) { if (val) p[k] = val; else delete p[k]; }
+  const out = list.slice(); out[i] = p;
+  return { obj: { ...c, participants: out }, name: p.name, no };
+}
+async function openClientAgreement(caseId, name) {
+  const c = await getOne('cases', caseId), x = c && typeof caseClientList === 'function' ? caseClientList(c).find(k => !k.main && partySame(k.name, name)) : null;
+  if (!x) { toast('Доверитель в деле не найден', true); return; }
+  const all = typeof numberingCases === 'function' ? await numberingCases() : await getAll('cases'), fresh = !x.agreementNo && !x.agreementDate;
+  const no = x.agreementNo || (fresh && typeof nextAgreementNo === 'function' ? nextAgreementNo(all) : ''), date = x.agreementDate || (fresh ? todayISO() : '');
+  const body = `<p class="small muted">У каждого доверителя по делу — своё соглашение. Соглашение основного доверителя (${esc(c.client || 'не указан')}) — в форме дела, вкладка «Соглашение».${fresh ? ' Предложен следующий свободный номер.' : ''}</p>
+    <div class="form-grid">${fInput('cg-no', 'Номер соглашения', no, 'autocomplete="off"')}${fInput('cg-date', 'Дата соглашения', date, 'type="date"')}${fSelect('cg-signed', 'Соглашение подписано', x.agreementSigned || '', [['', '—'], ...CLIENT_AGR_SIGNED.map(s => [s, s])])}</div>
+    ${fSaveBar(`caseClientAgrSave('${jsq(c.id)}', '${jsq(x.name)}')`, '')}`;
+  openSheet('Соглашение · ' + x.name, body, true);
+}
+async function caseClientAgrSave(caseId, name) {
+  const v = { no: fv('cg-no'), date: fv('cg-date'), signed: fv('cg-signed') }, all = typeof numberingCases === 'function' ? await numberingCases() : await getAll('cases');
+  let res = null;
+  try { await recUpdate('cases', caseId, rec => { res = caseClientAgrModel(rec, name, v, all); if (res.error) return false; caseClientWrite(rec, res.obj); addCaseHistoryEvent(rec, 'client', '', 'соглашение с доверителем ' + res.name + (res.no ? ': № ' + res.no : ''), 'form'); }); }
+  catch (e) { logErr('form:client-agr', e); fErr((e && e.message) || 'Не удалось сохранить'); return; }
+  if (!res) { fErr('Дело не найдено'); return; }
+  if (res.error) { fErr(res.error); return; }
+  await refreshCasesCache(); toast('Соглашение записано: ' + res.name); await openCaseSheet(caseId);
+}
+// сборка 277: в счёте и доверенности — доверители этого дела одной кнопкой (поле «Плательщик», «Доверитель»); у дела с одним доверителем — пусто
+function caseClientChips(inputId, c) {
+  const ks = c && typeof caseClientList === 'function' ? caseClientList(c) : []; if (ks.length < 2) return '';
+  return `<div class="field wide case-client-chips" id="${inputId}-chips"><span>Доверители по делу</span><div class="chips">${ks.map(k => `<button type="button" class="chip" onclick="caseClientChipPick('${inputId}', '${jsq(k.name)}', '${jsq(k.clientId || '')}')">${esc(k.name)}</button>`).join('')}</div></div>`;
+}
+function caseClientChipPick(inputId, name, id) {
+  const el = document.getElementById(inputId); if (!el) return;
+  // ввод в поле снимает выбранную карточку (ui/combo.js) — поэтому карточка ставится после события ввода
+  el.value = name; el.dispatchEvent(new Event('input', { bubbles: true }));
+  if (id) el.dataset.pickedId = id; else delete el.dataset.pickedId;
+}
 let CLIENT_ADD_WARNED = '';
 async function openClientAdd(caseId) {
   const c = await getOne('cases', caseId); if (!c) { toast('Дело не найдено', true); return; }
@@ -27963,6 +28069,16 @@ HFIG.clients2 = { h: 176, title: 'Карточка дела: несколько 
   s += hf.row(20, 92, 360, 'Доверитель (Истец) · Сидоров Борис Борисович') + hf.btn(392, 90, 96, 24, 'Убрать');
   s += hf.btn(20, 130, 170, 28, '+ Добавить доверителя', true) + hf.num(204, 144, 4);
   return s; })() };
+// сборка 277 (O-167, шаг 2): соглашение и ордер у каждого доверителя
+HFIG.clients3 = { h: 196, title: 'Карточка дела: соглашение и ордер у каждого доверителя', caption: '① Вверху карточки — доверители без соглашения и без ордера на текущую инстанцию. ② «Выписать ордер» — ордер для первого из них, в форме поле «Доверитель». ③ Под вторым доверителем — его соглашение: «Указать» или «Изменить».', svg: (() => {
+  let s = hf.box(10, 6, 500, 184, { rx: 8 });
+  s += hf.t(20, 26, 'Соглашение № 4/2026 от 02.11.2026 · подписано · нет соглашения: Петрова', { fs: 11 }) + hf.num(504, 22, 1);
+  s += hf.t(20, 48, 'Ордер № 15 от 02.11.2026 · первая инстанция · нет ордера: Петрова', { fs: 11 });
+  s += hf.btn(20, 58, 130, 24, 'Выписать ордер', true) + hf.num(164, 70, 2);
+  s += hf.t(20, 104, 'Доверители', { bold: true, fs: 12, fill: 'var(--text-muted)' });
+  s += hf.row(20, 114, 360, 'Доверитель (Истец) · Петрова Анна Сергеевна') + hf.btn(392, 112, 96, 24, 'Убрать');
+  s += hf.row(32, 144, 348, 'Соглашение не указано', true) + hf.btn(392, 142, 96, 24, 'Указать') + hf.num(504, 154, 3);
+  return s; })() };
 // сборка 214 (Ш-3): лист документа — подача
 HFIG.filing = { h: 214, title: 'Лист документа: подача', caption: '① «Открыть файл», «Готов к подаче». ② Дата, способ, куда подан, входящий номер. ③ Срок, под который готовился документ, — флажок закрывает его подачей. ④ «Подано» — запись в журнал дела.', svg: (() => {
   let s = hf.box(10, 6, 500, 202, { rx: 8 }) + hf.t(20, 26, 'Ходатайство об истребовании доказательств', { bold: true, fs: 12 });
@@ -28060,8 +28176,10 @@ ${typeof helpFig === 'function' ? helpFig('gridcols') : ''}
 <p><b>Профиль практики.</b> Настройки → «Дела» → «Профиль практики»: отметьте, какие дела вы ведёте (Гражданское, Арбитраж, КАС, Уголовное, КоАП). В выборе вида дела останутся только они и виды, которые вы добавили в справочник сами; у уже заведённых дел вид не меняется. Без гражданских, арбитражных и КАС из «Калькуляторов» уходят расчёты для исков. Ничего не отмечено — видно всё. Настройка переходит на другие устройства обменом.</p>
 <p><b>Название дела</b> можно не вводить: если при сохранении поле «Предмет спора» пустое, оно заполняется само из доверителя и противной стороны («Иванов И. И. к ООО «Гарант»»; без противной стороны — доверитель и категория) и дальше правится как обычное. Выключается в Настройки → «Дела» → отметка «Название дела заполняется само…» — настройка этого устройства.</p>
 <p><b>Номер дела и УИД в карточке.</b> Под судьёй показаны «№ дела» той инстанции, на которой дело сейчас, и «УИД». Сменилась стадия (например, на «Апелляция») — показан номер этой инстанции; пока он не вписан в форме дела, так и написано: «№ дела в апелляции не указан». Судья тоже показан только этой инстанции: если дело ушло выше, а судья там не указан, строки «Судья» нет. Нажмите на номер или УИД — значение скопируется, и внизу появится подтверждение.</p>
-<p><b>Несколько доверителей</b> (со сборки 276): карточка дела → группа «Суд, стороны, инстанции» → блок «Доверитель» → «Добавить доверителя» — выберите доверителя из списка или впишите нового (у него появится своя карточка в «Доверителях») и роль: «Доверитель (Истец)», «Доверитель (Ответчик)» и другие — по виду дела. Первый доверитель — тот, что в форме дела. Остальные — в карточке дела под ним; в списке «Дел», в шапке листа срока и в «Сегодня» доверители идут через запятую, а поиск находит дело по любому из них. В карточке каждого доверителя — все его дела, в том числе те, где он второй. Жалобу, поданную любым доверителем, мониторинг считает «Нашей жалобой». «Убрать» рядом с доверителем снимает его с дела (на всех устройствах после обмена), его карточка остаётся. Счета, ордер, доверенность и соглашение — у каждого доверителя свои — появятся в следующей сборке.</p>
+<p><b>Несколько доверителей</b> (со сборки 276): карточка дела → группа «Суд, стороны, инстанции» → блок «Доверитель» → «Добавить доверителя» — выберите доверителя из списка или впишите нового (у него появится своя карточка в «Доверителях») и роль: «Доверитель (Истец)», «Доверитель (Ответчик)» и другие — по виду дела. Первый доверитель — тот, что в форме дела. Остальные — в карточке дела под ним; в списке «Дел», в шапке листа срока и в «Сегодня» доверители идут через запятую, а поиск находит дело по любому из них. В карточке каждого доверителя — все его дела, в том числе те, где он второй. Жалобу, поданную любым доверителем, мониторинг считает «Нашей жалобой». «Убрать» рядом с доверителем снимает его с дела (на всех устройствах после обмена), его карточка остаётся. </p>
 ${typeof helpFig === 'function' ? helpFig('clients2') : ''}
+<p><b>Соглашение, ордер, доверенность и счёт — у каждого доверителя свои</b> (со сборки 277). Под вторым и следующими доверителями в карточке дела — строка «Соглашение № … от …» или «Соглашение не указано» и кнопка «Указать» / «Изменить»: номер, дата и «Соглашение подписано» у каждого свои, номер не может совпасть с соглашением другого дела или другого доверителя (новому предлагается следующий свободный). Соглашение основного доверителя — как прежде, в форме дела на вкладке «Соглашение»; строка «Соглашение …» вверху карточки называет доверителей без соглашения («нет соглашения: Петрова»). В форме ордера у дела с несколькими доверителями есть поле «Доверитель»; строка «Ордер …» вверху карточки называет тех, у кого нет ордера на текущую инстанцию, а «Выписать ордер» сразу подставляет первого из них. Доверенность на дату заседания проверяется у каждого доверителя отдельно: доверенность одного не заменяет доверенность другого. В форме счёта и доверенности под полем доверителя — кнопки «Доверители по делу»; в блоке «Счета» карточки виден плательщик каждого счёта.</p>
+${typeof helpFig === 'function' ? helpFig('clients3') : ''}
 <p><b>Карточка дела</b>: сверху доверитель, суд и судья, номер дела и УИД, строка «Соглашение № … от … · подписано» и «Ордер № … от …» (кнопки «Указать» / «Изменить» открывают форму дела на вкладке «Соглашение», «Выписать ордер» / «Открыть» — ордер текущей инстанции, «Все ордера» — все ордера дела; соглашение — поля самого дела, отдельной записи у него нет), ниже — блок «Ближайшее»: ближайшее заседание, ближайший срок, следующий шаг и одна главная кнопка — «Подготовка к заседанию», если заседание впереди, или «Задать следующий шаг», если шага нет. У следующего шага кнопка «Выполнено»: шаг уходит в ленту дела строкой «Выполнено: …», а в блоке появляется пустое поле для следующего шага с датой — «Записать» сохраняет его, «Не нужно» закрывает поле; «Отменить» в сообщении внизу возвращает выполненный шаг, если новый ещё не записан. Ближайший срок — строка с датой и названием невыполненного срока дела (со сборки 268): «Срок · завтра», у рассчитанного программой и ещё не подтверждённого — «требует проверки», у просроченного — «Срок просрочен» красным; если в тот же день есть ещё сроки — «и ещё N в этот день». Строки заседания и срока идут по дате; нажатие на строку срока открывает сам срок. Сроков нет — строки нет. Под блоком — ряд из четырёх кнопок: «Изменить» (форма дела), «Добавить» (задача, типовые задачи, заседание, встреча, срок, отправление, доверенность), «Документы» (по шаблону, папка документов, фото → PDF, сводка, хронология, архив дела) и «Ещё» (контакты суда, сайты судов, данные с сайта суда, по назначению, ход дела для доверителя, связаться с доверителем, ждёт ответа, сообщить доверителю, в архив). У «Добавить», «Документы» и «Ещё» справа стрелка вниз — это группы: нажатие раскрывает их кнопки под рядом, стрелка поворачивается, сама плитка остаётся на месте. Открыта одна группа за раз, повторное нажатие сворачивает её. «Сайты судов» открывает дело на сайте суда каждой инстанции (по ссылкам из формы дела) и быстрые переходы: для арбитражного дела — КАД Арбитр и «Мой Арбитр», для суда общей юрисдикции — ГАС «Правосудие», поиск сайта суда и подача документов, для всех — банк данных ФССП; номер дела (или № ИП) программа копирует сама — вставьте его в поиск на сайте. Строка «Что произошло или что сделать?» записывает задачу (если есть дата) или заметку. Счёт и расход добавляются в группе «Деньги» ниже. Лента дела собирает всё по датам. Одно заседание с сайта суда — одной строкой: если заседание есть в программе, событие суда и строка движения «Судебное заседание» того же дня под ним не повторяются (у материала — отдельно от дела).</p>
 <p><b>Ордера по инстанциям.</b> На каждую инстанцию — свой ордер, все ордера видны в одном деле; так устроены дела всех видов: гражданские, арбитражные, по КАС, уголовные и об административных правонарушениях. Строка «Ордер» вверху карточки смотрит на стадию дела: ордер на эту инстанцию есть — видны его номер и дата; нет — написано, например, «На апелляцию ордера нет» и рядом кнопка «Выписать ордер». Кнопка «Все ордера» открывает лист «Ордера по делу»: инстанции идут по порядку, у каждой свои ордера и кнопка «Выписать», текущая отмечена. В форме ордера поле «Инстанция» заполнено по стадии дела, «Поручение / стадия» подсказано по виду дела (его можно исправить), а если в инстанции несколько рассмотрений, появляется поле «Рассмотрение»: после отмены и нового рассмотрения нужен новый ордер. Правка номера, даты, основания или заметки не меняет, к какому рассмотрению относится ордер. Если рассмотрение удалено из дела, в поле «Рассмотрение» так и написано: «рассмотрение удалено из дела», а на новое рассмотрение ордер остаётся ненаписанным; перенести его можно только самому, выбрав другое рассмотрение. Ордер без конкретного рассмотрения показан как «Вся инстанция (рассмотрение не указано)». Ордера, записанные до этой версии, остаются как были: инстанцию им можно указать кнопкой «Указать инстанцию», пока она не указана, программа не считает, что ордера не хватает. У рассмотрения в его листе тоже есть раздел «Ордера» и кнопка «Выписать ордер». В форме дела поля «Номер ордера» и «Дата ордера» видны, пока по делу нет ни одного ордера.</p>
 ${typeof helpFig === 'function' ? helpFig('orders') : ''}
