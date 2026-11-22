@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="22.11.2026 15:13 · b0c44c6">
-<meta name="build-no" content="286">
+<meta name="build" content="22.11.2026 19:37 · 652171a">
+<meta name="build-no" content="287">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -7554,12 +7554,16 @@ function appUpdModel(man, env, cur) {
   const m = man && man[env]; if (!m || !m.version || !m.url) return null;
   return !cur || verCmp(m.version, cur) > 0 ? { env, cur, version: m.version, url: m.url, notes: Array.isArray(m.notes) ? m.notes.slice(0, 5) : [], size: m.sizeMb || '' } : null;
 }
+// сборка 287 (O-48, поручение пользователя 22.11.2026 «ограничение времени ожидания … делай»): запрос к сайту — с пределом ожидания;
+// без него проверка обновлений при плохой связи «висела» без конца (правило раздела 3: fetch без signal — дефект)
+const APPUPD_MS = 20000;
+async function appUpdNet(url, opt) { if (typeof AbortController !== 'function') return fetch(url, opt); const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), APPUPD_MS); try { return await fetch(url, Object.assign({}, opt, { signal: ctl.signal })); } finally { clearTimeout(t); } }
 // сборка 262 (аудит 256, E5): APPUPD.net — запрос не дошёл до сайта (нет связи), в отличие от ответа без сведений
-async function appUpdFetch() { APPUPD.net = false; try { const r = await fetch(location.origin + '/dist/apps.json', { cache: 'no-store' }); if (!r.ok) return null; APPUPD.man = await r.json(); return APPUPD.man; } catch (e) { logErr('appupd:fetch', e); APPUPD.net = true; return null; } }
+async function appUpdFetch() { APPUPD.net = false; try { const r = await appUpdNet(location.origin + '/dist/apps.json', { cache: 'no-store' }); if (!r.ok) return null; APPUPD.man = await r.json(); return APPUPD.man; } catch (e) { logErr('appupd:fetch', e); APPUPD.net = true; return null; } }
 // файл обновления на своём сайте должен существовать (04.10.2026: в apps.json — Android 1.5, а apps/CRM_Advokata.apk на сайте нет, 404 —
 // карточка вела бы на несуществующий файл); файл на другом адресе не проверяется (запрос туда закрыт политикой CSP)
 async function appUpdFileOk(url) {
-  try { if (new URL(url, location.href).origin !== location.origin) return true; const r = await fetch(url, { method: 'HEAD', cache: 'no-store' }); return r.ok; } catch (e) { logErr('appupd:head', e); return false; }
+  try { if (new URL(url, location.href).origin !== location.origin) return true; const r = await appUpdNet(url, { method: 'HEAD', cache: 'no-store' }); return r.ok; } catch (e) { logErr('appupd:head', e); return false; }
 }
 async function appUpdResolve(man, env) {
   const u = man ? appUpdModel(man, env, appVersionNow()) : null; APPUPD.missing = null;
@@ -13348,15 +13352,18 @@ const YC = {
 // window.__ycHttpResult(reqId, { status, body } | { error }); тот же перечень адресов (*.api.cloud.yandex.net), предел 120 с
 const androidYc = () => (typeof window !== 'undefined' && window.AndroidApp && typeof window.AndroidApp.ycHttp === 'function') ? window.AndroidApp : null;
 const ycSupported = () => !!((desktopApp() && typeof desktopApp().ycHttp === 'function') || androidYc());
-const YC_PENDING = new Map();
+const YC_PENDING = new Map(), YC_BRIDGE_MS = 130000;
 if (typeof window !== 'undefined') window.__ycHttpResult = (reqId, r) => { const p = YC_PENDING.get(reqId); if (!p) return; YC_PENDING.delete(reqId); clearTimeout(p.t); if (r && r.error) p.reject(new Error(String(r.error))); else p.resolve(r || {}); };
 // один вызов моста для обеих оболочек: ответ — { status, body }
 function ycBridgeHttp(method, url, token, body) {
-  if (desktopApp() && typeof desktopApp().ycHttp === 'function') return desktopApp().ycHttp(method, url, token, body);
+  // сборка 287 (O-48): у приложения для компьютера — тот же предел 130 с, что у Android; без него шаг мастера ждал ответа без конца
+  // срабатывание таймера проверяется по часам: подменённый в тестах мгновенный setTimeout не обрывает шаг раньше срока
+  if (desktopApp() && typeof desktopApp().ycHttp === 'function' && (typeof setTimeout !== 'function' || typeof clearTimeout !== 'function')) return desktopApp().ycHttp(method, url, token, body);
+  if (desktopApp() && typeof desktopApp().ycHttp === 'function') { let t; const t0 = Date.now(); return Promise.race([Promise.resolve().then(() => desktopApp().ycHttp(method, url, token, body)), new Promise((_, rej) => { t = setTimeout(() => { if (Date.now() - t0 >= YC_BRIDGE_MS - 1000) rej(new Error('сеть: приложение не ответило за 130 с')); }, YC_BRIDGE_MS); })]).finally(() => clearTimeout(t)); }
   const app = androidYc(); if (!app) return Promise.reject(new Error('мост к Яндекс Облаку недоступен: нужно приложение для компьютера или Android 1.27+'));
   return new Promise((resolve, reject) => {
     const reqId = 'yc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    const t = setTimeout(() => { if (YC_PENDING.delete(reqId)) reject(new Error('сеть: приложение не ответило за 130 с')); }, 130000);
+    const t = setTimeout(() => { if (YC_PENDING.delete(reqId)) reject(new Error('сеть: приложение не ответило за 130 с')); }, YC_BRIDGE_MS);
     YC_PENDING.set(reqId, { resolve, reject, t });
     try { app.ycHttp(reqId, method, url, token, body); } catch (e) { YC_PENDING.delete(reqId); clearTimeout(t); reject(e); }
   });
@@ -28683,7 +28690,8 @@ ${typeof helpFig === 'function' ? helpFig('filing') : ''}
 ${typeof helpFig === 'function' ? helpFig('docdiff') : ''}
 <p><b>Дела по назначению</b> (ст. 51 УПК РФ, ст. 50 ГПК РФ). «Изменить» → «Все поля» → «Соглашение»: «Участие по назначению», категория оплаты (п. 22(1) постановления Правительства РФ № 1240) и, если нужно, своя ставка за день — с коэффициентами вашего региона (своя ставка важнее таблицы). В карточке такого дела — кнопка «По назначению»: дни участия (дата, что делалось; выходной или праздничный день программа узнаёт по календарю, ночное время — флажком), проведённые заседания предлагаются одной кнопкой; «Заявление об оплате» — файл .docx с перечнем дней, ставками, суммой и реквизитами для перечисления из «Реквизитов адвоката» (группа «Для оплаты по QR»; укажите там счёт адвокатского образования). «Отчёты» → «По назначению» — сводка за месяц по всем делам с печатью. Ставки в программе — базовые суммы с 01.10.2025 без районных коэффициентов и надбавок; перед подачей сверьте их и нормы по КонсультантПлюс.</p>
 <p><b>Ход дела для доверителя</b> (кнопка в карточке дела; нужен личный сервер 200 или новее). Включается для каждого дела отдельно: отметьте, что показать, — вид дела, стадию и состояние, суд и номер, ближайшее заседание, поданные документы (из журнала подачи), ваши имя и телефон, своя строка для доверителя — и нажмите «Включить страницу». Программа отправит на ваш сервер только отмеченное; поля ФИО, противной стороны и суммы не отправляются никогда, а из названий поданных документов программа убирает имена участников, записанные в карточке дела (и короткие фамилии вроде «Ли» — целым словом); другие имена и опечатки она не узнаёт — откройте ссылку и проверьте страницу перед отправкой; в своей строке для доверителя не указывайте чужие имена. «Скопировать ссылку» — отправьте её доверителю сами. Страница сама не обновляется: после заседания или подачи нажмите «Обновить». «Отключить» удаляет страницу с сервера — ссылка перестаёт открываться; при новом включении ссылка будет другой. Если страницу отключали или включали заново на другом устройстве, «Обновить» в старом листе откажет, чтобы прежнее содержимое не попало на новую ссылку: проверьте лист и нажмите «Включить страницу». С сервером 202 и новее у дела всегда одна ссылка: если страницу включили одновременно на двух устройствах или в двух вкладках, обе получат одну и ту же ссылку, а «Отключить» на любом из них закрывает все ссылки этого дела, в том числе выданные раньше. Со сборки 242 и личного сервера 203 «Обновить» не включает страницу, которую отключили на другом устройстве, а «Включить страницу», нажатое до отключения на другом устройстве, отвечает «нажмите ещё раз, если она нужна» — включить снова можно только новым нажатием. По ссылке страницу увидит любой, у кого она есть, — давайте её только доверителю.</p>
-<p><b>Посмотреть пример.</b> Настройки → «О программе» → «демонстрация с вымышленными делами» (или адрес программы с «?demo=1») открывает отдельную демонстрационную базу: шесть вымышленных дел разных видов со сроками, заседаниями, задачами, счетами, перепиской и обращениями. Ваша база и настройки в демонстрации не открываются и не меняются; сервер и обмен там не подключены. Вверху — полоса «Демонстрация»; «Выйти из демонстрации» возвращает к вашей базе. Ссылку можно дать коллеге, чтобы он посмотрел программу без своих данных.</p>
+<p><b>Посмотреть пример.</b> Настройки → «О программе» → «демонстрация с вымышленными делами» (или адрес программы с «?demo=1»; на листе соглашения при первом запуске — ссылка «Посмотреть пример») открывает отдельную демонстрационную базу
+без принятия лицензионного соглашения (оно принимается, когда вы переходите к своей базе): шесть вымышленных дел разных видов со сроками, заседаниями, задачами, счетами, перепиской и обращениями. Ваша база и настройки в демонстрации не открываются и не меняются; сервер и обмен там не подключены. Вверху — полоса «Демонстрация»; «Выйти из демонстрации» возвращает к вашей базе. Ссылку можно дать коллеге, чтобы он посмотрел программу без своих данных.</p>
 <p><b>Правообладатель и связь с автором.</b> Настройки → «О программе»: правообладатель — Канзавели Дмитрий Давидович (ИНН 330503424130); «Связь с автором» — Telegram <a class="touch-link" href="https://t.me/Kanzaveli" target="_blank" rel="noopener">t.me/Kanzaveli</a> и почта <a class="touch-link" href="mailto:9107775577@mail.ru">9107775577@mail.ru</a> (нажатие открывает Telegram или почтовую программу; ссылки нажимаются и здесь, и в «О программе»); «Создано» — программа создана автором совместно с Claude, ИИ-ассистентом компании Anthropic.</p>
 <p><b>Поиск по документам.</b> Строка поиска в шапке (и Ctrl+K) ищет и в документах дел: по названию и по тексту файлов .docx — вложений писем и документов по шаблонам, которые есть на этом устройстве. Найденное — блоком «В документах» с кусочком текста вокруг совпадения; нажатие открывает лист документа. Текст читается на устройстве и держится только в памяти открытой программы. Сканы (PDF, фото) не распознаются — по ним ищется название.</p>
 <p><b>Хронология дела</b> (кнопка «Хронология» в карточке дела) — таблица «дата — событие — подробности» из ленты дела: заседания и их итоги, сроки, события с сайта суда, переписка, заметки, а по выбору — задачи, деньги и журнал. Сначала отмечены строки суда, переписки и заметок, которые уже наступили; отметку можно снять или поставить у любой строки, а нажатие на группу («Суд», «Деньги»…) отмечает или снимает все её строки. «Скачать .docx» — файл для Word (приложение к пояснениям, отчёт доверителю, передача дела коллеге); «Печать или PDF» — окно печати.</p>
@@ -28967,12 +28975,15 @@ function openEulaSheet(mandatory) {
     <div class="form-actions" style="margin:4px 0"><a class="button" id="eula-full" href="${esc(location.origin + '/eula.html')}" target="_blank" rel="noopener noreferrer">${icon('files')}Полный текст соглашения</a></div>
     <p class="small muted">Редакция от ${esc(fmtDate(eulaVer()))}${prev && prev.ver === eulaVer() ? ' · принято ' + esc(new Date(prev.at || 0).toLocaleDateString('ru-RU')) : ''}</p>
     <div class="form-actions save-bar" id="eula-bar">${prev && prev.ver === eulaVer() && !mandatory ? `<button type="button" class="button" onclick="sheetBack()">Закрыть</button>` : `<button type="button" class="button primary" id="eula-accept" onclick="eulaAccept()">${icon('check')}Принимаю и продолжаю</button>`}</div>
-    ${mandatory ? '<p class="small muted">Если вы не согласны — закройте программу и удалите её с устройства.</p>' : ''}`, mandatory ? undefined : (sheetIsOpen() ? true : undefined));
+    ${mandatory ? '<p class="small muted">Если вы не согласны — закройте программу и удалите её с устройства.</p>' : ''}
+    ${mandatory && typeof demoUrl === 'function' ? `<p class="small muted" id="eula-demo">Сначала посмотреть программу? <a href="${esc(demoUrl())}">Посмотреть пример</a> — вымышленные дела, без принятия соглашения; соглашение принимается, когда вы начинаете работу со своей базой.</p>` : ''}`, mandatory ? undefined : (sheetIsOpen() ? true : undefined));
   // сборка 257 (аудит 256, E1): до принятия лист не закрывается (ui/shell.js, sheetLockOn); как в прежней программе
   if (mandatory && typeof UI !== 'undefined' && UI.cur && !eulaAccepted()) { UI.cur.lock = 'eula'; sheetShow(); }
 }
 // при запуске: не принято на этом устройстве (или вышла новая редакция) — лист соглашения
-function eulaGate() { if (!eulaAccepted()) { openEulaSheet(true); return false; } return true; }
+// сборка 287 (A277-P4, решение пользователя 22.11.2026 «Пример — без реальных данных, а соглашение принимается при начале настоящей работы»):
+// в демонстрации (?demo=1, вымышленная база) лист соглашения не открывается; принятие — при переходе к своей базе
+function eulaGate() { if (typeof demoOn === 'function' && demoOn()) return true; if (!eulaAccepted()) { openEulaSheet(true); return false; } return true; }
 
 // ▼▼▼ ui/keys.js
 // ═══ ui/keys.js — клавиши на компьютере (Ш-33, сборка 211; мозговой штурм 27.10.2026, поручение пользователя 27.10.2026) ═══
@@ -29106,7 +29117,7 @@ async function demoSeed(force) {
 function demoBanner() {
   if (!demoOn() || document.getElementById('demo-bar')) return;
   const bar = document.createElement('div'); bar.id = 'demo-bar'; bar.className = 'demo-bar'; bar.setAttribute('role', 'status');
-  bar.innerHTML = '<span>Демонстрация — данные вымышленные; ваша база не открыта и не меняется.</span><span class="demo-actions"><a class="button small-btn" id="demo-exit" href="./">Выйти из демонстрации</a></span>';
+  bar.innerHTML = '<span>Демонстрация — данные вымышленные; ваша база не открыта и не меняется.</span><span class="demo-actions"><a class="button small-btn" id="demo-eula" href="' + esc(location.origin + '/eula.html') + '" target="_blank" rel="noopener noreferrer">Соглашение</a><a class="button small-btn" id="demo-exit" href="./">Выйти из демонстрации</a></span>';
   document.body.prepend(bar); document.body.classList.add('demo-shown');
 }
 
@@ -31363,7 +31374,9 @@ async function nextUpdateApply() {
 async function nextNetDown() {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
   if (typeof fetch !== 'function') return false;
-  try { await fetch('sw.js?net=' + Date.now(), { method: 'HEAD', cache: 'no-store' }); return false; } catch (e) { return true; }
+  // сборка 287 (O-48): короткий запрос — с пределом 10 с; сайт не ответил за это время — «нет связи», а не ожидание без конца
+  const ctl = typeof AbortController === 'function' ? new AbortController() : { abort() {}, signal: undefined }, t = setTimeout(() => ctl.abort(), 10000);
+  try { await fetch('sw.js?net=' + Date.now(), { method: 'HEAD', cache: 'no-store', signal: ctl.signal }); return false; } catch (e) { return true; } finally { clearTimeout(t); }
 }
 async function nextUpdateCheck(force) {
   const reg = NEXT_UPDATE.reg;
