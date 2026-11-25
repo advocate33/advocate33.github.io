@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="25.11.2026 23:05 · 10f6e6f">
-<meta name="build-no" content="305">
+<meta name="build" content="26.11.2026 00:46 · ab5feac">
+<meta name="build-no" content="306">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -1173,6 +1173,15 @@ if (typeof location === 'object' && /[?&]demo(?:[=&]|$)/.test(String(location.se
     SP.getItem = function (k) { return g.call(this, key(this, k)); };
     SP.setItem = function (k, v) { return s.call(this, key(this, k), v); };
     SP.removeItem = function (k) { return r.call(this, key(this, k)); };
+    // сборка 306 (аудит 293, G13): перечисление (key, length) и очистка (clear) — только свои ключи, с префиксом; прежде они видели и
+    // стирали все ключи сайта, в том числе рабочие. перечисление собственных свойств хранилища по-прежнему видит все имена — в программе так не читается
+    const kf = SP.key, cl = SP.clear, lenD = Object.getOwnPropertyDescriptor(SP, 'length');
+    const own = () => { const out = []; if (!lenD || !lenD.get) return out; const n = lenD.get.call(real); for (let i = 0; i < n; i++) { const x = kf.call(real, i); if (x != null && x.startsWith(NEXT_NS.ls)) out.push(x); } return out; };
+    if (lenD && lenD.get) {
+      SP.key = function (i) { if (this !== real) return kf.call(this, i); const a = own(); return i >= 0 && i < a.length ? a[i].slice(NEXT_NS.ls.length) : null; };
+      Object.defineProperty(SP, 'length', { configurable: true, enumerable: true, get() { return this === real ? own().length : lenD.get.call(this); } });
+    }
+    SP.clear = function () { if (this !== real) return cl.call(this); for (const x of own()) r.call(real, x); };
     const F = IDBFactory.prototype, open = F.open, drop = F.deleteDatabase, map = n => NEXT_NS.idb[n] || n;
     F.open = function (n, v) { return v === undefined ? open.call(this, map(n)) : open.call(this, map(n), v); };
     F.deleteDatabase = function (n) { return drop.call(this, map(n)); };
@@ -4101,6 +4110,70 @@ if (typeof busyClash === 'function') {
       }
     }
     return found.length ? found[0].text : '';
+  };
+}
+
+// ═══ сборка 306 (аудит 293: G18, N06, G11, G04) — файл и карточка документа, окончательное удаление, локальная база, очередь слияний ═══
+// Решение пользователя 24.11.2026 «остальные пункты из этого разбора утверждаю, реализуй по плану в следующих сборках».
+// G18: файл версии документа (docBlobs) и её карточка (docVersions) писались двумя транзакциями — сбой второй оставлял файл без карточки.
+// Теперь — одной (putMany): обе записи или ни одной; версия карточки сверяется, как у обычной записи (REC_GUARD)
+if (typeof docVersionSave === 'function') {
+  docVersionSave = async function (ver) {
+    const data = ver.dataUrl || '';
+    const meta = Object.assign({}, ver); delete meta.dataUrl; meta.hasBlob = !!data || !!meta.hasBlob;
+    if (!data || !(typeof db === 'object' && db && typeof db.transaction === 'function')) {
+      if (data) await put('docBlobs', { id: ver.id, data });
+      await put('docVersions', meta);
+    } else {
+      let opts, upd0 = meta._upd;
+      if (REC_GUARD.on && meta._upd != null) {
+        const pa = recPurgedAt(meta.id);
+        opts = { expect: { store: 'docVersions', id: meta.id, upd: meta._upd || 0, ack: null, msg: REC_GUARD_MSG, purgedAt: pa ? Math.max(pa, meta._upd || 0) : 0, editOf: (meta._upd || 0) > 0, goneMsg: REC_GONE_MSG } };
+      }
+      try { await putMany([['docBlobs', { id: ver.id, data }], ['docVersions', meta]], opts); }
+      catch (e) { meta._upd = upd0; if (e && (e.message === REC_GUARD_MSG || e.message === REC_GONE_MSG)) { REC_GUARD.conflicts++; logErr('put:stale', 'docVersions:' + meta.id); } throw e; }
+    }
+    delete ver.dataUrl; ver.hasBlob = meta.hasBlob;
+    return meta;
+  };
+}
+// N06: отметка окончательного удаления (реестр crm_purged) ставится до завершения транзакции — это намеренно: при сбое удаление доделает
+// следующий обмен (purgedApply), а отметка не теряется при аварии. Но ответ «не удалено» не отличал «ничего не произошло» от «удаление
+// записано и будет доделано». Теперь во втором случае ответ — 'pending', и корзина говорит об этом прямо
+if (typeof purge === 'function') {
+  purge = async function (store, id) {
+    const p0 = Number((purgedList() || {})[id] || 0);
+    const r = await purgeRaw(store, id, null, true);
+    if (r === false && Number((purgedList() || {})[id] || 0) > p0) return 'pending';
+    return r;
+  };
+}
+// G11: localKV открывал новое соединение с локальной базой при каждом обращении и не закрывал его. Теперь одно соединение на вкладку;
+// сбой открытия — следующий вызов откроет заново; смена версии базы другой вкладкой или закрытие браузером — соединение закрывается
+// и открывается заново при следующем обращении
+if (typeof localKV === 'function') {
+  const localKVOpen = localKV; let kvConn = null;
+  localKV = function () {
+    if (!kvConn) {
+      kvConn = localKVOpen().then(d => {
+        d.onversionchange = () => { try { d.close(); } catch (e) { logErr('kv:close', e); } kvConn = null; };
+        d.onclose = () => { kvConn = null; };
+        return d;
+      }, e => { kvConn = null; throw e; });
+    }
+    return kvConn;
+  };
+}
+// G04: слияния шли параллельно с общим состоянием (MERGE_SEEN, учёт сбоев настроек, строгий режим проверки пакета): окончание первого
+// снимало защиту второго. Теперь слияния выполняются по очереди: следующее начинается после окончания предыдущего (успех или сбой).
+// Обёртка — последней, поверх всех прежних: каждое слияние целиком, от проверки пакета до итога, идёт без соседа
+if (typeof mergeIncoming === 'function') {
+  const mergeIncomingOne = mergeIncoming; let mergeQueue = Promise.resolve();
+  mergeIncoming = function (parsed, allowSecrets, opts) {
+    const run = () => mergeIncomingOne(parsed, allowSecrets, opts);
+    const p = mergeQueue.then(run, run);
+    mergeQueue = p.then(() => {}, () => {});
+    return p;
   };
 }
 
@@ -18106,8 +18179,9 @@ async function openPurgeSheet(store, id) {
 }
 async function purgeConfirmed(store, id) {
   const items = trashItems(await trashRaw()), list = store ? items.filter(i => (i.store === store && i.id === id) || i.withId === id) : items;
-  let n = 0; for (const i of list) { try { if (await purge(i.store, i.id)) n++; } catch (e) { logErr('trash:purge', e); } }
-  toast(n === list.length ? 'Удалено окончательно: ' + n : 'Удалено ' + n + ' из ' + list.length + ' — повторите', n !== list.length);
+  // сборка 306 (аудит 293, N06): 'pending' — запись не стёрта сейчас, но удаление записано и доделается при следующем обмене
+  let n = 0, pend = 0; for (const i of list) { try { const r = await purge(i.store, i.id); if (r === 'pending') pend++; else if (r) n++; } catch (e) { logErr('trash:purge', e); } }
+  toast(n === list.length ? 'Удалено окончательно: ' + n : pend && n + pend === list.length ? 'Удалено ' + n + ' из ' + list.length + '; остальные стереть сейчас не удалось — удаление записано и завершится при следующем обмене, или повторите' : 'Удалено ' + n + ' из ' + list.length + ' — повторите', n !== list.length);
   openTrashSheet();
 }
 
