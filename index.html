@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="24.11.2026 18:29 · 2ba99f7">
-<meta name="build-no" content="300">
+<meta name="build" content="25.11.2026 16:00 · 566e173">
+<meta name="build-no" content="301">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3643,6 +3643,23 @@ mergeCaseRecords = function (cur, rec, base, events) {
   const delP = {}; for (const src of [cur, rec]) { const dp = src && src._delItems && src._delItems.participants; if (dp) for (const k of Object.keys(dp)) delP[k] = Math.max(Number(delP[k]) || 0, Number(dp[k]) || 0); }
   if (Object.keys(delP).length) { m.participants = (Array.isArray(m.participants) ? m.participants : []).filter(p => !(p && delP[crmMonNorm(p.name || '')] > (Number(p.addedAt) || 0))); m._delItems = { ...(m._delItems || {}), participants: delP }; }
   return m;
+};
+
+// Аудит 293, G03 (сборка 301): отметка удаления — позже отметки прежнего возврата записи, отметка возврата — позже отметки удаления, даже если
+// часы этого устройства отстают от устройства, где запись удаляли или возвращали (иначе при слиянии побеждало более раннее действие: удалённое
+// возвращалось, возвращённое снова исчезало). Запись читается перед записью, а put сверяет её версию в транзакции записи (REC_GUARD) —
+// отметки считаются по той же версии, что записывается. data/db.js общий с прежней программой — поэтому здесь.
+del = async function (store, id) {
+  const rec = (await getAllRaw(store)).find(r => r && r.id === id) || null, now = Date.now();
+  const obj = rec ? { ...rec, _deleted: true, _deletedAt: Math.max(now, Number(rec._restoredAt || 0) + 1) } : { id, _deleted: true, _deletedAt: now };
+  return put(store, obj);
+};
+undelete = async function (store, id) {
+  const rec = (await getAllRaw(store)).find(r => r && r.id === id);
+  if (!rec) return false;
+  const obj = { ...rec }, at = Math.max(Date.now(), Number(rec._deletedAt || 0) + 1);
+  delete obj._deleted; delete obj._deletedAt; obj._restoredAt = at;
+  return put(store, obj);
 };
 
 // v8 (sync/blobs.js): файл версии документа, которого нет на этом устройстве, берётся из хранилища по cloudId
@@ -8164,8 +8181,9 @@ function snapRbRecord(store, cur, snap, now) {
   const c = cur || {}, o = snapRbClone(snap);
   for (const k of ['_deleted', '_deletedAt', '_deletedWith', '_ch', '_upd', '_device']) delete o[k];
   // сборка 222 (Д-10): запись возвращается из корзины откатом — отметка возврата побеждает при слиянии прежнее удаление
-  if (c._deleted) o._restoredAt = now;
   const after = t => Math.max(now, (Number(t) || 0) + 1);
+  // аудит 293, G03 (сборка 301): и позже отметки удаления этой записи
+  if (c._deleted) o._restoredAt = after(c._deletedAt);
   // надгробия обеих версий — по максимуму (как при слиянии)
   const dels = {};
   for (const src of [c._delItems, snap._delItems]) if (src && typeof src === 'object') for (const f of Object.keys(src)) { dels[f] = dels[f] || {}; for (const id of Object.keys(src[f] || {})) dels[f][id] = Math.max(Number(dels[f][id]) || 0, Number(src[f][id]) || 0); }
@@ -8219,7 +8237,7 @@ function snapRbTarget(store, cur, target, now) {
     if (!cur || cur._deleted) return null;
     const o = target ? snapRbRecord(store, cur, target, now) : snapRbClone(cur);
     for (const k of ['_ch', '_upd', '_device', '_deletedWith']) delete o[k];
-    o._deleted = true; o._deletedAt = (target && Number(target._deletedAt)) || now; if (target && target._deletedWith) o._deletedWith = target._deletedWith;
+    o._deleted = true; o._deletedAt = Math.max((target && Number(target._deletedAt)) || now, Number(cur._restoredAt || 0) + 1, Number(o._restoredAt || 0) + 1); if (target && target._deletedWith) o._deletedWith = target._deletedWith;
     o.id = cur.id; return o;
   }
   return snapRbRecord(store, cur, target, now);
@@ -11036,7 +11054,7 @@ function hearingDupApplyIn(H, E, C, key, sig, choices, mustAuto) {
   const procChosen = (p.conflicts || []).some(x => x.f === 'proceedingId');
   if (procChosen) { keep.procManual = now; keep.procAuto = null; keep.procOp = ''; }
   const iK = H.findIndex(h => h && h.id === keep.id); if (iK < 0) return { error: 'gone', text: 'Запись не найдена' }; H[iK] = keep;
-  for (const h of H) if (h && dropIds.has(h.id)) { h._deleted = true; h._deletedAt = now; h.mergedInto = keep.id; }
+  for (const h of H) if (h && dropIds.has(h.id)) { h._deleted = true; h._deletedAt = Math.max(now, Number(h._restoredAt || 0) + 1); h.mergedInto = keep.id; }
   let moved = 0; for (const e of E) { if (!e || e._deleted) continue; const mine = dropIds.has(e.appliedRecordId) || e.appliedRecordId === keep.id; if (!mine) continue; if (dropIds.has(e.appliedRecordId)) { e.appliedRecordId = keep.id; moved++; } if (procChosen) { if (keep.proceedingId) e.proceedingId = keep.proceedingId; else delete e.proceedingId; e.procManual = now; delete e.procRepair; } }
   const c = C.find(x => x && !x._deleted && (keep.caseId ? x.id === keep.caseId : x.number === p.caseNum));
   if (c && typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, 'hearing_upd', '', `Заседание ${fmtDate(p.date)}${p.time ? ' ' + p.time : ''}: объединены ${p.drop.length + 1} одинаковые записи — оставлена одна, остальные в корзине`, 'auto');
@@ -11181,7 +11199,7 @@ async function hearingFakeOpen(id) {
 }
 async function hearingFakeDrop(id) {
   const b = typeof document !== 'undefined' ? document.getElementById('hearing-fake-drop') : null, upd = b ? Number(b.dataset.upd || 0) : 0;
-  let r; try { r = await heardupTx((H, E, C) => { const h = H.find(x => x && x.id === id && !x._deleted); if (!h) return { error: 'gone', text: 'Запись уже удалена' }; if (upd && Number(h._upd || 0) !== upd) return { error: 'changed', text: 'Запись изменилась — откройте лист заново' }; const L = hearingFakeLinks(h, E); if (L.real.length) return { error: 'changed', text: 'К заседанию применены и другие события суда — запись не убрана, откройте лист заново' }; const e = E.find(x => x && x.id === h.monitorEventId); h._deleted = true; h._deletedAt = Date.now(); for (const x of L.fake) { x.eventType = 'caseflow'; x.status = 'flow'; if (x.appliedRecordId === h.id) delete x.appliedRecordId; } const c = C.find(x => x && !x._deleted && (h.caseId ? x.id === h.caseId : x.number === h.caseNum)); if (c && typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, 'hearing_upd', '', 'Заседание ' + fmtDate(h.date) + ' убрано: это строка движения дела («' + (e ? crmMonEventHead(e) : '') + '»), а не заседание', 'auto'); return { ok: true }; }); } catch (e) { logErr('hearing:fake', e); toast('Не удалось: ' + ((e && e.message) || e), true); return; }
+  let r; try { r = await heardupTx((H, E, C) => { const h = H.find(x => x && x.id === id && !x._deleted); if (!h) return { error: 'gone', text: 'Запись уже удалена' }; if (upd && Number(h._upd || 0) !== upd) return { error: 'changed', text: 'Запись изменилась — откройте лист заново' }; const L = hearingFakeLinks(h, E); if (L.real.length) return { error: 'changed', text: 'К заседанию применены и другие события суда — запись не убрана, откройте лист заново' }; const e = E.find(x => x && x.id === h.monitorEventId); h._deleted = true; h._deletedAt = Math.max(Date.now(), Number(h._restoredAt || 0) + 1); for (const x of L.fake) { x.eventType = 'caseflow'; x.status = 'flow'; if (x.appliedRecordId === h.id) delete x.appliedRecordId; } const c = C.find(x => x && !x._deleted && (h.caseId ? x.id === h.caseId : x.number === h.caseNum)); if (c && typeof addCaseHistoryEvent === 'function') addCaseHistoryEvent(c, 'hearing_upd', '', 'Заседание ' + fmtDate(h.date) + ' убрано: это строка движения дела («' + (e ? crmMonEventHead(e) : '') + '»), а не заседание', 'auto'); return { ok: true }; }); } catch (e) { logErr('hearing:fake', e); toast('Не удалось: ' + ((e && e.message) || e), true); return; }
   if (!r || r.error) { toast((r && r.text) || 'Не изменено', true); return; }
   toast('Запись убрана в корзину, событие — в ленте дела'); closeSheet(); if (typeof openIntegritySheet === 'function') openIntegritySheet();
 }
@@ -17829,11 +17847,13 @@ function deletePlan(store, rec, d) {
   return plan;
 }
 // Надгробие записи, ушедшей в корзину вместе с делом
-function deleteMark(rec, at, withId) { const o = { ...rec, _deleted: true, _deletedAt: at }; if (withId) o._deletedWith = withId; return o; }
+// аудит 293, G03 (сборка 301): отметка удаления — позже отметки прежнего возврата этой записи (часы устройства могут отставать)
+function deleteMark(rec, at, withId) { const o = { ...rec, _deleted: true, _deletedAt: Math.max(at, Number((rec || {})._restoredAt || 0) + 1) }; if (withId) o._deletedWith = withId; return o; }
 // Что восстановить: сама запись и то, что ушло в корзину вместе с ней. Возвращает [[хранилище, запись без отметок удаления], …]
 function restoreSet(store, id, raw) {
   // сборка 222 (Д-10): отметка восстановления — при слиянии восстановленная запись побеждает более раннее удаление
-  const clean = r => { const o = { ...r }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; o._restoredAt = Date.now(); return o; };
+  // аудит 293, G03 (сборка 301): отметка возврата — позже отметки удаления этой записи
+  const clean = r => { const o = { ...r }, at = Math.max(Date.now(), Number(r._deletedAt || 0) + 1); delete o._deleted; delete o._deletedAt; delete o._deletedWith; o._restoredAt = at; return o; };
   const rec = (raw[store] || []).find(r => r && r.id === id && r._deleted); if (!rec) return [];
   const out = [[store, clean(rec)]];
   if (store === 'cases') for (const st of DELETE_LINKED) for (const r of (raw[st] || [])) if (r && r._deleted && r._deletedWith === id) out.push([st, clean(r)]);
@@ -17862,7 +17882,7 @@ async function deleteConfirmed(store, id) {
     // разбор GPT 05.10.2026, п. 4: дело и связанные записи уходят в корзину одной транзакцией (всё или ничего)
     if (store === 'cases' && withLinked && typeof putMany === 'function') { const d = {}; for (const st of DELETE_LINKED) d[st] = await getAll(st); const p = deletePlan(store, rec, d); const list = [];
       // разбор GPT 05.10.2026 (2), п. 6: отметки ставятся на свежую запись из транзакции, а не на копию, прочитанную заранее
-      for (const st of DELETE_LINKED) for (const r of p.linked[st]) list.push([st, { id: r.id }, cur => deleteMark(cur, at, id)]); list.push([store, { id: rec.id }, cur => ({ ...cur, _deleted: true, _deletedAt: at })]); await putMany(list);
+      for (const st of DELETE_LINKED) for (const r of p.linked[st]) list.push([st, { id: r.id }, cur => deleteMark(cur, at, id)]); list.push([store, { id: rec.id }, cur => deleteMark(cur, at)]); await putMany(list);
       if (typeof devrAlarms === 'function' && devrAlarms()) devrAlarmsSync(true).catch(e => logErr('devremind:alarms', e)); }
     else { if (store === 'cases' && withLinked) { const d = {}; for (const st of DELETE_LINKED) d[st] = await getAll(st); const p = deletePlan(store, rec, d); for (const st of DELETE_LINKED) for (const r of p.linked[st]) await put(st, deleteMark(r, at, id)); } await del(store, id); }
     // журнал дела — для заседания и задачи, как при их сохранении; встречи v310 в журнал дела не пишет
@@ -17887,7 +17907,7 @@ async function openTrashSheet(sub) {
 }
 async function trashRestore(store, id) {
   const raw = await trashRaw(), set = restoreSet(store, id, raw); if (!set.length) { toast('Запись не найдена', true); return; }
-  try { if (typeof putMany === 'function') await putMany(set.map(([st, rec]) => [st, { id: rec.id }, cur => { const o = { ...cur }; delete o._deleted; delete o._deletedAt; delete o._deletedWith; o._restoredAt = Date.now(); return o; }])); else for (const [st, rec] of set) await put(st, rec); } catch (e) { logErr('trash:restore', e); toast('Не удалось вернуть: ' + ((e && e.message) || 'сбой записи'), true); return; }
+  try { if (typeof putMany === 'function') await putMany(set.map(([st, rec]) => [st, { id: rec.id }, cur => { const o = { ...cur }, at = Math.max(Date.now(), Number(cur._deletedAt || 0) + 1); delete o._deleted; delete o._deletedAt; delete o._deletedWith; o._restoredAt = at; return o; }])); else for (const [st, rec] of set) await put(st, rec); } catch (e) { logErr('trash:restore', e); toast('Не удалось вернуть: ' + ((e && e.message) || 'сбой записи'), true); return; }
   await refreshCasesCache();
   const rec = set[0][1], twin = store === 'cases' && rec.number ? (await getAll('cases')).find(c => c.id !== rec.id && c.number === rec.number) : null;
   toast(twin ? 'Возвращено. Номер ' + rec.number + ' есть ещё у одного дела — проверьте' : 'Возвращено' + (set.length > 1 ? ': запись и связанных с ней — ' + (set.length - 1) : ''), !!twin);
