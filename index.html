@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="25.11.2026 18:06 · 3ce9b7e">
-<meta name="build-no" content="302">
+<meta name="build" content="25.11.2026 19:46 · 445398c">
+<meta name="build-no" content="303">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3903,7 +3903,22 @@ if (typeof put === 'function') { const putPlain = put; put = function (store, ob
     const upd0 = obj._upd;
     return putMany([[store, obj]], { expect: ex }).catch(e => { obj._upd = upd0; if (e && (e.message === REC_GUARD_MSG || e.message === REC_GONE_MSG)) { REC_GUARD.conflicts++; logErr('put:stale', store + ':' + obj.id); } throw e; });
   }
+  // сборка 303 (аудит 293, G01): запись без версии (справочники: saveRef, courtInfoSave, judgeInfoSave и соседние пишут { id, … }) — версия
+  // больше версии записи в базе, в той же транзакции (putMany); прежде — только по часам устройства, и правка проигрывала записи, пришедшей с
+  // устройства, у которого часы спешат (справочники сливаются целой записью по _upd). Новая запись создаётся как прежде
+  if (REC_GUARD.on && obj && obj.id != null && obj._upd == null && typeof db === 'object' && db && typeof db.transaction === 'function') return putMany([[store, obj]]);
   return putPlain.call(this, store, obj, ...rest); }; }
+// сборка 303 (аудит 293, G05): сбой чтения ключей хранилища — отказ, а не пустой список: реестр окончательных удалений (purgedApply) считает
+// его сбоем, а не «удалять нечего», проверка целостности не принимает все файлы за потерянные, отчёт запуска не пишет «0 записей»
+if (typeof getAllKeys === 'function') {
+  getAllKeys = function (store) {
+    return new Promise((res, rej) => {
+      const fail = e => rej(new Error('Не удалось прочитать ключи хранилища «' + store + '»: ' + ((e && e.message) || 'ошибка чтения')));
+      let r; try { r = tx(store).getAllKeys(); } catch (e) { fail(e); return; }
+      r.onsuccess = () => res(r.result || []); r.onerror = () => fail(r.error);
+    });
+  };
+}
 // Аудит 05.10.2026: отметка «Дата прошла» при запуске (data/hearings.js, v312) писала прошедшие заседания по одному — на базе с сотнями
 // прошедших заседаний первый запуск занимал больше 10 секунд. Та же логика, но записи идут пачками по 40 одновременно, правило стадии на
 // это время выключено (смена статуса данных инстанции не добавляет). Проверка: next_37_audit1.js, замер — tools/perf (аудит 05.10.2026).
@@ -31881,8 +31896,9 @@ const NEXT_BOOT = {
   },
   async report() {
     // сборка 222 (Д-16): число записей — по ключам, без чтения хранилища файлов целиком
-    const counts = {}; for (const st of STORES) counts[st] = (await getAllKeys(st)).length;
-    return { версия: APP_VER, сборка: BUILD_ID, изоляция: NEXT_NS.ok, база: db && db.name, версияБазы: db && db.version, правилаСроков: NEXT_RULES_VER, секреты: _sec.ok, записей: counts };
+    // сборка 303 (аудит 293, G05): хранилище, ключи которого не прочитались, — null и в списке «сбойЧтения», а не «0 записей»
+    const counts = {}, bad = []; for (const st of STORES) { try { counts[st] = (await getAllKeys(st)).length; } catch (e) { counts[st] = null; bad.push(st); logErr('next:report', e); } }
+    return { версия: APP_VER, сборка: BUILD_ID, изоляция: NEXT_NS.ok, база: db && db.name, версияБазы: db && db.version, правилаСроков: NEXT_RULES_VER, секреты: _sec.ok, записей: counts, сбойЧтения: bad };
   },
   async start() {
     if (!NEXT_NS.ok) { this.say('Изоляция от прежней версии не сработала (' + NEXT_NS.why + ') — программа остановлена, данные не тронуты.', true); return; }
