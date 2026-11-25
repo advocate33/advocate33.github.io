@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="26.11.2026 00:46 · ab5feac">
-<meta name="build-no" content="306">
+<meta name="build" content="26.11.2026 02:27 · 43ccc5c">
+<meta name="build-no" content="307">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3649,6 +3649,9 @@ async function getAll(store) {
 const mergeCaseRecordsV312 = mergeCaseRecords;
 mergeCaseRecords = function (cur, rec, base, events) {
   const m = mergeCaseRecordsV312(cur, rec, base, events);
+  // сборка 307 (O-190, аудит 293, G06): участники — по своей метке (partsMerge, ниже), каждый по своей версии _u; прежде список брался
+  // целиком из более новой версии дела, и смена роли на одном устройстве терялась, если на другом позже правили другое поле дела
+  { const nw = recNewer(cur, rec); m.participants = partsMerge(m.id, nw.participants, (nw === rec ? cur : rec).participants); }
   // Б9 (11.10.2026): убранный участник дела — надгробие _delItems.participants[ключ имени] (раздел 6 правил); надгробия — по максимуму,
   // участник остаётся, только если добавлен позже удаления (addedAt)
   const delP = {}; for (const src of [cur, rec]) { const dp = src && src._delItems && src._delItems.participants; if (dp) for (const k of Object.keys(dp)) delP[k] = Math.max(Number(delP[k]) || 0, Number(dp[k]) || 0); }
@@ -4174,6 +4177,53 @@ if (typeof mergeIncoming === 'function') {
     const p = mergeQueue.then(run, run);
     mergeQueue = p.then(() => {}, () => {});
     return p;
+  };
+}
+
+// ═══ сборка 307 (O-190; аудит 293, G06) — участники дела по своей метке ═══
+// Пользователь 24.11.2026: «ок, ставь в очередь» (OCHERED.md, «O-190 (24.11.2026)»). У участника — метка id и версия _u (как у сроков).
+// Метка участника без неё вычисляется одинаково на любом устройстве — из номера записи дела и имени (partKeyOf): прежние записи, копии и
+// прежняя программа (/old/) без меток совпадают с записями с метками, дублей нет, массового переписывания базы нет — метка ставится при
+// первой записи дела (fieldStamps). Новый участник с тем же именем, что у прежнего, получает ту же метку: форма и лист участников и прежде
+// не допускали двух участников с одним именем; тёзки с разными метками (из копии, с другого устройства) при слиянии не сливаются.
+function partNorm(s) { return typeof crmMonNorm === 'function' ? crmMonNorm(s || '') : String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+function partKeyOf(caseId, p) {
+  if (p && p.id != null && p.id !== '') return String(p.id);
+  const s = String(caseId) + '|' + partNorm(p && p.name); let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return 'P' + (h >>> 0).toString(36) + s.length.toString(36);
+}
+// объединение: участник с одной меткой — из версии, где он менялся позже (_u); при равных версиях — из более новой версии дела (как прежде;
+// так правка в прежней программе, которая версию участника не ставит, не теряется). Порядок — как в более новой версии, затем новые из другой
+function partsMerge(caseId, newerList, olderList) {
+  const out = [], idx = new Map();
+  const add = (p, fromNewer) => {
+    if (!p || typeof p !== 'object') return;
+    const k = partKeyOf(caseId, p);
+    if (!idx.has(k)) { idx.set(k, out.length); out.push(p); return; }
+    const i = idx.get(k), q = out[i], up = Number(p._u || 0), uq = Number(q._u || 0);
+    if (up > uq && !fromNewer) out[i] = p;
+  };
+  for (const p of (Array.isArray(newerList) ? newerList : [])) add(p, true);
+  for (const p of (Array.isArray(olderList) ? olderList : [])) add(p, false);
+  return JSON.parse(JSON.stringify(out));
+}
+// метка и версия участника — при каждой записи дела (форма, лист участников, мониторинг, обмен через put): изменённый или новый участник
+// получает версию записи, неизменённый сохраняет прежнюю
+if (typeof fieldStamps === 'function') {
+  const fieldStampsV306 = fieldStamps;
+  fieldStamps = function (obj, prev, ts) {
+    if (obj && obj.id != null && Array.isArray(obj.participants)) {
+      const pm = new Map(); for (const p of (prev && Array.isArray(prev.participants) ? prev.participants : [])) if (p && typeof p === 'object') pm.set(partKeyOf(obj.id, p), p);
+      const bare = p => { const o = Object.assign({}, p); delete o._u; delete o.id; return JSON.stringify(o); };
+      for (const p of obj.participants) {
+        if (!p || typeof p !== 'object') continue;
+        const k = partKeyOf(obj.id, p); if (p.id == null || p.id === '') p.id = k;
+        const pp = pm.get(k);
+        if (!pp || bare(pp) !== bare(p)) p._u = ts; else if (pp._u) p._u = pp._u; else delete p._u;
+      }
+    }
+    return fieldStampsV306(obj, prev, ts);
   };
 }
 
