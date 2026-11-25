@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="CRM Адвоката">
 <link rel="manifest" id="manifest-placeholder">
-<meta name="build" content="25.11.2026 19:46 · 445398c">
-<meta name="build-no" content="303">
+<meta name="build" content="25.11.2026 21:26 · dde7a7b">
+<meta name="build-no" content="304">
 <meta name="theme-color" content="#172c48">
 <title>CRM Адвоката</title>
 <style>
@@ -3943,6 +3943,118 @@ if (typeof hearingsAutoDone === 'function') {
 function mergeFailText(r, plain) {
   if (r && r.raced && r.raced >= r.failed) return 'записи изменились на этом устройстве во время обмена (' + r.raced + ') — объединятся при повторе';
   return plain;
+}
+
+// ═══ сборка 304 (аудит 293, план Г: N01, N02, N03, G07) — проверка копии и пакета обмена ═══
+// Решение пользователя 24.11.2026 «остальные пункты из этого разбора утверждаю, реализуй по плану в следующих сборках».
+// N02, G07: проверка копии (validateBackup → cleanImportedValue) обрезала длинные строки и списки, отбрасывала слишком глубокие значения и
+// большие файлы молча — ответ был ok:true без перечня потерь. Теперь потери считаются: предпросмотр копии из файла предупреждает до записи
+// (закрыть лист — отказаться), а обмен (сервер, папка, другое устройство) такой пакет не принимает — отказ, а не тихая обрезка.
+const IMPORT_LOSS = { strings: 0, arrays: 0, deep: 0, files: 0, strict: false };
+if (typeof cleanImportedValue === 'function') {
+  cleanImportedValue = function (value, depth) {
+    depth = depth || 0;
+    if (depth > 20) { if (value !== null && value !== undefined) IMPORT_LOSS.deep++; return null; }
+    if (value === null || typeof value === 'boolean' || typeof value === 'number') return value;
+    if (typeof value === 'string') {
+      if (value.startsWith('data:')) { if (value.length > 12000000) { if (typeof _importOversize === 'number') _importOversize++; IMPORT_LOSS.files++; return null; } return value; }
+      if (value.length > 2000000) IMPORT_LOSS.strings++;
+      return value.slice(0, 2000000);
+    }
+    if (Array.isArray(value)) { if (value.length > 10000) IMPORT_LOSS.arrays++; return value.slice(0, 10000).map(v => cleanImportedValue(v, depth + 1)); }
+    if (typeof value !== 'object') return null;
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (k === '__proto__' || k === 'prototype' || k === 'constructor') continue;
+      out[String(k).slice(0, 120)] = cleanImportedValue(v, depth + 1);
+    }
+    return out;
+  };
+}
+function importLossList(l) {
+  const out = [];
+  if (l.files) out.push('файлов больше 8 МБ — не войдут: ' + l.files);
+  if (l.strings) out.push('текстов длиннее 2 млн знаков — будут обрезаны: ' + l.strings);
+  if (l.arrays) out.push('списков длиннее 10 000 элементов — будут обрезаны: ' + l.arrays);
+  if (l.deep) out.push('значений глубже 20 уровней вложенности — не войдут: ' + l.deep);
+  return out;
+}
+// N01: прежде ограничивалась только версия записи (_upd, не дальше суток вперёд). Метки порядка слияния — по тому же правилу: число,
+// конечное, не меньше 0 и не дальше суток вперёд, на любой глубине записи (рассмотрения, элементы списков). Иначе метка «из будущего» из
+// повреждённой или чужой копии навсегда побеждала бы правки поля, удаление или возврат записи
+const IMPORT_STAMP_ONE = ['_upd', '_deletedAt', '_restoredAt'], IMPORT_STAMP_MAP = ['_ch', '_delDl'], IMPORT_STAMP_MAP2 = ['_delItems'];
+function importStampsFix(row, lim) {
+  let n = 0;
+  const fix = v => { const x = Number(v), y = Number.isFinite(x) ? Math.max(0, Math.min(x, lim)) : 0; if (y !== v) n++; return y; };
+  const walk = (o, d) => {
+    if (!o || typeof o !== 'object' || d > 20) return;
+    if (Array.isArray(o)) { for (const x of o) walk(x, d + 1); return; }
+    for (const k of IMPORT_STAMP_ONE) if (o[k] !== undefined && o[k] !== null) o[k] = fix(o[k]);
+    for (const k of IMPORT_STAMP_MAP) if (o[k] && typeof o[k] === 'object' && !Array.isArray(o[k])) for (const f of Object.keys(o[k])) o[k][f] = fix(o[k][f]);
+    for (const k of IMPORT_STAMP_MAP2) if (o[k] && typeof o[k] === 'object' && !Array.isArray(o[k])) for (const f of Object.keys(o[k])) { const m = o[k][f]; if (m && typeof m === 'object' && !Array.isArray(m)) for (const id of Object.keys(m)) m[id] = fix(m[id]); }
+    for (const k of Object.keys(o)) if (!IMPORT_STAMP_ONE.includes(k) && !IMPORT_STAMP_MAP.includes(k) && !IMPORT_STAMP_MAP2.includes(k) && o[k] && typeof o[k] === 'object') walk(o[k], d + 1);
+  };
+  walk(row, 0);
+  return n;
+}
+if (typeof validateBackup === 'function') {
+  const validateBackupPlain = validateBackup;
+  validateBackup = function (parsed) {
+    IMPORT_LOSS.strings = IMPORT_LOSS.arrays = IMPORT_LOSS.deep = IMPORT_LOSS.files = 0;
+    const r = validateBackupPlain(parsed);
+    if (!r || !r.ok || !r.parsed) return r;
+    const lim = Date.now() + 86400000; let fixed = 0;
+    for (const st of Object.keys(r.parsed.data || {})) for (const row of (r.parsed.data[st] || [])) fixed += importStampsFix(row, lim);
+    r.losses = importLossList(IMPORT_LOSS); r.stampsFixed = fixed;
+    if (fixed) logErr('import:stamps', 'исправлено меток порядка: ' + fixed);
+    if (IMPORT_LOSS.strict && r.losses.length) return { ok: false, losses: r.losses, error: 'Пакет обмена не принят: ' + r.losses.join('; ') + '. Данные на устройстве не изменены — принять пакет с потерями молча нельзя' };
+    return r;
+  };
+}
+// N03: структурные настройки (быстрые записи, реестр удалений, перечни устройств) — проверка формы JSON до применения. Прежде '{}' вместо
+// списка быстрых записей бросало исключение внутри applyIncomingSettings, оно уходило в журнал, а обмен считался полным. Теперь ключ
+// неверной формы не применяется, здешнее значение не трогается, и сбой считается: слияние не ставит метку полного обмена
+const SETTINGS_SHAPE = { crm_inbox: 'list', crm_inbox_del: 'map', crm_purged: 'map', crm_lost_devices: 'map', crm_devreg: 'map' };
+const SETTINGS_APPLY = { failed: [] };
+function settingsShapeBad(inc) {
+  const out = [];
+  for (const k of Object.keys(SETTINGS_SHAPE)) {
+    const v = inc[k]; if (v === undefined || v === null) continue;
+    let x; try { x = typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { out.push(k); continue; }
+    const list = SETTINGS_SHAPE[k] === 'list';
+    if (list ? !Array.isArray(x) : (!x || typeof x !== 'object' || Array.isArray(x))) out.push(k);
+  }
+  return out;
+}
+if (typeof applyIncomingSettings === 'function') {
+  const applyIncomingSettingsPlain = applyIncomingSettings;
+  applyIncomingSettings = function (incoming, allowSecrets) {
+    if (incoming && typeof incoming === 'object') {
+      const bad = settingsShapeBad(incoming);
+      if (bad.length) { incoming = Object.assign({}, incoming); for (const k of bad) { delete incoming[k]; SETTINGS_APPLY.failed.push(k); logErr('settings:shape', new Error('настройка «' + k + '» неверной формы — не применена')); } }
+    }
+    return applyIncomingSettingsPlain(incoming, allowSecrets);
+  };
+}
+// обмен — строгий (потери — отказ), предпросмотр (dryRun) и перенос из /next/ (allowLoss) — как прежде; сбой настроек — в failed, метка
+// полного обмена (opts.baseKey) возвращается к прежней
+if (typeof mergeIncoming === 'function') {
+  const mergeIncomingLoose = mergeIncoming;
+  mergeIncoming = async function (parsed, allowSecrets, opts) {
+    const dry = !!(opts && opts.dryRun), bk = opts && opts.baseKey, prev = bk ? localStorage.getItem(bk) : null;
+    SETTINGS_APPLY.failed = [];
+    // validateBackup вызывается в начале mergeIncoming до первого ожидания — строгий режим действует только на этот вызов
+    IMPORT_LOSS.strict = !(dry || (opts && opts.allowLoss));
+    let p; try { p = mergeIncomingLoose(parsed, allowSecrets, opts); } finally { IMPORT_LOSS.strict = false; }
+    const r = await p;
+    const sf = SETTINGS_APPLY.failed.slice(); SETTINGS_APPLY.failed = [];
+    if (sf.length && r && typeof r === 'object') {
+      r.failed = Number(r.failed || 0) + sf.length;
+      r.failedIds = (Array.isArray(r.failedIds) ? r.failedIds : []).concat(sf.map(k => 'settings:' + k)).slice(0, 20);
+      if (bk && !dry) { if (prev === null) localStorage.removeItem(bk); else localStorage.setItem(bk, prev); }
+    }
+    return r;
+  };
 }
 
 // ▼▼▼ next/errlog.js
@@ -7885,7 +7997,7 @@ async function backupPreviewModel(text, pass) {
   if (block === 'blobs') { try { safe = await backupSafePrepare({ parsed: checked.parsed, verify }); const sd = await mergeIncoming(JSON.parse(JSON.stringify(safe.plan)), false, backupMergeOpts({ dryRun: true })); safe.added = sd.added; safe.updated = sd.updated; safe.skipped = sd.skipped; } catch (e) { logErr('backup:safe-preview', e); safe = null; } }
   // 25.10.2026 (аудит сборки 194, 6.4): проверка структуры копии — отчёт о связях и файлах (сборка 199, N5: название по уровню проверки)
   let restore = null; try { restore = backupRestoreReport(checked.parsed.data); } catch (e) { logErr('backup:restore-report', e); }
-  return { ok: true, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, restore, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files, verify, block, safe };
+  return { ok: true, losses: checked.losses || [], stampsFixed: checked.stampsFixed || 0, encrypted, parsed: checked.parsed, exportedAt: checked.parsed._exportedAt || 0, per, restore, added: dry.added, updated: dry.updated, skipped: dry.skipped, conflicts: dry.conflicts || 0, files, verify, block, safe };
 }
 // v163 (R2): что закрывает применение копии: '' — можно; 'blobs' — не сошлись только файлы документов (можно объединить без них);
 // 'all' — не хватает записей, ошибка проверки или формат сумм новее программы
@@ -8092,6 +8204,12 @@ async function backupSaveNow(noFiles, share) {
   } catch (e) { logErr('backup:save', e); fErr('Копия не создана: ' + String((e && e.message) || e).slice(0, 100)); return null; }
   finally { if (b) b.disabled = false; }
 }
+// сборка 304 (аудит 293, N02, G07): потери при проверке копии — предупреждение до записи; отказаться — закрыть лист, ничего не нажимая
+function backupLossHtml(m) {
+  const l = m && Array.isArray(m.losses) ? m.losses : [], n = m ? Number(m.stampsFixed || 0) : 0;
+  return (l.length ? `<div class="info-box warning" id="bk-loss" role="alert">В копии есть данные, которые программа не примет целиком: ${esc(l.join('; '))}. «Объединить с базой» запишет остальное без них. Чтобы отказаться — закройте лист, ничего не нажимая.</div>` : '')
+    + (n ? `<p class="small muted" id="bk-stamps">Отметок времени из будущего или повреждённых исправлено: ${n}.</p>` : '');
+}
 async function backupCheckFile() {
   const inp = document.getElementById('bk-file'), box = document.getElementById('bk-preview'), file = inp && inp.files && inp.files[0];
   BACKUP_PENDING = null; if (box) box.innerHTML = '';
@@ -8105,7 +8223,7 @@ async function backupCheckFile() {
   // разбор GPT 06.10.2026, п. 6: статус полноты из самой копии и предупреждение о большом файле
   const filesNote = m.files && m.files.text ? ' ' + m.files.text.charAt(0).toUpperCase() + m.files.text.slice(1) + '.' : (m.files === null ? ' Полнота копии по файлам документов не записана (копия прежней программы или старого выпуска).' : '');
   const bigNote = file.size > BACKUP_WARN ? ` Файл большой — ${backupMb(file.size)} МБ: объединение займёт несколько минут.` : '';
-  if (box) box.innerHTML = `${m.verify && !m.verify.none && !m.verify.ok ? `<div class="info-box warning" id="bk-sums" role="alert">${esc(backupVerifyText(m.verify))}</div>` : ''}<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}${m.verify && (m.verify.none || m.verify.ok || m.verify.error) ? ' ' + esc(backupVerifyText(m.verify, m.files)) : ''}</div>
+  if (box) box.innerHTML = `${backupLossHtml(m)}${m.verify && !m.verify.none && !m.verify.ok ? `<div class="info-box warning" id="bk-sums" role="alert">${esc(backupVerifyText(m.verify))}</div>` : ''}<div class="info-box${m.files && m.files.state === 'partial' ? ' warning' : ''}" id="bk-result">Файл проверен, в базу ещё ничего не записано. ${m.exportedAt ? 'Копия создана ' + esc(new Date(m.exportedAt).toLocaleString('ru-RU')) + '. ' : ''}Добавится записей: ${m.added}, обновится: ${m.updated}, без изменений: ${m.skipped}${m.conflicts ? '; правились и здесь, и в файле: ' + m.conflicts : ''}.${esc(filesNote)}${esc(bigNote)}${m.verify && (m.verify.none || m.verify.ok || m.verify.error) ? ' ' + esc(backupVerifyText(m.verify, m.files)) : ''}</div>
     <div class="list-rows">${m.per.map(r => `<div><span>${esc(r.title)}</span><span class="muted num">${r.count}</span></div>`).join('')}</div>
     ${m.restore ? `<div class="info-box${m.restore.orphanTotal || m.restore.docMissing ? ' warning' : ''}" id="bk-restore">${esc(backupRestoreText(m.restore))}</div>` : ''}
     <div class="form-actions">${m.block === 'all' ? '<span class="small muted">Объединение и возврат к этой копии закрыты — см. предупреждение выше.</span>' : m.block === 'blobs' ? `${m.safe ? `<p class="small" id="bk-safe-plan">Без повреждённых файлов добавится записей: ${m.safe.added}, обновится: ${m.safe.updated}${esc(backupSafeNote(m.safe))}.</p>` : ''}<button type="button" class="button primary" id="bk-apply-safe" onclick="backupApply('safe')">${icon('check')}Объединить без повреждённых файлов</button>` : m.added + m.updated ? `<button type="button" class="button primary" id="bk-apply" onclick="backupApply()">${icon('check')}Объединить с базой</button>` : '<span class="small muted">В базе уже есть всё, что есть в файле.</span>'}${typeof openFileRollback === 'function' && !m.block ? `<button type="button" class="button" id="bk-rollback" onclick="openFileRollback()">${icon('rotate-ccw')}Вернуть базу к копии…</button>` : ''}</div>
@@ -8127,7 +8245,7 @@ async function backupApply(mode) {
   const b = document.getElementById('bk-apply'); if (b) { if (b.disabled) return null; b.disabled = true; }
   if (typeof NEXT_SYNC === 'object') { NEXT_SYNC.busy = true; if (typeof syncStatusRender === 'function') syncStatusRender(); }
   try {
-    const r = await mergeIncoming(safe ? JSON.parse(JSON.stringify(safe.plan)) : m.parsed, false, backupMergeOpts());
+    const r = await mergeIncoming(safe ? JSON.parse(JSON.stringify(safe.plan)) : m.parsed, false, backupMergeOpts({ allowLoss: true }));
     // записанное из файла должно дойти до серверов: записи слияния ревизию не двигают — отметка «есть что отправить» каждому серверу
     if ((r.added || r.updated || r.settingsChanged || r.purgedMerged) && typeof srvFwdMark === 'function') srvFwdMark(-1);
     if (r.failed) { fErr((typeof mergeFailText === 'function' ? mergeFailText(r, 'Не записано записей: ' + r.failed) : 'Не записано записей: ' + r.failed).replace(/^./, ch => ch.toUpperCase()) + ' — повторите загрузку файла'); if (b) b.disabled = false; return r; }
@@ -14389,7 +14507,7 @@ async function nextMigrateFromNext() {
         // 13.10.2026 (подготовка перехода, урок 117): перенос — слияние «как из файла»: база определения коллизий серверов (её делят основной
         // адрес и прежняя программа в /old/) не сдвигается, читается самая ранняя (backupMergeOpts, sync/files.js); иначе одновременная правка
         // поля, пришедшая потом с сервера, решалась бы «новее целиком» и терялась
-        const r = await mergeIncoming({ _fmt: SYNC_FMT, _ver: DB_VER, _exportedAt: Date.now(), data, settings: {} }, false, typeof backupMergeOpts === 'function' ? backupMergeOpts() : undefined);
+        const r = await mergeIncoming({ _fmt: SYNC_FMT, _ver: DB_VER, _exportedAt: Date.now(), data, settings: {} }, false, typeof backupMergeOpts === 'function' ? backupMergeOpts({ allowLoss: true }) : { allowLoss: true });
         res.added = r.added; res.updated = r.updated;
         if (r.failed) { logErr('migrate:merge', new Error('не записано записей: ' + r.failed)); toast('Перенос данных из /next/ не завершён: не записано ' + r.failed + ' — повторится при следующем запуске', true); return null; }
         // записи слияния ревизию не двигают — перенесённое ждёт отправки на серверы основного адреса (как загрузка из файла)
@@ -29241,7 +29359,7 @@ ${typeof helpFig === 'function' ? helpFig('tgbot') : ''}
 <p>Если разобранное событие в календаре перенесли, отменили, удалили или изменили его название или место, на «Сегодня» появится строка «В календаре перенесено …» («изменено …») с тем, что было и что стало, — программа сама заседание не меняет: проверьте и нажмите «Разобрано». У неразобранной записи новые дата, время, название и место подставляются сами. Сменили ссылку на календарь — программа не сочтёт события прежнего календаря удалёнными. Если событие читается из двух календарей (ссылка на компьютере и календарь телефона), календарь, который ещё показывает прежние время, название или место после того, как другой сообщил новые, считается «ещё не обновившимся» — строки не чередуются; событие, которого нет в одном календаре, но есть в другом, отмечается строкой «Нет в одном из календарей» (не «удалено») — проверьте, где верно; «Удалено из календаря» — когда его не показывает ни один из них. Если один из календарей заменили или отключили, итог пересчитывается при ближайшем чтении оставшегося: не показывает и он — «удалено»; показывает — строка о расхождении снимается. Календарь, который ещё показывает событие отменённым (или не отменённым) после того, как другой сообщил обратное, тоже считается «ещё не обновившимся», но его новые название и место при этом замечаются.</p>` },
 
   { id: 'files', title: 'Копии, печать, выгрузка', html: `
-<p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями. Копия с 16.10.2026 несёт контрольные суммы — число записей по разделам и содержимое каждого файла документа; «Проверить файл» пересчитывает их и предупреждает, если файл повреждён или неполон. Там же — проверка структуры копии (в памяти, база устройства не меняется): сколько записей восстановится, нет ли записей, привязанных к делу, которого в копии нет, и у скольких версий документов файл есть в самой копии. Копию с несошедшимися суммами программа не объединяет и не даёт вернуть к ней базу; если повреждены только файлы документов — можно «Объединить без повреждённых файлов», файлы на устройстве останутся прежними. Объединение добавляет и обновляет записи: более новые записи из копии заменяют здешние.</p>
+<p>Настройки → «Копии базы»: копия в файл (зашифрована паролем), загрузка из файла с предпросмотром, копии на сервере. Делайте копию перед крупными изменениями. Копия с 16.10.2026 несёт контрольные суммы — число записей по разделам и содержимое каждого файла документа; «Проверить файл» пересчитывает их и предупреждает, если файл повреждён или неполон. Там же — проверка структуры копии (в памяти, база устройства не меняется): сколько записей восстановится, нет ли записей, привязанных к делу, которого в копии нет, и у скольких версий документов файл есть в самой копии. Копию с несошедшимися суммами программа не объединяет и не даёт вернуть к ней базу; если повреждены только файлы документов — можно «Объединить без повреждённых файлов», файлы на устройстве останутся прежними. Объединение добавляет и обновляет записи: более новые записи из копии заменяют здешние. Если в копии есть то, что программа не примет целиком (файл документа больше 8 МБ, текст длиннее 2 млн знаков, список длиннее 10 000 элементов), «Проверить файл» перечисляет это до записи: «Объединить с базой» запишет остальное без них, а чтобы отказаться — закройте лист, ничего не нажимая. Обмен с сервером, папкой или другим устройством такой пакет не принимает и называет причину — данные на устройстве не меняются. Отметки времени «из будущего» в копии (с устройства, у которого спешили часы) исправляются до записи, программа говорит, сколько их было.</p>
 <p><b>Вернуть базу к снимку.</b> «Синхронизация» → «Снимки на сервере» (откроется лист «Снимки базы на сервере») → «Вернуть…» у нужного снимка (или «Копии базы» → проверить файл → «Вернуть базу к копии…»). Программа сравнит снимок с базой на устройстве и покажет три группы: удалённое после снимка — вернётся; изменённое после снимка — вернётся к значениям снимка; созданное после снимка — по желанию уйдёт в корзину (по умолчанию не отмечено). Снимите отметки с того, что возвращать не нужно, и нажмите «Вернуть выбранное». Возврат записывается как новые правки и при обмене уходит на остальные устройства; перед возвратом получите изменения с сервера, чтобы учесть правки других устройств. Не меняются настройки, файлы документов, события судов и история изменений дел. Возврат можно отменить: «Отменить возврат…» в тех же листах — записи получат версии, которые были до возврата. Отменить можно только последний возврат и только если прежние версии поместились в память устройства — программа скажет об этом сразу после возврата; иначе вернуть прежнее можно из копии базы.</p>
 <p>Смена сервера или пароля шифрования: если часть файлов документов лежит только в хранилище прежнего подключения, программа предложит «Перенести» — скачает их на это устройство прежним подключением, затем сменит подключение; в новое хранилище файлы уйдут при ближайшей отправке на сервер. Если скачать удалось не всё, подключение не меняется: «Повторить перенос» докачает остальное, «Сменить без переноса» сменит подключение, а нескачанные файлы откроются только с прежним подключением. «Синхронизация» → «Файлы документов» показывает, где лежат файлы, и скачивает недостающие.</p>
 <p>«Поделиться» там же — отправить файл копии в Telegram, почту или облако через меню телефона (в приложении для Android — с версии 1.22, в браузере телефона — если браузер умеет делиться файлами). Где такого меню нет, копия сохраняется в загрузки, и программа об этом говорит. Файл зашифрован паролем копии — без пароля его не прочитать.</p>
