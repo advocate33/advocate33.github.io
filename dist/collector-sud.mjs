@@ -24,6 +24,7 @@
 //
 //  Требуется Node.js 18+ (https://nodejs.org, версия LTS). Зависимостей нет.
 //
+//  v3.33: действие courtinfo — контакты суда (адрес, телефоны, e-mail, часы работы) со страницы суда по ссылке дела; кэш 30 дней (O-178).
 //  v3.32: разовое чтение (collectone) — ссылка материала и рассмотрения: pid/cpid, mat, как в плановом сборе; в ответе ver и matOk (O-166).
 //  v3.31: признак капчи и блокировки — без <script>, <style>, <noscript>, <template>: настройка «useRecaptcha» в коде каждой карточки
 //         mos-gorsud.ru принималась за капчу, и дела судов Москвы не читались (проверка 04.11.2026 по поручению пользователя).
@@ -100,7 +101,7 @@ import dns from 'node:dns';
 import tls from 'node:tls';
 import crypto from 'node:crypto';
 
-const COLLECTOR_VER = '3.32';
+const COLLECTOR_VER = '3.33';
 // v3.27 (аудит сборки 188, R6): сетевые послабления (самоподписанные и просроченные сертификаты, устаревший TLS у многих *.sudrf.ru) —
 // ТОЛЬКО у запросов к сайтам судов ГАС «Правосудие» и только через отдельный транспорт (courtDispatcher). Процесс целиком их больше не
 // получает: личный сервер (с кодом), хранилище (с IAM-токеном), Telegram, API Assist, СУДиДЕЛО и загрузка обновлений проверяют сертификаты.
@@ -1702,6 +1703,80 @@ async function collectOne(body) {
   for (const e of events) pidMark(e, pid, cpid);
   return Object.assign({ ok: true, card, events, hearings: page.hearings.length, flow: flow.length, complaints: cmp.length, via, ver: COLLECTOR_VER, matOk: true }, mat ? { mat: '1' } : {}, pid ? { pid } : {}, match ? { match } : {});
 }
+// v3.33 (O-178): контакты суда со страницы суда. Страница — по ссылке дела: sudrf.ru — «Общая информация», суды Москвы — страница суда,
+// арбитражный суд — главная его сайта. Мировые судьи и kad.arbitr.ru не читаются (O-180), причина — в ответе.
+const CI_TTL_MS = 30 * 24 * 3600 * 1000;
+const CI_KEY = h => 'collector/courtinfo/' + crypto.createHash('sha256').update(h, 'utf8').digest('hex').slice(0, 32) + '.json';
+function courtInfoPage(url) {
+  let u = null; try { u = new URL(String(url || '').trim()); } catch (e) { return { err: 'некорректная ссылка' }; }
+  if (!/^https?:$/.test(u.protocol) || netHostBad(u.hostname)) return { err: 'адрес не похож на сайт суда' };
+  const h = u.hostname.toLowerCase().replace(/\.$/, ''), k = hostKind(u.href);
+  if (h.endsWith('msudrf.ru') || h.endsWith('mos-sud.ru')) return { err: 'мировые судьи: контакты участка коллектор не читает — впишите их в карточку суда вручную' };
+  if (k === 'sudrf') return { page: 'https://' + h + '/modules.php?name=info_court' };
+  if (k === 'mos') {
+    const seg = u.pathname.split('/').filter(Boolean);
+    if (seg[0] === 'rs' && seg[1]) return { page: 'https://' + h + '/rs/' + seg[1] };
+    if (seg[0] === 'mgs') return { page: 'https://' + h + '/mgs' };
+    return { err: 'по ссылке не понятно, какой это суд Москвы — нужна ссылка на дело с сайта mos-gorsud.ru' };
+  }
+  if (k === 'kad') {
+    if (h === 'kad.arbitr.ru' || h === 'arbitr.ru' || h === 'www.arbitr.ru' || h === 'my.arbitr.ru') return { err: 'по ссылке КАД суд не определить — нужен адрес сайта арбитражного суда (например, https://<суд>.arbitr.ru)' };
+    return { page: 'https://' + h + '/' };
+  }
+  return { err: 'сайт не распознан как сайт суда (sudrf.ru, mos-gorsud.ru, arbitr.ru)' };
+}
+// строки страницы: переносы — по блокам и ячейкам, теги сняты
+function ciLines(html) {
+  return decodeEntities(String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<a\b[^>]*href\s*=\s*["']mailto:([^"'?]+)[^"']*["'][^>]*>/gi, ' $1 ')
+    .replace(/<br\s*\/?>|<\/(p|div|tr|li|h\d|table|dd|dt|section|header|footer)>/gi, '\n').replace(/<\/t[dh]>/gi, ' \t ')
+    .replace(/<[^>]+>/g, ' '))
+    .split('\n').map(x => x.replace(/\s*\t\s*/g, ' ').replace(/[  ]+/g, ' ').trim()).filter(Boolean);
+}
+const RE_CI_MAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
+const RE_CI_PHONE = /(?:\+7|8)?[\s-]*\(\d{3,5}\)[\s-]*\d{1,3}(?:[\s-]?\d{2}){1,2}|(?:\+7|8)[\s-]*\d{3,5}[\s-]+\d{1,3}(?:[\s-]?\d{2}){1,2}/g;
+const ciVal = l => l.replace(/^[^:]{1,60}:\s*/, '').trim();
+function parseCourtInfo(html) {
+  const lines = ciLines(html), out = { name: '', address: '', phones: [], emails: [], hours: '' };
+  const t = (String(html || '').match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1];
+  if (t) out.name = decodeEntities(t.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().slice(0, 200);
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i], lab = (l.match(/^([^:]{1,60}):/) || [])[1] || '';
+    if (!out.address && /адрес/i.test(lab) && !/почт|e-?mail|сайт|интернет|web/i.test(lab)) { const v = ciVal(l) || lines[i + 1] || ''; if (/\d{6}|ул\.|пр-?т|просп|пл\.|д\.\s*\d/i.test(v)) out.address = v.slice(0, 250); }
+    if (!out.hours && /(режим|график|часы|время)\s+работы/i.test(l)) { const v = ciVal(l); out.hours = (v && !/работы\s*$/i.test(v) ? v : (lines[i + 1] || '')).slice(0, 250); }
+    if (/телефон|тел\.|факс|справочн|при[её]мн|канцеляри|экспедиц/i.test(l)) {
+      for (const m of l.matchAll(RE_CI_PHONE)) {
+        const num = m[0].replace(/\s+/g, ' ').trim(), digits = num.replace(/\D/g, '');
+        if (digits.length < 10 || digits.length > 11 || out.phones.some(p => p.num.replace(/\D/g, '') === digits)) continue;
+        const before = l.slice(0, m.index).replace(/[\s:,;–—-]+$/, '').split(/[;,]/).pop().replace(/^[\s:–—-]+/, '').trim();
+        out.phones.push({ label: before.slice(-60) || 'телефон', num });
+        if (out.phones.length >= 8) break;
+      }
+    }
+    for (const m of l.matchAll(RE_CI_MAIL)) { const e = m[0].toLowerCase(); if (!out.emails.includes(e) && out.emails.length < 4) out.emails.push(e); }
+  }
+  if (!out.address) { const a = lines.find(x => /\b\d{6},\s*\S/.test(x) && /(г\.|город|ул\.|улица|просп|пр-?т|пл\.)/i.test(x)); if (a) out.address = (a.match(/\d{6},[\s\S]*$/) || [a])[0].slice(0, 250); }
+  return out;
+}
+async function courtInfo(body, context) {
+  const src = String((body && (body.url || body.site)) || '').trim(), pi = courtInfoPage(src);
+  if (pi.err) return { ok: false, error: pi.err, ver: COLLECTOR_VER };
+  const key = CI_KEY(pi.page); let iam = null;
+  // кэш — только при доступном бакете; сбой бакета чтению страницы не мешает
+  if (ENV.BUCKET) { try { iam = await iamToken(context); } catch (e) { iam = null; } }
+  if (iam && !(body && body.fresh)) {
+    try { const raw = await s3get(key, iam); const j = raw ? jsonOf(raw) : null; if (j && j.info && Date.now() - Date.parse(j.info.at) < CI_TTL_MS) return Object.assign(j, { cached: true, ver: COLLECTOR_VER }); } catch (e) { /* ниже — чтение страницы */ }
+  }
+  let r; try { r = await fetchPageRetry(pi.page, Number(ENV.TIMEOUT_MS) || 25000, () => {}, 3000); } catch (e) { return { ok: false, error: 'сайт суда не ответил: ' + errText(e), page: pi.page, ver: COLLECTOR_VER }; }
+  if (!r || r.status >= 400 || pageBlocked(r.text)) return { ok: false, error: r && pageBlocked(r.text) ? 'сайт суда не пустил (похоже на капчу или блокировку)' : 'сайт суда не отдал страницу (HTTP ' + (r ? r.status : '—') + ')', page: pi.page, ver: COLLECTOR_VER };
+  const p = parseCourtInfo(r.text);
+  if (!p.address && !p.phones.length && !p.emails.length) return { ok: false, error: 'на странице суда не найдено ни адреса, ни телефона, ни e-mail — получено ' + pageBrief(r), page: pi.page, ver: COLLECTOR_VER };
+  const info = Object.assign(p, { site: new URL(pi.page).origin, page: pi.page, at: new Date().toISOString() });
+  const res = { ok: true, info };
+  if (iam) { try { await s3put(key, JSON.stringify(res), iam); } catch (e) { /* кэш не записан — ответ всё равно отдаётся */ } }
+  return Object.assign({}, res, { cached: false, ver: COLLECTOR_VER });
+}
 // v3.15: проверка доставки на личный сервер. Возвращает только несекретное: адрес сервера, длину кода, были ли пробелы по краям,
 // совпадает ли код с кодом программы (программа присылает SHA-256 своего кода в body.hash), и ответ сервера на ping.
 async function bridgeCheck(body) {
@@ -1754,6 +1829,8 @@ export async function handler(event, context) {
       if (d.action === 'collectone') return fnResp(200, await collectOne(d.body)); // v3.7
       if (d.action === 'bridgecheck') return fnResp(200, await bridgeCheck(d.body)); // v3.15
       if (d.action === 'courtsearch') return fnResp(200, await courtSearch(d.body)); // v3.28
+      // v3.33 (O-178): контакты суда
+      if (d.action === 'courtinfo') return fnResp(200, await courtInfo(d.body, context));
       return fnResp(400, { ok: false, error: 'unknown_action' });
     }
     return fnResp(200, await cloudCollect(context, 'timer'));
