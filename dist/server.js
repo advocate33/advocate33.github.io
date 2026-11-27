@@ -10,6 +10,8 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v205: O-160 — запросы к SpeechKit и YandexGPT с заголовком x-data-logging-enabled: false (Облако не сохраняет записи и тексты
+//  диктовок у себя); в ответе ping — признак aiNoLog.
 //  v204: аудит 250 (A250-4, A250-5) — страница «Ход дела»: устаревший запрос не пишет в действующую ссылку (проверка метки и поколения и при
 //  включённой странице), обновление реестр не переписывает, запись содержимого сверяется с реестром после записи, без условной записи
 //  реестр меняет только отключение.
@@ -358,7 +360,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 204,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 205,
       ready: readiness()
     });
   }
@@ -387,7 +389,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 204, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 205, aiNoLog: true, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -988,6 +990,8 @@ async function dictUpload(body) {
   await jobSave(job);
   return { ok: true, id, key, url: presign('PUT', key, 3600), format, expiresIn: 3600 };
 }
+// v205 (O-160): запрет журналирования запроса на стороне Облака — для каждого запроса к SpeechKit и YandexGPT
+const AI_NO_LOG = { 'x-data-logging-enabled': 'false' };
 // SpeechKit v3: асинхронное распознавание файла из бакета по подписанной ссылке
 async function dictStart(body, event) {
   needStorage(); const iam = iamOf(event);
@@ -999,7 +1003,7 @@ async function dictStart(body, event) {
       textNormalization: { textNormalization: 'TEXT_NORMALIZATION_ENABLED', profanityFilter: false, literatureText: true },
       languageRestriction: { restrictionType: 'WHITELIST', languageCode: ['ru-RU'] }, audioProcessingType: 'FULL_DATA' } };
   const r = await fetch('https://stt.api.cloud.yandex.net/stt/v3/recognizeFileAsync', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + iam, 'x-folder-id': process.env.FOLDER_ID, 'Content-Type': 'application/json' }, body: JSON.stringify(req) });
+    headers: Object.assign({ Authorization: 'Bearer ' + iam, 'x-folder-id': process.env.FOLDER_ID, 'Content-Type': 'application/json' }, AI_NO_LOG), body: JSON.stringify(req) });
   const j = await r.json().catch(() => null);
   if (!r.ok || !j || !j.id) { job.status = 'error'; job.error = 'SpeechKit: HTTP ' + r.status + ' ' + JSON.stringify(j || {}).slice(0, 200); await jobSave(job); return { ok: false, error: job.error }; }
   job.opId = j.id; job.status = 'recognizing'; job.format = format; job.startedAt = Date.now(); delete job.error; await jobSave(job);
@@ -1028,7 +1032,7 @@ async function dictStatus(body, event) {
   if (!op) return { ok: true, id: job.id, done: false, status: 'recognizing' };
   if (op.error) { job.status = 'error'; job.error = 'SpeechKit: ' + (op.error.message || JSON.stringify(op.error)); await jobSave(job); return { ok: false, error: job.error }; }
   if (!op.done) return { ok: true, id: job.id, done: false, status: 'recognizing' };
-  const rr = await fetch('https://stt.api.cloud.yandex.net/stt/v3/getRecognition?operationId=' + encodeURIComponent(job.opId), { headers: { Authorization: 'Bearer ' + iam, 'x-folder-id': process.env.FOLDER_ID || '' } });
+  const rr = await fetch('https://stt.api.cloud.yandex.net/stt/v3/getRecognition?operationId=' + encodeURIComponent(job.opId), { headers: Object.assign({ Authorization: 'Bearer ' + iam, 'x-folder-id': process.env.FOLDER_ID || '' }, AI_NO_LOG) });
   if (!rr.ok) { const t = await rr.text().catch(() => ''); return { ok: false, error: 'SpeechKit результат: HTTP ' + rr.status + ' ' + t.slice(0, 120) }; }
   job.text = sttTextFrom(await rr.text()); job.status = 'done'; job.doneAt = Date.now(); await jobSave(job);
   return { ok: true, id: job.id, done: true, text: job.text, status: 'done' };
@@ -1050,7 +1054,7 @@ function splitChunks(text, maxChars) { // по абзацам, затем по �
 }
 async function llmComplete(system, user, modelUri, iam) {
   const r = await fetch('https://llm.api.cloud.yandex.net/foundationModels/v1/completion', { method: 'POST',
-    headers: { Authorization: 'Bearer ' + iam, 'x-folder-id': process.env.FOLDER_ID, 'Content-Type': 'application/json' },
+    headers: Object.assign({ Authorization: 'Bearer ' + iam, 'x-folder-id': process.env.FOLDER_ID, 'Content-Type': 'application/json' }, AI_NO_LOG),
     body: JSON.stringify({ modelUri, completionOptions: { stream: false, temperature: 0.2, maxTokens: '8000' }, messages: [{ role: 'system', text: system }, { role: 'user', text: user }] }) });
   const j = await r.json().catch(() => null);
   if (!r.ok || !j) throw new Error('Модель: HTTP ' + r.status + ' ' + JSON.stringify(j || {}).slice(0, 200));
