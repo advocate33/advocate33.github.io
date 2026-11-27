@@ -10,6 +10,8 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v206: O-191 — отслеживание Почты по токену API трекинга (REST postapi.pochta.ru, POCHTA_TOKEN); логин и пароль (SOAP) — как
+//  прежде; в ответе ping — признак pochtaToken.
 //  v205: O-160 — запросы к SpeechKit и YandexGPT с заголовком x-data-logging-enabled: false (Облако не сохраняет записи и тексты
 //  диктовок у себя); в ответе ping — признак aiNoLog.
 //  v204: аудит 250 (A250-4, A250-5) — страница «Ход дела»: устаревший запрос не пишет в действующую ссылку (проверка метки и поколения и при
@@ -76,6 +78,7 @@
 //    SECRET        — секретный код (тот же вводится в CRM)
 //    POCHTA_LOGIN  — логин API трекинга (tracking.pochta.ru)
 //    POCHTA_PASS   — пароль API трекинга
+//    POCHTA_TOKEN  — токен API трекинга (otpravka.pochta.ru → «Настройки»; v206) — если задан, запрос идёт по нему
 //    TG_TOKEN, TG_CHAT — токен бота и номер чата для уведомлений
 //    (v198: POCHTA_* и TG_* можно не задавать — программа записывает их в файл настроек на сервере; переменная, если задана, важнее)
 //    BUCKET        — имя бакета Object Storage (для календарной ленты и событий)
@@ -128,7 +131,7 @@ function secretOk(given) {
   return crypto.timingSafeEqual(a, b);
 }
 // v192: секретный код (и имена файлов от него, если STORE_ID не задан) не попадает в журнал функции и в ответы без кода
-function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID, process.env.S3_SECRET, process.env.CFG_KEY, cv('TG_TOKEN'), cv('POCHTA_PASS')]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
+function scrub(x) { let t = String(x == null ? '' : x); for (const v of [process.env.SECRET, process.env.STORE_ID, process.env.S3_SECRET, process.env.CFG_KEY, cv('TG_TOKEN'), cv('POCHTA_PASS'), cv('POCHTA_TOKEN')]) if (typeof v === 'string' && v.length >= 4) t = t.split(v).join('…'); return t; }
 // v192: адрес клиента для пределов публичных форм — тот, что видит платформа. В X-Forwarded-For первые адреса может прислать сам клиент,
 // настоящий платформа дописывает последним; без заголовка — общий предел для всех «без адреса», а не отсутствие предела
 function clientIp(event) {
@@ -181,7 +184,7 @@ function timerEventOk(e) {
 // R3: запись — условная по ETag прочитанного (If-Match; файла не было — If-None-Match: *); конфликт — перечитать и применить только
 // присланные поля. R4: файл не расшифровывается — обычная запись его не заменяет (cfg_unreadable); замена — только сбросом (reset), перед
 // ним прежние байты кладутся копией cfgbak-…, копия проверяется чтением.
-const CFG_KEYS = ['TG_TOKEN', 'TG_CHAT', 'POCHTA_LOGIN', 'POCHTA_PASS'];
+const CFG_KEYS = ['TG_TOKEN', 'TG_CHAT', 'POCHTA_LOGIN', 'POCHTA_PASS', 'POCHTA_TOKEN'];
 let CFG = {}, cfgAt = 0;
 function cv(k) { return process.env[k] || CFG[k] || ''; }
 const cfgName = () => 'cfg-' + storeId() + '.crypt';
@@ -247,7 +250,7 @@ async function cfgLoad(force, migrate) {
 // ответ о настройках: токен и пароль — только «задан / не задан»; env — какие заданы переменными функции (их программа не меняет)
 function cfgState(extra) {
   const env = {}; for (const k of CFG_KEYS) env[k] = !!process.env[k];
-  return Object.assign({ ok: true, env, tgToken: !!cv('TG_TOKEN'), tgChat: cv('TG_CHAT'), pochtaLogin: cv('POCHTA_LOGIN'), pochtaPass: !!cv('POCHTA_PASS') }, extra || {});
+  return Object.assign({ ok: true, env, tgToken: !!cv('TG_TOKEN'), tgChat: cv('TG_CHAT'), pochtaLogin: cv('POCHTA_LOGIN'), pochtaPass: !!cv('POCHTA_PASS'), pochtaToken: !!cv('POCHTA_TOKEN') }, extra || {});
 }
 async function cfgGet() { const l = await cfgLoad(true, true); return cfgState(l.ok ? null : Object.assign({ warn: l.error }, l.unreadable ? { unreadable: true } : {})); }
 const TG_TOKEN_RE = /^\d{5,15}:[A-Za-z0-9_-]{30,64}$/;
@@ -261,7 +264,7 @@ async function cfgBackup(cur) {
   if (back !== cur.text) return { ok: false, error: 'копия прежнего файла настроек не подтвердилась чтением — настройки не сброшены' };
   return { ok: true, key };
 }
-// set: { TG_TOKEN?, TG_CHAT?, POCHTA_LOGIN?, POCHTA_PASS? } — пустая строка удаляет значение, отсутствующий ключ оставляет прежнее.
+// set: { TG_TOKEN?, TG_CHAT?, POCHTA_LOGIN?, POCHTA_PASS?, POCHTA_TOKEN? } — пустая строка удаляет значение, отсутствующий ключ оставляет прежнее.
 // reset: true — файл не читается и пользователь решил записать настройки заново (прежние байты — в копию cfgbak-…)
 async function cfgPut(body) {
   needStorage();
@@ -360,7 +363,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 205,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 206,
       ready: readiness()
     });
   }
@@ -389,7 +392,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 205, aiNoLog: true, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 206, aiNoLog: true, pochtaToken: true, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -437,7 +440,7 @@ module.exports.handler = async function (event, context) {
 
 function readiness() {
   return {
-    pochta: !!(cv('POCHTA_LOGIN') && cv('POCHTA_PASS')),
+    pochta: !!(cv('POCHTA_TOKEN') || (cv('POCHTA_LOGIN') && cv('POCHTA_PASS'))),
     tg: !!(cv('TG_TOKEN') && cv('TG_CHAT')),
     storage: !!(process.env.BUCKET && process.env.S3_KEY_ID && process.env.S3_SECRET),
     secret: !!process.env.SECRET,
@@ -459,8 +462,9 @@ function bearerOf(event) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function trackBarcodes(barcodes) {
-  if (!cv('POCHTA_LOGIN') || !cv('POCHTA_PASS')) {
-    return { ok: false, error: 'Не заданы логин и пароль API Почты (в программе: «Почта России» → «Доступ к API Почты» или переменные POCHTA_LOGIN / POCHTA_PASS функции)' };
+  const soap = !!(cv('POCHTA_LOGIN') && cv('POCHTA_PASS')), token = !!cv('POCHTA_TOKEN');
+  if (!soap && !token) {
+    return { ok: false, error: 'Не задан доступ к API Почты — ни токен API трекинга, ни логин и пароль (в программе: Настройки → «Почта России — отслеживание», шаг 2; или переменные функции POCHTA_TOKEN либо POCHTA_LOGIN и POCHTA_PASS)' };
   }
   const results = {}, errors = {};
   const list = (barcodes || []).slice(0, 30); // лимит бесплатного доступа ~100 запросов/день
@@ -469,7 +473,9 @@ async function trackBarcodes(barcodes) {
     if (!first) await sleep(300); // Почта отбрасывает залп быстрых запросов — щадящая пауза
     first = false;
     try {
-      const r = await trackOne(b);
+      // v206: по токену; отказ в доступе по токену при заданных логине и пароле — прежним способом
+      let r = token ? await trackRest(b) : await trackOne(b);
+      if (token && r.denied && soap) r = await trackOne(b);
       results[b] = r.list;
       if (!r.list.length && r.err) errors[b] = r.err;
     } catch (e) { results[b] = []; errors[b] = String(e && e.message || e); }
@@ -529,6 +535,53 @@ async function trackOne(barcode) {
     if (!err && !/historyRecord/.test(xml)) err = 'нет данных по треку (проверьте номер)';
   }
   return { list: out, err };
+}
+
+// ── v206 (O-191): REST API трекинга по токену ──
+// GET https://postapi.pochta.ru/tracking/api/external/v1/info?barcodeList=<трек>; Authorization: ApiKey <токен>; Language: RU.
+// Ответ — отправление (или список отправлений) с группами статусов trackingItemOperationGroupStatuses, в каждой — исходные операции
+// originTrackingHistoryItems { date, humanStatus, humanOperationStatus, operationType, operationAttr, description, index, cityName };
+// группы с future: true — будущий путь, не операции. Название операции — как у SOAP («Вид — атрибут»): программа узнаёт приём, вручение
+// и возврат по этим словам (ui/mailx.js), поэтому вид операции по коду (1 — приём, 2 — вручение, 3 — возврат) пишется впереди.
+const POCHTA_OPER = { 1: 'Приём', 2: 'Вручение', 3: 'Возврат', 4: 'Досылка почты', 5: 'Невручение', 6: 'Хранение', 8: 'Обработка', 12: 'Неудачная попытка вручения' };
+function restOper(h) {
+  const t = Number(h.operationType), a = Number(h.operationAttr), kind = POCHTA_OPER[t] || '';
+  let st = String(h.humanStatus || '').trim();
+  const op = String(h.humanOperationStatus || '').trim(); if (op && op !== st) st = st ? st + ' — ' + op : op;
+  if (t === 2 && a === 1 && !/адресат/i.test(st)) st = (st ? st + ' — ' : '') + 'Вручение адресату';
+  if (t === 2 && a === 2 && !/отправител/i.test(st)) st = (st ? st + ' — ' : '') + 'Вручение отправителю';
+  if (t === 3 && !/отправител|истек/i.test(st)) st = (st ? st + ' — ' : '') + 'возврат отправителю';
+  return kind && st.toLowerCase().indexOf(kind.toLowerCase()) !== 0 ? kind + (st ? ' — ' + st : '') : (st || kind);
+}
+function restItems(j, barcode) {
+  const arr = Array.isArray(j) ? j : Array.isArray(j && j.items) ? j.items : Array.isArray(j && j.trackedItems) ? j.trackedItems : j ? [j] : [];
+  const it = arr.find(x => x && String(x.barcode || '').toUpperCase() === barcode.toUpperCase()) || arr[0] || {};
+  const out = [];
+  for (const g of (it.trackingItemOperationGroupStatuses || [])) {
+    if (!g || g.future === true) continue;
+    for (const h of (g.originTrackingHistoryItems || [])) {
+      if (!h || !h.date) continue;
+      out.push({ date: String(h.date).replace('T', ' ').slice(0, 16), oper: restOper(h), place: String(h.description || [h.index, h.cityName].filter(Boolean).join(', ') || '') });
+    }
+  }
+  return out.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+}
+async function trackRest(barcode) {
+  barcode = String(barcode || '').replace(/[^0-9A-Za-z]/g, '');
+  const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 15000);
+  let resp, text = '';
+  try {
+    resp = await fetch('https://postapi.pochta.ru/tracking/api/external/v1/info?barcodeList=' + encodeURIComponent(barcode), {
+      method: 'GET', headers: { Authorization: 'ApiKey ' + cv('POCHTA_TOKEN'), 'Content-Type': 'application/json', Language: 'RU' }, signal: ctl.signal });
+    text = await resp.text();
+  } catch (e) { return { list: [], err: 'Почта (токен) не ответила: ' + scrub(e && e.message || e) }; }
+  finally { clearTimeout(timer); }
+  if (resp.status === 401 || resp.status === 403) return { list: [], denied: true, err: 'Почта не приняла токен API трекинга (ответ ' + resp.status + ') — проверьте токен в «Настройках» otpravka.pochta.ru' };
+  let j = null; try { j = JSON.parse(text || 'null'); } catch (e) { j = null; }
+  if (!resp.ok) return { list: [], err: 'Почта (токен) ответила ' + resp.status + (j && (j.message || j.error) ? ': ' + scrub(String(j.message || j.error)).slice(0, 160) : '') };
+  if (!j) return { list: [], err: 'Почта (токен) прислала ответ не в JSON' };
+  const list = restItems(j, barcode);
+  return { list, err: list.length ? '' : 'нет данных по треку (проверьте номер)' };
 }
 
 function pick(s, tag) {
