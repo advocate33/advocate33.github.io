@@ -10,6 +10,8 @@
 //  v173: события хранят crmNumber — точная привязка к делу CRM (коллектор v3.6)
 //  v179: запись базы быстрее — независимые операции с хранилищем идут одновременно (при небольшом таймауте функции 178
 //  не успевал: «сервер не ответил»); порядок, от которого зависит сохранность, прежний.
+//  v207: Почта — ответ по токену без операций: при логине и пароле — прежним способом; операции ищутся по всему ответу;
+//  пустой ответ — в ошибке имена полей (жалоба 28.11.2026 на старые отправления).
 //  v206: O-191 — отслеживание Почты по токену API трекинга (REST postapi.pochta.ru, POCHTA_TOKEN); логин и пароль (SOAP) — как
 //  прежде; в ответе ping — признак pochtaToken.
 //  v205: O-160 — запросы к SpeechKit и YandexGPT с заголовком x-data-logging-enabled: false (Облако не сохраняет записи и тексты
@@ -363,7 +365,7 @@ module.exports.handler = async function (event, context) {
     // v198: «готовность» учитывает файл настроек
     await cfgLoad();
     return reply({
-      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 206,
+      ok: true, service: 'CRM Адвоката — личный сервер', module: 'lichny-server', ver: 207,
       ready: readiness()
     });
   }
@@ -392,7 +394,7 @@ module.exports.handler = async function (event, context) {
     if (body.action === 'cfgput') return reply(await cfgPut(body));
     if (body.action === 'tgfind') return reply(await tgFind());
     if (body.action === 'tgtest') return reply(await tgTest());
-    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 206, aiNoLog: true, pochtaToken: true, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
+    if (body.action === 'ping')  return reply({ ok: true, ready: readiness(), ver: 207, aiNoLog: true, pochtaToken: true, cal: true, ask: true, askCats: true, casePage: true, casePageReg: true, casePageGen: true, casePageGuard: true, ical: true, cfg: true, cfgReset: true });
     if (body.action === 'track') return reply(await trackBarcodes(body.barcodes || []));
     if (body.action === 'ics')   return reply(await publishIcs(body.ics));
     if (body.action === 'calcheck') return reply(await calCheck());
@@ -476,6 +478,8 @@ async function trackBarcodes(barcodes) {
       // v206: по токену; отказ в доступе по токену при заданных логине и пароле — прежним способом
       let r = token ? await trackRest(b) : await trackOne(b);
       if (token && r.denied && soap) r = await trackOne(b);
+      // v207: по токену операций нет — прежним способом, если он задан (старые отправления, жалоба 28.11.2026)
+      else if (token && !r.list.length && soap) { const o = await trackOne(b); if (o.list.length || !r.err) r = o; else if (o.err) r = { list: [], err: r.err + '; логин и пароль: ' + o.err }; }
       results[b] = r.list;
       if (!r.list.length && r.err) errors[b] = r.err;
     } catch (e) { results[b] = []; errors[b] = String(e && e.message || e); }
@@ -556,15 +560,35 @@ function restOper(h) {
 function restItems(j, barcode) {
   const arr = Array.isArray(j) ? j : Array.isArray(j && j.items) ? j.items : Array.isArray(j && j.trackedItems) ? j.trackedItems : j ? [j] : [];
   const it = arr.find(x => x && String(x.barcode || '').toUpperCase() === barcode.toUpperCase()) || arr[0] || {};
-  const out = [];
+  const out = [], seen = new Set();
+  const add = h => {
+    if (!h || typeof h !== 'object' || !h.date || !(h.humanStatus || h.humanOperationStatus || h.operationType != null)) return;
+    const row = { date: String(h.date).replace('T', ' ').slice(0, 16), oper: restOper(h), place: String(h.description || [h.index, h.cityName].filter(Boolean).join(', ') || '') };
+    const k = row.date + '|' + row.oper; if (!seen.has(k)) { seen.add(k); out.push(row); }
+  };
   for (const g of (it.trackingItemOperationGroupStatuses || [])) {
     if (!g || g.future === true) continue;
-    for (const h of (g.originTrackingHistoryItems || [])) {
-      if (!h || !h.date) continue;
-      out.push({ date: String(h.date).replace('T', ' ').slice(0, 16), oper: restOper(h), place: String(h.description || [h.index, h.cityName].filter(Boolean).join(', ') || '') });
-    }
+    for (const h of (g.originTrackingHistoryItems || [])) add(h);
+  }
+  // v207: другие имена списков истории (trackingHistoryItemList и т. п.) — обход всего отправления, кроме групп будущего пути
+  if (!out.length) {
+    const walk = (v, d) => {
+      if (!v || typeof v !== 'object' || d > 6) return;
+      if (Array.isArray(v)) { for (const x of v) walk(x, d + 1); return; }
+      if (v.future === true) return;
+      add(v);
+      for (const key of Object.keys(v)) if (v[key] && typeof v[key] === 'object') walk(v[key], d + 1);
+    };
+    walk(it, 0);
   }
   return out.sort((x, y) => x.date < y.date ? -1 : x.date > y.date ? 1 : 0);
+}
+// v207: вид ответа без операций — только имена полей и число отправлений, без значений (в значениях — адреса и фамилии)
+function restShape(j) {
+  const keys = v => v && typeof v === 'object' && !Array.isArray(v) ? Object.keys(v).slice(0, 12).join(', ') : '';
+  const arr = Array.isArray(j) ? j : Array.isArray(j && j.items) ? j.items : Array.isArray(j && j.trackedItems) ? j.trackedItems : null;
+  if (arr) return 'ответ по токену: отправлений ' + arr.length + (arr[0] ? ', поля: ' + keys(arr[0]) : '');
+  return 'ответ по токену без операций, поля: ' + (keys(j) || 'нет');
 }
 async function trackRest(barcode) {
   barcode = String(barcode || '').replace(/[^0-9A-Za-z]/g, '');
@@ -581,7 +605,7 @@ async function trackRest(barcode) {
   if (!resp.ok) return { list: [], err: 'Почта (токен) ответила ' + resp.status + (j && (j.message || j.error) ? ': ' + scrub(String(j.message || j.error)).slice(0, 160) : '') };
   if (!j) return { list: [], err: 'Почта (токен) прислала ответ не в JSON' };
   const list = restItems(j, barcode);
-  return { list, err: list.length ? '' : 'нет данных по треку (проверьте номер)' };
+  return { list, err: list.length ? '' : 'нет данных по треку (проверьте номер); ' + restShape(j) };
 }
 
 function pick(s, tag) {
